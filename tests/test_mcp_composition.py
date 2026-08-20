@@ -75,9 +75,9 @@ class TestMcpComposition(unittest.TestCase):
 
         expected = (
             "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
-            "resources",
+            "resources", "feedback",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
-            "plugin_check", "remote", "hermes", "recovery",
+            "secrets", "plugin_check", "remote", "hermes", "recovery",
         )
         self.assertEqual(BUILTIN_TOOL_GROUPS, expected)
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
@@ -103,6 +103,8 @@ class TestMcpComposition(unittest.TestCase):
         self.assertIn("remote", compose)
         self.assertIn("resources", wordpress)
         self.assertIn("resources", compose)
+        self.assertIn("feedback", wordpress)
+        self.assertIn("feedback", compose)
         with self.assertRaisesRegex(ValueError, "no MCP catalog"):
             project_default_groups("unsupported")
 
@@ -134,7 +136,7 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
@@ -152,10 +154,12 @@ class TestMcpComposition(unittest.TestCase):
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
                 "resources": ("resource_service_factory",),
+                "feedback": ("feedback_service_factory",),
+                "secrets": ("secret_service_factory",),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets"}))
 
     def test_domains_group_declares_the_full_ingress_transport_contract(self):
         from tools.manifest import BUILTIN_TOOL_NAMES
@@ -250,7 +254,7 @@ class TestMcpComposition(unittest.TestCase):
         groups = (
             "instances", "wp", "net", "data", "fs", "mail", "context", "cache",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
-            "plugin_check", "remote", "hermes", "recovery", "resources",
+            "plugin_check", "remote", "hermes", "recovery", "resources", "feedback",
         )
         for group in groups:
             self.assertNotIn("from app import *", (root / f"{group}.py").read_text())

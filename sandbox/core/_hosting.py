@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import shlex
+import subprocess
 import tempfile
 import time
 import urllib.parse
@@ -117,24 +118,64 @@ def _reject_redirect_cycles(routes: list[dict]) -> None:
 
 
 def _project_root(project_dir: str | Path) -> Path:
-    root = Path(project_dir).expanduser().resolve()
-    manifest = root / "sandbox.hosting.yml"
-    if not manifest.exists():
-        raise HostingError(f"missing {manifest}; add a project-local sandbox.hosting.yml")
-    return root
+    """Return the validated manifest parent, not an arbitrary outer checkout.
+
+    Hosting callers often receive a path from a nested workspace or a file
+    picker.  Walk upward only until the nearest manifest so a nested manifest
+    owns its Compose/source root; never replace it with the caller's outer Git
+    checkout.  Passing the manifest file itself is supported for adapters that
+    already resolved the exact path.
+    """
+    candidate = Path(project_dir).expanduser().resolve()
+    if candidate.is_file():
+        if candidate.name != "sandbox.hosting.yml":
+            raise HostingError(f"expected sandbox.hosting.yml, got {candidate.name}")
+        candidate = candidate.parent
+    for root in (candidate, *candidate.parents):
+        manifest = root / "sandbox.hosting.yml"
+        if manifest.is_file():
+            return root
+    manifest = candidate / "sandbox.hosting.yml"
+    raise HostingError(f"missing {manifest}; add a project-local sandbox.hosting.yml")
 
 
 def load_manifest(project_dir: str | Path) -> tuple[Path, dict]:
     root = _project_root(project_dir)
     ensure_pyyaml()
     import yaml
+    manifest_path = root / "sandbox.hosting.yml"
     try:
-        data = yaml.safe_load((root / "sandbox.hosting.yml").read_text()) or {}
+        data = yaml.safe_load(manifest_path.read_text()) or {}
     except yaml.YAMLError as exc:
         raise HostingError(f"invalid sandbox.hosting.yml: {exc}") from exc
     if not isinstance(data, dict):
         raise HostingError("sandbox.hosting.yml must contain a mapping")
+    # Internal provenance is carried alongside the validated result so the
+    # CLI/MCP result can show both paths without making callers rediscover the
+    # manifest.  It is not a user-configurable field and is never serialized
+    # into the project manifest.
+    data = {**data, "_manifest_path": str(manifest_path), "_manifest_root": str(root)}
     return root, data
+
+
+def _git_root(path: Path) -> Path | None:
+    """Return the checkout boundary that may contain a nested manifest.
+
+    A hosting manifest may intentionally point at a sibling/parent source
+    directory (for example ``config/sandbox.hosting.yml`` with
+    ``source_root: ../site``), but it must not be able to broaden deployment
+    to an arbitrary directory outside the checkout.  Git is the authoritative
+    boundary for a project checkout; when there is no checkout boundary we
+    retain the safer historical restriction to the manifest directory.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return Path(value).resolve() if value else None
 
 
 def _environment(manifest: dict, name: str | None) -> tuple[str, dict]:
@@ -325,15 +366,53 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", project):
         raise HostingError("project must use lowercase letters, numbers, and hyphens")
     env_name, env = _environment(manifest, environment)
+    # A manifest may explicitly name a source root relative to its own parent
+    # (for example ``source_root: ../site``).  The default is the manifest
+    # parent; importantly, the caller's outer checkout is never substituted.
+    # Resolve and constrain the declaration before interpreting any Compose
+    # paths.  An ancestor source root is allowed only when it remains inside
+    # the Git checkout that owns the manifest, so the declaration is exact
+    # without becoming an arbitrary path traversal primitive.
+    declared_source_root = manifest.get("source_root", manifest.get("project_root", "."))
+    if not isinstance(declared_source_root, str) or not declared_source_root.strip():
+        raise HostingError("source_root must be a non-empty relative directory")
+    if Path(declared_source_root).is_absolute():
+        raise HostingError("source_root must be a non-empty relative directory")
+    source_root_path = (root / declared_source_root).resolve()
+    if source_root_path != root.resolve():
+        checkout_root = _git_root(root)
+        if checkout_root is None:
+            raise HostingError("source_root must stay within the manifest project root")
+        try:
+            source_root_path.relative_to(checkout_root)
+        except ValueError as exc:
+            raise HostingError("source_root must stay within the manifest checkout") from exc
+    else:
+        checkout_root = _git_root(source_root_path)
+    source_root_nested = bool(checkout_root and source_root_path != checkout_root)
+    if not source_root_path.is_dir():
+        raise HostingError(f"source_root does not exist: {declared_source_root}")
+    source_root = source_root_path
     compose = env.get("compose") or {}
     files = compose.get("files") or []
     if not isinstance(files, list) or not files or not all(isinstance(f, str) and f for f in files):
         raise HostingError("compose.files must list one or more compose files")
+    compose_paths: list[str] = []
     for file_name in files:
-        if Path(file_name).is_absolute() or ".." in Path(file_name).parts:
-            raise HostingError("compose files must be relative to the project root")
-        if not (root / file_name).is_file():
+        file_path = Path(file_name)
+        if file_path.is_absolute():
+            raise HostingError("compose files must be relative to the source root")
+        resolved_file = (source_root / file_path).resolve()
+        try:
+            resolved_file.relative_to(source_root.resolve())
+        except ValueError as exc:
+            raise HostingError("compose files must stay within the source root") from exc
+        if not resolved_file.is_file():
             raise HostingError(f"compose file does not exist: {file_name}")
+        # Keep the manifest's declared relative spelling for compatibility;
+        # source_root is explicit in the validated envelope and consumers join
+        # these paths against that root.
+        compose_paths.append(file_name)
     if not str(compose.get("service") or "").strip() or not isinstance(compose.get("container_port"), int):
         raise HostingError("compose.service and integer compose.container_port are required")
     if not _SERVICE_RE.fullmatch(str(compose["service"])):
@@ -349,6 +428,12 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     declared_services = [str(compose["service"]), *init_services, *background_services]
     if len(declared_services) != len(set(declared_services)):
         raise HostingError("compose service names must not be duplicated across service lists")
+    # An environment whose image build is too slow for the deploy timeout can
+    # opt out of rebuilding. Compose still builds a service whose image is
+    # missing, so this skips the rebuild, never the first build.
+    build = compose.get("build", True)
+    if not isinstance(build, bool):
+        raise HostingError("compose.build must be true or false")
     healthcheck = env.get("healthcheck") or {}
     if not isinstance(healthcheck.get("path"), str) or not healthcheck["path"].startswith("/"):
         raise HostingError("healthcheck.path must start with /")
@@ -411,8 +496,13 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     robots = env.get("robots", "allow")
     if robots not in {"allow", "deny"}:
         raise HostingError("robots must be allow or deny")
-    return {"project_root": str(root), "project": project, "environment": env_name,
-            "compose": compose, "healthcheck": healthcheck, "routes": routes,
+    normalized_compose = {**compose, "files": compose_paths, "build": build}
+    return {"project_root": str(source_root), "source_root": str(source_root),
+            "manifest_root": str(root),
+            "source_root_nested": source_root_nested,
+            "manifest_path": manifest.get("_manifest_path", str(root / "sandbox.hosting.yml")),
+            "project": project, "environment": env_name,
+            "compose": normalized_compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env),
             "autologin": _autologin(env), "basic_auth": basic_auth,
             "robots": robots}

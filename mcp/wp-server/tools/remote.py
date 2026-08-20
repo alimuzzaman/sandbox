@@ -29,7 +29,10 @@ def _redact_ssh_connection(value: str) -> str:
 @mcp.tool()
 def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
                   expose: bool = True, domain: str | None = None,
-                  plugin_slug: str | None = None) -> dict:
+                  plugin_slug: str | None = None,
+                  pro_plugins: bool = True,
+                  aliases: list[str] | None = None,
+                  prune_routes: bool = False) -> dict:
     """Deploy the local project's current state (committed HEAD + uncommitted
     changes, including untracked files) to a registered, provisioned remote VPS
     target on demand. One-way, on-demand only — never a continuous sync; the
@@ -52,8 +55,21 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
       CLI defaults to default-<project-slug>.sandbox.asb.bd.
     plugin_slug: optional WordPress-only slug to activate after ensure. Defaults to
       project slug; generic projects reject this argument.
+    pro_plugins: when true (default), also mirror this machine's Pro plugin store to
+      the remote host so every instance there offers those slugs on demand. Unchanged
+      stores are a no-op; a failure never fails the deploy.
+    aliases: optional extra hostnames the exposed instance also answers on, e.g.
+      a CDN pull-zone origin. Omit to use the project's sandbox.config.json
+      `aliases`; pass [] to expose the primary domain only. DNS for each must
+      already point at the VPS.
+    prune_routes: when true, delete remote routes that proxy to this instance's
+      port but are neither the current domain nor a declared alias. Off by
+      default — the inventory covers the whole host, so a route may belong to a
+      checkout this project's config cannot see. Stale routes are reported as
+      instance.stale_routes either way.
 
-    Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url, error}.
+    Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url,
+    pro_plugins, error}.
     """
     if _require_project_deployment_capability is None:
         # Command-forwarding unit harnesses do not compose the full app.
@@ -72,6 +88,17 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         cmd.extend(["--domain", domain])
     if plugin_slug:
         cmd.extend(["--plugin-slug", plugin_slug])
+    if aliases is not None:
+        # An explicit [] must still override the project declaration, so send a
+        # sentinel the CLI reads as "declared, and empty".
+        for alias in aliases:
+            cmd.extend(["--alias", str(alias)])
+        if not aliases:
+            cmd.extend(["--alias", ""])
+    if prune_routes:
+        cmd.append("--prune-routes")
+    if not pro_plugins:
+        cmd.append("--no-pro-plugins")
     res = _run_sandbox_json(cmd, 1200)
     if res["timed_out"]:
         return {

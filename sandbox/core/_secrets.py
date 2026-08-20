@@ -57,17 +57,36 @@ def resolve_secret(key: str, path: Path | None = None) -> str | None:
 
 
 def write_secret(key: str, value: str, path: Path | None = None) -> None:
-    """Set one exported key atomically without returning its value."""
+    """Set one exported key atomically without returning its value.
+
+    Only the target assignment is rewritten.  Comments, section banners, and the
+    ordering produced by ``sb secrets organize`` are preserved, so a hosting or
+    Cloudflare write no longer flattens the file back into one sorted block.
+    """
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key or ""):
         raise SecretError("invalid secret key")
+    from sandbox.secrets.parser import (
+        SecretParseError, parse_document, render_assignment, replace_assignment,
+    )
     path = path or secret_file()
-    values = read_secret_file(path)
-    values[key] = value
-    lines = ["# Personal secrets. Keep this file out of Git."]
-    lines.extend(f"export {name}={shlex.quote(values[name])}" for name in sorted(values))
+    read_secret_file(path)  # keep the legacy fail-closed syntax contract
+    current = path.read_bytes() if path.exists() else b""
+    if not current.strip():
+        current = b"# Personal secrets. Keep this file out of Git.\n"
+    try:
+        document = parse_document(current)
+        if key in document.entries:
+            updated = replace_assignment(document, key, value)
+        else:
+            prefix = b"" if current.endswith(b"\n") else b"\n"
+            line = render_assignment(key, value, exported=True).encode("utf-8")
+            updated = current + prefix + line + b"\n"
+    except SecretParseError as exc:
+        # The code is a stable reason; the offending line is never included.
+        raise SecretError(f"cannot update {path}: {exc.code}") from None
     temporary = path.with_suffix(path.suffix + ".tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text("\n".join(lines) + "\n")
+    temporary.write_bytes(updated)
     temporary.chmod(0o600)
     temporary.replace(path)
     path.chmod(0o600)
@@ -108,12 +127,7 @@ def migrate_zshrc(path: Path | None = None, zshrc: Path | None = None) -> list[s
         kept.append("# Personal API and deployment secrets (chmod 0600).")
         kept.append(source)
     if moved:
-        lines = ["# Personal secrets. Keep this file out of Git."]
-        lines.extend(f"export {name}={shlex.quote(existing[name])}" for name in sorted(existing))
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text("\n".join(lines) + "\n")
-        temporary.chmod(0o600)
-        temporary.replace(path)
-        path.chmod(0o600)
+        for name in moved:
+            write_secret(name, existing[name], path)
         zshrc.write_text("\n".join(kept) + "\n")
     return moved

@@ -8,7 +8,12 @@ from pathlib import Path
 
 from sandbox.resources.adapters import LocalResourceAdapter
 from sandbox.resources.adapters import _parse_byte_size
-from sandbox.resources.models import CleanupCandidate, ResourceObservation
+from sandbox.resources.models import (
+    CleanupCandidate,
+    NetworkLifecycle,
+    NetworkLifecycleRegistry,
+    ResourceObservation,
+)
 from sandbox.resources.plans import PlanStore
 from sandbox.resources.service import ResourceService
 from sandbox.services.process import ProcessResult
@@ -415,6 +420,129 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(volume.classification, "stale_candidate")
         self.assertEqual(volume.size_bytes, 4096 * 1024)
         self.assertIn("compose_project_label", volume.evidence)
+
+    def test_network_lifecycle_requires_live_evidence_and_preserves_foreign_rows(self):
+        networks = [
+            {
+                "Id": "managed-idle",
+                "Name": "sandbox-fixture_default",
+                "Labels": {"com.docker.compose.project": "sandbox-fixture"},
+                "Containers": {},
+            },
+            {
+                "Id": "managed-active",
+                "Name": "sandbox-fixture_active",
+                "Labels": {"com.docker.compose.project": "sandbox-fixture"},
+                "Containers": {"container": {}},
+            },
+            {
+                "Id": "foreign-active",
+                "Name": "customer-net",
+                "Labels": {"com.docker.compose.project": "customer"},
+                "Containers": {"container": {}},
+            },
+            {
+                "Id": "unattributed-idle",
+                "Name": "unattributed-net",
+                "Labels": {},
+                "Containers": {},
+            },
+        ]
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(""),
+            ("docker", "network", "ls", "-q"): response(
+                "managed-idle\nmanaged-active\nforeign-active\n"
+                "unattributed-idle\n",
+            ),
+            ("docker", "network", "inspect"): response(json.dumps(networks)),
+            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "buildx", "du"): response(""),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        observed = {
+            item.locator: item
+            for item in adapter.observe(thorough=False, budget_seconds=30).resources
+            if item.kind == "network"
+        }
+        self.assertEqual(observed["managed-idle"].classification, "unverified")
+        self.assertEqual(observed["managed-idle"].reclaimable_bytes, 0)
+        self.assertEqual(observed["managed-active"].classification, "active")
+        self.assertEqual(observed["foreign-active"].owner_kind, "foreign")
+        self.assertEqual(observed["foreign-active"].classification, "active")
+        self.assertEqual(observed["unattributed-idle"].owner_kind, "unmanaged")
+        self.assertEqual(observed["unattributed-idle"].classification, "unmanaged")
+        self.assertTrue(all(not item.capacity_accounted for item in observed.values()))
+        self.assertFalse(any(
+            command[:3] == ("docker", "network", "rm")
+            for command, _timeout in runner.calls
+        ))
+
+    def test_network_lifecycle_create_stop_destroy_recreate_is_idempotent(self):
+        lifecycle = NetworkLifecycleRegistry()
+
+        created = lifecycle.create("ws_unit")
+        self.assertEqual(created.owner_identity, ("workspace", "ws_unit"))
+        self.assertEqual(lifecycle.create("ws_unit").network_id, created.network_id)
+        self.assertEqual(lifecycle.count(), 1)
+
+        stopped = lifecycle.stop("ws_unit")
+        self.assertEqual(stopped.lifecycle, "idle")
+        destroyed = lifecycle.destroy("ws_unit")
+        self.assertEqual(destroyed.lifecycle, "orphaned")
+        recreated = lifecycle.recreate("ws_unit")
+
+        self.assertEqual(recreated.network_id, created.network_id)
+        self.assertEqual(recreated.lifecycle, "active")
+        self.assertEqual(lifecycle.count(), 1)
+        self.assertEqual(lifecycle.network_ids(), (created.network_id,))
+
+    def test_network_release_refuses_active_references_and_stays_diagnostic_only(self):
+        lifecycle = NetworkLifecycleRegistry()
+        lifecycle.create(
+            "ws_unit",
+            active_references={"leases": 1, "containers": 0, "jobs": 0},
+        )
+        lifecycle.destroy("ws_unit")
+
+        refused = lifecycle.release("ws_unit")
+        self.assertEqual(refused["status"], "refused")
+        self.assertEqual(refused["reason"], "active_references")
+        self.assertEqual(lifecycle.count(), 1)
+
+        lifecycle.reconcile(
+            "ws_unit",
+            active_references={"leases": 0, "containers": 0, "jobs": 0},
+        )
+        disabled = lifecycle.release("ws_unit")
+        self.assertEqual(disabled["status"], "refused")
+        self.assertEqual(disabled["reason"], "network_cleanup_disabled")
+        self.assertEqual(lifecycle.count(), 1)
+
+    def test_network_observation_round_trips_one_owner_identity(self):
+        item = ResourceObservation(
+            resource_id="network-1",
+            kind="network",
+            locator="network-1",
+            display_name="sandbox-unit_default",
+            owner_kind="workspace",
+            owner_id="ws_unit",
+            classification="unverified",
+            size_state="measured",
+            size_bytes=0,
+            reclaimable_bytes=0,
+            lifecycle="idle",
+            active_references={"leases": 0, "containers": 0, "jobs": 0},
+            allocation_state="allocated",
+            cleanup_eligible=False,
+        )
+        lifecycle = NetworkLifecycle.from_observation(item)
+        self.assertEqual(lifecycle.owner_identity, ("workspace", "ws_unit"))
+        self.assertEqual(lifecycle.to_dict()["owner"]["id"], "ws_unit")
+        self.assertEqual(lifecycle.to_dict()["active_references"]["leases"], 0)
+        self.assertFalse(lifecycle.cleanup_eligible)
 
     def test_adapter_contains_no_broad_prune_command(self):
         source = Path(__file__).parent.parent.joinpath(

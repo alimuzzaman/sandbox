@@ -9,6 +9,8 @@ from typing import Mapping, Protocol, Sequence
 import os
 import subprocess
 
+from .redaction import redact_text
+
 
 @dataclass(frozen=True)
 class ProcessResult:
@@ -40,9 +42,7 @@ class BoundedProcessRunner:
         self._secrets = tuple(value for value in secret_values if value)
 
     def _redact(self, value: str) -> str:
-        for secret in self._secrets:
-            value = value.replace(secret, "[REDACTED]")
-        return value[:self.max_output]
+        return redact_text(value, exact_values=self._secrets)[:self.max_output]
 
     @staticmethod
     def _remaining(deadline: float | None) -> float | None:

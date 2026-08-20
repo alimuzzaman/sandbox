@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import shlex
@@ -187,7 +188,59 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
 
 
 class ManagedServiceCompiler:
-    def compile(self, policy, *, web_server="nginx", backend_port=8080):
+    @staticmethod
+    def _extension_contract(value):
+        """Return a detached, digest-bound extension contract for the guest.
+
+        The package planner is the authority that creates this document.  The
+        service compiler accepts only its JSON-compatible representation and
+        rejects a caller-supplied package/source/build field before any service
+        files are rendered.
+        """
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            value = value.to_dict()
+        if not isinstance(value, Mapping):
+            raise ValueError("managed PHP extension contract is invalid")
+        allowed = {"php_version", "profile", "requirements", "packages",
+                   "catalog_digest", "digest"}
+        if set(value) != allowed:
+            raise ValueError("managed PHP extension contract is invalid")
+        if (not isinstance(value.get("php_version"), str)
+                or not isinstance(value.get("catalog_digest"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["catalog_digest"])
+                or not isinstance(value.get("digest"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value["digest"])):
+            raise ValueError("managed PHP extension contract digest is invalid")
+        requirements = value.get("requirements")
+        packages = value.get("packages")
+        if not isinstance(requirements, list) or not isinstance(packages, list):
+            raise ValueError("managed PHP extension contract entries are invalid")
+        safe_requirements = []
+        for item in requirements:
+            if (not isinstance(item, Mapping)
+                    or set(item) - {"name", "state", "version"}
+                    or not isinstance(item.get("name"), str)
+                    or item.get("state") not in {"enabled", "disabled"}):
+                raise ValueError("managed PHP extension requirement is invalid")
+            safe_requirements.append({key: item[key] for key in ("name", "state", "version")
+                                     if key in item})
+        safe_packages = []
+        for item in packages:
+            if (not isinstance(item, Mapping)
+                    or set(item) - {"name", "package", "package_version", "state",
+                                    "version_constraint", "catalog_digest", "source"}
+                    or item.get("state") != "enabled"
+                    or item.get("source") != "official-distribution"):
+                raise ValueError("managed PHP extension package evidence is invalid")
+            safe_packages.append(dict(item))
+        return {
+            "php_version": value["php_version"], "profile": value.get("profile"),
+            "requirements": safe_requirements, "packages": safe_packages,
+            "catalog_digest": value["catalog_digest"], "digest": value["digest"],
+        }
+
+    def compile(self, policy, *, web_server="nginx", backend_port=8080,
+                php_extensions=None):
         if web_server not in {"nginx", "apache"}: raise ValueError("managed web server is invalid")
         port = int(backend_port)
         if not 1024 <= port <= 65535: raise ValueError("managed backend port is invalid")
@@ -201,11 +254,24 @@ class ManagedServiceCompiler:
                                              writable_targets=tuple(item["target"]
                                                                     for item in getattr(
                                                                         policy, "writable_mounts", ())))
+        extension_contract = None
+        if php_extensions is not None:
+            extension_contract = self._extension_contract(php_extensions)
+            # This file is inside the managed rootfs and participates in the
+            # service digest.  A package/requirement change therefore cannot
+            # reuse a previously approved service plan, and the helper sees
+            # only a deterministic catalog-derived document.
+            files["/etc/sandbox-native/php-extensions.json"] = (
+                json.dumps(extension_contract, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            )
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "web_server": web_server, "backend": {"address": guest, "port": port},
                 "files": files, "file_digests": {path: hashlib.sha256(content.encode()).hexdigest()
                                                   for path, content in files.items()},
-                "units": units, "digest": canonical_digest(files)}
+                "units": units, "digest": canonical_digest(files),
+                **({"php_extensions_digest": extension_contract["digest"]}
+                   if extension_contract is not None else {})}
 
 
 class ManagedServiceSupervisor:

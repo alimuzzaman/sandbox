@@ -18,15 +18,33 @@ def resource_status(
     deep: bool = False,
     budget_seconds: float = 15,
     cancelled: bool = False,
+    fast: bool = False,
+    refresh: bool = False,
 ) -> dict:
-    """Inspect local or named-remote host storage without mutation."""
+    """Inspect local or named-remote host storage without mutation.
+
+    `fast` answers from the cached host directory index and never walks a
+    filesystem; `refresh` rebuilds that index. They are mutually exclusive.
+    """
+    if fast and refresh:
+        from sandbox.resources.service import ResourceError, result
+        return result(
+            False,
+            "status",
+            status="failed",
+            error=ResourceError(
+                "fast and refresh are mutually exclusive", "invalid_mode",
+            ),
+        )
     kwargs = {
-        "thorough": thorough or deep,
+        "thorough": (thorough or deep) and not fast,
         "budget_seconds": budget_seconds,
-        "deep": deep,
+        "deep": deep or fast or refresh,
     }
     if cancelled:
         kwargs["cancelled"] = True
+    if fast or refresh:
+        kwargs["directory_cache"] = "cache_only" if fast else "refresh"
     return _service(remote).status(
         **kwargs,
     )

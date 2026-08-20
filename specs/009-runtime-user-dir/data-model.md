@@ -1,7 +1,8 @@
 # Phase 1 Data Model: Single Swappable Per-User Base
 
-This feature has no database schema; the "data model" is the path-derivation graph and the
-artifact-classification that governs migration.
+The original path-derivation graph and artifact classification remain authoritative. The
+convergence addition below introduces one owner-only SQLite index for workspace metadata;
+it is additive and does not replace the project/instance registry.
 
 ## Entity: Base (`SANDBOX_HOME`)
 
@@ -31,7 +32,9 @@ All of these rebase from `ROOT/"runtime"` (or legacy config locations) onto
 | `PROXY_DIR` (+certs/Caddyfile/compose) | `ROOT/runtime/proxy` | `RUNTIME_DIR/proxy` |
 | `_HTTPS_OFFER_MARKER` | `ROOT/runtime/.https-offer-declined` | `RUNTIME_DIR/.https-offer-declined` |
 | `TEST_SUITE_DIR` / `TEST_TOOLS_DIR` | `ROOT/runtime/test-*` | `RUNTIME_DIR/test-*` |
+| PHP extension build cache | `ROOT/runtime/build/php-extensions/<digest>` (new) | `RUNTIME_DIR/build/php-extensions/<digest>` |
 | registry | `ROOT/runtime/registry.json` | `RUNTIME_DIR/registry.json` |
+| workspace index | absent | `RUNTIME_DIR/workspaces/index.sqlite3` |
 | herd shims | `ROOT/runtime/herd-shims/<inst>` | `RUNTIME_DIR/herd-shims/<inst>` |
 | `wp-cli.phar` | `ROOT/runtime/wp-cli.phar` | `RUNTIME_DIR/wp-cli.phar` |
 | `CONFIG_LOCAL` | `ROOT/sandbox.local.yml` | `LOCAL_YML` |
@@ -47,7 +50,7 @@ All of these rebase from `ROOT/"runtime"` (or legacy config locations) onto
 |-------|-----------|------------------|
 | **Pure data** (move as-is) | `wp-<inst>/`, `snapshots/`, `dl-cache/`, `seeds/`, `registry.json`, `test-suite/`, `test-tools/`, proxy `certs/`, `sandbox.local.yml`, `.env.local`, `config.json` | `shutil.move` into base; preserve perms (esp. `.env.local` 600) |
 | **Regenerated** (rebuild from config) | compose files (`compose/`), herd shims, `Caddyfile`/`proxy.yml` | regenerate post-move (absolute mounts) |
-| **Recreated** (baked interpreter path) | `.venv-tools` | delete + `ensure_tools_venv` |
+| **Recreated** (baked interpreter path) | `.venv-tools`, PHP extension build contexts | delete/rebuild under the active base; extension contexts are content-addressed and carry safe provenance |
 | **Unaffected** (not under base) | DB named volumes, plugin sources (gotcha #3), sudoers/launchd→repo, `.cli-venv`, `mcp/.venv` | none |
 
 ## Entity: Registry entry (unchanged shape)
@@ -84,3 +87,56 @@ CONFLICT    (both base AND <repo>/runtime populated) ──► abort, base autho
 - After migration, zero machine-state paths under the repo (verifiable via clean
   `git status` + absence of `runtime/`, `sandbox.local.yml`, `.env.local`).
 - CLI and MCP MUST compute identical `BASE` for a given environment.
+- PHP extension build-cache paths MUST derive from the same `BASE`; a digest change
+  invalidates reuse without touching database volumes, uploads, snapshots, or project
+  files, and cache metadata MUST contain no secrets.
+
+## Convergence amendment — 2026-08-13 (workspace index)
+
+### Durable index boundary
+
+The workspace index is stored at
+`$SANDBOX_HOME/runtime/workspaces/index.sqlite3` with owner-only permissions. It uses
+SQLite WAL, foreign keys, a bounded busy timeout, a schema-version table, and explicit
+transactions. All reads and writes go through a workspace repository/service; callers,
+resource providers, transports, and MCP adapters MUST NOT open the database directly.
+
+### Tables and invariants
+
+| Table | Required fields and invariants |
+|---|---|
+| `workspace_schema` | `schema_version`, migration identity, and current index generation; one authoritative row per key. |
+| `workspaces` | Opaque `workspace_id` primary key; `project_identity`, `workspace_label`, `mode`, explicit lifecycle state, metadata/checkout locators, locator digests, runtime identity, generation, and UTC timestamps. Unique `(project_identity, workspace_label)`. |
+| `workspace_aliases` | Alias kind plus normalized digest, workspace ID, evidence, and observation time. Unique `(alias_kind, alias_digest)`; collisions are explicit, never last-write-wins. |
+| `workspace_migrations` | Legacy source locator/digest, decision (`adopted`, `unresolved`, `conflict`, `invalid`), safe reason, optional workspace ID, and timestamps. Source is never rewritten. |
+| `workspace_resource_bindings` | Typed resource kind/identity, workspace ID, project identity, active reference state, evidence digest, and observation time for resource projections. |
+| `workspace_migration_plans` | Immutable plan ID, target identity, full inventory digest, index generation, candidate decisions, creation/expiry, and state. Apply requires an unchanged digest/generation. |
+
+`workspace_id` is the stable control identity. A path, checkout, legacy namespace,
+Compose project, or runtime instance is only an alias/locator and may be regenerated or
+relocated. Lifecycle transitions are `provisioning → ready → resetting/destroying →
+destroyed`, with `indeterminate` for an unfinished or unverified operation.
+
+### Legacy discovery and migration
+
+Discovery scans only exact-depth
+`$SANDBOX_HOME/runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json`
+records (plus the legacy fallback root when present). It rejects symlinks, path escapes,
+oversized or malformed metadata, and inconsistent namespace/label evidence. Adoption is
+allowed only when the job repository supplies an exact project-root/namespace match and
+one distinct project identity; aliases may corroborate but cannot override a conflict.
+Every source receives one durable decision and safe reason. An empty index with relevant
+unresolved/conflicting legacy records is `workspace_index_incomplete`, not an empty list.
+
+Migration plans bind a complete inventory digest and current index generation. A global
+migration lock plus per-workspace locks serialize plan/apply and lifecycle operations.
+Apply rescans before one transaction; drift returns `workspace_migration_plan_stale` or
+`workspace_ownership_drift`. No migration step deletes, renames, resets, destroys, or
+releases a resource.
+
+### Relocation
+
+Relocation moves the SQLite file and migration audit metadata as pure data, preserves
+legacy `workspace.json` bytes and all protected project/runtime data, then regenerates
+checkout/compose/runtime locators for the destination base. The operation records the
+same workspace IDs and index generation; network/container/job counts must be unchanged.

@@ -441,3 +441,74 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
 - Docker remains available as the recommended fallback when native isolation or versions
   cannot be proved.
 - Runtime switching and foreign-site import remain separate explicit workflows.
+
+## Convergence amendment — 2026-08-13 (PHP extension requirements)
+
+This amendment defines the v1 PHP extension contract used by the WordPress runtime.
+It is intentionally additive: omission keeps the existing image/package/readiness
+behavior, and generic Compose remains outside this feature's mutation authority.
+
+### Normative requirements
+
+- **FR-048**: A WordPress project MAY declare top-level `phpExtensions` with immutable
+  profile `wordpress@1` and an extension map. Values MUST normalize from `true`, an
+  exact/version string, `false`, or canonical `{state,version}` objects. Versions are
+  restricted to an exact version, `X.Y.*`, or `php` (the active PHP major/minor).
+- **FR-049**: Omitted `phpExtensions` MUST preserve legacy behavior exactly: no new
+  catalog lookup, image build, package transaction, extension probe, or readiness gate
+  is allowed solely because the feature exists.
+- **FR-050**: `wordpress@1` MUST remain immutable and expand to required `curl`, `dom`,
+  `exif`, `fileinfo`, `hash`, `json`, `mbstring`, `mysqli`, `openssl`, `pcre`, and
+  `xml`, plus an image capability from `gd`/`imagick`; `intl`, `sodium`, `zip`, and
+  `opcache` are recommended warnings. The image capability may be satisfied by a
+  fresh observation or an allowlisted official Apache/nginx child-image build, so
+  config need not name the member; if neither is observed/provisionable, readiness
+  fails with a missing-capability result. Explicit entries are hard requirements, and
+  a required capability cannot be disabled (the pair cannot disable both).
+- **FR-051**: Unknown extensions, keys, profiles, states, malformed constraints,
+  contradictory profile entries, unavailable requested versions, and unsupported
+  disable operations MUST fail before any runtime, image, package, database, or
+  filesystem mutation. An active disable is permitted only for a module whose
+  checked-in manifest marks it INI-disableable; other `disabled` requests return
+  `unsupported_disable` and do not edit global or unknown INI files. PHP module
+  versions are checked from the runtime observation (`ReflectionExtension::getVersion()`);
+  package/artifact versions remain provenance.
+- **FR-052**: Official WordPress Apache/nginx base images MAY use only checked-in,
+  allowlisted Sandbox-owned child-image recipes after base-image and digest validation.
+  Custom images and LiteSpeed are validate-only in v1 and MUST return an honest
+  unsupported-provisioning result when requirements are not already satisfied.
+  Imagick and Xdebug are observation-only on the Compose path in v1: when they are
+  requested but absent, the adapter returns `unsupported_provisioning` and MUST NOT
+  invoke PECL, accept a URL, or infer a package. Managed-native may resolve Imagick only
+  through its separately approved signed-APT package plan.
+  Herd, Valet, and other incumbent native runtimes are validate-only and MUST never
+  mutate shared host PHP or global INI state.
+- **FR-053**: Managed-native extension installation MUST extend the existing signed-APT
+  package plan and its current simulation-digest/TTY confirmation gate. It MUST NOT
+  bypass source, version, service-effect, or host-baseline checks. Generic Compose MUST
+  refuse `phpExtensions` in v1 rather than mutate a project-owned image.
+- **FR-054**: No project-provided package names, arbitrary PECL artifacts, repositories,
+  URLs, Dockerfiles, INI paths, shell fragments, or checksums are accepted. Any PECL
+  artifact used by a future catalog MUST have a checked-in version and SHA-256 identity.
+- **FR-055**: Extension resolution MUST produce a content digest over normalized
+  requirements, profile/catalog revision, parent image digest, PHP version, server
+  flavor, platform, and architecture. Cache/build contexts are recreatable machine
+  state under `$SANDBOX_HOME/runtime/build/php-extensions/<digest>/` and every result
+  records safe package/artifact/image provenance and observations.
+- **FR-056**: Enabled/disabled state and requested versions MUST be observed consistently
+  across web PHP, WP-CLI, bounded exec, and PHPUnit. A missing, unobservable,
+  mismatched, or cross-plane-drifted observation MUST block readiness with the failing
+  plane identified; a prior observation cannot satisfy a new apply.
+- **FR-057**: `apply` MAY recreate or reconcile only web/runtime extension artifacts. It
+  MUST preserve database volumes, uploads, snapshots, and project files, and must retain
+  the existing instance identity and rollback metadata.
+
+### Acceptance evidence required before closing this amendment
+
+The matrix MUST cover omission, profile immutability, shorthand/canonical forms,
+exact/`X.Y.*`/`php` constraints, unknowns and pre-mutation rejection, WordPress
+required/recommended sets, official Apache/nginx child images, custom/LiteSpeed/Herd
+validation-only behavior, managed-native signed-APT drift, generic Compose refusal,
+disabled-module policy, digest/cache/provenance invalidation, four-plane parity, and
+apply preservation of database/uploads/snapshots/project files. Remote proof MUST
+include GD observed in web, WP-CLI, and PHPUnit environments.

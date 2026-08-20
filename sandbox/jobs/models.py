@@ -102,6 +102,21 @@ def validate_job_id(value: object) -> str:
     return value
 
 
+def validate_ack_job_id(value: object, *, label: str = "job id") -> str:
+    """Validate an acknowledgement identity without accepting a blank placeholder.
+
+    Remote controllers may use a legacy short identifier in test doubles or while
+    replaying an old record, so this boundary intentionally requires a bounded
+    non-empty string rather than imposing the local repository's 16/32-hex shape.
+    Local repository rows continue to use :func:`validate_job_id`.
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        raise ValueError(f"{label} is missing or invalid")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{label} is missing or invalid")
+    return value
+
+
 def validate_argv(value: object) -> tuple[str, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
         raise ValueError("command must be a non-empty argv list")
@@ -238,22 +253,67 @@ class SourceIdentity:
 
 @dataclass(frozen=True)
 class TargetRequest:
-    project_dir: str
+    project_dir: str = "."
     local: bool = False
     remote: str | None = None
     workspace: str | None = None
     required_capability: str | None = None
+    project_identity: str | None = None
+    workspace_id: str | None = None
+    migration_plan_id: str | None = None
+    confirm: bool = False
+    expected_legacy_namespace: str | None = None
+    checkout_locator: str | None = None
+    deployment_receipt: str | None = None
+    inventory_digest: str | None = None
+    index_generation: int | None = None
+    limit: int = 50
+    active_only: bool = False
+    measure_sizes: bool = False
+    mode: str = "persistent"
+    # Whether this operation may infer the single configured remote when no
+    # target is selected (spec 014: "operations that permit target inference").
+    # Instance lifecycle opts out: booting a dev instance is a local action
+    # unless the project or the caller asks for a remote, and inferring one
+    # moved every project's `sb ensure` onto the VPS.
+    allow_inferred_remote: bool = True
 
     def __post_init__(self) -> None:
         _safe_text(self.project_dir, "project directory")
         if not isinstance(self.local, bool):
             raise ValueError("local selector must be boolean")
+        if not isinstance(self.allow_inferred_remote, bool):
+            raise ValueError("inferred remote selector must be boolean")
         if self.remote is not None:
             _safe_name(self.remote, "remote name")
         if self.workspace is not None:
             _safe_name(self.workspace, "workspace label")
         if self.required_capability is not None:
             _safe_text(self.required_capability, "required capability")
+        for value, label in (
+            (self.project_identity, "project identity"),
+            (self.workspace_id, "workspace id"),
+            (self.migration_plan_id, "migration plan id"),
+            (self.expected_legacy_namespace, "legacy workspace namespace"),
+            (self.checkout_locator, "workspace checkout locator"),
+            (self.deployment_receipt, "workspace deployment receipt"),
+            (self.inventory_digest, "workspace inventory digest"),
+        ):
+            if value is not None:
+                _safe_text(value, label)
+        if not isinstance(self.confirm, bool):
+            raise ValueError("workspace confirmation must be boolean")
+        if (isinstance(self.index_generation, bool) or
+                self.index_generation is not None and
+                (not isinstance(self.index_generation, int) or self.index_generation < 0)):
+            raise ValueError("workspace index generation must be non-negative")
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or not 1 <= self.limit <= 5000:
+            raise ValueError("workspace list limit must be between 1 and 5000")
+        if not isinstance(self.active_only, bool):
+            raise ValueError("workspace active-only selector must be boolean")
+        if not isinstance(self.measure_sizes, bool):
+            raise ValueError("workspace size-measurement selector must be boolean")
+        _safe_name(self.mode, "workspace mode")
 
 
 @dataclass(frozen=True)
@@ -272,6 +332,22 @@ class ResolvedTarget:
         if self.kind not in {"local", "remote"}:
             raise ValueError("target kind is invalid")
         _safe_name(self.workspace_label, "workspace label")
+
+    def context(self) -> dict[str, Any]:
+        """Return the canonical project/workspace context for detached callers."""
+        return {
+            "project_dir": self.project_root,
+            "workspace": self.workspace_label,
+            "target": {"kind": self.kind, "remote": self.remote_name},
+            "namespace": self.namespace,
+        }
+
+    @property
+    def project_identity(self) -> str:
+        value = self.sources.get("identity")
+        if not isinstance(value, str) or not value:
+            raise ValueError("resolved target has no canonical project identity")
+        return value
 
 
 @dataclass(frozen=True)

@@ -327,3 +327,41 @@ facades or registry JSON.
 
 No constitution violations require justification.
 
+## Convergence amendment — 2026-08-13 (durable workspace metadata/index)
+
+The existing remote job runtime remains the execution owner. A workspace repository is
+added as a durable identity/index seam so jobs, remote controls, and resource monitoring
+share one workspace owner without using checkout paths as identity.
+
+### Implementation sequence
+
+1. Add the owner-only SQLite index/repository under
+   `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` with versioning, WAL, foreign keys,
+   bounded busy handling, opaque IDs, alias collision records, and unique
+   `(project_identity, workspace_label)`.
+2. Implement exact legacy discovery at
+   `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json`; correlate only
+   exact job project-root/namespace and one project identity, preserve source bytes, and
+   persist adopted/unresolved/conflict/invalid decisions.
+3. Add immutable migration plan/apply orchestration with full inventory digest, index
+   generation, expiry, global/per-workspace locks, pre-apply rescan, one transaction, and
+   stable drift/incomplete errors. No migration path performs cleanup or resource release.
+4. Route workspace lifecycle through the service/repository. Remote list/status/migrate
+   accept project identity/workspace ID without project-dir; create registers the exact
+   deployed tree, reset/destroy require confirmation and a busy lock, and startup marks
+   unfinished destructive actions indeterminate.
+5. Publish typed workspace resource bindings to Spec 035. The resource service consumes
+   the projection and never opens the index/legacy JSON; duplicate or stale bindings are
+   unknown/indeterminate and cannot become cleanup candidates.
+
+### Acceptance and release gates
+
+- Focused tests cover empty/indexed legacy fixtures, idempotency, exact adoption,
+  unresolved/conflict/invalid/symlink/oversize inputs, alias collision, missing checkout,
+  plan expiry/digest/generation drift, lock contention, relocation, and remote strict
+  response parsing.
+- CLI/MCP tests prove workspace controls do not require a checkout and destructive
+  controls use opaque IDs plus confirmation; job acceptance remains durable before reply.
+- Read-only live evidence records workspace/job/resource/network/container counts before
+  and after metadata migration. Apply is allowed only for a zero-collision, unchanged
+  digest plan; cleanup, reset, destroy, deploy, and network release are separate actions.

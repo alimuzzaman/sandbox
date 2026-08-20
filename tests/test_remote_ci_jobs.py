@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib.util
 import json
 import sys
@@ -48,7 +49,8 @@ class RemoteCIJobTests(unittest.TestCase):
                 "        with:\n"
                 "          path: reports\n"
             )
-            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p", {})
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p",
+                                    {"identity": "project:ci"})
             args = SimpleNamespace(timeout=3600, label_prefix="ci", matrix_filter={}, jobs=None,
                                    allow_deploy=False, keep_on_fail=True, strict_provision=False,
                                    accepted_differences=None, output_profile="smart")
@@ -59,6 +61,11 @@ class RemoteCIJobTests(unittest.TestCase):
             self.assertEqual({item.artifact_paths for item in submissions}, {("reports",)})
             self.assertTrue(all("--matrix-filter" in item.argv for item in submissions))
             self.assertTrue(all(item.deadline_seconds == 3600 for item in submissions))
+            self.assertEqual({item.project_identity for item in submissions}, {"project:ci"})
+            self.assertEqual(
+                {item.source.identity for item in submissions},
+                {"sha256:" + hashlib.sha256(str(root.resolve()).encode()).hexdigest()},
+            )
 
     def test_remote_matrix_control_contains_explicit_child_plan(self):
         calls = []
@@ -96,7 +103,8 @@ class RemoteCIJobTests(unittest.TestCase):
         captured = []
         service = SimpleNamespace(submit_matrix=lambda submissions, **_kwargs: captured.extend(submissions) or {
             "ok": True, "parent_job_id": "p" * 32, "children": []})
-        target = ResolvedTarget("/tmp/project", "local", None, "default", "local:p", {})
+        target = ResolvedTarget("/tmp/project", "local", None, "default", "local:p",
+                                {"identity": "project:legacy"})
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target),
                         "job_service": service}
         args = SimpleNamespace(spec_json=encoded, command=[], workspace=None, project_dir="/tmp/project",
@@ -122,7 +130,8 @@ class RemoteCIJobTests(unittest.TestCase):
         # Project discovery can canonicalize a copied checkout to a different
         # root. The explicitly supplied deployment root remains the boundary
         # for deterministic sibling workspaces.
-        target = ResolvedTarget("/tmp/canonical-root", "local", None, "default", "local:p", {})
+        target = ResolvedTarget("/tmp/canonical-root", "local", None, "default", "local:p",
+                                {"identity": "project:sibling"})
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target),
                         "job_service": service}
         args = SimpleNamespace(spec_json=encoded, command=[], workspace=None, project_dir="/tmp/deployed",
@@ -199,7 +208,8 @@ class RemoteCIJobTests(unittest.TestCase):
                 "    steps:\n"
                 "      - run: echo unit\n"
             )
-            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p", {})
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p",
+                                    {"identity": "project:ci"})
             args = SimpleNamespace(timeout=60, label_prefix="ci", matrix_filter={}, jobs=None,
                                    allow_deploy=False, keep_on_fail=False, strict_provision=False,
                                    accepted_differences=None, output_profile="smart")
@@ -215,7 +225,8 @@ class RemoteCIJobTests(unittest.TestCase):
             root = Path(temp)
             workflow = root / "ci.yml"
             workflow.write_text("jobs:\n  unit:\n    steps:\n      - run: echo unit\n")
-            target = ResolvedTarget(str(root), "remote", "r", "lenzora-ci", "remote:r:p", {})
+            target = ResolvedTarget(str(root), "remote", "r", "lenzora-ci", "remote:r:p",
+                                    {"identity": "project:ci"})
             args = SimpleNamespace(timeout=60, label_prefix=None, matrix_filter={}, jobs=None,
                                    allow_deploy=False, keep_on_fail=False, strict_provision=False,
                                    accepted_differences=None, output_profile="smart")
@@ -232,7 +243,8 @@ class RemoteCIJobTests(unittest.TestCase):
                 "jobs:\n  unit:\n    steps:\n      - uses: actions/upload-artifact@v4\n"
                 "        with:\n          path: |\n            reports\n            coverage.xml\n"
             )
-            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p", {})
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p",
+                                    {"identity": "project:ci"})
             args = SimpleNamespace(timeout=60, label_prefix=None, matrix_filter={}, jobs=None,
                                    allow_deploy=False, keep_on_fail=False, strict_provision=False,
                                    accepted_differences=None, output_profile="smart")

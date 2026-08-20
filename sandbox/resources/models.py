@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import re
 import secrets
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 TARGET_KINDS = frozenset({"local", "remote"})
@@ -14,12 +14,17 @@ CLASSIFICATIONS = frozenset({
     "unverified", "unmanaged",
 })
 SIZE_STATES = frozenset({"measured", "not_measured", "timed_out", "unavailable"})
-PLAN_SCOPES = frozenset({"cache", "stale"})
+RECLAIM_TIERS = ("safe", "tmp", "all")
+PLAN_SCOPES = frozenset({"cache", "stale", *RECLAIM_TIERS})
 PLAN_STATES = frozenset({
     "planned", "in_progress", "completed", "indeterminate", "expired",
 })
 RUN_STATES = frozenset({"completed", "partial", "indeterminate", "refused"})
 ITEM_STATES = frozenset({"removed", "skipped", "failed", "timed_out", "already_absent"})
+NETWORK_LIFECYCLES = frozenset({"active", "idle", "orphaned", "indeterminate"})
+NETWORK_ALLOCATION_STATES = frozenset({"allocated", "available", "exhausted", "unknown"})
+NETWORK_OWNER_KINDS = frozenset({"workspace", "sandbox", "foreign", "unknown", "unmanaged"})
+NETWORK_REFERENCE_KINDS = frozenset({"leases", "containers", "jobs", "mounts"})
 _SECRET = re.compile(
     r"(?i)(token|password|passphrase|authorization|cookie|credential|secret)"
     r"\s*[=:]\s*\S+"
@@ -66,6 +71,294 @@ def _non_negative(value: int | None, name: str, *, optional: bool = False) -> No
         return
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
+
+
+def normalize_active_references(value: Mapping[str, Any] | Iterable[tuple[str, Any]] | None) -> tuple[tuple[str, int | None], ...]:
+    """Normalize lifecycle references without treating missing evidence as zero."""
+    if value is None:
+        return ()
+    items = value.items() if isinstance(value, Mapping) else value
+    normalized: dict[str, int | None] = {}
+    try:
+        for key, count in items:
+            if not isinstance(key, str) or not key:
+                raise ValueError("reference names must be non-empty strings")
+            if count is not None:
+                _non_negative(count, f"active_references.{key}")
+            normalized[key] = count
+    except (TypeError, ValueError):
+        raise ValueError("active_references must be a mapping of counts") from None
+    return tuple(sorted(normalized.items()))
+
+
+def _references_dict(value: Iterable[tuple[str, int | None]]) -> dict[str, int | None]:
+    return {key: count for key, count in value}
+
+
+@dataclass(frozen=True)
+class NetworkLifecycle:
+    """Canonical, read-only network ownership/lifecycle evidence.
+
+    The model is shared by local and named-remote resource adapters.  It is
+    deliberately incapable of enabling network cleanup: ``cleanup_eligible``
+    is always false and release decisions remain diagnostic until an explicit
+    lifecycle owner authorizes a separate operation.
+    """
+
+    network_id: str
+    owner_kind: str
+    owner_id: str | None
+    lifecycle: str
+    active_references: tuple[tuple[str, int | None], ...] = ()
+    allocation_state: str = "unknown"
+    allocation_pool: str | None = None
+    last_observed: str | None = None
+    evidence: tuple[str, ...] = ()
+    cleanup_eligible: bool = False
+    display_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.network_id, str) or not self.network_id:
+            raise ValueError("network_id is required")
+        if self.owner_kind not in NETWORK_OWNER_KINDS:
+            raise ValueError("invalid network owner kind")
+        if self.owner_kind in {"workspace", "sandbox"} and (
+            not isinstance(self.owner_id, str) or not self.owner_id
+        ):
+            raise ValueError("owned networks require an owner identity")
+        if self.lifecycle not in NETWORK_LIFECYCLES:
+            raise ValueError("invalid network lifecycle")
+        if self.allocation_state not in NETWORK_ALLOCATION_STATES:
+            raise ValueError("invalid network allocation state")
+        if self.allocation_pool is not None and (
+            not isinstance(self.allocation_pool, str) or not self.allocation_pool
+        ):
+            raise ValueError("allocation_pool must be a non-empty string or null")
+        refs = normalize_active_references(self.active_references)
+        object.__setattr__(self, "active_references", refs)
+        if not isinstance(self.cleanup_eligible, bool):
+            raise ValueError("cleanup_eligible must be a boolean")
+        if self.cleanup_eligible:
+            raise ValueError("network cleanup is diagnostic-only")
+        if self.last_observed is not None:
+            _parse_timestamp(self.last_observed)
+        if not all(isinstance(item, str) and item for item in self.evidence):
+            raise ValueError("network evidence must contain non-empty strings")
+
+    @property
+    def owner_identity(self) -> tuple[str, str | None]:
+        return self.owner_kind, self.owner_id
+
+    @property
+    def has_active_references(self) -> bool:
+        # Unknown reference values (None) are active for release safety.
+        return any(value is None or value > 0 for _key, value in self.active_references)
+
+    @property
+    def is_releasable(self) -> bool:
+        return (
+            self.owner_kind in {"workspace", "sandbox"}
+            and self.owner_id is not None
+            and self.lifecycle in {"idle", "orphaned"}
+            and self.allocation_state == "allocated"
+            and not self.has_active_references
+        )
+
+    def release_decision(self, *, enabled: bool = False) -> dict:
+        """Return a bounded release decision without touching a network."""
+        if self.has_active_references:
+            return {
+                "status": "refused",
+                "reason": "active_references",
+                "owner": {"kind": self.owner_kind, "id": self.owner_id},
+            }
+        if not self.is_releasable:
+            return {
+                "status": "refused",
+                "reason": "network_lifecycle_not_releasable",
+                "owner": {"kind": self.owner_kind, "id": self.owner_id},
+            }
+        if not enabled:
+            return {
+                "status": "refused",
+                "reason": "network_cleanup_disabled",
+                "owner": {"kind": self.owner_kind, "id": self.owner_id},
+            }
+        return {
+            "status": "released",
+            "reason": "released",
+            "owner": {"kind": self.owner_kind, "id": self.owner_id},
+        }
+
+    def to_dict(self) -> dict:
+        return redact({
+            "network_id": self.network_id,
+            "display_name": self.display_name or self.network_id,
+            "owner": {"kind": self.owner_kind, "id": self.owner_id},
+            "lifecycle": self.lifecycle,
+            "active_references": _references_dict(self.active_references),
+            "allocation": {
+                "state": self.allocation_state,
+                "pool": self.allocation_pool,
+            },
+            "capacity_accounted": False,
+            "cleanup_eligible": False,
+            "evidence": [{"kind": item, "quality": "bounded"} for item in self.evidence],
+            "last_observed": self.last_observed,
+        })
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "NetworkLifecycle":
+        if not isinstance(value, Mapping):
+            raise ValueError("network lifecycle must be an object")
+        owner = value.get("owner") or {}
+        allocation = value.get("allocation") or {}
+        evidence = value.get("evidence") or ()
+        evidence_values = tuple(
+            item.get("kind") if isinstance(item, Mapping) else item
+            for item in evidence
+        )
+        return cls(
+            network_id=value.get("network_id"),
+            display_name=value.get("display_name"),
+            owner_kind=owner.get("kind"),
+            owner_id=owner.get("id"),
+            lifecycle=value.get("lifecycle"),
+            active_references=value.get("active_references") or (),
+            allocation_state=allocation.get("state", "unknown"),
+            allocation_pool=allocation.get("pool"),
+            last_observed=value.get("last_observed"),
+            evidence=evidence_values,
+            cleanup_eligible=False,
+        )
+
+    @classmethod
+    def from_observation(cls, item: "ResourceObservation") -> "NetworkLifecycle":
+        if item.kind != "network":
+            raise ValueError("network lifecycle requires a network observation")
+        return cls(
+            network_id=item.locator,
+            display_name=item.display_name,
+            owner_kind=item.owner_kind,
+            owner_id=item.owner_id,
+            lifecycle=item.lifecycle or "indeterminate",
+            active_references=item.active_references,
+            allocation_state=item.allocation_state or "unknown",
+            allocation_pool=item.allocation_pool,
+            last_observed=item.last_observed,
+            evidence=item.evidence,
+        )
+
+
+class NetworkLifecycleRegistry:
+    """Small in-memory lifecycle projection used by deterministic adapters/tests."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, NetworkLifecycle] = {}
+
+    @staticmethod
+    def _network_id(owner_id: str) -> str:
+        return "network-" + hashlib.sha256(owner_id.encode()).hexdigest()[:20]
+
+    @staticmethod
+    def _refs(value: Mapping[str, Any] | Iterable[tuple[str, Any]] | None) -> tuple[tuple[str, int | None], ...]:
+        return normalize_active_references(value)
+
+    def create(
+        self,
+        owner_id: str,
+        *,
+        owner_kind: str = "workspace",
+        network_id: str | None = None,
+        active_references: Mapping[str, Any] | Iterable[tuple[str, Any]] | None = None,
+        allocation_pool: str | None = None,
+    ) -> NetworkLifecycle:
+        if not isinstance(owner_id, str) or not owner_id:
+            raise ValueError("owner identity is required")
+        existing = self._records.get(owner_id)
+        if existing is not None:
+            if network_id is not None and network_id != existing.network_id:
+                raise ValueError("network_allocation_conflict")
+            refs = existing.active_references if active_references is None else self._refs(active_references)
+            updated = replace(
+                existing,
+                lifecycle="active",
+                active_references=refs,
+                allocation_state="allocated",
+            )
+            self._records[owner_id] = updated
+            return updated
+        chosen = network_id or self._network_id(owner_id)
+        if any(item.network_id == chosen for item in self._records.values()):
+            raise ValueError("network_allocation_conflict")
+        refs = self._refs(active_references)
+        record = NetworkLifecycle(
+            network_id=chosen,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            lifecycle="active",
+            active_references=refs,
+            allocation_state="allocated",
+            allocation_pool=allocation_pool,
+            evidence=("lifecycle_owner", "allocation_owned"),
+        )
+        self._records[owner_id] = record
+        return record
+
+    def get(self, owner_id: str) -> NetworkLifecycle | None:
+        return self._records.get(owner_id)
+
+    def reconcile(
+        self,
+        owner_id: str,
+        *,
+        lifecycle: str | None = None,
+        active_references: Mapping[str, Any] | Iterable[tuple[str, Any]] | None = None,
+    ) -> NetworkLifecycle:
+        current = self._records.get(owner_id)
+        if current is None:
+            return self.create(owner_id, active_references=active_references)
+        updates = {}
+        if lifecycle is not None:
+            if lifecycle not in NETWORK_LIFECYCLES:
+                raise ValueError("invalid network lifecycle")
+            updates["lifecycle"] = lifecycle
+        if active_references is not None:
+            updates["active_references"] = self._refs(active_references)
+        if updates:
+            current = replace(current, **updates)
+            self._records[owner_id] = current
+        return current
+
+    def stop(self, owner_id: str) -> NetworkLifecycle:
+        return self.reconcile(owner_id, lifecycle="idle")
+
+    def destroy(self, owner_id: str) -> NetworkLifecycle:
+        return self.reconcile(owner_id, lifecycle="orphaned")
+
+    def recreate(self, owner_id: str, **kwargs: Any) -> NetworkLifecycle:
+        # Reuse the owner-bound allocation; never create a duplicate network.
+        return self.create(owner_id, **kwargs)
+
+    def release(self, owner_id: str, *, enabled: bool = False) -> dict:
+        current = self._records.get(owner_id)
+        if current is None:
+            return {"status": "already_absent", "reason": "already_absent"}
+        decision = current.release_decision(enabled=enabled)
+        if decision["status"] == "released":
+            self._records[owner_id] = replace(
+                current, lifecycle="orphaned", allocation_state="available",
+            )
+        return decision
+
+    def count(self) -> int:
+        return len(self._records)
+
+    def network_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(item.network_id for item in self._records.values()))
+
+    def snapshots(self) -> tuple[NetworkLifecycle, ...]:
+        return tuple(sorted(self._records.values(), key=lambda item: item.network_id))
 
 
 @dataclass(frozen=True)
@@ -133,6 +426,15 @@ class ResourceObservation:
     references: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    # Network lifecycle evidence is additive and intentionally unavailable for
+    # non-network resources.  Missing reference counts stay unknown (None),
+    # rather than being coerced to zero.
+    lifecycle: str | None = None
+    active_references: tuple[tuple[str, int | None], ...] = ()
+    allocation_state: str | None = None
+    allocation_pool: str | None = None
+    cleanup_eligible: bool = False
+    last_observed: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("resource_id", "kind", "locator", "display_name", "owner_kind"):
@@ -166,9 +468,36 @@ class ResourceObservation:
             self.references, self.evidence, self.errors,
         ) for item in values):
             raise ValueError("resource evidence fields must contain strings")
+        refs = normalize_active_references(self.active_references)
+        object.__setattr__(self, "active_references", refs)
+        if self.kind == "network":
+            if self.lifecycle is None:
+                lifecycle = "indeterminate"
+                object.__setattr__(self, "lifecycle", lifecycle)
+            elif self.lifecycle not in NETWORK_LIFECYCLES:
+                raise ValueError("invalid network lifecycle")
+            if self.allocation_state is None:
+                object.__setattr__(self, "allocation_state", "unknown")
+            elif self.allocation_state not in NETWORK_ALLOCATION_STATES:
+                raise ValueError("invalid network allocation state")
+            if self.allocation_pool is not None and (
+                not isinstance(self.allocation_pool, str) or not self.allocation_pool
+            ):
+                raise ValueError("allocation_pool must be a non-empty string or null")
+            if self.cleanup_eligible:
+                raise ValueError("network cleanup is diagnostic-only")
+            if self.last_observed is not None:
+                _parse_timestamp(self.last_observed)
+        elif any(value is not None for value in (
+            self.lifecycle, self.allocation_state, self.allocation_pool,
+            self.last_observed,
+        )) or self.active_references or self.cleanup_eligible:
+            raise ValueError("lifecycle evidence is only valid for network resources")
+        if not isinstance(self.cleanup_eligible, bool):
+            raise ValueError("cleanup_eligible must be a boolean")
 
     def to_dict(self) -> dict:
-        return redact({
+        value = {
             "resource_id": self.resource_id,
             "kind": self.kind,
             "display_name": self.display_name,
@@ -182,7 +511,19 @@ class ResourceObservation:
             "references": list(self.references),
             "evidence": list(self.evidence),
             "errors": list(self.errors),
-        })
+        }
+        if self.kind == "network":
+            value.update({
+                "lifecycle": self.lifecycle,
+                "active_references": _references_dict(self.active_references),
+                "allocation": {
+                    "state": self.allocation_state,
+                    "pool": self.allocation_pool,
+                },
+                "cleanup_eligible": False,
+                "last_observed": self.last_observed,
+            })
+        return redact(value)
 
     def internal_dict(self) -> dict:
         return {**self.to_dict(), "locator": self.locator}
@@ -200,6 +541,10 @@ class CleanupCandidate:
     expected_size_bytes: int | None
     expected_reclaimable_bytes: int
     evidence_digest: str
+    expected_lifecycle: str | None = None
+    expected_active_references: tuple[tuple[str, int | None], ...] = ()
+    expected_allocation_state: str | None = None
+    expected_allocation_pool: str | None = None
 
     @classmethod
     def from_observation(cls, item: ResourceObservation) -> "CleanupCandidate":
@@ -208,6 +553,8 @@ class CleanupCandidate:
         canonical = "\n".join((
             item.resource_id, item.kind, item.locator, item.owner_kind,
             item.owner_id or "", *sorted(item.evidence), *sorted(item.references),
+            item.lifecycle or "", repr(item.active_references),
+            item.allocation_state or "", item.allocation_pool or "",
         ))
         return cls(
             resource_id=item.resource_id,
@@ -220,6 +567,10 @@ class CleanupCandidate:
             expected_size_bytes=item.size_bytes,
             expected_reclaimable_bytes=item.reclaimable_bytes,
             evidence_digest=hashlib.sha256(canonical.encode()).hexdigest(),
+            expected_lifecycle=item.lifecycle,
+            expected_active_references=item.active_references,
+            expected_allocation_state=item.allocation_state,
+            expected_allocation_pool=item.allocation_pool,
         )
 
     def __post_init__(self) -> None:
@@ -240,6 +591,17 @@ class CleanupCandidate:
             raise ValueError(
                 "expected reclaimable bytes cannot exceed expected size",
             )
+        refs = normalize_active_references(self.expected_active_references)
+        object.__setattr__(self, "expected_active_references", refs)
+        if self.expected_lifecycle is not None and self.expected_lifecycle not in NETWORK_LIFECYCLES:
+            raise ValueError("invalid expected lifecycle")
+        if self.expected_allocation_state is not None and self.expected_allocation_state not in NETWORK_ALLOCATION_STATES:
+            raise ValueError("invalid expected allocation state")
+        if self.expected_allocation_pool is not None and (
+            not isinstance(self.expected_allocation_pool, str)
+            or not self.expected_allocation_pool
+        ):
+            raise ValueError("expected allocation pool must be a non-empty string or null")
 
     def to_dict(self, *, public: bool = False) -> dict:
         value = {
@@ -255,6 +617,17 @@ class CleanupCandidate:
             "expected_reclaimable_bytes": self.expected_reclaimable_bytes,
             "evidence_digest": self.evidence_digest,
         }
+        if self.kind == "network":
+            value.update({
+                "expected_lifecycle": self.expected_lifecycle,
+                "expected_active_references": _references_dict(
+                    self.expected_active_references,
+                ),
+                "expected_allocation": {
+                    "state": self.expected_allocation_state,
+                    "pool": self.expected_allocation_pool,
+                },
+            })
         if not public:
             value["locator"] = self.locator
         return redact(value) if public else value
@@ -276,6 +649,10 @@ class CleanupCandidate:
                 value.get("expected_size_bytes") or 0,
             ),
             evidence_digest=value.get("evidence_digest"),
+            expected_lifecycle=value.get("expected_lifecycle"),
+            expected_active_references=value.get("expected_active_references") or (),
+            expected_allocation_state=(value.get("expected_allocation") or {}).get("state"),
+            expected_allocation_pool=(value.get("expected_allocation") or {}).get("pool"),
         )
 
 
@@ -293,6 +670,10 @@ class CleanupPlan:
     estimated_reclaimable_bytes: int
     state: str = "planned"
     confirmation_required: bool = True
+    # Feature-owned, opaque to the plan contract: tiered reclamation stores the
+    # reviewed candidate detail (class, tier, reason, mtime) it must replay at
+    # execution time without re-deciding policy against a changed host.
+    metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -326,6 +707,7 @@ class CleanupPlan:
         scan_id: str | None = None,
         now: datetime | None = None,
         ttl: timedelta = timedelta(minutes=15),
+        metadata: dict | None = None,
     ) -> "CleanupPlan":
         reference = (now or utc_now()).astimezone(timezone.utc)
         chosen = tuple(candidates)
@@ -342,6 +724,7 @@ class CleanupPlan:
             estimated_reclaimable_bytes=sum(
                 item.expected_reclaimable_bytes for item in chosen
             ),
+            metadata=dict(metadata or {}),
         )
 
     def to_dict(self, *, public: bool = False) -> dict:
@@ -359,6 +742,12 @@ class CleanupPlan:
             "state": self.state,
             "confirmation_required": self.confirmation_required,
         }
+        if self.metadata:
+            # Candidate locators are filesystem paths; keep them owner-only.
+            value["metadata"] = (
+                {"candidate_count": len(self.metadata.get("candidates") or ())}
+                if public else self.metadata
+            )
         return redact(value) if public else value
 
     @classmethod
@@ -381,6 +770,7 @@ class CleanupPlan:
             estimated_reclaimable_bytes=value.get("estimated_reclaimable_bytes"),
             state=value.get("state", "planned"),
             confirmation_required=value.get("confirmation_required", True),
+            metadata=value.get("metadata") or {},
         )
 
 
@@ -403,6 +793,8 @@ class StorageScan:
     drift: dict | None = None
     deep_attribution: Any | None = None
     capacity_scope_id: str | None = None
+    capacity_pressure: dict | None = None
+    reclaim: dict | None = None
 
     def __post_init__(self) -> None:
         if self.capacity is not None:
@@ -472,6 +864,7 @@ class StorageScan:
             "completeness": self.status,
             "capacity": self.capacity,
             "capacity_scope_id": self.capacity_scope_id,
+            "capacity_pressure": self.capacity_pressure,
             "summary": {
                 "attributed_bytes": self.attributed_bytes,
                 "unknown_bytes": self.unknown_bytes,
@@ -486,6 +879,8 @@ class StorageScan:
         }
         if self.deep_attribution is not None:
             value["deep_attribution"] = self.deep_attribution.to_dict()
+        if self.reclaim is not None:
+            value["reclaim"] = self.reclaim
         return redact(value)
 
 

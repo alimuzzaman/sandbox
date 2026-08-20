@@ -1,4 +1,5 @@
 import hashlib
+import io
 import importlib.util
 import json
 import subprocess
@@ -12,8 +13,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_start,
-                                          cmd_job_status, configure_start_parser)
+from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
+                                          cmd_job_start, cmd_job_status, _emit_json_line,
+                                          configure_list_parser, configure_start_parser)
+from sandbox.jobs.registry import JobNotFound
 
 
 ROOT = Path(__file__).parent.parent
@@ -31,6 +34,92 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_job_acceptance_json_is_flushed_as_one_complete_line(self):
+        class Output(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_count = 0
+
+            def flush(self):
+                self.flush_count += 1
+                return super().flush()
+
+        output = Output()
+        with redirect_stdout(output):
+            _emit_json_line({"ok": True, "status": "accepted", "job_id": "a" * 32})
+
+        self.assertEqual(output.flush_count, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": True, "status": "accepted", "job_id": "a" * 32,
+        })
+
+    def test_remote_job_list_translates_the_project_path_to_canonical_identity(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp).resolve()
+            args = parser.parse_args([
+                "--remote", "r", "--project-dir", str(project),
+                "--workspace", "unit", "--json",
+            ])
+            expected_identity = "project:" + hashlib.sha256(
+                f"{project}\0default".encode()).hexdigest()
+            target = SimpleNamespace(
+                project_root=str(project),
+                sources={"identity": expected_identity},
+            )
+            captured = []
+            output = StringIO()
+            with patch("sandbox.core._remote.get_remote", return_value={"provisioned": True}), \
+                    patch("sandbox.core._remote.remote_sb_path", return_value="/srv/sandbox/sb-src/sb"), \
+                    patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                        "target_service": SimpleNamespace(resolve=lambda _request: target),
+                        "job_service": SimpleNamespace(list=lambda _query: []),
+                    }), \
+                    patch("sandbox.transports.remote_jobs.RemoteJobTransport.list",
+                          autospec=True,
+                          side_effect=lambda _transport, *positional, **keywords:
+                          captured.append((positional, keywords)) or {"jobs": []}), \
+                    redirect_stdout(output):
+                cmd_job_list(None, args)
+
+        self.assertEqual(captured, [(('r',), {
+            "limit": 50,
+            "project_identity": expected_identity,
+            "workspace": "unit",
+            "active_only": False,
+        })])
+        self.assertEqual(json.loads(output.getvalue()), {"jobs": [], "ok": True})
+
+    def test_job_list_rejects_a_malformed_controller_project_identity(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        args = parser.parse_args(["--project-identity", "not-a-digest", "--json"])
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies:
+            with self.assertRaisesRegex(ValueError, "project identity"):
+                cmd_job_list(None, args)
+            dependencies.assert_not_called()
+
+    def test_local_active_job_list_filters_at_the_repository_boundary(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        args = parser.parse_args(["--active-only", "--json"])
+        captured = []
+        output = StringIO()
+        service = SimpleNamespace(
+            list=lambda query: captured.append(query) or [{
+                "job_id": "a" * 32, "lifecycle": "running",
+                "workspace_label": "unit",
+            }],
+        )
+        with patch(
+                "sandbox.commands.jobs_runtime.durable_job_dependencies",
+                return_value={"target_service": None, "job_service": service}), \
+                redirect_stdout(output):
+            cmd_job_list(None, args)
+        self.assertEqual(captured, [{"limit": 50, "active_only": True}])
+        self.assertEqual(len(json.loads(output.getvalue())["jobs"]), 1)
+
     def test_start_parser_and_detached_acceptance_preserve_explicit_argv_context(self):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)
@@ -39,7 +128,8 @@ class JobCliTests(unittest.TestCase):
             "--output-profile", "full", "--request-id", "request-1", "--", "python", "-c", "print('ok')",
         ])
         target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
-                                 workspace_label="unit", runtime_policy={})
+                                 workspace_label="unit", runtime_policy={},
+                                 sources={"identity": "project:cli"})
         captured = []
         accepted = {"ok": True, "job_id": "d" * 32, "target": {"kind": "local", "remote": None},
                     "workspace": "unit", "deadline": {"seconds": 120, "source": "explicit"}}
@@ -52,7 +142,28 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(captured[0].argv, ("python", "-c", "print('ok')"))
         self.assertEqual(captured[0].request_id, "request-1")
         self.assertEqual(captured[0].output_profile, "full")
+        self.assertEqual(captured[0].project_identity, "project:cli")
+        self.assertEqual(
+            captured[0].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
         self.assertIn("target=local workspace=unit deadline=120s source=explicit", output.getvalue())
+
+    def test_start_rejects_source_path_hash_as_project_identity_fallback(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args([
+            "--project-dir", "/project", "--local", "--workspace", "unit",
+            "--timeout", "120", "--", "echo", "ok",
+        ])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="unit", runtime_policy={}, sources={})
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(submit=lambda _submission: self.fail("submitted")),
+            }):
+            with self.assertRaisesRegex(ValueError, "canonical project identity"):
+                cmd_job_start(None, args)
 
     def test_start_rejects_missing_or_malformed_explicit_argv(self):
         parser = __import__("argparse").ArgumentParser()
@@ -89,6 +200,27 @@ class JobCliTests(unittest.TestCase):
             self.assertEqual(output.getvalue().strip(),
                              f"{state['job_id']} succeeded (terminal) target=local workspace=unit "
                              "deadline=60s source=explicit")
+
+    def test_missing_local_status_returns_a_structured_remote_aware_error(self):
+        job_id = "0" * 32
+        service = SimpleNamespace(get=lambda _job_id: (_ for _ in ()).throw(
+            JobNotFound("not in this ledger")))
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies",
+                   return_value={"job_service": service}), redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                cmd_job_status(None, SimpleNamespace(remote=None, job_id=job_id, json=True))
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": False,
+            "code": "job_not_found",
+            "job_id": job_id,
+            "error": "job was not found in the local durable-job ledger",
+            "hint": (
+                "The job may belong to a configured remote; run `./sb remote list` "
+                "and retry `./sb job-status <job-id> --remote <name> --json`."
+            ),
+        })
 
     def test_cli_artifact_get_rejects_invalid_bounds_before_transport(self):
         from sandbox.commands.jobs_runtime import cmd_job_artifact_get

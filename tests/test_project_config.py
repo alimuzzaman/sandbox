@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "modularity" / "config"
@@ -63,6 +63,65 @@ from unittest import mock
 
 
 class TestProjectConfig(unittest.TestCase):
+    def test_conventional_config_home_loads_complete_compose_family(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            home = root / ".config" / "sandbox"
+            home.mkdir(parents=True)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            (home / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose",
+                "compose": {
+                    "file": "compose.yaml", "service": "web",
+                    "internal_port": 80, "health_path": "/primary",
+                },
+            }))
+            (home / "sandbox.config.override.json").write_text(json.dumps({
+                "compose": {"health_path": "/override"},
+            }))
+            (home / "sandbox.config.qa.json").write_text(json.dumps({
+                "compose": {"health_path": "/qa"},
+            }))
+
+            from sandbox.config.facade import resolve_project_config
+            result = resolve_project_config(root, label="qa", legacy_loader=Mock())
+
+        self.assertEqual(result["kind"], "compose")
+        self.assertEqual(result["health_path"], "/qa")
+
+    def test_duplicate_primary_config_homes_fail_closed(self):
+        from sandbox.config.facade import resolve_project_config
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            home = root / ".config" / "sandbox"
+            home.mkdir(parents=True)
+            descriptor = {
+                "kind": "compose",
+                "compose": {
+                    "file": "compose.yaml", "service": "web",
+                    "internal_port": 80, "health_path": "/",
+                },
+            }
+            (root / "sandbox.config.json").write_text(json.dumps(descriptor))
+            (home / "sandbox.config.json").write_text(json.dumps(descriptor))
+
+            with self.assertRaisesRegex(ValueError, "ambiguous Sandbox project configuration"):
+                resolve_project_config(root, legacy_loader=Mock())
+
+    def test_nested_invocation_from_conventional_home_keeps_project_root(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            home = root / ".config" / "sandbox"
+            nested = home / "nested"
+            nested.mkdir(parents=True)
+            (home / "sandbox.config.json").write_text(json.dumps({"slug": "nested-plugin"}))
+            self.assertEqual(sandbox_core.find_project_root(nested), root)
+
     def test_wordpress_test_suite_config_is_validated(self):
         from sandbox.config.facade import resolve_project_config
 

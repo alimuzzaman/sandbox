@@ -24,16 +24,17 @@ Gitignored — they're a per-machine convenience, not shared state.
 
 For the common "undo what this test did to the DB" case you don't need a named
 snapshot. Each instance keeps a reserved **`@install` baseline** (a db-only
-snapshot captured once at provision time, stored as `__install__` — hidden from
-`./sb snapshots`):
+snapshot captured once after final provisioning (and refreshed after a successful
+onboarding seed), stored as `__install__` — shown separately by `./sb snapshots`
+as a protected reset target):
 
 ```bash
 ./sb reset              # drop the DB + restore the post-install baseline (keeps uploads)
 ./sb reset --rebaseline # re-capture the baseline from the CURRENT DB instead
 ```
 
-MCP: `wp_reset(confirm:true)` / `wp_reset(rebaseline:true)`. Use `reset` for a
-fast in-place rollback; use a **named snapshot** when you need to capture and
+MCP: `snapshot(name, db_only:true)` captures just the DB; `wp_reset(confirm:true)` /
+`wp_reset(rebaseline:true)` resets it. Use `reset` for a fast in-place rollback; use a **named snapshot** when you need to capture and
 restore arbitrary points (and uploads). `db reset/import` run via the `wpcli`
 service (the fpm web image has no mysql client — see
 `memory/plugin-behavior/restore-needs-mysql-client.md`).
@@ -41,9 +42,15 @@ service (the fpm web image has no mysql client — see
 **Auto-captured on first create/recreate** (Docker; spec 008): the db-only
 `__install__` baseline above, **plus** a FULL named snapshot `install-baseline`
 (DB + uploads) for a complete post-install rollback — `./sb restore install-baseline`.
-Both are captured once after plugins/themes are wired; a `recreate` wipes the
+Both are captured once after plugins/themes are wired (and an onboarding seed
+refreshes them to include its fixture); a `recreate` wipes the
 snapshots dir first, so they refresh to the fresh install. A failed capture is
 logged and leaves no half-written dir (no more 0 KB `__install__`).
+
+Snapshot database capture and restore stream through the `wpcli` service's
+standard output/input. The dump is opened host-side with exclusive `0600`
+permissions, so no snapshot directory is bind-mounted into the container and
+no MariaDB `mysql` UID chown or cross-UID permission window is needed.
 
 ## From wp-admin (spec 002)
 

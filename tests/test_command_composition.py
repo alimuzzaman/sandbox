@@ -51,14 +51,15 @@ class TestCommandComposition(unittest.TestCase):
         load_builtin_commands()
         self.assertEqual(len(BUILTIN_COMMAND_MODULES), len(set(BUILTIN_COMMAND_MODULES)))
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
-        self.assertEqual(len(COMMANDS), 87)
+        self.assertEqual(len(COMMANDS), 88)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.domains", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.jobs_runtime", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.workspaces", BUILTIN_COMMAND_MODULES)
-        self.assertEqual(set(COMMANDS), set(LEGACY_BRIDGE_COMMANDS))
+        self.assertEqual(set(COMMANDS) - {"secrets"}, set(LEGACY_BRIDGE_COMMANDS))
         self.assertEqual(validate_builtin_command_coverage(), ())
         self.assertEqual(COMMAND_SPECS.get("domains").owner, "sandbox.commands.domains")
+        self.assertEqual(COMMAND_SPECS.get("secrets").owner, "sandbox.commands.secrets")
 
     def test_recovery_stays_feature_owned(self):
         from pathlib import Path

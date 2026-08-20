@@ -1,4 +1,4 @@
-# PRD 00 — Outbound mail from each instance's own domain
+# PRD 01 — Outbound mail from each instance's own domain
 
 Date: 2026-08-06 · Status: Product brief for later Spec-Kit conversion · Owner surfaces: instance mail transport, `sandbox.config.json` / `sandbox.hosting.yml` mail blocks, Cloudflare DNS automation, remote provisioner, mail mu-plugin
 Sources: live probes of the remote host 2026-08-06 (port-25 reachability, blocklist status, rDNS, resources) · provider research 2026-08-06 (SES / Scaleway TEM / Postal / maddy / Stalwart / Postfix) · `sandbox/core/_provision.py:85` (`_write_mail_muplugin`, current Mailpit capture) · `sandbox/core/_remote.py:665` (`_caddy_proxy_command`, preview route provisioning) · `sandbox/core/_hosting.py` (permanent hosting manifest) · spec 014 remote hosting

@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "notice": "All fixtures are synthetic non-credentials derived from public format documentation.",
+  "fixtures": [
+    {
+      "id": "gcp-service-account",
+      "platform": "Google Cloud",
+      "format": "json",
+      "file": "gcp-service-account.json",
+      "docs": "https://cloud.google.com/iam/docs/keys-create-delete",
+      "expectedKeys": ["/auth_uri", "/client_email", "/client_id", "/client_x509_cert_url", "/private_key", "/private_key_id", "/project_id", "/token_uri", "/type", "/universe_domain"]
+    },
+    {
+      "id": "gcp-authorized-user",
+      "platform": "Google Cloud",
+      "format": "json",
+      "file": "gcp-authorized-user.json",
+      "docs": "https://cloud.google.com/docs/authentication/application-default-credentials",
+      "expectedKeys": ["/client_id", "/client_secret", "/quota_project_id", "/refresh_token", "/type"]
+    },
+    {
+      "id": "gcp-external-account",
+      "platform": "Google Cloud",
+      "format": "json",
+      "file": "gcp-external-account.json",
+      "docs": "https://google.aip.dev/auth/4117",
+      "expectedKeys": ["/audience", "/credential_source/file", "/service_account_impersonation_url", "/subject_token_type", "/token_url", "/type"]
+    },
+    {
+      "id": "aws-shared-credentials",
+      "platform": "AWS",
+      "format": "ini",
+      "file": "aws-credentials.ini",
+      "docs": "https://docs.aws.amazon.com/sdkref/latest/guide/file-format.html",
+      "expectedKeys": ["/default/aws_access_key_id", "/default/aws_secret_access_key", "/default/aws_session_token", "/sandbox/credential_process"]
+    },
+    {
+      "id": "aws-web-identity-token",
+      "platform": "AWS",
+      "format": "opaque",
+      "file": "aws-web-identity.jwt",
+      "docs": "https://docs.aws.amazon.com/sdkref/latest/guide/access-assume-role-web.html",
+      "expectedKeys": ["/value"]
+    },
+    {
+      "id": "azure-service-principal-pem",
+      "platform": "Microsoft Azure",
+      "format": "pem",
+      "file": "azure-service-principal.pem",
+      "docs": "https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-service-principal",
+      "expectedKeys": ["/blocks/0/private-key", "/blocks/1/certificate"]
+    },
+    {
+      "id": "kubernetes-kubeconfig",
+      "platform": "Kubernetes",
+      "format": "yaml",
+      "file": "kubeconfig.yaml",
+      "docs": "https://kubernetes.io/docs/reference/config-api/kubeconfig.v1/",
+      "expectedKeys": ["/apiVersion", "/clusters/0/cluster/certificate-authority-data", "/clusters/0/cluster/server", "/clusters/0/name", "/contexts/0/context/cluster", "/contexts/0/context/user", "/contexts/0/name", "/current-context", "/kind", "/users/0/name", "/users/0/user/token"]
+    },
+    {
+      "id": "docker-config",
+      "platform": "Docker",
+      "format": "json",
+      "file": "docker-config.json",
+      "docs": "https://docs.docker.com/reference/cli/docker/login/",
+      "expectedKeys": ["/auths/registry.example.invalid/auth", "/credHelpers/registry-helper.example.invalid", "/credsStore"]
+    },
+    {
+      "id": "npmrc",
+      "platform": "npm",
+      "format": "properties",
+      "file": "npmrc.properties",
+      "docs": "https://docs.npmjs.com/cli/v8/configuring-npm/npmrc/",
+      "expectedKeys": ["/@sandbox:registry", "/~1~1registry.example.invalid~1:_authToken"]
+    },
+    {
+      "id": "pypirc",
+      "platform": "Python Packaging",
+      "format": "ini",
+      "file": "pypirc.ini",
+      "docs": "https://packaging.python.org/en/latest/specifications/pypirc/",
+      "expectedKeys": ["/distutils/index-servers", "/pypi/password", "/pypi/repository", "/pypi/username"]
+    },
+    {
+      "id": "terraform-credentials",
+      "platform": "Terraform",
+      "format": "json",
+      "file": "terraform-credentials.tfrc.json",
+      "docs": "https://developer.hashicorp.com/terraform/cli/commands/login",
+      "expectedKeys": ["/credentials/app.terraform.io/token"]
+    },
+    {
+      "id": "composer-auth",
+      "platform": "Composer",
+      "format": "json",
+      "file": "composer-auth.json",
+      "docs": "https://getcomposer.org/doc/articles/authentication-for-private-packages.md",
+      "expectedKeys": ["/bearer/repo.example.invalid", "/github-oauth/github.com", "/http-basic/repo.example.invalid/password", "/http-basic/repo.example.invalid/username"]
+    },
+    {
+      "id": "cargo-credentials",
+      "platform": "Cargo",
+      "format": "toml",
+      "file": "cargo-credentials.toml",
+      "docs": "https://doc.rust-lang.org/cargo/reference/config.html#credentials",
+      "expectedKeys": ["/registries/sandbox/token", "/registry/token"]
+    },
+    {
+      "id": "maven-settings",
+      "platform": "Apache Maven",
+      "format": "xml",
+      "file": "maven-settings.xml",
+      "docs": "https://maven.apache.org/settings.html",
+      "expectedKeys": ["/settings/servers/server/id/#text", "/settings/servers/server/passphrase/#text", "/settings/servers/server/privateKey/#text", "/settings/servers/server/username/#text"]
+    },
+    {
+      "id": "nuget-config",
+      "platform": "NuGet",
+      "format": "xml",
+      "file": "nuget-config.xml",
+      "docs": "https://learn.microsoft.com/en-us/nuget/consume-packages/consuming-packages-authenticated-feeds",
+      "expectedKeys": ["/configuration/packageSourceCredentials/sandbox/add/0/@key", "/configuration/packageSourceCredentials/sandbox/add/0/@value", "/configuration/packageSourceCredentials/sandbox/add/1/@key", "/configuration/packageSourceCredentials/sandbox/add/1/@value"]
+    },
+    {
+      "id": "oci-config",
+      "platform": "Oracle Cloud Infrastructure",
+      "format": "ini",
+      "file": "oci-config.ini",
+      "docs": "https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm",
+      "expectedKeys": ["/DEFAULT/fingerprint", "/DEFAULT/key_file", "/DEFAULT/region", "/DEFAULT/tenancy", "/DEFAULT/user"]
+    },
+    {
+      "id": "github-app-private-key",
+      "platform": "GitHub",
+      "format": "pem",
+      "file": "github-app-private-key.pem",
+      "docs": "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps",
+      "expectedKeys": ["/blocks/0/rsa-private-key"]
+    },
+    {
+      "id": "pkcs12-container",
+      "platform": "PKCS #12",
+      "format": "binary",
+      "file": "synthetic-container.pfx",
+      "docs": "https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/export-certificate-private-key",
+      "expectedKeys": ["/file"]
+    }
+  ]
+}

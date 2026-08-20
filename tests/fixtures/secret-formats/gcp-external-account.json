@@ -1,0 +1,10 @@
+{
+  "type": "external_account",
+  "audience": "//iam.googleapis.com/projects/000000000000/locations/global/workloadIdentityPools/synthetic/providers/synthetic",
+  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+  "token_url": "https://sts.googleapis.com/v1/token",
+  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/synthetic.invalid:generateAccessToken",
+  "credential_source": {
+    "file": "/synthetic/not-a-real-token.jwt"
+  }
+}

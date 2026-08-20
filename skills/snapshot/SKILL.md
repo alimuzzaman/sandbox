@@ -47,6 +47,11 @@ refreshes them to include its fixture); a `recreate` wipes the
 snapshots dir first, so they refresh to the fresh install. A failed capture is
 logged and leaves no half-written dir (no more 0 KB `__install__`).
 
+Snapshot database capture and restore stream through the `wpcli` service's
+standard output/input. The dump is opened host-side with exclusive `0600`
+permissions, so no snapshot directory is bind-mounted into the container and
+no MariaDB `mysql` UID chown or cross-UID permission window is needed.
+
 ## From wp-admin (spec 002)
 
 Named snapshots are also take/restore/list/delete-able from **Tools → Sandbox

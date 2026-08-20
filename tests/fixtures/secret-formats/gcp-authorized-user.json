@@ -1,0 +1,7 @@
+{
+  "type": "authorized_user",
+  "client_id": "SB_SYNTHETIC_CLIENT_ID.apps.googleusercontent.com",
+  "client_secret": "SB_SYNTHETIC_CLIENT_SECRET_NOT_REAL",
+  "refresh_token": "SB_SYNTHETIC_REFRESH_TOKEN_NOT_REAL",
+  "quota_project_id": "synthetic-project.invalid"
+}

@@ -23,6 +23,7 @@ from sandbox.resources.attribution import (
     parse_lsof_fields,
     parse_mount_output,
     reconcile_attribution,
+    network_capacity_pressure,
     select_filesystem_mounts,
 )
 from sandbox.services.process import ProcessResult
@@ -44,6 +45,58 @@ class FakeRunner:
 
 
 class TestDeepAttributionModels(unittest.TestCase):
+    def test_network_capacity_pressure_thresholds_and_safe_recovery(self):
+        def network(index, classification="active", owner_kind="project"):
+            return SimpleNamespace(
+                kind="network",
+                classification=classification,
+                owner_kind=owner_kind,
+            )
+
+        for count, level, code in (
+            (23, "low", None),
+            (24, "medium", "network_capacity_pressure"),
+            (27, "medium", "network_capacity_pressure"),
+            (28, "high", "network_pool_exhausted"),
+        ):
+            with self.subTest(count=count):
+                pressure = network_capacity_pressure(
+                    [network(index) for index in range(count)],
+                )
+                self.assertEqual(pressure["level"], level)
+                self.assertEqual(
+                    pressure["managed_user_defined_network_count"], count,
+                )
+                self.assertEqual(pressure["threshold"], 28)
+                self.assertEqual(pressure["recovery"]["code"], code)
+                self.assertFalse(pressure["recovery"]["automatic_cleanup"])
+                if level == "high":
+                    self.assertIn("workspace destroy", pressure["recovery"]["guidance"])
+                    self.assertIn("rescan", pressure["recovery"]["guidance"])
+                    self.assertIn("Do not delete active", pressure["recovery"]["guidance"])
+
+    def test_network_pressure_does_not_claim_inactive_networks_are_stale(self):
+        pressure = network_capacity_pressure([
+            SimpleNamespace(
+                kind="network", classification="unverified",
+                owner_kind="project",
+            ),
+        ])
+        self.assertEqual(pressure["classification_summary"]["unverified"], 1)
+        self.assertEqual(pressure["recovery"]["code"], None)
+
+    def test_network_pressure_is_low_confidence_when_inventory_is_partial(self):
+        pressure = network_capacity_pressure([
+            SimpleNamespace(
+                kind="network", classification="active",
+                owner_kind="project",
+            ) for _ in range(28)
+        ], inventory_status="unavailable")
+        self.assertEqual(pressure["level"], "high")
+        self.assertEqual(pressure["status"], "partial")
+        self.assertEqual(pressure["confidence"], "low")
+        self.assertFalse(pressure["recovery"]["automatic_cleanup"])
+
     def test_reconciliation_excludes_overlap_and_never_goes_negative(self):
         value = reconcile_attribution(
             used_bytes=1000,

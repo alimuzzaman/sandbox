@@ -189,3 +189,36 @@ One confirmed attempt to apply a plan.
 - Plan and run records use atomic replace and restrictive permissions.
 - Structured results redact secrets, file contents, userinfo, credentials, and
   sensitive mount options.
+
+## Convergence amendment — 2026-08-13 (workspace ownership projection)
+
+### WorkspaceResourceBinding
+
+Resource monitoring consumes this typed projection from the workspace/job service; it
+does not inspect workspace SQLite or legacy files directly.
+
+| Field | Type | Rules |
+|---|---|---|
+| `workspace_id` | opaque string | Required stable owner identity; never a path or display label. |
+| `project_identity` | string | Required owner tuple component; must agree with the workspace service. |
+| `workspace_label` | string | Display/filter value; not sufficient for control or deletion. |
+| `owner_kind` | enum | `workspace`, `unknown`, `foreign`, or `unmanaged`; only `workspace` with complete evidence can attribute. |
+| `lifecycle` | enum | `provisioning`, `ready`, `resetting`, `destroying`, `destroyed`, `indeterminate`, or `unknown`. |
+| `alias_evidence` | list | Typed alias kind/digest and quality; collisions are explicit. |
+| `active_references` | object | Leases, containers, jobs, mounts, and retention references; missing fields are unknown, not zero. |
+| `locator_digest` / `evidence_digest` | string | Non-secret digests binding the observed resource and ownership evidence. |
+| `index_generation` | integer | Generation observed from the service; drift invalidates persistent ownership. |
+| `observed_at` | timestamp | UTC observation time and target identity. |
+
+Bindings with unresolved/conflict/invalid decisions, duplicate aliases, missing index,
+stale generation, or unavailable remote evidence classify resources as `unknown` or
+`indeterminate`, set `reclaimable_bytes=0`, and carry a bounded error. The resource
+service may display such observations but never repairs them or promotes them to a plan.
+
+### Metadata-only migration invariant
+
+Workspace index migration/relocation changes only owner metadata and path-bearing
+locators. Resource observations must preserve their non-secret resource IDs and report
+unchanged network, container, job, volume, upload, snapshot, and project-file counts.
+An observed locator change is not a lifecycle release and cannot make a network or volume
+eligible for cleanup. A fresh typed rescan is required after generation drift.

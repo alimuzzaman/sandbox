@@ -170,10 +170,12 @@ def _aggregate_result(result: dict, workers: int) -> dict:
 def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
                               workers: int, timeout: int, args) -> list:
     """Build one isolated durable job per requested Playwright shard."""
-    from sandbox.jobs.models import JobSubmission, SourceIdentity
+    from sandbox.jobs.models import JobSubmission
+    from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 
     relative_config = os.path.relpath(config_path.resolve(), root_path.resolve())
-    identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    identity = _resolved_project_identity(target)
+    source = _source_identity(target.project_root)
     # These labels become remote workspace paths. A unique run key prevents
     # concurrent E2E submissions from sharing a staged checkout.
     run_key = uuid.uuid4().hex[:10]
@@ -199,7 +201,7 @@ def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
         submissions.append(JobSubmission(
             "e2e", target.project_root, identity, "remote",
             f"e2e-{namespace_key}-{run_key}-w{shard['index']}", tuple(command), timeout,
-            SourceIdentity("sha256:" + identity), remote_name=target.remote_name,
+            source, remote_name=target.remote_name,
             workspace_mode="isolated", output_profile="smart", deadline_source="explicit",
         ))
     return submissions
@@ -247,7 +249,7 @@ def cmd_e2e(cfg, args) -> None:
 
     from sandbox.application.context import durable_job_dependencies
     from sandbox.application.target_service import TargetResolutionError
-    from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+    from sandbox.jobs.models import JobSubmission, TargetRequest
     try:
         target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=root, local=bool(getattr(args, "local", False)),

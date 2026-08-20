@@ -22,6 +22,15 @@ def _job_resource_records():
     return read_resource_index(RUNTIME_DIR / "jobs" / "registry.sqlite3")
 
 
+def _workspace_projection():
+    """Return the typed application-owned workspace projection."""
+    try:
+        from sandbox.application.context import workspace_ownership_projection
+        return workspace_ownership_projection()
+    except Exception:
+        return {"records": [], "counts": {"total": 0, "incomplete": 1}}
+
+
 def resource_service(remote: str | None = None) -> ResourceService:
     from sandbox.core._paths import BASE, RUNTIME_DIR
 
@@ -33,8 +42,37 @@ def resource_service(remote: str | None = None) -> ResourceService:
             BASE,
             registry_records=_registry_records,
             job_resource_records=_job_resource_records,
+            workspace_projection=_workspace_projection,
         )
     return ResourceService(
         adapter,
         PlanStore(Path(RUNTIME_DIR) / "resource-plans"),
+    )
+
+
+def reclaim_service(remote: str | None = None):
+    """Build the tiered reclamation service for a local or remote target."""
+    import hashlib
+    import platform
+
+    from sandbox.core._paths import BASE, RUNTIME_DIR
+
+    from .models import StorageTarget
+    from .reclaim_service import (
+        ReclaimService, _LocalReclaimProvider, _RemoteReclaimProvider,
+    )
+    from .remote import LocalProbeAdapter, RemoteResourceAdapter
+
+    store = PlanStore(Path(RUNTIME_DIR) / "resource-plans")
+    if remote:
+        return ReclaimService(
+            _RemoteReclaimProvider(RemoteResourceAdapter(remote)), store,
+        )
+    seed = f"{platform.node()}:{BASE}"
+    target = StorageTarget(
+        "local", "local", hashlib.sha256(seed.encode()).hexdigest()[:24],
+    )
+    return ReclaimService(
+        _LocalReclaimProvider(LocalProbeAdapter(), target), store,
+        target=target,
     )

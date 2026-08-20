@@ -243,3 +243,81 @@ references the old base.
   environment shims are regenerated like other baked artifacts.
 - Removal of any legacy in-repo path handling follows the project's parity-before-removal
   rule: old-location reads are kept as a fallback until the migrated path is proven.
+
+## Convergence amendment — 2026-08-13 (PHP extension build state)
+
+The WordPress PHP-extension requirement is project configuration, but the generated
+build context and its provenance are machine state. This amendment keeps that state
+inside the same swappable base and does not change the configuration-home placement
+decision in Spec 042.
+
+- Extension build contexts and recreatable caches MUST live below
+  `$SANDBOX_HOME/runtime/build/php-extensions/<content-digest>/`; they MUST NOT be
+  written into a checkout, a tracked spec, or a project-owned source directory.
+- The extension cache key MUST include the normalized requirement document, immutable
+  profile/catalog revision, parent image digest, PHP version, web-server flavor,
+  platform, and architecture. A change to any input MUST select a different digest.
+- Cache entries MUST record only non-secret source/artifact provenance, resolved image
+  digests, package/artifact versions, and last observations. They MUST be safe to
+  recreate or discard during base relocation; no cache entry may be treated as the
+  source of truth for project data.
+- Relocation MUST move pure metadata safely and regenerate path-bearing build contexts
+  for the new base. It MUST preserve the existing database volumes, uploads, snapshots,
+  and project files; extension reconciliation is limited to web/runtime artifacts.
+- The CLI and MCP processes MUST derive this path from the same active base, and cache
+  diagnostics MUST redact credentials, tokens, and private source paths.
+
+## Convergence amendment — 2026-08-13 (durable workspace metadata/index)
+
+This amendment adds durable workspace ownership metadata to the existing swappable
+machine-state base. It does not change the global project-identity model, create a new
+Spec Kit feature, or authorize cleanup of legacy state or runtime resources.
+
+### Normative requirements
+
+- **FR-017**: Sandbox MUST maintain an owner-only, versioned SQLite workspace index at
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. The index MUST use WAL, foreign keys,
+  bounded busy handling, and transactional schema migrations; it is an additive index and
+  MUST NOT replace the existing project/instance registry.
+- **FR-018**: Each workspace MUST have a durable opaque `workspace_id`. The index MUST
+  enforce one owner for each `(project_identity, workspace_label)` pair while allowing
+  paths, legacy namespaces, and checkout locations to change as aliases/locators.
+- **FR-019**: Existing legacy metadata at
+  `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` MUST remain
+  byte-identical during discovery, migration, relocation, and normal index operation.
+  Migration MAY add index rows and audit metadata only; it MUST NOT rewrite, delete,
+  rename, or clean legacy files.
+- **FR-020**: Legacy adoption MUST use exact evidence: a job `project_root` hash may
+  match the namespace and label, and adoption requires exactly one distinct durable
+  `project_identity`. Project/runtime aliases may enrich that evidence; caller identity
+  is valid only when it matches an exact expected alias and no conflict exists. Names,
+  age, directory order, or a single ambiguous candidate MUST never establish ownership.
+- **FR-021**: Migration MUST classify every discovered legacy record as `adopted`,
+  `unresolved`, `conflict`, or `invalid`, preserve the source and reason, and surface
+  `workspace_index_incomplete` whenever relevant legacy records remain unresolved rather
+  than returning an empty or false “not found” result.
+- **FR-022**: A migration plan MUST bind the target project identity, complete legacy
+  inventory digest, current index generation, immutable plan ID, and expiry. Apply MUST
+  hold the migration lock, rescan, reject any digest/generation drift, and adopt rows in
+  one transaction. Re-running an applied plan MUST be idempotent; a stale plan MUST fail
+  with `workspace_migration_plan_stale`.
+- **FR-023**: Workspace lifecycle state MUST be explicit (`provisioning`, `ready`,
+  `resetting`, `destroying`, `destroyed`, or `indeterminate`), with per-workspace busy
+  locking. Startup MUST mark unfinished destructive transitions `indeterminate` and
+  MUST NOT repeat reset/destroy work automatically.
+- **FR-024**: Relocating `SANDBOX_HOME` MUST move the index as pure metadata and
+  regenerate path-bearing locators while preserving legacy metadata byte-for-byte,
+  project files, uploads, snapshots, and database volumes. Index relocation MUST NOT
+  release networks, destroy workspaces, or perform cleanup.
+- **FR-025**: Resource monitoring MUST consume a typed workspace ownership projection
+  keyed by `workspace_id` and `project_identity`; it MUST NOT read the SQLite index or
+  legacy metadata files directly and MUST treat duplicate aliases as ambiguous.
+
+### Additional success criteria
+
+- **SC-008**: An interrupted or repeated index migration leaves the legacy metadata
+  unchanged and produces the same adoption/conflict decision on every retry.
+- **SC-009**: A missing checkout path does not prevent list/status by opaque workspace ID,
+  while unresolved/conflicting legacy records are never silently omitted.
+- **SC-010**: Relocation changes neither network/container/job counts nor any protected
+  project data; only index metadata and regenerated locators change.

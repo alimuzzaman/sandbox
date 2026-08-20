@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import time
 from types import SimpleNamespace
 import unittest
 
-from sandbox.resources.remote import RemoteResourceAdapter, _program
+from sandbox.resources.remote import (
+    RemoteResourceAdapter,
+    _program,
+    parse_job_list_payload,
+)
 from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
 from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
-from sandbox.resources.models import CleanupCandidate
+from sandbox.resources.models import CleanupCandidate, NetworkLifecycle
 
 
 class TestRemoteResourceAdapter(unittest.TestCase):
@@ -99,6 +105,26 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertNotIn("sqlite3.connect", program)
         self.assertNotIn("registry.read_text", program)
 
+    def test_job_list_consumer_accepts_only_top_level_ok_jobs(self):
+        self.assertEqual(parse_job_list_payload({"ok": True, "jobs": []}), [])
+        with self.assertRaisesRegex(ValueError, "top-level jobs"):
+            parse_job_list_payload({"ok": True, "data": {"jobs": []}})
+        with self.assertRaisesRegex(ValueError, "top-level list"):
+            parse_job_list_payload({"ok": True, "jobs": {}})
+        with self.assertRaisesRegex(ValueError, "top-level ok"):
+            parse_job_list_payload({"ok": False, "jobs": []})
+
+    def test_remote_program_embeds_strict_job_list_parser(self):
+        namespace = self._probe_namespace()
+        self.assertEqual(
+            namespace["parse_job_list_payload"]({"ok": True, "jobs": []}),
+            [],
+        )
+        with self.assertRaisesRegex(ValueError, "top-level jobs"):
+            namespace["parse_job_list_payload"]({
+                "ok": True, "data": {"jobs": []},
+            })
+
     def test_remote_deep_probe_is_read_only_and_uses_installed_tool_fallbacks(self):
         program = _program({
             "action": "observe",
@@ -111,12 +137,14 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         compile(program, "<remote-resource-probe>", "exec")
         for evidence in (
             'shutil.which("gdu")',
-            '["du", "-x", "-k", "-d", "4"]',
+            '["du", "-x", "-k", "-d", str(DIRECTORY_DEPTH)]',
             '[lsof, "-nP", "-FpcfDitsn", "+L1"]',
             '["docker", "system", "df", "-v", "--format", "json"]',
             '"deep_attribution": deep',
             '["sudo", "-n", "true"]',
-            "exc.stdout or",
+            # A killed sudo leaves the real worker holding the pipe, so the
+            # probe must end the whole process group to keep its budget.
+            "os.killpg(os.getpgid(process.pid), signal.SIGKILL)",
             "directory_measurement_timed_out_with_partial",
             "resource_thorough = thorough and not deep_requested",
         ):
@@ -213,6 +241,28 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         snapshot = adapter.observe(thorough=True, budget_seconds=2)
         self.assertIsNone(snapshot.capacity)
         self.assertEqual(snapshot.category_outcomes[0]["status"], "timed_out")
+        self.assertEqual(len(calls), 1)
+
+    def test_remote_transport_timeout_exception_is_structured_partial_evidence(self):
+        calls = []
+
+        def ssh(_remote, command, *, input_data=None, timeout=0):
+            calls.append(command)
+            raise subprocess.TimeoutExpired(("ssh", "fixture"), timeout)
+
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh,
+            clock=lambda: NOW,
+        )
+
+        snapshot = adapter.observe(thorough=True, budget_seconds=2)
+
+        self.assertIsNone(snapshot.capacity)
+        self.assertEqual(snapshot.category_outcomes, ({
+            "category": "remote_probe", "status": "timed_out",
+        },))
         self.assertEqual(len(calls), 1)
 
     def test_remote_timeout_retains_delivered_valid_partial_payload(self):
@@ -429,7 +479,18 @@ class TestRemoteResourceAdapter(unittest.TestCase):
                 return 0, "{}", ""
             raise AssertionError(argv)
 
+        def walk_rows(argv, _timeout, multiplier, _keep_prefixes=()):
+            commands.append(tuple(argv))
+            if "/gdu" in argv:
+                return [], False
+            return [
+                (10240 * multiplier, "/var"), (51200 * multiplier, "/"),
+            ], True
+
         namespace["run"] = run
+        namespace["walk_rows"] = walk_rows
+        namespace["directory_cache_read"] = lambda: None
+        namespace["directory_cache_write"] = lambda _payload: True
         namespace["docker_deep_findings"] = lambda _output: (_ for _ in ()).throw(
             RuntimeError("provider parser failed"),
         )
@@ -554,6 +615,247 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertIn('"kind":"build_cache"', calls[0])
         self.assertIn('"locator":"bbbbbbbbbbbbbbbbbbbbbbbb"', calls[0])
         self.assertIn('"--filter", "id=" + locator', calls[0])
+
+    def test_remote_workspace_lifecycle_keeps_one_owner_identity_and_refs(self):
+        namespace = self._probe_namespace()
+        details = namespace["workspace_owner_details"](
+            {
+                "records": [{
+                    "workspace_id": "ws_remote", "owner_kind": "workspace",
+                    "lifecycle": "destroyed", "status": "destroyed",
+                    "observed_at": "2026-07-28T12:00:00Z", "index_generation": 1,
+                    "active_references": {"leases": 0, "containers": 0, "jobs": 0},
+                    "bindings": [{
+                        "resource_type": "compose_project",
+                        "resource_id": "sandbox-unit", "status": "owned",
+                    }],
+                }],
+                "index_generation": 1,
+                "counts": {"total": 1, "unresolved": 0, "conflict": 0, "incomplete": 0},
+            },
+            "compose_project", "sandbox-unit",
+        )
+        self.assertEqual(
+            (details["owner_kind"], details["owner_id"]),
+            ("workspace", "ws_remote"),
+        )
+        self.assertEqual(details["lifecycle"], "destroyed")
+        self.assertEqual(details["active_references"]["leases"], 0)
+
+    def test_remote_network_release_refuses_active_references_without_transport(self):
+        calls = []
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+            clock=lambda: NOW,
+        )
+        decision = adapter.release_network(NetworkLifecycle(
+            network_id="network-1", owner_kind="workspace", owner_id="ws_remote",
+            lifecycle="orphaned",
+            active_references={"leases": 1, "containers": 0, "jobs": 0},
+            allocation_state="allocated",
+        ))
+        self.assertEqual(decision["status"], "refused")
+        self.assertEqual(decision["reason"], "active_references")
+        self.assertEqual(calls, [])
+
+
+class TestRemoteProbeResilience(unittest.TestCase):
+    """A full disk must never degrade the report to "unmeasurable"."""
+
+    def _probe_namespace(self, request=None):
+        source = _program(request or {
+            "action": "observe", "thorough": True, "deep": True,
+            "budget_seconds": 300, "managed_host": True,
+            "remote_name": "remote-a",
+        }).split("\ntry:\n    output = remove()", 1)[0]
+        namespace = {}
+        exec(source, namespace)
+        return namespace
+
+    @staticmethod
+    def _envelope_line(**overrides):
+        payload = {
+            "stage": "envelope",
+            "identity": "remote-identity",
+            "capacity": {
+                "total_bytes": 200, "used_bytes": 190,
+                "available_bytes": 10, "reserved_bytes": 0,
+            },
+            "capacity_scope_id": "capacity-root",
+            "resources": [],
+            "category_outcomes": [{
+                "category": "remote_probe", "status": "partial",
+                "reason": "probe_incomplete_capacity_only",
+            }],
+            "drift": None,
+            "deep_attribution": None,
+        }
+        payload.update(overrides)
+        return json.dumps(payload)
+
+    def test_probe_publishes_capacity_before_bounded_work(self):
+        program = _program({
+            "action": "observe", "thorough": True, "deep": True,
+            "budget_seconds": 300, "managed_host": True,
+            "remote_name": "remote-a",
+        })
+        envelope_at = program.index('"stage": "envelope"')
+        self.assertLess(envelope_at, program.index('PHASE = "lifecycle_evidence"'))
+        self.assertIn("emit(ENVELOPE)", program)
+
+    def test_truncated_final_record_still_reports_capacity(self):
+        stdout = self._envelope_line() + "\n" + '{"identity":"remote-ide'
+
+        def ssh(_remote, _command, *, input_data=None, timeout=0):
+            return ProcessResult(("ssh",), 124, stdout, "timed out")
+
+        snapshot = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh, clock=lambda: NOW,
+        ).observe(thorough=True, budget_seconds=2, deep=True)
+        self.assertEqual(snapshot.capacity["used_bytes"], 190)
+        self.assertEqual(snapshot.capacity_scope_id, "capacity-root")
+        self.assertEqual(
+            snapshot.category_outcomes[0]["reason"],
+            "probe_incomplete_capacity_only",
+        )
+        self.assertEqual(snapshot.category_outcomes[-1]["status"], "timed_out")
+
+    def test_final_record_supersedes_the_envelope(self):
+        final = self._envelope_line(
+            stage="final",
+            resources=[],
+            category_outcomes=[{"category": "paths", "status": "complete"}],
+        )
+
+        def ssh(_remote, _command, *, input_data=None, timeout=0):
+            return ProcessResult(("ssh",), 0, self._envelope_line() + "\n" + final, "")
+
+        snapshot = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh, clock=lambda: NOW,
+        ).observe(thorough=True, budget_seconds=2)
+        self.assertEqual(
+            snapshot.category_outcomes[0],
+            {"category": "paths", "status": "complete"},
+        )
+
+    def test_probe_failure_reports_capacity_and_failing_phase(self):
+        failure = self._envelope_line(
+            stage="error", error="resource probe failed",
+            error_phase="docker_inventory", error_type="RuntimeError",
+            category_outcomes=[{
+                "category": "remote_probe", "status": "unavailable",
+                "reason": "probe_failed_in_docker_inventory",
+            }],
+        )
+
+        def ssh(_remote, _command, *, input_data=None, timeout=0):
+            return ProcessResult(("ssh",), 1, failure, "")
+
+        snapshot = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh, clock=lambda: NOW,
+        ).observe(thorough=True, budget_seconds=2)
+        self.assertEqual(snapshot.capacity["used_bytes"], 190)
+        self.assertEqual(
+            snapshot.category_outcomes[0]["reason"],
+            "probe_failed_in_docker_inventory",
+        )
+
+    def test_run_kills_the_whole_process_group_within_its_budget(self):
+        namespace = self._probe_namespace()
+        started = time.monotonic()
+        # A backgrounded grandchild inherits stdout; killing only the direct
+        # child would block the read until the grandchild exits.
+        code, _out, _err = namespace["run"](
+            ["sh", "-c", "sleep 30 & sleep 30"], 1,
+        )
+        self.assertEqual(code, 124)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_walk_rows_keeps_managed_paths_and_partial_output(self):
+        namespace = self._probe_namespace()
+        namespace["DIRECTORY_MIN_BYTES"] = 1024 * 1024
+        rows, complete = namespace["walk_rows"](
+            ["printf", "1\t/home/alim/sandbox/deploy-src/ws\n2048\t/var\n1\t/tmp\n"],
+            5, 1024, ("/home/alim/sandbox",),
+        )
+        self.assertIn((1024, "/home/alim/sandbox/deploy-src/ws"), rows)
+        self.assertIn((2048 * 1024, "/var"), rows)
+        self.assertNotIn((1024, "/tmp"), rows)
+        self.assertTrue(complete)
+
+    def test_directory_index_reuses_cache_and_reports_provenance(self):
+        namespace = self._probe_namespace()
+        stored = {}
+        namespace["directory_cache_write"] = lambda payload: stored.update(payload) or True
+        namespace["directory_cache_read"] = lambda: stored or None
+        namespace["walk_rows"] = lambda *_args, **_kwargs: (
+            [(4096, "/var"), (8192, "/")], True,
+        )
+        fresh = namespace["directory_index"]("/", ["du"], 1024, 5, ())
+        self.assertEqual(fresh["source"], "scan")
+        self.assertTrue(fresh["complete"])
+        namespace["walk_rows"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached index must not walk the disk"),
+        )
+        cached = namespace["directory_index"]("/", ["du"], 1024, 5, ())
+        self.assertEqual(cached["source"], "cache")
+        self.assertEqual(cached["rows"], [(4096, "/var"), (8192, "/")])
+        self.assertFalse(cached["stale"])
+
+    def test_fast_mode_never_walks_and_says_the_index_is_missing(self):
+        namespace = self._probe_namespace({
+            "action": "observe", "thorough": False, "deep": True,
+            "budget_seconds": 10, "managed_host": True,
+            "remote_name": "remote-a", "directory_cache": "cache_only",
+        })
+        self.assertTrue(namespace["FAST"])
+        namespace["directory_cache_read"] = lambda: None
+        namespace["walk_rows"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fast mode must not walk the disk"),
+        )
+        index = namespace["directory_index"]("/", ["du"], 1024, 5, ())
+        self.assertEqual(index["source"], "cache_missing")
+        self.assertEqual(index["rows"], [])
+
+    def test_managed_paths_are_named_and_unmanaged_paths_are_not(self):
+        namespace = self._probe_namespace()
+        home = str(namespace["HOME"])
+        findings, total = namespace["rank_directory_rows"](
+            [
+                (90, home + "/deploy-src/feature-workspace-1"),
+                (50, "/srv/private-thing"),
+                (200, "/"),
+            ],
+            "filesystem-1", "/", None, None,
+        )
+        names = [item["display_name"] for item in findings]
+        self.assertIn("Sandbox home/deploy-src/feature-workspace-1", names)
+        self.assertTrue(any(name.startswith("entry ") for name in names))
+        self.assertEqual(total, 200)
+
+    def test_engine_storage_includes_the_containerd_content_store(self):
+        namespace = self._probe_namespace()
+        namespace["INDEX_ROWS"].update({
+            "/var/lib/containerd": 25_000_000_000,
+            "/var/lib/docker/overlay2": 35_000_000_000,
+        })
+        namespace["Path"] = namespace["Path"]
+        resources, outcomes = namespace["docker_storage_resources"](True)
+        stores = {
+            item["display_name"]: item["size_bytes"] for item in resources
+        }
+        self.assertEqual(
+            stores.get("containerd content store"), 25_000_000_000,
+        )
+        self.assertEqual(outcomes[0]["category"], "docker_storage")
 
 
 if __name__ == "__main__":

@@ -4,9 +4,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 import types as _types
 from contextlib import contextmanager
 import io
@@ -22,7 +25,7 @@ from sandbox.core import (
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
     focus_file, info, load_config, ok, proxy_available, regen_caddyfile,
     reload_proxy, resolve_instances, snapshots_dir, valet_proxy_remove, wp_dir,
-    wpcli,
+    wpcli, _write_abilities_context,
 )
 
 from sandbox.registry import register
@@ -30,6 +33,71 @@ from sandbox.application.context import (
     domain_service, ingress_service, runtime_service, wordpress_runtime_service,
 )
 from sandbox.runtimes.base import OperationError, OperationRequest
+from sandbox.services.redaction import redact_structure, redact_text
+
+
+def _is_wordpress_project(config: dict) -> bool:
+    """Return whether a resolved descriptor uses the WordPress schema."""
+    return config.get("kind") == "wordpress"
+
+
+def _print_ensure_json(document: object, *, sort_keys: bool = False,
+                       compact: bool = False, reveal_login: bool = False) -> None:
+    """Emit one fail-closed public JSON document for ``sb ensure --json``.
+
+    ``reveal_login`` is the ``--reveal-login`` opt-in and restores the single
+    ``login_url`` field after redaction. Default output stays redacted, so the
+    guarantee is unchanged for every caller that does not ask. Without the
+    opt-in the redacted value still carries the ``sandbox_autologin=``
+    parameter name, so consumers cannot distinguish it from a working token by
+    shape alone.
+
+    Two records qualify. A LOCAL instance whose URL is loopback-bound: that
+    token is a dev credential the caller already owns (stored in
+    ``sandbox.local.yml`` under the same UID) and authenticates nothing off
+    this machine. And a REMOTE ensure record, which an E2E runner needs for the
+    same reason a local one does -- note that a remote instance exposed on a
+    public hostname makes the revealed URL an admin credential for anyone who
+    obtains it, so it belongs in a gitignored descriptor, never in logs or a
+    commit.
+    """
+    payload = redact_structure(document)
+    if reveal_login and isinstance(document, Mapping) and isinstance(payload, dict):
+        revealed = _autologin_url_to_reveal(document)
+        if revealed:
+            payload["login_url"] = revealed
+    separators = (",", ":") if compact else None
+    print(json.dumps(
+        payload,
+        sort_keys=sort_keys,
+        separators=separators,
+        default=str,
+    ))
+
+
+def _autologin_url_to_reveal(document: Mapping) -> str:
+    """Return the autologin URL the ``--reveal-login`` opt-in may emit.
+
+    A remote ensure record qualifies on the strength of the flag alone: the
+    caller selected that remote, and the runner it feeds needs a usable login.
+    A local record still has to prove its host is loopback-bound, so a
+    deployed or rewritten local URL never leaks a token by accident.
+    Empty string when the record carries no autologin token at all.
+    """
+    value = document.get("login_url")
+    if not isinstance(value, str) or "sandbox_autologin=" not in value:
+        return ""
+    target = document.get("target")
+    if isinstance(target, Mapping) and target.get("remote"):
+        return value
+    host = urlsplit(value).hostname or ""
+    if host in {"localhost", "::1"} or host.startswith("127."):
+        return value
+    try:
+        resolved = socket.gethostbyname(host)
+    except OSError:
+        return ""
+    return value if resolved.startswith("127.") else ""
 
 
 
@@ -39,6 +107,7 @@ def cmd_focus(cfg, args) -> None:
     if args.clear:
         if ff.exists():
             ff.unlink()
+        _write_abilities_context(inst)
         ok("Cleared plugin focus")
         return
     if not args.slug:
@@ -61,16 +130,19 @@ def cmd_focus(cfg, args) -> None:
             if other == inst:
                 continue
             try:
-                if fp.read_text().strip() == args.slug:
-                    fp.unlink()
-                    stolen.append(other)
+                matches = fp.read_text().strip() == args.slug
             except OSError:
-                pass
+                continue
+            if matches:
+                fp.unlink()
+                _write_abilities_context(other)
+                stolen.append(other)
         if stolen:
             info(f"moved focus of '{args.slug}' here from: "
                  f"{', '.join(stolen)}")
 
     ff.write_text(args.slug)
+    _write_abilities_context(inst)
     ok(f"Focused plugin: {args.slug}")
 
 def cmd_ensure(cfg, args) -> None:
@@ -81,7 +153,8 @@ def cmd_ensure(cfg, args) -> None:
         from sandbox.commands.lifecycle import _remote_lifecycle
         remote_result = _remote_lifecycle(cfg, args, "ensure")
         if remote_result is not None and getattr(args, "json", False):
-            print(json.dumps(remote_result, sort_keys=True))
+            _print_ensure_json(remote_result, sort_keys=True,
+                               reveal_login=getattr(args, "reveal_login", False))
         elif remote_result is not None:
             print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
         if remote_result is not None:
@@ -98,9 +171,22 @@ def cmd_ensure(cfg, args) -> None:
             arguments={"create": create},
         ))
     except sc.ConfigError as e:
-        die(str(e))
+        message = str(e)
+        if getattr(args, "json", False):
+            _print_ensure_json({
+                "ok": False,
+                "error": {"code": "config_error", "message": message},
+            }, compact=True)
+            raise SystemExit(1)
+        die(redact_text(message))
     if isinstance(result, OperationError):
-        die(result.message)
+        if getattr(args, "json", False):
+            _print_ensure_json({
+                "ok": False,
+                "error": {"code": result.code, "message": result.message},
+            }, compact=True)
+            raise SystemExit(1)
+        die(redact_text(result.message))
     entry = dict(result.data)
     if not isinstance(entry, dict) or "instance" not in entry:
         # A runtime that refuses returns its own typed result, not an instance
@@ -115,7 +201,7 @@ def cmd_ensure(cfg, args) -> None:
         # working instance is worse than useless.
         if isinstance(entry, dict) and entry.get("ok"):
             if getattr(args, "json", False):
-                print(json.dumps(entry, separators=(",", ":"), default=str))
+                _print_ensure_json(entry, compact=True)
             else:
                 backend = entry.get("backend") or {}
                 where = (f"{backend.get('address')}:{backend.get('port')}"
@@ -128,7 +214,7 @@ def cmd_ensure(cfg, args) -> None:
         # from any other, so emit the whole payload under --json and the
         # message plus the completed steps otherwise.
         if getattr(args, "json", False):
-            print(json.dumps(entry, separators=(",", ":"), default=str))
+            _print_ensure_json(entry, compact=True)
         message = reason.get("message") if isinstance(reason, dict) else None
         failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
         summary = f"instance is not ready: {code or detail or 'no reason reported'}"
@@ -136,13 +222,13 @@ def cmd_ensure(cfg, args) -> None:
             summary += f": {message}"
         if failed_after:
             summary += f" (completed: {', '.join(str(step) for step in failed_after)})"
-        die(summary)
+        die(redact_text(summary))
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
-        # parse it past any boot/progress output above.
-        public_entry = dict(entry)
-        public_entry.pop("autologin_token", None)
-        print(json.dumps(public_entry))
+        # parse it past any boot/progress output above. The record here is
+        # always a local instance -- the remote branch returned long before,
+        # honouring --reveal-login on its own record.
+        _print_ensure_json(entry, reveal_login=getattr(args, "reveal_login", False))
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")
@@ -224,6 +310,11 @@ def cmd_init(cfg, args) -> None:
         # The resolved pconf already carries the canonical schema (defaults
         # merged, .wp-env.json mapped). Persist exactly the schema keys.
         data = {k: pconf.get(k, v) for k, v in sc.DEFAULTS.items()}
+        # New WordPress scaffolds opt into the reviewed profile explicitly.
+        # Keep existing descriptors (including --force regeneration) unchanged
+        # when they omitted the field; generic Compose returns above.
+        if _is_wordpress_project(pconf) and not has_native:
+            data["phpExtensions"] = {"profile": "wordpress@1"}
         if base_source == "defaults":
             # Defaults use the canonical map so Query Monitor can be declared
             # installed-but-inactive. Add this checkout under its real slug at

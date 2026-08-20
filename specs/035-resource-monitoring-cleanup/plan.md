@@ -145,3 +145,32 @@ See [research.md](research.md). All technical unknowns are resolved.
 ## Complexity Tracking
 
 No constitution violations require justification.
+
+## Convergence amendment — 2026-08-13 (workspace index ownership projection)
+
+Resource Monitoring remains a read-only/confirmation-gated consumer. It receives a typed
+workspace ownership projection from the workspace/job service and never becomes a second
+workspace-state reader.
+
+### Integration sequence
+
+1. Define a typed projection keyed by opaque `workspace_id` and `project_identity`, with
+   lifecycle, alias/evidence digests, active lease/container/job references, index
+   generation, completeness, and bounded errors.
+2. Adapt local and remote providers to consume that projection and the single Spec 032
+   top-level job-list decoder. Missing, unresolved, conflicting, duplicate, stale, or
+   unavailable bindings become unknown/indeterminate and zero reclaimable bytes.
+3. Keep network/resource lifecycle accounting on the existing owner model. A moved
+   checkout or metadata locator is not a release; active/foreign/unknown networks remain
+   exclusions, and migration never calls cleanup or broad prune.
+4. Add CLI/MCP parity tests for incomplete index, alias collision, generation drift,
+   missing checkout, remote timeout, and fresh-rescan-before-plan behavior.
+
+### Validation gates
+
+- Focused fixtures prove no resource module imports/open the workspace index or legacy
+  JSON, and malformed/nested job-list responses fail closed without changing state.
+- Read-only before/after evidence records stable workspace/resource/network/container/job
+  counts across a metadata-only migration and relocation.
+- Any unavailable projection blocks persistent cleanup planning; no live reset, destroy,
+  network release, or broad prune is part of this amendment.

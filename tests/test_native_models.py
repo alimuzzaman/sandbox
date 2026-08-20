@@ -68,6 +68,23 @@ class TestNativeModels(unittest.TestCase):
         with self.assertRaises(ValueError):
             PackageTransactionPlan("x", ({"password": "leak"},), (), (), (), (), ())
 
+    def test_managed_php_extension_plan_binds_catalog_and_package_provenance(self):
+        from sandbox.php_extensions.catalog import DEFAULT_CATALOG
+        from sandbox.runtimes.managed.models import ManagedPhpExtensionPlan, PhpExtensionPackage
+
+        package = PhpExtensionPackage("gd", "php8.3-gd", "8.3.6",
+                                     catalog_digest=DEFAULT_CATALOG.digest)
+        plan = ManagedPhpExtensionPlan(
+            "8.3", None, ({"name": "gd", "state": "enabled", "version": None},),
+            (package,), DEFAULT_CATALOG.digest,
+        )
+        self.assertEqual(plan.to_dict()["packages"][0]["package"], "php8.3-gd")
+        with self.assertRaises(ValueError):
+            ManagedPhpExtensionPlan(
+                "8.3", None, plan.requirements, plan.packages,
+                DEFAULT_CATALOG.digest, digest="0" * 64,
+            )
+
     def test_backend_health_transitions_and_cleanup_records_are_structured(self):
         from sandbox.runtimes.managed.models import NativeBackendRecord
         from sandbox.isolation.models import NativeCleanupRecovery

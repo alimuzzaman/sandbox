@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import time
+from collections import Counter
 from typing import Any, Iterable
 
 from sandbox.services.process import ProcessResult
@@ -42,6 +43,7 @@ GUIDANCE_STATES = frozenset({
     "existing_cache_scope", "existing_stale_scope", "manual",
     "monitoring_only", "non_cleanable",
 })
+NETWORK_PRESSURE_THRESHOLD = 28
 _BYTE_SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I)
 
 
@@ -62,6 +64,124 @@ def _strings(values: Iterable[str], name: str) -> tuple[str, ...]:
 def _identifier(kind: str, *parts: str) -> str:
     seed = "\0".join(parts)
     return f"{kind}-{hashlib.sha256(seed.encode()).hexdigest()[:20]}"
+
+
+def network_capacity_pressure(
+    resources: Iterable[Any],
+    *,
+    inventory_status: str = "complete",
+) -> dict | None:
+    """Summarize observed Sandbox-managed user-defined network pressure.
+
+    This is deliberately a diagnostic signal.  It never turns an inactive
+    network into a cleanup candidate and it does not infer liveness from job
+    termination alone.  A complete Docker network inventory gives high
+    confidence; partial inventories retain the bounded observation while
+    clearly marking confidence as low.
+    """
+    managed = []
+    summary = Counter({
+        "active": 0,
+        "retained": 0,
+        "unverified": 0,
+        "disposable_cache": 0,
+        "stale_candidate": 0,
+        "foreign": 0,
+        "unattributed": 0,
+    })
+    for item in resources or ():
+        if isinstance(item, dict):
+            resource_type = item.get("kind")
+            owner = item.get("owner") or {}
+            ownership = owner.get("kind")
+            classification = str(item.get("classification", "unverified"))
+        else:
+            resource_type = getattr(item, "kind", None)
+            ownership = getattr(item, "owner_kind", None)
+            classification = str(getattr(item, "classification", "unverified"))
+        if resource_type != "network":
+            continue
+        if ownership == "project":
+            managed.append(item)
+            if classification in summary:
+                summary[classification] += 1
+            else:
+                summary["unverified"] += 1
+        elif ownership == "foreign":
+            summary["foreign"] += 1
+        else:
+            summary["unattributed"] += 1
+
+    if inventory_status not in {"complete", "observed", "partial"}:
+        # An unavailable inventory cannot establish either pressure or safe
+        # ownership.  Do not fabricate a low-pressure result from no rows.
+        return None if not managed else {
+            "level": "high" if len(managed) >= NETWORK_PRESSURE_THRESHOLD else
+            "medium" if len(managed) >= NETWORK_PRESSURE_THRESHOLD - 4 else "low",
+            "managed_user_defined_network_count": len(managed),
+            "threshold": NETWORK_PRESSURE_THRESHOLD,
+            "classification_summary": dict(summary),
+            "confidence": "low",
+            "status": "partial",
+            "recovery": {
+                "code": "network_pool_exhausted"
+                if len(managed) >= NETWORK_PRESSURE_THRESHOLD
+                else "network_capacity_pressure"
+                if len(managed) >= NETWORK_PRESSURE_THRESHOLD - 4 else None,
+                "guidance": (
+                    "Network inventory is incomplete; do not delete networks. "
+                    "Review the specific Sandbox workspace and job/container "
+                    "references, then rescan before any confirmed lifecycle action."
+                ),
+                "automatic_cleanup": False,
+            },
+        }
+
+    count = len(managed)
+    level = (
+        "high" if count >= NETWORK_PRESSURE_THRESHOLD else
+        "medium" if count >= NETWORK_PRESSURE_THRESHOLD - 4 else "low"
+    )
+    code = (
+        "network_pool_exhausted" if level == "high" else
+        "network_capacity_pressure" if level == "medium" else None
+    )
+    if level == "high":
+        guidance = (
+            "Docker user-defined network capacity is under severe pressure. "
+            "Review Sandbox-managed workspace ownership and active job, lease, "
+            "and container references; if a specific workspace is no longer "
+            "needed and has no active jobs or leases, use the existing "
+            "confirmation-gated `sb workspace destroy --remote NAME "
+            "--workspace LABEL --yes` lifecycle, then rescan. Do not delete "
+            "active, foreign, "
+            "or unattributed Docker networks directly."
+        )
+    elif level == "medium":
+        guidance = (
+            "Docker user-defined network capacity is approaching the pressure "
+            "threshold. Review Sandbox workspace/job/container references and "
+            "rescan before any explicitly confirmed workspace lifecycle action; "
+            "do not delete networks directly."
+        )
+    else:
+        guidance = (
+            "No immediate Sandbox network-capacity recovery action is indicated; "
+            "continue bounded monitoring."
+        )
+    return {
+        "level": level,
+        "managed_user_defined_network_count": count,
+        "threshold": NETWORK_PRESSURE_THRESHOLD,
+        "classification_summary": dict(summary),
+        "confidence": "high" if inventory_status in {"complete", "observed"} else "low",
+        "status": "complete" if inventory_status in {"complete", "observed"} else "partial",
+        "recovery": {
+            "code": code,
+            "guidance": guidance,
+            "automatic_cleanup": False,
+        },
+    }
 
 
 def parse_byte_size(value: Any) -> int | None:
@@ -509,10 +629,15 @@ class DeepAttribution:
     coverage: tuple[CoverageObservation, ...]
     reconciliation: AttributionReconciliation
     capacity_scope_id: str | None = None
+    directory_index: dict | None = None
 
     def __post_init__(self) -> None:
         if self.status not in DEEP_STATES:
             raise ValueError("invalid deep attribution status")
+        if self.directory_index is not None and not isinstance(
+            self.directory_index, dict,
+        ):
+            raise ValueError("directory_index must be an object or null")
         if self.capacity_scope_id is not None and (
             not isinstance(self.capacity_scope_id, str) or not self.capacity_scope_id
         ):
@@ -527,6 +652,7 @@ class DeepAttribution:
             "coverage": [item.to_dict() for item in self.coverage],
             "reconciliation": self.reconciliation.to_dict(),
             "capacity_scope_id": self.capacity_scope_id,
+            "directory_index": self.directory_index,
         })
 
     @classmethod
@@ -555,6 +681,10 @@ class DeepAttribution:
                 value.get("reconciliation") or {},
             ),
             capacity_scope_id=value.get("capacity_scope_id"),
+            directory_index=(
+                value.get("directory_index")
+                if isinstance(value.get("directory_index"), dict) else None
+            ),
         )
 
 

@@ -41,16 +41,116 @@ import hashlib
 import ipaddress
 import urllib.error
 import urllib.request
-import re
 import subprocess
+import sys
+import time
+from pathlib import PurePosixPath
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._config import ensure_pyyaml, _local_yaml
 from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
+from sandbox.services.redaction import redact_structure, redact_text
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+# macOS writes AppleDouble metadata alongside files when a checkout is copied
+# through a filesystem that cannot carry the resource fork.  These files are
+# never intended project input.  Keep this policy deliberately narrow: only a
+# basename beginning with ``._`` is a sidecar; ordinary dotfiles (including
+# ``.env``) remain transfer eligible.
+_APPLEDOUBLE_BASENAME_PREFIX = "._"
+_APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
+_NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS = 300
+
+
+def is_appledouble_basename(value: str | os.PathLike) -> bool:
+    """Return whether ``value`` has an AppleDouble sidecar basename.
+
+    The check is intentionally basename-only.  A path such as ``.env`` or
+    ``nested/.config`` is ordinary project input, while ``nested/._metadata``
+    is excluded regardless of its parent directory.
+    """
+    if isinstance(value, (str, os.PathLike)):
+        name = PurePosixPath(os.fspath(value)).name
+    else:
+        return False
+    return name.startswith(_APPLEDOUBLE_BASENAME_PREFIX)
+
+
+def filter_appledouble_paths(paths):
+    """Return ``(kept, skipped_count)`` for an iterable of relative paths.
+
+    No skipped path is retained for later command construction, and the count
+    is the only diagnostic datum callers should expose.
+    """
+    kept = []
+    skipped = 0
+    for value in paths:
+        if is_appledouble_basename(value):
+            skipped += 1
+        else:
+            kept.append(value)
+    return kept, skipped
+
+
+def appledouble_tar_exclude_patterns() -> tuple[str, ...]:
+    """Patterns covering ``._*`` basenames at the archive root and below it."""
+    return _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS
+
+
+def count_appledouble_files(root: str | Path, *, excluded_roots=()) -> int:
+    """Count sidecar entries that a runtime archive would otherwise include.
+
+    ``excluded_roots`` contains project-relative directory/file names already
+    omitted by the archive.  This helper never returns paths or reads file
+    contents; it exists solely for a safe count-only operator diagnostic.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    excluded = []
+    for value in excluded_roots:
+        if not isinstance(value, str) or not value:
+            continue
+        candidate = PurePosixPath(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            continue
+        excluded.append(candidate)
+    count = 0
+    try:
+        entries = root.rglob("*")
+        for entry in entries:
+            try:
+                relative = PurePosixPath(entry.relative_to(root).as_posix())
+            except (OSError, ValueError):
+                continue
+            if not is_appledouble_basename(relative):
+                continue
+            if any(relative == prefix or prefix in relative.parents for prefix in excluded):
+                continue
+            count += 1
+    except OSError:
+        # A diagnostic must never make an otherwise valid upload fail.  Tar is
+        # still authoritative for transfer success/failure below.
+        return 0
+    return count
+
+
+def emit_appledouble_skip_diagnostic(count: int, *, context: str) -> None:
+    """Emit a bounded count-only sidecar diagnostic without path disclosure."""
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return
+    labels = {
+        "dirty-overlay": "dirty overlay",
+        "runtime-source": "runtime source upload",
+    }
+    label = labels.get(context, "remote transfer")
+    print(
+        f"{label}: skipped {count} macOS AppleDouble sidecar(s)",
+        file=sys.stderr,
+    )
 
 # OpenSSH multiplexing removes the repeated TCP/KEX/authentication cost while
 # still keeping each command a separately isolated SSH session. Ten minutes is
@@ -100,10 +200,54 @@ def validate_remote_name(name: str) -> str:
 
 
 def get_remote(name: str) -> dict | None:
-    return _remote_block().get(name)
+    entry = _remote_block().get(name)
+    if not isinstance(entry, dict):
+        return entry
+    # Keep the owning record name available to pre-staging admission without
+    # changing the persisted secret-store schema.  The marker is internal and
+    # never sent to a remote command or included in a public envelope.
+    copy = dict(entry)
+    if isinstance(name, str) and _NAME_RE.fullmatch(name):
+        copy["_remote_name"] = name
+    return copy
 
 
-def deploy_exact_working_tree(remote: dict, project_root: str | Path) -> dict:
+def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
+    """Resolve a named ref to one full commit before any remote mutation.
+
+    Immutable deploys intentionally reject every local dirty layer.  The
+    caller can therefore prove that the transferred source is exactly the
+    resolved commit and that a failed resolution never contacted the remote.
+    """
+    root = Path(project_root).resolve()
+    if not isinstance(source_ref, str) or not source_ref.strip() or "\x00" in source_ref:
+        raise ValueError("source_ref is invalid")
+    requested = source_ref.strip()
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{requested}^{{commit}}"],
+        cwd=str(root), capture_output=True, text=True, check=False,
+    )
+    commit = (resolved.stdout or "").strip().lower()
+    if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("source_ref could not be resolved to a full commit")
+    diff_text, untracked = capture_uncommitted(root)
+    if diff_text.strip() or untracked:
+        raise ValueError(
+            "source_ref requires a clean working tree; immutable source was not combined "
+            "with local changes"
+        )
+    return commit
+
+
+def deploy_exact_working_tree(
+    remote: dict,
+    project_root: str | Path,
+    *,
+    source_ref: str | None = None,
+    source_root: str | Path | None = None,
+    required_subnets: int = 1,
+    remote_name: str | None = None,
+) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
     This is the reusable deploy primitive for remote jobs.  It intentionally
@@ -111,17 +255,94 @@ def deploy_exact_working_tree(remote: dict, project_root: str | Path) -> dict:
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    # Admission is intentionally the first remote operation.  In particular,
+    # it must precede ensure_deploy_repo(), git push, reset, dirty-overlay
+    # upload, and any subsequent workspace/instance staging.  A partial or
+    # unavailable probe is a bounded refusal; it is never converted into a
+    # count-based or disk-space-based guess.
+    admitted_remote_name = remote_name
+    if not (isinstance(admitted_remote_name, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", admitted_remote_name)):
+        candidate = remote.get("_remote_name") if isinstance(remote, dict) else None
+        admitted_remote_name = candidate if isinstance(candidate, str) \
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", candidate) else None
+    network_capacity = remote_network_capacity_admission(
+        remote, required_subnets=required_subnets, remote_name=admitted_remote_name,
+    )
+    if network_capacity.get("ok") is not True:
+        raise NetworkCapacityAdmissionError(network_capacity)
+    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     target = ensure_deploy_repo(remote, root)
-    branch = current_branch(root)
-    pushed_sha = push_commits(remote, root, target, branch)
+    branch = current_branch(root) if resolved_source is None else None
+    pushed_sha = push_commits(
+        remote, root, target, branch,
+        source_ref=source_ref, resolved_sha=resolved_source,
+        source_root=source_root,
+    )
     reset_target_to(remote, target, pushed_sha)
-    diff_text, untracked = capture_uncommitted(root)
-    applied = apply_uncommitted(remote, target, root, diff_text, untracked)
+    diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
+    applied = apply_uncommitted(remote, target, root, diff_text, untracked) if resolved_source is None else 0
     dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
-            "uncommitted_files_applied": applied}
+            "uncommitted_files_applied": applied,
+            "network_capacity": network_capacity,
+            "source_ref": source_ref,
+            # For a nested immutable deploy the pushed commit is the
+            # source-root subtree artifact; retain the user's resolved ref as
+            # the provenance identity rather than replacing it with the
+            # synthetic tree SHA.
+            "resolved_commit": resolved_source or pushed_sha,
+            "source_immutable": resolved_source is not None}
+
+
+def register_workspace_deployment_receipt(
+    remote: dict, deployed: dict, project_identity: str,
+) -> str:
+    """Persist an opaque remote-side receipt for one exact deployed tree.
+
+    Workspace control receives only the receipt ID.  The protected target path
+    stays inside the deployment adapter and the remote controller's owner-only
+    receipt store; it is never serialized as a workspace CLI argument.
+    """
+    import base64
+    import shlex
+
+    target = deployed.get("target_path")
+    commit = deployed.get("commit")
+    source_identity = deployed.get("identity")
+    if not all(isinstance(item, str) and item for item in (
+            target, commit, source_identity, project_identity)):
+        raise RuntimeError("exact deployment did not produce a registerable receipt")
+    receipt_id = "wdr_" + hashlib.sha256(
+        f"{project_identity}\0{source_identity}\0{target}".encode()
+    ).hexdigest()
+    payload = json.dumps({
+        "schema_version": 1,
+        "receipt_id": receipt_id,
+        "project_identity": project_identity,
+        "checkout_locator": target,
+        "source_checkout_locator": deployed.get("source_checkout_locator"),
+        "source_identity": source_identity,
+        "commit": commit,
+        "dirty_digest": deployed.get("dirty_digest"),
+    }, sort_keys=True, separators=(",", ":")).encode()
+    encoded = base64.b64encode(payload).decode("ascii")
+    receipt_root = resolve_sandbox_home(remote) + "/runtime/workspaces/deployment-receipts"
+    program = (
+        "import base64,os,pathlib,sys,tempfile;"
+        "root=pathlib.Path(sys.argv[1]);rid=sys.argv[2];data=base64.b64decode(sys.argv[3]);"
+        "root.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(root,0o700);"
+        "fd,tmp=tempfile.mkstemp(prefix='.'+rid+'.',dir=root);os.fchmod(fd,0o600);"
+        "f=os.fdopen(fd,'wb');f.write(data);f.flush();os.fsync(f.fileno());f.close();"
+        "os.replace(tmp,root/(rid+'.json'))"
+    )
+    command = shlex.join(["python3", "-c", program, receipt_root, receipt_id, encoded])
+    result = ssh_run(remote, command, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError("could not persist exact deployment receipt")
+    return receipt_id
 
 
 def put_remote(name: str, **fields) -> dict:
@@ -167,7 +388,15 @@ def redact_ssh_connection(value: str, remote: dict | None = None) -> str:
     if remote and remote.get("ssh"):
         text = text.replace(str(remote["ssh"]), "[redacted SSH target]")
         text = text.replace(f"ssh://{remote['ssh']}", "[redacted SSH target]")
-    return _SSH_CONNECTION_RE.sub("[redacted SSH target]", text)
+    return redact_text(_SSH_CONNECTION_RE.sub("[redacted SSH target]", text))
+
+
+def _safe_remote_diagnostic(result, remote: dict | None = None, *, limit: int = 1000) -> str:
+    """Bound and sanitize injected runner diagnostics without raw fallback."""
+    value = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return redact_ssh_connection(value, remote)[-limit:]
 
 
 def parse_ssh_target(ssh_value: str) -> dict:
@@ -469,7 +698,7 @@ def resolve_sandbox_home(remote: dict) -> str:
     if res.returncode != 0 or not (res.stdout or "").strip():
         raise RuntimeError(
             f"could not resolve $SANDBOX_HOME on remote: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return res.stdout.strip()
 
@@ -532,12 +761,20 @@ def ensure_deploy_repo(remote: dict, project_root) -> str:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not prepare deploy-target repo on remote: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return target
 
 
-def _last_json(stdout: str) -> dict | None:
+def _last_json(stdout: str, *, redact: bool = True) -> dict | None:
+    """Parse the last JSON object printed by a remote command.
+
+    Redaction is the default and the only path callers should use for a whole
+    document. ``redact=False`` exists for the narrow case of lifting ONE field
+    the operator explicitly asked for (``sb ensure --reveal-login``); the
+    caller must merge that field into an otherwise redacted payload rather
+    than forwarding the raw document.
+    """
     for line in reversed((stdout or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -547,7 +784,10 @@ def _last_json(stdout: str) -> dict | None:
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict):
-            return data
+            if not redact:
+                return data
+            sanitized = redact_structure(data)
+            return sanitized if isinstance(sanitized, dict) else None
     return None
 
 
@@ -593,7 +833,46 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
     if res.returncode != 0 or not data:
         raise RuntimeError(
             f"could not ensure remote instance: "
-            f"{(res.stderr or res.stdout or '').strip()[:2000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=2000)}"
+        )
+    return data
+
+
+def reconcile_remote_instance(remote: dict, target_path: str,
+                              label: str | None = None) -> dict:
+    """Apply the deployed WordPress config before post-deploy activation.
+
+    ``ensure`` deliberately fast-returns for a reachable ready instance. A
+    deploy can still change local-plugin paths and therefore the Compose bind
+    mounts, so the remote deploy flow must run the existing non-destructive
+    apply operation before expecting the deployed plugin to be visible.
+    """
+    sb = remote_sb_path(remote)
+    label_arg = f" --label {shlex.quote(label)}" if label else ""
+    apply = (
+        f"{shlex.quote(sb)} apply --project-dir {shlex.quote(target_path)}"
+        f"{label_arg} --json"
+    )
+    cmd = (
+        "exec timeout --signal=TERM "
+        f"--kill-after={REMOTE_ENSURE_KILL_GRACE_SECONDS}s "
+        f"{REMOTE_ENSURE_TIMEOUT_SECONDS}s {apply}"
+    )
+    try:
+        res = ssh_run(remote, cmd, timeout=REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"remote instance apply timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        ) from exc
+    data = _last_json(res.stdout or "")
+    if res.returncode == 124:
+        raise RuntimeError(
+            f"remote instance apply timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        )
+    if res.returncode != 0 or not data:
+        raise RuntimeError(
+            "could not reconcile remote instance: "
+            f"{_safe_remote_diagnostic(res, remote, limit=2000)}"
         )
     return data
 
@@ -615,13 +894,14 @@ def activate_remote_plugin(remote: dict, target_path: str, instance: str,
         f"rm -rf {shlex.quote(plugin_path)}; "
         f"ln -s {shlex.quote(target_path)} {shlex.quote(plugin_path)}; "
         f"cd {shlex.quote(target_path)}; "
-        f"{shlex.quote(sb)} wp plugin activate {shlex.quote(plugin_slug)}"
+        f"{shlex.quote(sb)} --instance {shlex.quote(instance)} "
+        f"wp plugin activate {shlex.quote(plugin_slug)}"
     )
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
             f"could not activate remote plugin {plugin_slug}: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -738,7 +1018,7 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure remote instance HTTPS route: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -757,8 +1037,44 @@ def remove_instance_https_route(remote: dict, domain: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not remove remote instance HTTPS route: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
+
+
+def instance_route_hosts(remote: dict, port: int) -> list[str]:
+    """Hostnames whose Sandbox instance route currently proxies to `port`.
+
+    Read back from the remote's own Caddy fragments rather than from local
+    state, because the routes outlive the machine that created them: a route
+    added from another checkout, or by an earlier `--expose --domain`, is still
+    live and still owned by this instance's port. That makes stale-route
+    pruning self-describing instead of dependent on a local record that may not
+    exist. Only Sandbox's own `sandbox-instance-*` fragments are considered —
+    permanent `sb host` routes are never in scope."""
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("invalid remote instance port")
+    cmd = (
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO grep -l -F {shlex.quote(f'reverse_proxy 127.0.0.1:{int(port)}')} "
+        "/etc/caddy/conf.d/sandbox-instance-*.caddy 2>/dev/null || true"
+    )
+    res = ssh_run(remote, cmd, timeout=60)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "could not read remote instance routes: "
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
+        )
+    hosts = []
+    for line in (res.stdout or "").splitlines():
+        name = line.strip().rsplit("/", 1)[-1]
+        if not name.startswith("sandbox-instance-") or not name.endswith(".caddy"):
+            continue
+        host = name[len("sandbox-instance-"):-len(".caddy")]
+        try:
+            hosts.append(_validate_hostname(host, "remote instance domain"))
+        except ValueError:
+            continue
+    return hosts
 
 
 def delete_remote_instance(remote: dict, instance_name: str) -> None:
@@ -770,7 +1086,7 @@ def delete_remote_instance(remote: dict, instance_name: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not delete remote Sandbox instance: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -792,7 +1108,7 @@ def delete_remote_instance_for_label(remote: dict, target_path: str, label: str)
     if res.returncode != 0 or not isinstance(data, dict):
         raise RuntimeError(
             "could not list remote instances for preview rollback: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
     rows = data.get("instances")
     if not isinstance(rows, list):
@@ -820,7 +1136,7 @@ def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not set remote instance URL: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -840,12 +1156,101 @@ def current_branch(project_root) -> str:
     return branch
 
 
-def push_commits(remote: dict, project_root, target_path: str, branch: str) -> str:
-    """git push HEAD to the deploy-target repo over SSH -- works even for a
-    branch never pushed anywhere else (spec FR-008), since this is a direct
-    git-to-git push over the SAME SSH connection already registered, not
-    dependent on GitHub/origin at all. Returns the pushed commit SHA."""
+def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Path]:
+    """Create the committed tree containing only ``source_root``.
+
+    A Git commit made in an outer checkout always carries the outer tree.  A
+    nested hosting manifest must instead push a deterministic subtree commit,
+    while the dirty overlay remains relative to the same source root.  Git's
+    subtree splitter preserves the source-root history, so a normal mutable
+    branch remains fast-forwardable and an immutable source-ref maps to a
+    stable SHA-derived artifact without force-pushing.
+    """
+    source = Path(source_root).resolve()
+    result = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    checkout = (result.stdout or "").strip()
+    if result.returncode != 0 or not checkout:
+        raise RuntimeError("could not determine the Git checkout for source_root")
+    checkout_path = Path(checkout).resolve()
+    try:
+        relative = source.relative_to(checkout_path)
+    except ValueError as exc:
+        raise ValueError("source_root must stay within the Git checkout") from exc
+    if not relative.parts:
+        return commit, checkout_path
+    prefix = PurePosixPath(*relative.parts).as_posix()
+    split = subprocess.run(
+        ["git", "subtree", "split", f"--prefix={prefix}", commit],
+        cwd=str(checkout_path), capture_output=True, text=True, check=False,
+    )
+    split_sha = next(
+        (line.strip().lower() for line in reversed((split.stdout or "").splitlines())
+         if re.fullmatch(r"[0-9a-fA-F]{40}", line.strip())),
+        None,
+    )
+    if split.returncode != 0 or split_sha is None:
+        detail = _safe_remote_diagnostic(split, limit=500)
+        raise RuntimeError(f"could not create source-root commit: {detail}")
+    return split_sha, checkout_path
+
+
+def push_commits(
+    remote: dict,
+    project_root,
+    target_path: str,
+    branch: str | None,
+    *,
+    source_ref: str | None = None,
+    resolved_sha: str | None = None,
+    source_root: str | Path | None = None,
+) -> str:
+    """Push the committed source artifact to the deploy-target repo.
+
+    A normal project pushes ``HEAD`` directly.  When ``source_root`` is a
+    nested checkout path, Git subtree creates a commit whose root is exactly
+    that directory before the push; dirty files are applied separately by the
+    caller.  Both paths use the same registered SSH transport and never route
+    through another Git remote.
+    """
     push_url = git_ssh_url(remote, target_path)
+    source_commit = resolved_sha
+    push_cwd = Path(project_root)
+    if source_root is not None and source_commit is None:
+        head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root), capture_output=True, text=True, check=False,
+        )
+        source_commit = (head_res.stdout or "").strip().lower()
+        if head_res.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+            raise RuntimeError("could not resolve the committed source tree")
+    if source_ref is not None:
+        commit = resolved_sha or resolve_source_ref(project_root, source_ref)
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("source_ref did not resolve to a full commit")
+        # A SHA-derived ref is immutable by construction: repeated deploys
+        # address the same object and never move a user-named branch.
+        destination = f"refs/heads/sandbox-source-{commit}"
+        source_spec = f"{commit}:{destination}"
+        source_commit = commit
+        resolved_sha = commit
+    else:
+        if not isinstance(branch, str) or not branch.strip():
+            raise ValueError("deploy branch is required for a working-tree source")
+        source_spec = f"HEAD:refs/heads/{branch}"
+    if source_root is not None:
+        tree_commit, push_cwd = _source_tree_commit(project_root, source_root, source_commit or "")
+        # A subtree commit cannot update a branch previously seeded with the
+        # full outer checkout: Git correctly rejects that non-fast-forward
+        # update, and force-pushing would destroy an existing deploy history.
+        # Every nested source therefore gets its own immutable tree-SHA ref,
+        # regardless of whether the caller selected a mutable branch or an
+        # immutable source_ref.  The checked-out target is reset to the
+        # returned subtree SHA below.
+        destination = f"refs/heads/sandbox-source-{tree_commit}"
+        source_spec = f"{tree_commit}:{destination}"
     try:
         _ensure_ssh_control_dir()
     except OSError:
@@ -855,20 +1260,24 @@ def push_commits(remote: dict, project_root, target_path: str, branch: str) -> s
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = git_ssh
     res = subprocess.run(
-        ["git", "push", push_url, f"HEAD:refs/heads/{branch}"],
-        cwd=str(project_root), env=env, capture_output=True, text=True,
+        ["git", "push", push_url, source_spec],
+        cwd=str(push_cwd), env=env, capture_output=True, text=True,
         timeout=120, check=False,
     )
     if res.returncode != 0:
         raise RuntimeError(
             f"git push to remote failed: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
+    if source_ref is not None:
+        return tree_commit if source_root is not None else resolved_sha  # already validated as a full SHA above
+    if source_root is not None:
+        return tree_commit
     sha_res = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
-    return (sha_res.stdout or "").strip()
+    return (sha_res.stdout or "").strip().lower()
 
 
 def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
@@ -890,7 +1299,7 @@ def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not reset the VPS working tree to {sha}: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
 
 
@@ -909,20 +1318,87 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     testing). Without `=all`, a new file inside a new untracked directory
     would be silently skipped entirely by apply_uncommitted's
     `local_path.is_file()` check (a directory is never a file)."""
+    # `--relative` is essential for a source root nested below the Git
+    # checkout.  Without it Git emits paths such as `site/compose.yml` while
+    # callers treat `project_root` (the site directory) as the transfer root,
+    # causing a second `site/` prefix on the remote and silently missing files
+    # when the target is expected to be the declared source root.
     diff_res = subprocess.run(
-        ["git", "diff", "HEAD"],
+        ["git", "diff", "--relative", "HEAD"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
     diff_text = diff_res.stdout or ""
     status_res = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        ["git", "status", "--short", "--untracked-files=all"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
-    untracked = [
-        line[3:] for line in (status_res.stdout or "").splitlines()
-        if line.startswith("??")
-    ]
+    untracked = []
+    status_entries = []
+    tracked_changes = False
+    skipped = 0
+    for line in (status_res.stdout or "").splitlines():
+        if len(line) < 3:
+            continue
+        status_entries.append(line)
+        relative = line[3:].strip()
+        status = line[:2]
+        # `git status --short` can still report untracked siblings as
+        # `../name` when the declared source root is nested in the checkout.
+        # They are outside the transfer root and must not be copied (nor later
+        # rejected as unsafe paths by apply_uncommitted).
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts:
+            continue
+        if status == "??":
+            if is_appledouble_basename(relative):
+                skipped += 1
+                continue
+            untracked.append(relative)
+        elif status.strip():
+            # A sidecar-only tracked edit must not make the overlay appear
+            # dirty.  This status pass is already part of the capture, so no
+            # extra Git invocation (or diff content parsing) is needed.
+            if is_appledouble_basename(relative):
+                skipped += 1
+            else:
+                tracked_changes = True
+    if diff_text.strip() and status_entries and not tracked_changes:
+        diff_text = ""
+    emit_appledouble_skip_diagnostic(skipped, context="dirty-overlay")
     return diff_text, untracked
+
+
+def deploy_project_descriptor_files(project_root) -> list[str]:
+    """Return project-local runtime descriptors that deploy must carry.
+
+    A repository may intentionally keep ``sandbox.config.*`` out of Git (for
+    example through ``.git/info/exclude``). The descriptor is still required
+    to reconstruct plugin mounts on the remote. Transfer only the selected
+    primary project descriptor; machine overrides and secret files remain
+    local by design.
+    """
+    from sandbox.config.descriptors import primary_config
+
+    root = Path(project_root).expanduser().resolve()
+    selected = primary_config(root)
+    if selected is None:
+        selected = next(
+            (root / name for name in (".wp-env.json",)
+             if (root / name).is_file()),
+            None,
+        )
+    if selected is None:
+        return []
+    try:
+        relative = selected.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("project descriptor must stay within the deploy root") from exc
+    if not selected.is_file():
+        raise RuntimeError("project descriptor is not a regular file")
+    if is_appledouble_basename(relative):
+        emit_appledouble_skip_diagnostic(1, context="dirty-overlay")
+        return []
+    return [relative.as_posix()]
 
 
 def apply_uncommitted(remote: dict, target_path: str, project_root,
@@ -941,22 +1417,22 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
     deleted: list[str] = []
     if diff_text.strip():
         changed_res = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"],
+            ["git", "diff", "--name-only", "--relative", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
         if changed_res.returncode != 0:
             raise RuntimeError(
                 f"could not list changed tracked files: "
-                f"{(changed_res.stderr or changed_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(changed_res, limit=500)}"
             )
         deleted_res = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=D", "HEAD"],
+            ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
         if deleted_res.returncode != 0:
             raise RuntimeError(
                 f"could not list deleted tracked files: "
-                f"{(deleted_res.stderr or deleted_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(deleted_res, limit=500)}"
             )
         changed_names = [n for n in (changed_res.stdout or "").splitlines() if n.strip()]
         deleted = [n for n in (deleted_res.stdout or "").splitlines() if n.strip()]
@@ -971,6 +1447,11 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
 
     deleted = [safe_relpath(value) for value in deleted]
     to_copy = [safe_relpath(value) for value in to_copy]
+    deleted, skipped_deleted = filter_appledouble_paths(deleted)
+    to_copy, skipped_to_copy = filter_appledouble_paths(to_copy)
+    emit_appledouble_skip_diagnostic(
+        skipped_deleted + skipped_to_copy, context="dirty-overlay"
+    )
     if deleted:
         commands = [
             f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
@@ -980,7 +1461,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if rm_res.returncode != 0:
             raise RuntimeError(
                 "could not remove deleted files on remote: "
-                f"{(rm_res.stderr or rm_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(rm_res, remote, limit=500)}"
             )
         applied += len(deleted)
 
@@ -994,11 +1475,16 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         tar_res = subprocess.run(
             ["tar", "-czf", "-", "--", *existing], cwd=str(project_root),
             capture_output=True, check=False,
+            # BSD tar on macOS otherwise synthesizes ``._*`` members from
+            # filesystem metadata even when no sidecar exists in the input.
+            # Disable that metadata channel so the archive contains only the
+            # intended project bytes; GNU tar ignores this variable.
+            env={**os.environ, "COPYFILE_DISABLE": "1"},
         )
         if tar_res.returncode != 0:
             raise RuntimeError(
                 "could not package dirty files: "
-                f"{(tar_res.stderr or b'').decode(errors='replace').strip()[:500]}"
+                f"{_safe_remote_diagnostic(tar_res, limit=500)}"
             )
         extract = (
             f"mkdir -p -- {shlex.quote(target_path)} && "
@@ -1009,7 +1495,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if copy_res.returncode != 0:
             raise RuntimeError(
                 "could not transfer dirty files: "
-                f"{(copy_res.stderr or copy_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(copy_res, remote, limit=500)}"
             )
         applied += len(existing)
     return applied
@@ -1020,6 +1506,7 @@ _MCP_PIDFILE = "/tmp/sandbox-mcp-remote.pid"
 REMOTE_MCP_SERVICE = "sandbox-mcp-remote.service"
 _REMOTE_MCP_ENV = "$HOME/.sandbox/mcp-remote.env"
 _REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
+_REMOTE_MCP_REVISION_RE = re.compile(r"[0-9a-f]{24}")
 
 
 def _remote_mcp_bind_allowed(bind: str) -> bool:
@@ -1041,12 +1528,28 @@ def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> s
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
+def _remote_mcp_revision_sources(root: Path | None = None) -> tuple[Path, ...]:
+    """Return the deterministic shipped CLI/MCP source surface."""
+    root = root or Path(__file__).resolve().parents[2]
+    parts = [root / "VERSION", root / "sb"]
+    for source_root in (root / "sandbox", root / "mcp" / "wp-server"):
+        parts.extend(source_root.rglob("*.py"))
+    return tuple(sorted(
+        (source for source in parts if source.is_file() and
+         ".venv" not in source.parts and "__pycache__" not in source.parts and
+         not is_appledouble_basename(source)),
+        key=lambda source: source.relative_to(root).as_posix(),
+    ))
+
+
 def _remote_mcp_runtime_revision() -> str:
-    """Return a non-secret local runtime identity that survives staged uploads."""
+    """Return a non-secret identity for the complete staged runtime surface."""
     root = Path(__file__).resolve().parents[2]
-    parts = (Path(__file__), root / "mcp" / "wp-server" / "server.py")
     digest = hashlib.sha256()
-    for source in parts:
+    for source in _remote_mcp_revision_sources(root):
+        relative = source.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
         digest.update(source.read_bytes())
     return digest.hexdigest()[:24]
 
@@ -1130,7 +1633,1007 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
         raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
+    sanitized = redact_structure(payload)
+    if not isinstance(sanitized, dict):
+        raise RuntimeError("remote diagnostics redaction failed")
+    return sanitized
+
+
+REMOTE_DOCKER_ADDRESS_POOLS = (
+    # The /12 must use its canonical network boundary. Docker's built-in pools
+    # begin at 172.17/16, but the enclosing configurable pool is 172.16/12.
+    {"base": "172.16.0.0/12", "size": 24},
+    {"base": "10.201.0.0/16", "size": 24},
+    {"base": "10.202.0.0/16", "size": 24},
+)
+
+
+# This is deliberately separate from ``remote_docker_pool``.  That command
+# plans a reviewed daemon configuration transaction; admission is a read-only
+# preflight that must prove the currently configured pool and every currently
+# allocated user-defined subnet before a deploy/staging side effect begins.
+_REMOTE_NETWORK_CAPACITY_PROGRAM = r'''
+import hashlib
+import ipaddress
+import json
+from pathlib import Path
+import subprocess
+
+CONFIG = Path("/etc/docker/daemon.json")
+MAX_SUBNETS = 1000000
+MAX_NETWORKS = 10000
+
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+
+def fail(code, reason):
+    emit({"ok": False, "status": "unavailable", "code": code,
+          "reason": reason})
+    raise SystemExit(0)
+
+
+def run(argv, timeout):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def opaque(kind, value):
+    digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    return kind + "-" + digest[:20]
+
+
+def load_pools():
+    try:
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        fail("docker_address_pools_unavailable", "daemon address-pool configuration is unavailable")
+    rows = config.get("default-address-pools") if isinstance(config, dict) else None
+    if not isinstance(rows, list) or not rows:
+        fail("docker_address_pools_unavailable", "daemon address-pool configuration is unavailable")
+    result = []
+    for item in rows:
+        if not isinstance(item, dict):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        try:
+            base = ipaddress.ip_network(item.get("base"), strict=True)
+            size = item.get("size")
+        except (TypeError, ValueError):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        if (base.version != 4 or not base.is_private or isinstance(size, bool)
+                or not isinstance(size, int) or size < base.prefixlen or size > 30):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        capacity = 1 << (size - base.prefixlen)
+        if capacity < 1 or capacity > MAX_SUBNETS:
+            fail("docker_address_pools_invalid", "daemon address-pool configuration exceeds probe bounds")
+        result.append({
+            "base": base, "size": size,
+            "id": opaque("pool", str(base) + "/" + str(size)),
+            "units": set(),
+        })
+    for left_index, left in enumerate(result):
+        for right in result[left_index + 1:]:
+            if left["base"].overlaps(right["base"]):
+                fail("docker_address_pools_invalid", "daemon address pools overlap")
+    return result
+
+
+def owner_class(labels):
+    labels = labels if isinstance(labels, dict) else {}
+    project = labels.get("com.docker.compose.project")
+    working = str(labels.get("com.docker.compose.project.working_dir") or "")
+    if (isinstance(project, str) and project.startswith("sandbox-")) or \
+            "/sandbox/" in working or working.endswith("/sandbox"):
+        return "sandbox"
+    if isinstance(project, str) and project:
+        return "foreign"
+    return "unattributed"
+
+
+def units_for(subnet, pool):
+    if not subnet.subnet_of(pool["base"]):
+        return ()
+    unit_prefix = pool["size"]
+    unit_size = 1 << (32 - unit_prefix)
+    first = (int(subnet.network_address) - int(pool["base"].network_address)) // unit_size
+    count = 1 << max(unit_prefix - subnet.prefixlen, 0)
+    if first < 0 or first + count > (1 << (unit_prefix - pool["base"].prefixlen)):
+        return ()
+    return range(first, first + count)
+
+
+pools = load_pools()
+ids = run(["docker", "network", "ls", "-q"], 20)
+if ids is None or ids.returncode != 0:
+    fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
+network_ids = [value.strip() for value in (ids.stdout or "").splitlines() if value.strip()]
+if len(network_ids) > MAX_NETWORKS or len(set(network_ids)) != len(network_ids):
+    emit({"ok": True, "status": "partial", "reason": "network_inventory_ambiguous"})
+    raise SystemExit(0)
+rows = []
+if network_ids:
+    inspected = run(["docker", "network", "inspect", *network_ids], 30)
+    if inspected is None or inspected.returncode != 0:
+        fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
+    try:
+        rows = json.loads(inspected.stdout or "[]")
+    except (TypeError, ValueError):
+        fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
+    if not isinstance(rows, list):
+        fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
+    if len(rows) != len(network_ids):
+        emit({"ok": True, "status": "partial", "reason": "network_inventory_incomplete"})
+        raise SystemExit(0)
+    observed_ids = [row.get("Id") if isinstance(row, dict) else None for row in rows]
+    if (any(not isinstance(value, str) or not value for value in observed_ids)
+            or len(set(observed_ids)) != len(observed_ids)
+            or set(observed_ids) != set(network_ids)):
+        emit({"ok": True, "status": "partial", "reason": "network_inventory_ambiguous"})
+        raise SystemExit(0)
+
+allocations = {}
+ownership = {"sandbox": 0, "foreign": 0, "unattributed": 0}
+collisions = set()
+unknown_networks = 0
+for row in rows:
+    if not isinstance(row, dict):
+        unknown_networks += 1
+        continue
+    name = str(row.get("Name") or "")
+    if name in {"bridge", "host", "none"}:
+        continue
+    labels = row.get("Labels") if isinstance(row.get("Labels"), dict) else {}
+    owner = owner_class(labels)
+    ipam = row.get("IPAM") if isinstance(row.get("IPAM"), dict) else {}
+    configs = ipam.get("Config") if isinstance(ipam.get("Config"), list) else None
+    if not configs:
+        unknown_networks += 1
+        continue
+    for config in configs:
+        if not isinstance(config, dict) or not config.get("Subnet"):
+            unknown_networks += 1
+            continue
+        try:
+            subnet = ipaddress.ip_network(config.get("Subnet"), strict=False)
+        except (TypeError, ValueError):
+            unknown_networks += 1
+            continue
+        if subnet.version != 4:
+            continue
+        matched = False
+        for pool in pools:
+            units = units_for(subnet, pool)
+            if not units:
+                continue
+            matched = True
+            for unit in units:
+                key = (pool["id"], unit)
+                previous = allocations.get(key)
+                if previous is None:
+                    allocations[key] = owner
+                else:
+                    # A pool unit may be claimed by only one user-defined
+                    # network.  Even a same-owner duplicate is ambiguous: it
+                    # can be a stale/duplicated daemon observation, so never
+                    # treat it as two known allocations or free capacity.
+                    collisions.add(key)
+        if not matched:
+            # A valid subnet outside the configured default pools is not an
+            # allocation from those pools, but its presence is still retained
+            # as bounded evidence through the network inventory status.
+            continue
+
+if unknown_networks:
+    emit({"ok": True, "status": "partial", "reason": "network_ipam_unavailable",
+          "unknown_network_count": unknown_networks})
+    raise SystemExit(0)
+
+if collisions:
+    emit({"ok": True, "status": "partial", "reason": "network_allocation_conflict",
+          "collision_count": len(collisions)})
+    raise SystemExit(0)
+
+for owner in ownership:
+    ownership[owner] = sum(value == owner for value in allocations.values())
+pool_rows = []
+for pool in pools:
+    total = 1 << (pool["size"] - pool["base"].prefixlen)
+    allocated = sum(key[0] == pool["id"] for key in allocations)
+    pool_rows.append({"pool_id": pool["id"], "capacity_subnets": total,
+                      "allocated_subnets": allocated,
+                      "usable_subnets": total - allocated})
+total = sum(item["capacity_subnets"] for item in pool_rows)
+allocated = len(allocations)
+emit({
+    "ok": True, "status": "complete",
+    "pools": pool_rows,
+    "totals": {"total_subnets": total, "allocated_subnets": allocated,
+               "usable_subnets": total - allocated},
+    "ownership": {
+        "sandbox_allocated_subnets": ownership["sandbox"],
+        "foreign_allocated_subnets": ownership["foreign"],
+        "unattributed_allocated_subnets": ownership["unattributed"],
+    },
+})
+'''
+
+
+class NetworkCapacityAdmissionError(RuntimeError):
+    """A remote operation was refused before any deploy/staging side effect."""
+
+    def __init__(self, decision: dict):
+        self.decision = decision
+        code = decision.get("code") or "docker_network_capacity_unavailable"
+        # Keep the public exception bounded and machine-readable.  All values
+        # in ``decision`` are produced by the redacted policy evaluator (opaque
+        # IDs only), so callers can surface this without forwarding probe
+        # paths, names, or command lines.
+        super().__init__(json.dumps({
+            "code": code,
+            "status": decision.get("status", "blocked"),
+            "resource_class": decision.get("resource_class"),
+            "resource_kind": decision.get("resource_kind"),
+            "owner_classes": decision.get("owner_classes"),
+            "capacity": decision.get("capacity"),
+            "evidence": decision.get("evidence"),
+            "recovery": decision.get("recovery"),
+            "retryable": False,
+            "side_effects": decision.get("side_effects"),
+        }, sort_keys=True))
+
+
+def remote_network_capacity_admission(
+    remote: dict,
+    *,
+    required_subnets: int = 1,
+    remote_name: str | None = None,
+    timeout: int = 60,
+) -> dict:
+    """Probe configured Docker pools and evaluate explicit usable capacity."""
+    from sandbox.resources.network_capacity import evaluate_network_capacity
+
+    if isinstance(required_subnets, bool) or not isinstance(required_subnets, int) \
+            or required_subnets < 1:
+        raise ValueError("required_subnets must be a positive integer")
+    if (isinstance(timeout, bool) or not isinstance(timeout, int)
+            or timeout < 1 or timeout > _NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS):
+        raise ValueError(
+            "network capacity probe timeout must be an integer between 1 and "
+            f"{_NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS} seconds"
+        )
+    import base64
+
+    encoded = base64.b64encode(_REMOTE_NETWORK_CAPACITY_PROGRAM.encode()).decode()
+    command = "sudo -n python3 -c " + shlex.quote(
+        "import base64;exec(base64.b64decode(" + repr(encoded) + "))"
+    )
+    try:
+        result = ssh_run(remote, command, timeout=max(1, int(timeout)))
+    except Exception:
+        result = None
+    payload = None
+    output = getattr(result, "stdout", "") if result is not None else ""
+    candidates = []
+    if isinstance(output, str):
+        for line in output.splitlines():
+            try:
+                candidate = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(candidate, dict):
+                candidates.append(candidate)
+    if len(candidates) == 1:
+        payload = candidates[0]
+    elif len(candidates) > 1:
+        payload = {"status": "unavailable", "reason": "probe_output_ambiguous"}
+    else:
+        payload = {"status": "unavailable", "reason": "probe_output_unavailable"}
+    if getattr(result, "returncode", 1) != 0 and payload.get("status") == "complete":
+        payload = {"status": "unavailable", "reason": "probe_failed"}
+    decision = evaluate_network_capacity(
+        payload, required_subnets=required_subnets, remote_name=remote_name,
+    )
+    return decision
+
+
+# Short names make the pre-staging seam easy to inject in focused tests and
+# preserve one feature-owned implementation.
+remote_network_capacity = remote_network_capacity_admission
+
+
+def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False,
+                                expected_running: int | None = None,
+                                expected_removed: int = 0,
+                                recovery_since: str | None = None) -> str:
+    """Build the fixed, non-interactive host-pool transaction."""
+    desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
+    return f'''import datetime, fcntl, hashlib, ipaddress, json, os, pathlib, shutil, subprocess, sys, tempfile, time
+CONFIG = pathlib.Path("/etc/docker/daemon.json")
+LOCK = pathlib.Path("/run/lock/sandbox-docker-pool.lock")
+DESIRED = json.loads({desired!r})
+APPLY = {confirm!r}
+RECOVER_INTERRUPTED = {recover_interrupted!r}
+EXPECTED_RUNNING = {expected_running!r}
+EXPECTED_REMOVED = {expected_removed!r}
+RECOVERY_SINCE = {recovery_since!r}
+
+def run(argv, timeout=60, check=True):
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+    if check and result.returncode != 0:
+        raise RuntimeError(argv[0] + " failed")
+    return result
+
+def running_ids():
+    return set(filter(None, run(["docker", "ps", "-q"], timeout=30).stdout.splitlines()))
+
+def recover(expected, budget_seconds=180):
+    deadline = time.monotonic() + budget_seconds
+    missing = sorted(expected - running_ids())
+    for container_id in missing:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            break
+        run(["docker", "start", container_id], timeout=min(10, max(1, int(remaining))), check=False)
+    settle_deadline = min(deadline, time.monotonic() + 30)
+    while time.monotonic() < settle_deadline:
+        remaining = expected - running_ids()
+        if not remaining:
+            return 0
+        time.sleep(2)
+    return len(expected - running_ids())
+
+def wait_docker(timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run(["docker", "info"], timeout=15, check=False).returncode == 0:
+            return True
+        time.sleep(2)
+    return False
+
+def sync_parent(path):
+    descriptor = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def write_candidate(data, mode, uid, gid):
+    descriptor, temporary = tempfile.mkstemp(prefix="daemon.json.", dir=str(CONFIG.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.chown(temporary, uid, gid)
+        return temporary
+    except Exception:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+def pool_networks():
+    networks = []
+    for item in DESIRED:
+        network = ipaddress.ip_network(item["base"], strict=True)
+        size = item["size"]
+        if network.version != 4 or not network.is_private or not isinstance(size, int):
+            raise ValueError("address pool is invalid")
+        if size < network.prefixlen or size > 30:
+            raise ValueError("address pool size is invalid")
+        networks.append(network)
+    if any(left.overlaps(right) for index, left in enumerate(networks)
+           for right in networks[index + 1:]):
+        raise ValueError("address pools overlap")
+    return networks
+
+def unsafe_route_count(networks):
+    docker_interfaces = {{"docker0"}}
+    links = run(["docker", "network", "ls", "-q"], timeout=30).stdout.splitlines()
+    if links:
+        details = run(["docker", "network", "inspect", *links], timeout=60)
+        for row in json.loads(details.stdout or "[]"):
+            options = row.get("Options") if isinstance(row, dict) else None
+            bridge = options.get("com.docker.network.bridge.name") if isinstance(options, dict) else None
+            if isinstance(bridge, str) and bridge:
+                docker_interfaces.add(bridge)
+            network_id = row.get("Id") if isinstance(row, dict) else None
+            if isinstance(network_id, str) and len(network_id) >= 12:
+                docker_interfaces.add("br-" + network_id[:12])
+    result = run(["ip", "-j", "route", "show", "table", "all"], timeout=30)
+    routes = json.loads(result.stdout or "[]")
+    unsafe = 0
+    for row in routes:
+        destination = row.get("dst")
+        device = str(row.get("dev") or "")
+        if not destination or destination == "default":
+            continue
+        try:
+            route = ipaddress.ip_network(destination, strict=False)
+        except ValueError:
+            continue
+        if route.version != 4 or not any(route.overlaps(pool) for pool in networks):
+            continue
+        if device in docker_interfaces:
+            continue
+        unsafe += 1
+    return unsafe
+
+LOCK.parent.mkdir(parents=True, exist_ok=True)
+lock_stream = LOCK.open("a+")
+try:
+    fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print(json.dumps({{"ok": False, "code": "docker_pool_busy", "status": "failed",
+                      "message": "Docker pool transaction is busy"}}))
+    raise SystemExit(2)
+
+if RECOVER_INTERRUPTED:
+    if isinstance(EXPECTED_RUNNING, bool) or not isinstance(EXPECTED_RUNNING, int) or not (1 <= EXPECTED_RUNNING <= 500):
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Expected running count is required"}}))
+        raise SystemExit(2)
+    if isinstance(EXPECTED_REMOVED, bool) or not isinstance(EXPECTED_REMOVED, int) or not (0 <= EXPECTED_REMOVED < EXPECTED_RUNNING):
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Expected removed count is invalid"}}))
+        raise SystemExit(2)
+    backups = sorted(CONFIG.parent.glob(CONFIG.name + ".bak-*"),
+                     key=lambda path: path.stat().st_mtime, reverse=True)
+    asserted_since = None
+    if isinstance(RECOVERY_SINCE, str):
+        try:
+            asserted_since = datetime.datetime.strptime(
+                RECOVERY_SINCE, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            asserted_since = None
+    if backups and time.time() - backups[0].stat().st_mtime <= 3600:
+        evidence_start = backups[0].stat().st_mtime
+    else:
+        evidence_start = asserted_since
+    if evidence_start is None or not (0 <= time.time() - evidence_start <= 3600):
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Recent recovery evidence is unavailable"}}))
+        raise SystemExit(2)
+    since = max(0, int(evidence_start) - 5)
+    # Container State timestamps persist across daemon restarts. The bounded
+    # twenty-minute interval covers restart plus the interrupted recovery.
+    until = min(int(time.time()) + 1, since + 1200)
+    try:
+        configured = json.loads(CONFIG.read_text()) if CONFIG.exists() else {{}}
+    except Exception:
+        configured = None
+    if not isinstance(configured, dict):
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Interrupted rollback state is not proven"}}))
+        raise SystemExit(2)
+    all_ids = list(filter(None, run(["docker", "ps", "-aq"], timeout=30).stdout.splitlines()))
+    rows = json.loads(run(["docker", "inspect", *all_ids], timeout=90).stdout) if all_ids else []
+    evidence_ids = set()
+    for row in rows:
+        state = row.get("State") if isinstance(row, dict) else None
+        container_id = row.get("Id") if isinstance(row, dict) else None
+        if not isinstance(state, dict) or not isinstance(container_id, str):
+            continue
+        timestamps = []
+        for key in ("StartedAt", "FinishedAt"):
+            value = state.get(key)
+            if not isinstance(value, str) or value.startswith("0001-"):
+                continue
+            try:
+                timestamps.append(datetime.datetime.fromisoformat(
+                    value.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                continue
+        if any(since <= value <= until for value in timestamps):
+            evidence_ids.add(container_id)
+    if len(evidence_ids) + EXPECTED_REMOVED != EXPECTED_RUNNING:
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_mismatch",
+                          "status": "failed", "message": "Restart event evidence does not match baseline",
+                          "recovery_expected_count": EXPECTED_RUNNING,
+                          "recovery_removed_count": EXPECTED_REMOVED,
+                          "recovery_evidence_count": len(evidence_ids)}}))
+        raise SystemExit(2)
+    candidates = evidence_ids - running_ids()
+    recovery_base = {{
+        "ok": True, "status": "recovery_planned" if not APPLY else "recovery_complete",
+        "requires_confirm": not APPLY, "recovery_candidate_count": len(candidates),
+        "recovery_window_seconds": until - since,
+        "recovery_expected_count": EXPECTED_RUNNING,
+        "recovery_removed_count": EXPECTED_REMOVED,
+        "recovery_evidence_count": len(evidence_ids),
+    }}
+    if not APPLY:
+        print(json.dumps(recovery_base, sort_keys=True))
+        raise SystemExit(0)
+    missing = recover(candidates)
+    recovery_base.update({{"requires_confirm": False,
+                           "containers_restored": len(candidates) - missing,
+                           "containers_missing": missing,
+                           "ok": missing == 0,
+                           "status": "recovery_complete" if missing == 0 else "failed"}})
+    if missing:
+        recovery_base.update({{"code": "docker_pool_recovery_failed",
+                              "message": "Interrupted transaction recovery was incomplete"}})
+    print(json.dumps(recovery_base, sort_keys=True))
+    raise SystemExit(0 if missing == 0 else 3)
+
+try:
+    networks = pool_networks()
+    route_overlap_count = unsafe_route_count(networks)
+except Exception:
+    print(json.dumps({{"ok": False, "code": "docker_pool_preflight_failed",
+                      "status": "failed", "message": "Docker pool preflight failed"}}))
+    raise SystemExit(2)
+
+before = running_ids()
+network_count = len(list(filter(None, run(
+    ["docker", "network", "ls", "--filter", "type=custom", "-q"], timeout=30
+).stdout.splitlines())))
+restart_policies = []
+if before:
+    inspected = run([
+        "docker", "inspect", "--format", "{{{{.HostConfig.RestartPolicy.Name}}}}", *sorted(before)
+    ], timeout=60).stdout.splitlines()
+    restart_policies = [value.strip() or "no" for value in inspected]
+had_config = CONFIG.exists()
+initial_bytes = CONFIG.read_bytes() if had_config else b""
+initial_digest = hashlib.sha256(initial_bytes).hexdigest()
+initial_stat = CONFIG.stat() if had_config else None
+try:
+    current = json.loads(initial_bytes.decode()) if had_config else {{}}
+    if not isinstance(current, dict):
+        raise ValueError("daemon config must be an object")
+except Exception:
+    print(json.dumps({{"ok": False, "code": "docker_pool_config_invalid",
+                      "status": "failed",
+                      "message": "Docker daemon configuration is invalid"}}))
+    raise SystemExit(2)
+current_pools = current.get("default-address-pools")
+current_pools_json = json.dumps(current_pools, sort_keys=True, separators=(",", ":"))
+base = {{
+    "ok": True, "status": "planned" if not APPLY else "unchanged",
+    "current_pools_configured": "default-address-pools" in current,
+    "current_pool_count": len(current_pools) if isinstance(current_pools, list) else 0,
+    "current_pools_digest": "sha256:" + hashlib.sha256(current_pools_json.encode()).hexdigest(),
+    "desired_pools": DESIRED,
+    "network_count": network_count, "running_container_count": len(before),
+    "restart_policy_none_count": sum(value == "no" for value in restart_policies),
+    "subnet_capacity": 4608, "requires_confirm": not APPLY,
+    "restart_required": current_pools != DESIRED,
+    "route_overlap_count": route_overlap_count,
+    "apply_safe": route_overlap_count == 0,
+}}
+if not APPLY or current_pools == DESIRED:
+    print(json.dumps(base, sort_keys=True))
+    raise SystemExit(0)
+if route_overlap_count:
+    print(json.dumps({{"ok": False, "code": "docker_pool_route_overlap",
+                      "status": "failed", "message": "Docker pool overlaps host routes",
+                      "route_overlap_count": route_overlap_count}}))
+    raise SystemExit(2)
+
+stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+backup = CONFIG.with_name(CONFIG.name + ".bak-" + stamp)
+mode = (initial_stat.st_mode & 0o777) if initial_stat else 0o600
+uid = initial_stat.st_uid if initial_stat else 0
+gid = initial_stat.st_gid if initial_stat else 0
+restart_attempted = False
+config_replaced = False
+failure_stage = "backup_config"
+try:
+    if had_config:
+        backup_tmp = write_candidate(initial_bytes, mode, uid, gid)
+        os.replace(backup_tmp, backup)
+        sync_parent(backup)
+    failure_stage = "write_config"
+    updated = dict(current)
+    updated["default-address-pools"] = DESIRED
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(updated, indent=2, sort_keys=True) + "\\n").encode()
+    temporary = write_candidate(encoded, mode, uid, gid)
+    try:
+        failure_stage = "validate_config"
+        run(["dockerd", "--validate", "--config-file", temporary], timeout=30)
+        current_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
+        if hashlib.sha256(current_bytes).hexdigest() != initial_digest:
+            raise RuntimeError("daemon configuration changed concurrently")
+        failure_stage = "activate_config"
+        os.replace(temporary, CONFIG)
+        sync_parent(CONFIG)
+        config_replaced = True
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    restart_attempted = True
+    failure_stage = "restart_docker"
+    run(["systemctl", "restart", "docker"], timeout=120)
+    failure_stage = "wait_for_docker"
+    if not wait_docker():
+        raise RuntimeError("docker did not become ready")
+    failure_stage = "recover_containers"
+    missing_after_recovery = recover(before)
+    if missing_after_recovery:
+        raise RuntimeError("previously running containers did not recover")
+except Exception:
+    rollback_missing = len(before)
+    rollback_succeeded = not config_replaced
+    rollback_error = False
+    try:
+        if config_replaced:
+            if had_config:
+                restored = write_candidate(initial_bytes, mode, uid, gid)
+                try:
+                    os.replace(restored, CONFIG)
+                    sync_parent(CONFIG)
+                finally:
+                    if os.path.exists(restored):
+                        os.unlink(restored)
+            else:
+                CONFIG.unlink(missing_ok=True)
+                sync_parent(CONFIG)
+        if restart_attempted and config_replaced:
+            restarted = run(["systemctl", "restart", "docker"], timeout=120, check=False)
+            if restarted.returncode == 0 and wait_docker():
+                try:
+                    rollback_missing = recover(before)
+                except Exception:
+                    rollback_error = True
+            else:
+                rollback_error = True
+        elif not restart_attempted:
+            try:
+                rollback_missing = len(before - running_ids())
+            except Exception:
+                rollback_error = True
+        restored_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
+        rollback_succeeded = (not rollback_error and rollback_missing == 0 and
+                              hashlib.sha256(restored_bytes).hexdigest() == initial_digest)
+    except Exception:
+        rollback_error = True
+    finally:
+        print(json.dumps({{"ok": False, "code": "docker_pool_apply_failed",
+                          "status": "failed",
+                          "message": "Docker pool update failed during " + failure_stage,
+                          "rollback_attempted": True,
+                          "rollback_succeeded": rollback_succeeded,
+                          "containers_missing": rollback_missing}}))
+    raise SystemExit(3)
+
+digest = hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+print(json.dumps({{**base, "ok": missing_after_recovery == 0,
+                  "status": "complete" if missing_after_recovery == 0 else "degraded",
+                  "requires_confirm": False, "restart_performed": True,
+                  "containers_restored": len(before) - missing_after_recovery,
+                  "containers_missing": missing_after_recovery,
+                  "backup_created": had_config,
+                  "config_digest": "sha256:" + digest}}, sort_keys=True))
+raise SystemExit(0 if missing_after_recovery == 0 else 4)
+'''
+
+
+def remote_docker_pool(remote: dict, *, confirm: bool = False,
+                       recover_interrupted: bool = False,
+                       expected_running: int | None = None,
+                       expected_removed: int = 0,
+                       recovery_since: str | None = None,
+                       timeout: int = 900) -> dict:
+    """Plan or apply the fixed Docker address-pool transaction on one remote."""
+    import base64
+    program = base64.b64encode(
+        _remote_docker_pool_program(
+            confirm=confirm, recover_interrupted=recover_interrupted,
+            expected_running=expected_running,
+            expected_removed=expected_removed,
+            recovery_since=recovery_since).encode()).decode()
+    command = (
+        "sudo -n python3 -c " + shlex.quote(
+            "import base64;exec(base64.b64decode(" + repr(program) + "))")
+    )
+    result = ssh_run(remote, command, timeout=timeout)
+    output = (result.stdout or "").strip()
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("remote Docker pool operation returned invalid output") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+        raise RuntimeError("remote Docker pool operation returned an invalid envelope")
+    allowed = {
+        "ok", "status", "code", "message", "current_pools_configured",
+        "current_pool_count", "current_pools_digest", "desired_pools",
+        "network_count", "running_container_count", "restart_policy_none_count",
+        "subnet_capacity", "requires_confirm", "restart_required",
+        "restart_performed", "containers_restored", "containers_missing",
+        "backup_created", "config_digest", "rollback_attempted",
+        "rollback_succeeded", "route_overlap_count", "apply_safe",
+        "recovery_candidate_count", "recovery_window_seconds",
+        "recovery_expected_count", "recovery_evidence_count",
+        "recovery_removed_count",
+    }
+    if set(payload) - allowed:
+        raise RuntimeError("remote Docker pool operation returned unexpected fields")
+    status = payload.get("status")
+    if status not in {"planned", "unchanged", "complete", "degraded", "failed",
+                      "recovery_planned", "recovery_complete", "recovery_failed"}:
+        raise RuntimeError("remote Docker pool operation returned an invalid status")
+    code = payload.get("code")
+    known_errors = {
+        "docker_pool_config_invalid": "Docker daemon configuration is invalid",
+        "docker_pool_apply_failed": "Docker pool update failed",
+        "docker_pool_busy": "Docker pool transaction is busy",
+        "docker_pool_preflight_failed": "Docker pool preflight failed",
+        "docker_pool_route_overlap": "Docker pool overlaps host routes",
+        "docker_pool_recovery_evidence_missing": "Recent recovery evidence is unavailable",
+        "docker_pool_recovery_evidence_mismatch": "Restart event evidence does not match baseline",
+        "docker_pool_recovery_failed": "Interrupted transaction recovery was incomplete",
+    }
+    if payload["ok"] is False:
+        if code not in known_errors:
+            raise RuntimeError("remote Docker pool operation returned an unknown error")
+        payload["message"] = known_errors[code]
+    elif code is not None or payload.get("message") is not None:
+        raise RuntimeError("remote Docker pool operation returned an invalid success envelope")
+    required_by_status = {
+        "planned": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe",
+        },
+        "unchanged": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe",
+        },
+        "complete": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe", "restart_performed",
+            "containers_restored", "containers_missing", "backup_created",
+            "config_digest",
+        },
+        "recovery_planned": {
+            "ok", "status", "requires_confirm", "recovery_candidate_count",
+            "recovery_window_seconds", "recovery_expected_count",
+            "recovery_evidence_count", "recovery_removed_count",
+        },
+        "recovery_complete": {
+            "ok", "status", "requires_confirm", "recovery_candidate_count",
+            "recovery_window_seconds", "recovery_expected_count",
+            "recovery_evidence_count", "recovery_removed_count",
+            "containers_restored", "containers_missing",
+        },
+    }
+    if payload["ok"]:
+        if status not in required_by_status or not required_by_status[status].issubset(payload):
+            raise RuntimeError("remote Docker pool operation returned incomplete evidence")
+        if result.returncode != 0:
+            raise RuntimeError("remote Docker pool operation failed without a safe error")
+        if status == "planned" and payload.get("requires_confirm") is not True:
+            raise RuntimeError("remote Docker pool plan omitted confirmation gate")
+        if status == "recovery_planned" and payload.get("requires_confirm") is not True:
+            raise RuntimeError("remote Docker recovery plan omitted confirmation gate")
+        if status == "unchanged" and payload.get("restart_required") is not False:
+            raise RuntimeError("remote Docker pool unchanged receipt is inconsistent")
+        if status == "complete" and (
+                payload.get("restart_performed") is not True or
+                payload.get("containers_missing") != 0):
+            raise RuntimeError("remote Docker pool completion receipt is inconsistent")
+        if status == "recovery_complete" and payload.get("containers_missing") != 0:
+            raise RuntimeError("remote Docker pool recovery receipt is inconsistent")
+        if status == "recovery_complete" and payload.get("requires_confirm") is not False:
+            raise RuntimeError("remote Docker pool recovery receipt is inconsistent")
+    else:
+        expected_exit = {
+            "docker_pool_config_invalid": 2,
+            "docker_pool_busy": 2,
+            "docker_pool_preflight_failed": 2,
+            "docker_pool_route_overlap": 2,
+            "docker_pool_recovery_evidence_missing": 2,
+            "docker_pool_recovery_evidence_mismatch": 2,
+            "docker_pool_recovery_failed": 3,
+            "docker_pool_apply_failed": 3,
+        }[code]
+        if result.returncode != expected_exit or status != "failed":
+            raise RuntimeError("remote Docker pool error receipt is inconsistent")
+        failure_required = {"ok", "status", "code", "message"}
+        if code == "docker_pool_route_overlap":
+            failure_required.add("route_overlap_count")
+        if code == "docker_pool_recovery_evidence_mismatch":
+            failure_required.update({"recovery_expected_count", "recovery_evidence_count"})
+        if code == "docker_pool_apply_failed":
+            failure_required.update({"rollback_attempted", "rollback_succeeded",
+                                     "containers_missing"})
+        if code == "docker_pool_recovery_failed":
+            failure_required.update({"recovery_candidate_count", "recovery_window_seconds",
+                                     "containers_restored", "containers_missing"})
+        if not failure_required.issubset(payload):
+            raise RuntimeError("remote Docker pool error omitted required evidence")
+    if "desired_pools" in payload and payload["desired_pools"] != list(REMOTE_DOCKER_ADDRESS_POOLS):
+        raise RuntimeError("remote Docker pool operation returned unexpected desired pools")
+    for field in ("network_count", "running_container_count", "restart_policy_none_count",
+                  "subnet_capacity", "current_pool_count", "containers_restored",
+                  "containers_missing", "route_overlap_count",
+                  "recovery_candidate_count", "recovery_window_seconds",
+                  "recovery_expected_count", "recovery_evidence_count",
+                  "recovery_removed_count"):
+        value = payload.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise RuntimeError("remote Docker pool operation returned invalid counts")
+    if payload.get("recovery_window_seconds", 0) > 1200:
+        raise RuntimeError("remote Docker pool recovery window is unbounded")
+    if payload["ok"] and payload.get("recovery_evidence_count") is not None and (
+            payload.get("recovery_evidence_count") + payload.get("recovery_removed_count", 0) !=
+            payload.get("recovery_expected_count")):
+        raise RuntimeError("remote Docker pool recovery evidence is inconsistent")
+    if payload.get("containers_restored") is not None and payload.get("recovery_candidate_count") is not None and (
+            payload["containers_restored"] + payload.get("containers_missing", 0) !=
+            payload["recovery_candidate_count"]):
+        raise RuntimeError("remote Docker pool recovery counts are inconsistent")
+    for field in ("current_pools_configured", "requires_confirm", "restart_required",
+                  "restart_performed", "backup_created", "rollback_attempted",
+                  "rollback_succeeded", "apply_safe"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, bool):
+            raise RuntimeError("remote Docker pool operation returned invalid flags")
+    for field in ("current_pools_digest", "config_digest"):
+        value = payload.get(field)
+        if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise RuntimeError("remote Docker pool operation returned an invalid digest")
     return payload
+
+
+def remote_domain_inventory(remote: dict, *, timeout: int = 60) -> dict:
+    """Return a bounded, secret-free domain inventory for one registered host."""
+    import base64
+    runtime_root = str(PurePosixPath(remote_sb_path(remote)).parents[1])
+    program = f'''import json, pathlib, re, urllib.parse
+ROOT = pathlib.Path({runtime_root!r})
+rows = {{}}
+def add(domain, owner, source, status=None):
+    if not isinstance(domain, str): return
+    domain = domain.strip().lower().rstrip(".")
+    if domain.startswith("*."): domain = domain[2:]
+    if domain == "localhost" or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain): return
+    try:
+        import ipaddress
+        ipaddress.ip_address(domain)
+        return
+    except ValueError:
+        pass
+    item = rows.setdefault(domain, {{"domain": domain, "owners": set(), "sources": set(), "statuses": set()}})
+    if isinstance(owner, str) and owner: item["owners"].add(owner[:120])
+    item["sources"].add(source)
+    if isinstance(status, str) and status: item["statuses"].add(status[:40])
+registry = ROOT / "runtime" / "registry.json"
+try:
+    data = json.loads(registry.read_text())
+except Exception:
+    data = {{}}
+instances = data.get("instances") if isinstance(data, dict) else {{}}
+if isinstance(instances, dict):
+    for key, record in instances.items():
+        if not isinstance(record, dict): continue
+        owner = record.get("instance") or key
+        add(record.get("domain"), owner, "instance_registry", record.get("status"))
+        url = record.get("url")
+        if isinstance(url, str):
+            try: add(urllib.parse.urlsplit(url).hostname, owner, "instance_registry", record.get("status"))
+            except ValueError: pass
+caddy = pathlib.Path("/etc/caddy/conf.d")
+if caddy.is_dir():
+    for path in caddy.glob("sandbox-*.caddy"):
+        owner = path.stem[:120]
+        try: text = path.read_text()
+        except Exception: continue
+        depth = 0
+        for line in text.splitlines():
+            if depth == 0:
+                match = re.match(r"^\\s*(?:https?://)?(\\*\\.)?([a-zA-Z0-9.-]+)(?::\\d+)?(?:,|\\s*\\{{)", line)
+                if match: add(match.group(2), owner, "caddy_route", "configured")
+            depth += line.count("{{") - line.count("}}")
+            depth = max(depth, 0)
+output = []
+for domain in sorted(rows):
+    item = rows[domain]
+    output.append({{"domain": domain, "owners": sorted(item["owners"]),
+                   "sources": sorted(item["sources"]), "statuses": sorted(item["statuses"])}})
+print(json.dumps({{"ok": True, "domains": output, "count": len(output)}}, sort_keys=True))
+'''
+    encoded = base64.b64encode(program.encode()).decode()
+    command = "sudo -n python3 -c " + shlex.quote(
+        "import base64;exec(base64.b64decode(" + repr(encoded) + "))")
+    result = ssh_run(remote, command, timeout=timeout)
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("remote domain inventory returned invalid output") from exc
+    if result.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError("remote domain inventory failed")
+    if set(payload) != {"ok", "domains", "count"} or not isinstance(payload["domains"], list):
+        raise RuntimeError("remote domain inventory returned an invalid envelope")
+    if payload["count"] != len(payload["domains"]) or payload["count"] > 1000:
+        raise RuntimeError("remote domain inventory returned an invalid count")
+    for item in payload["domains"]:
+        if not isinstance(item, dict) or set(item) != {"domain", "owners", "sources", "statuses"}:
+            raise RuntimeError("remote domain inventory returned an invalid record")
+        if not isinstance(item["domain"], str) or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", item["domain"]):
+            raise RuntimeError("remote domain inventory returned an invalid domain")
+        if not all(isinstance(item[field], list) and all(isinstance(value, str) for value in item[field])
+                   for field in ("owners", "sources", "statuses")):
+            raise RuntimeError("remote domain inventory returned invalid metadata")
+    return payload
+
+
+def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -> dict:
+    """Perform the supported authenticated, secret-safe remote probe.
+
+    Only the recorded control transport is used.  The bearer token remains in
+    the in-memory request header and is never included in the returned
+    envelope, exception text, or a subprocess argument.  This helper is
+    intentionally read-only and bounded so a CLI/MCP adapter can surface the
+    same evidence without opening an SSH shell.
+    """
+    if not isinstance(remote, dict):
+        raise ValueError("remote verification target is invalid")
+    base = remote.get("control_url")
+    token = remote.get("bearer_token")
+    if not isinstance(base, str) or not base.strip():
+        raise RuntimeError("auth_verification_unavailable: control endpoint is unavailable")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("auth_verification_unavailable: stored authentication is unavailable")
+    parsed = urlsplit(base.strip())
+    if (parsed.scheme not in {"https", "http"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise RuntimeError("auth_verification_unavailable: control endpoint is invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("auth_verification_unavailable: control endpoint is invalid") from exc
+    endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/mcp", "", ""))
+    request = urllib.request.Request(
+        endpoint,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"},
+    )
+    started = time.monotonic()
+    status = None
+    authenticated = False
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(response.status)
+            authenticated = status in {200, 204, 400, 405, 406}
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        authenticated = status in {200, 204, 400, 405, 406}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RuntimeError("remote_auth_failed: authenticated control probe was unavailable")
+    elapsed = min(max(time.monotonic() - started, 0.0), float(timeout))
+    service = remote.get("mcp_service") if isinstance(remote.get("mcp_service"), dict) else {}
+    revision = service.get("runtime_revision") if isinstance(service.get("runtime_revision"), str) else None
+    safe_endpoint = {"scheme": parsed.scheme, "host": parsed.hostname}
+    if port is not None:
+        safe_endpoint["port"] = port
+    return {
+        "ok": authenticated,
+        "remote": name,
+        "authenticated": authenticated,
+        "endpoint": safe_endpoint,
+        "revision": revision,
+        "status": status,
+        "elapsed_seconds": elapsed,
+        "error": None if authenticated else "remote_auth_failed",
+    }
 
 
 def remote_mcp_service_status(remote: dict) -> dict:
@@ -1150,6 +2653,32 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"grep -Fq -- {shlex.quote('--bind ' + bind + ' --port ' + str(port))} "
         f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo ownership=proven; else echo ownership=ambiguous; fi; "
         if marker else "echo marker=0; "
+    )
+    # Read only the selected unit's declared runtime revision. The value is
+    # validated in the remote probe before it is printed, so malformed or
+    # unexpectedly duplicated declarations can never flow into the status
+    # envelope (or expose arbitrary unit contents).
+    unit_path = f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}"
+    revision_program = (
+        "import re,sys\n"
+        "from pathlib import Path\n"
+        "try:\n"
+        " lines=Path(sys.argv[1]).read_text().splitlines()\n"
+        "except (OSError,UnicodeError):\n"
+        " print('remote_revision=unavailable')\n"
+        " raise SystemExit\n"
+        "prefix='Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION='\n"
+        "matches=[line[len(prefix):] for line in lines if line.startswith(prefix)]\n"
+        "if len(matches)!=1:\n"
+        " print('remote_revision=' + ('unavailable' if not matches else 'unknown'))\n"
+        " raise SystemExit\n"
+        "value=matches[0]\n"
+        "print('remote_revision=' + value if re.fullmatch(r'[0-9a-f]{24}', value) else 'remote_revision=unknown')"
+    )
+    revision_probe = (
+        f"if test -r \"{unit_path}\" && command -v python3 >/dev/null 2>&1; then "
+        f"python3 -c {shlex.quote(revision_program)} \"{unit_path}\"; "
+        "else echo remote_revision=unavailable; fi; "
     )
     listener_probe = (
         f"if command -v ss >/dev/null 2>&1; then listeners=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk '{{print $4}}'); "
@@ -1194,14 +2723,15 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"pid=$(systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true); printf 'pid=%s\\n' \"$pid\"; "
         "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        + marker_probe + pid_probe + listener_probe + auth_probe + legacy_probe
+        + marker_probe + revision_probe + pid_probe + listener_probe + auth_probe + legacy_probe
     )
     res = ssh_run(remote, command, timeout=20)
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "pid_ownership", "listener", "auth", "legacy_pidfile"}:
-            values[key] = value.strip().lower()
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "pid_ownership", "listener", "auth", "legacy_pidfile"}:
+            normalized = value.strip()
+            values[key] = normalized if key == "remote_revision" else normalized.lower()
     installed = values.get("enabled") not in {"", "not-found", "unknown"}
     active = values.get("active") == "active"
     enabled = values.get("enabled") == "enabled"
@@ -1209,6 +2739,20 @@ def remote_mcp_service_status(remote: dict) -> dict:
     unit_owned = expected and installed and values.get("ownership") == "proven"
     pid_owned = values.get("pid_ownership", "unknown")
     ownership = "proven" if unit_owned and (not active or pid_owned == "proven") else "missing" if not installed else "ambiguous"
+    local_revision = _remote_mcp_runtime_revision()
+    local_revision_valid = _REMOTE_MCP_REVISION_RE.fullmatch(local_revision) is not None
+    observed_revision = values.get("remote_revision")
+    observed_revision_valid = (
+        isinstance(observed_revision, str)
+        and _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is not None
+    )
+    installed_revision = observed_revision if observed_revision_valid else None
+    if observed_revision_valid and local_revision_valid:
+        revision_state = "match" if observed_revision == local_revision else "mismatch"
+    elif (observed_revision is not None and observed_revision != "unavailable") or not local_revision_valid:
+        revision_state = "unknown"
+    else:
+        revision_state = "unavailable"
     return {
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
@@ -1220,6 +2764,9 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "listener_state": values.get("listener", "unknown"),
         "auth_state": values.get("auth", "unknown"),
         "legacy_pidfile": values.get("legacy_pidfile", "unknown"),
+        "local_runtime_revision": local_revision if local_revision_valid else None,
+        "installed_runtime_revision": installed_revision,
+        "runtime_revision_state": revision_state,
         "bind": record.get("bind"), "port": record.get("port"),
     }
 
@@ -1330,7 +2877,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if res.returncode != 0:
         if res.returncode in {42, 43}:
             raise RuntimeError("remote_service_ownership_unknown")
-        detail = redact_ssh_connection((res.stderr or res.stdout or "").strip()[:500], remote)
+        detail = _safe_remote_diagnostic(res, remote, limit=500)
         if detail:
             raise RuntimeError(f"could not install the remote MCP service: {detail}")
         raise RuntimeError("could not install the remote MCP service")
@@ -1345,7 +2892,7 @@ def resolve_tailscale_ip(remote: dict) -> str:
     if res.returncode != 0 or not ip:
         raise RuntimeError(
             f"could not resolve a Tailscale IP on the remote -- is Tailscale "
-            f"installed and joined? {(res.stderr or res.stdout or '').strip()[:500]}"
+            f"installed and joined? {_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return ip
 
@@ -1361,7 +2908,7 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure HTTPS control proxy: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 

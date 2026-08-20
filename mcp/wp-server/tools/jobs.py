@@ -6,13 +6,14 @@ throughout the implementation sequence.
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import json
 import time
 from pathlib import Path
 
 from dependencies import ToolDependencies
-from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, TargetRequest
+from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 
 
 _job_service = None
@@ -35,7 +36,8 @@ def register(server, dependencies: ToolDependencies) -> None:
     _workspace_service = dependencies.require("workspace_service")
     for tool in (job_start, job_matrix, job_status, job_list, job_output, job_follow, job_metrics, job_reconcile, job_retention, job_cancel,
                  job_artifacts, job_artifact_get, job_retry, job_cleanup,
-                 workspace_create, workspace_list, workspace_status, workspace_reset, workspace_destroy):
+                 workspace_create, workspace_list, workspace_status, workspace_reset, workspace_destroy,
+                 workspace_migration_plan, workspace_migration_apply):
         server.tool()(tool)
 
 
@@ -59,8 +61,8 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
         return {"ok": False, "code": getattr(exc, "code", "invalid_target"), "error": str(exc)}
     try:
         submission = JobSubmission(kind, target.project_root,
-            hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind, target.workspace_label,
-            tuple(command), timeout_seconds, SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
+            _resolved_project_identity(target), target.kind, target.workspace_label,
+            tuple(command), timeout_seconds, _source_identity(target.project_root),
             remote_name=target.remote_name, request_id=request_id, output_profile=output_profile,
             output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
                                        .get(output_profile)))
@@ -71,8 +73,8 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).submit(submission)
         return _job_service.submit(submission)
-    except Exception as exc:
-        return {"ok": False, "code": "supervisor_launch_failed", "error": str(exc)}
+    except Exception:
+        return {"ok": False, "code": "supervisor_launch_failed", "error": "job submission failed"}
 
 
 def job_start(command: list[str], project_dir: str, *, local: bool = False,
@@ -101,9 +103,9 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
     try:
         target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
             workspace=workspaces[0], required_capability="job.exec" if remote else None))
-        identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+        identity = _resolved_project_identity(target)
         submissions = [JobSubmission("test", target.project_root, identity, target.kind, workspace,
-            tuple(command), timeout_seconds, SourceIdentity("sha256:" + identity),
+            tuple(command), timeout_seconds, _source_identity(target.project_root),
             remote_name=target.remote_name, workspace_mode="isolated", output_profile=output_profile)
             for workspace in workspaces]
         if target.kind == "remote":
@@ -114,7 +116,8 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                 remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
         return _job_service.submit_matrix(submissions)
     except Exception as exc:
-        return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"), "error": str(exc)}
+        return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"),
+                "error": "job matrix submission failed"}
 
 
 def job_status(job_id: str, *, remote: str | None = None) -> dict:
@@ -126,11 +129,60 @@ def job_status(job_id: str, *, remote: str | None = None) -> dict:
         return {"ok": False, "code": "job_not_found", "error": str(exc)}
 
 
-def job_list(limit: int = 50, *, remote: str | None = None) -> dict:
-    """List durable jobs newest first with a bounded result page."""
+def job_list(project_dir: str | None = None, *, limit: int = 50,
+             remote: str | None = None, workspace: str | None = None,
+             lifecycle: str | None = None, kind: str | None = None,
+             cursor: str | None = None) -> dict:
+    """List a bounded, filterable durable-job page newest first."""
     try:
-        result = _remote_transport().list(remote, limit=limit) if remote else {"jobs": _job_service.list({"limit": limit})}
-        return {"ok": True, **result}
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        project_identity = None
+        if project_dir is not None:
+            target = _target_service.resolve(TargetRequest(
+                project_dir=project_dir, local=not bool(remote), remote=remote,
+                workspace=workspace,
+            ))
+            project_identity = _resolved_project_identity(target)
+        cursor_job_id = None
+        if cursor is not None:
+            try:
+                padding = "=" * (-len(cursor) % 4)
+                decoded = json.loads(base64.urlsafe_b64decode(cursor + padding))
+                cursor_job_id = decoded["job_id"]
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError("cursor is invalid") from exc
+        query = {"limit": min(200, limit + 1)}
+        if project_identity:
+            query["project_identity"] = project_identity
+        if workspace:
+            query["workspace_label"] = workspace
+        if lifecycle:
+            query["lifecycle"] = lifecycle
+        category = kind
+        if category:
+            query["kind"] = category
+        if cursor_job_id:
+            query["cursor_job_id"] = cursor_job_id
+        result = (_remote_transport().list(
+            remote, limit=min(200, limit + 1), project_identity=project_identity,
+            workspace=workspace, lifecycle=lifecycle, kind=category,
+            cursor_job_id=cursor_job_id,
+        ) if remote else {"jobs": _job_service.list(query)})
+        jobs = result.get("jobs") if isinstance(result, dict) else None
+        if not isinstance(jobs, list) or any(not isinstance(item, dict) for item in jobs):
+            raise ValueError("job list returned an invalid page")
+        page = jobs[:limit]
+        has_more = len(jobs) > limit
+        next_cursor = None
+        if has_more and page:
+            payload = json.dumps(
+                {"job_id": page[-1].get("job_id")},
+                sort_keys=True, separators=(",", ":"),
+            ).encode()
+            next_cursor = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        return {"ok": True, "jobs": page, "next_cursor": next_cursor,
+                "has_more": has_more}
     except Exception as exc:
         return {"ok": False, "code": "invalid_query", "error": str(exc)}
 
@@ -297,55 +349,138 @@ def job_retry(job_id: str, *, request_id: str | None = None, remote: str | None 
         return {"ok": False, "code": str(exc), "error": str(exc)}
 
 
-def _workspace_request(project_dir: str, *, local: bool, remote: str | None,
-                       workspace: str | None) -> TargetRequest:
-    return TargetRequest(project_dir=project_dir, local=local, remote=remote, workspace=workspace)
+def _workspace_request(project_dir: str = ".", *, local: bool, remote: str | None,
+                       workspace: str | None, project_identity: str | None = None,
+                       workspace_id: str | None = None,
+                       migration_plan_id: str | None = None,
+                       confirm: bool = False,
+                       expected_legacy_namespace: str | None = None,
+                       inventory_digest: str | None = None,
+                       index_generation: int | None = None,
+                       limit: int = 50, active_only: bool = False,
+                       measure_sizes: bool = False,
+                       mode: str = "persistent") -> TargetRequest:
+    return TargetRequest(
+        project_dir=project_dir, local=local, remote=remote, workspace=workspace,
+        project_identity=project_identity, workspace_id=workspace_id,
+        migration_plan_id=migration_plan_id, confirm=confirm,
+        expected_legacy_namespace=expected_legacy_namespace,
+        inventory_digest=inventory_digest, index_generation=index_generation,
+        limit=limit, active_only=active_only, measure_sizes=measure_sizes, mode=mode,
+    )
 
 
-def _workspace(action: str, project_dir: str, *, local: bool = False,
-               remote: str | None = None, workspace: str | None = None) -> dict:
+def _workspace(action: str, project_dir: str = ".", *, local: bool = False,
+               remote: str | None = None, workspace: str | None = None,
+               project_identity: str | None = None,
+               workspace_id: str | None = None,
+               migration_plan_id: str | None = None,
+               confirm: bool = False,
+               expected_legacy_namespace: str | None = None,
+               inventory_digest: str | None = None,
+               index_generation: int | None = None,
+               limit: int = 50, active_only: bool = False,
+               measure_sizes: bool = False,
+               mode: str = "persistent") -> dict:
     """Use the shared namespace-aware workspace lifecycle service."""
     try:
         return getattr(_workspace_service, action)(_workspace_request(
-            project_dir, local=local, remote=remote, workspace=workspace))
+            project_dir, local=local, remote=remote, workspace=workspace,
+            project_identity=project_identity, workspace_id=workspace_id,
+            migration_plan_id=migration_plan_id, confirm=confirm,
+            expected_legacy_namespace=expected_legacy_namespace,
+            inventory_digest=inventory_digest, index_generation=index_generation,
+            limit=limit, active_only=active_only, measure_sizes=measure_sizes,
+            mode=mode))
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "workspace_operation_failed"), "error": str(exc)}
 
 
-def workspace_create(project_dir: str, *, local: bool = False, remote: str | None = None,
-                     workspace: str | None = None) -> dict:
+def workspace_create(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
+                     workspace: str | None = None,
+                     project_identity: str | None = None,
+                     mode: str = "persistent") -> dict:
     """Create (or retain) a named reusable local or provisioned-remote workspace."""
-    return _workspace("create", project_dir, local=local, remote=remote, workspace=workspace)
+    return _workspace("create", project_dir, local=local, remote=remote, workspace=workspace,
+                      project_identity=project_identity, mode=mode)
 
 
-def workspace_list(project_dir: str, *, local: bool = False, remote: str | None = None,
-                   workspace: str | None = None) -> dict:
-    """List workspaces in one explicit local or remote namespace."""
-    return _workspace("list", project_dir, local=local, remote=remote, workspace=workspace)
+def workspace_list(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
+                   workspace: str | None = None, project_identity: str | None = None,
+                   workspace_id: str | None = None, limit: int = 50,
+                   active_only: bool = False, measure_sizes: bool = False) -> dict:
+    """List workspaces, plus on-disk deployment storage, in one namespace.
+
+    A degraded index reports `index.complete=false` with
+    `workspace_index_incomplete` instead of failing: read-only reporting must
+    never hide occupied storage. Sizes stay null unless `measure_sizes=True`.
+    """
+    return _workspace("list", project_dir, local=local, remote=remote, workspace=workspace,
+                      project_identity=project_identity, workspace_id=workspace_id,
+                      limit=limit, active_only=active_only, measure_sizes=measure_sizes)
 
 
-def workspace_status(project_dir: str, *, local: bool = False, remote: str | None = None,
-                     workspace: str | None = None) -> dict:
+def workspace_status(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
+                     workspace: str | None = None, project_identity: str | None = None,
+                     workspace_id: str | None = None) -> dict:
     """Read one workspace's lifecycle metadata without touching its contents."""
-    return _workspace("status", project_dir, local=local, remote=remote, workspace=workspace)
+    return _workspace("status", project_dir, local=local, remote=remote, workspace=workspace,
+                      project_identity=project_identity, workspace_id=workspace_id)
 
 
-def workspace_reset(project_dir: str, *, local: bool = False, remote: str | None = None,
-                    workspace: str | None = None, confirm: bool = False) -> dict:
+def workspace_reset(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
+                    workspace: str | None = None, project_identity: str | None = None,
+                    workspace_id: str | None = None, confirm: bool = False) -> dict:
     """Reset a non-busy workspace; active durable job leases are protected."""
     if confirm is not True:
         return {"ok": False, "code": "confirmation_required",
                 "error": "workspace reset requires confirm=true"}
-    return _workspace("reset", project_dir, local=local, remote=remote, workspace=workspace)
+    return _workspace("reset", project_dir, local=local, remote=remote, workspace=workspace,
+                      project_identity=project_identity, workspace_id=workspace_id,
+                      confirm=True)
 
 
-def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | None = None,
-                      workspace: str | None = None, confirm: bool = False) -> dict:
+def workspace_destroy(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
+                      workspace: str | None = None, project_identity: str | None = None,
+                      workspace_id: str | None = None, confirm: bool = False) -> dict:
     """Explicitly remove a non-busy named workspace from its selected namespace."""
     if confirm is not True:
         return {"ok": False, "code": "confirmation_required",
                 "error": "workspace destroy requires confirm=true"}
-    return _workspace("destroy", project_dir, local=local, remote=remote, workspace=workspace)
+    return _workspace("destroy", project_dir, local=local, remote=remote, workspace=workspace,
+                      project_identity=project_identity, workspace_id=workspace_id,
+                      confirm=True)
+
+
+def workspace_migration_plan(project_dir: str = ".", *, local: bool = False,
+                             remote: str | None = None,
+                             project_identity: str | None = None,
+                             expected_legacy_namespace: str | None = None,
+                             inventory_digest: str | None = None,
+                             index_generation: int | None = None) -> dict:
+    """Plan a metadata-only adoption of legacy workspace records."""
+    return _workspace("migration_plan", project_dir, local=local, remote=remote,
+                      project_identity=project_identity,
+                      expected_legacy_namespace=expected_legacy_namespace,
+                      inventory_digest=inventory_digest,
+                      index_generation=index_generation)
+
+
+def workspace_migration_apply(plan_id: str, project_dir: str = ".", *,
+                              local: bool = False, remote: str | None = None,
+                              project_identity: str | None = None,
+                              expected_legacy_namespace: str | None = None,
+                              confirm: bool = False) -> dict:
+    """Apply one exact unexpired metadata migration plan."""
+    if confirm is not True:
+        return {"ok": False, "code": "confirmation_required",
+                "error": "workspace migration apply requires confirm=true"}
+    return _workspace(
+        "migration_apply", project_dir, local=local, remote=remote,
+        project_identity=project_identity, migration_plan_id=plan_id,
+        expected_legacy_namespace=expected_legacy_namespace,
+        confirm=True,
+    )
 
 
 def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True,

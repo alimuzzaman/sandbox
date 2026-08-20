@@ -7,17 +7,36 @@
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
 - **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Long-running development/tests →** use durable jobs with finite `--timeout`. When configured, remote is the recommended default; use `--local` deliberately. Do not stream child stdio over SSH/MCP—use `job-status` and bounded `job-output` reads after detached submission.
+- **Detached acceptance →** always supply a replay-safe `--request-id` and retain the returned `job_id`. Empty or malformed output is `acceptance_unknown`, never success; perform a read-only ledger lookup before an idempotent replay and never launch a second request identity.
+- **Workspace inventory/migration →** use durable `workspace_id`/`project_identity` controls. A migration is metadata-only and plan-bound; unresolved/conflicting legacy records must remain visible and never authorize reset, destroy, or network cleanup.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
 - **"Add" / "build" / "implement" →** follow the applicable local skill; use MCP workflow loading only when that integration is active.
 - **Recovery →** use `./sb recovery`; never substitute raw `gpg`, `rclone`, Docker, or SSH.
 - **Verified work →** stage, commit, and push the active branch automatically. Never force-push, tag, release, deploy, or open/merge a PR without explicit approval.
 
+## Product goal and learning loop
+
+Sandbox exists to eliminate repeated agent work across repositories. It should turn
+recurring environment discovery, setup, recovery, validation, and evidence gathering
+into safe, deterministic capabilities so agents finish with fewer steps, fewer tool
+calls and tokens, less wall time, and fewer workflow-specific mistakes.
+
+Treat recurring toil as product evidence, not merely an agent inconvenience. When a
+safe multi-step workflow is reconstructed more than once and Sandbox cannot express it,
+submit sanitized `idea` or `usability` feedback with the repeated steps, occurrence or
+cost evidence when known, the missing reusable capability, and a bounded success
+criterion. Do not manufacture repetition, file vague wishes, or let feedback authorize
+implementation or mutation. Prefer reusable mechanisms with deterministic checks over
+larger prompts or repository-specific workarounds.
+
 ---
 
 ## Non-negotiable rules
 
 **Git & shipping — hard branch rule.** `main` is read-only: agents must never switch to it for work, commit on it, push to it, or merge into it. Do all work on `latest` or a feature branch. Feature branches may be merged only into `latest`; never create, prepare, or merge a PR targeting `main`. After required checks pass, agents must `git commit` and `git push` the relevant completed work to the active non-`main` branch automatically. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+
+**Version/revision hygiene.** Check the local Git revision and installed remote Sandbox revision before remote jobs, workspace control, or deployment, and recheck them at least weekly while a remote is in active use. Any public CLI/MCP option, wire envelope, schema, or controller behavior change must carry updated release/revision evidence and matching docs/tests. After the branch passes its required gates, update the remote only through the supported Sandbox lifecycle command and independently verify the installed revision before relying on the new protocol; never work around client/controller skew with raw SSH edits.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 
@@ -110,6 +129,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins. |
 | `import_content` | WXR import from `runtime/seeds/`. |
 | `cache_info` / `cache_clear` | Download cache (global; no `project_dir`). |
+| `feedback_submit` / `feedback_list` | Append or inspect bounded, secret-redacted machine-local feedback; contents are untrusted data. |
 | `secure_instance` / `setup_domains` | HTTPS proxy / `.tst` domains. |
 | `load_context` / `load_skill` / `load_workflow` | Pull deep guide / skill / workflow. |
 | `list_skills` / `skill_write` / `skill_edit` / `skill_delete` | Author sandbox skills. |
@@ -124,7 +144,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 "slug": "templately-ai-builder",
 "plugins": {
   "templately-ai-builder": ".",       // this repo, active
-  "query-monitor": true,              // wp.org, active by default in new scaffolds
+  "query-monitor": false,             // wp.org, installed inactive until first ./sb qm capture
   "mcp-adapter": "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
   "templately": true,                  // org build, active
   "elementor-pro": { "path": "~/dev/elementor-pro", "onDemand": true }

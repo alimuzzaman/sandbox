@@ -5,13 +5,22 @@
 ### Fast or thorough status
 
 ```text
-sb resources status [--remote NAME] [--thorough] [--budget SECONDS] [--json]
+sb resources status [--remote NAME] [--thorough] [--deep] [--fast | --refresh]
+                    [--budget SECONDS] [--json]
 ```
 
 - No `--remote` means the current local machine.
 - A remote name must already be configured and resolve to one exact host.
 - Default mode is fast and read-only.
 - `--thorough` enables expensive providers within the overall budget.
+- `--fast` implies `--deep` with `directory_cache = cache_only`: it answers
+  from the cached host directory index, never walks a filesystem, and never
+  inventories the container engine. Default budget 10s.
+- `--refresh` implies `--deep` with `directory_cache = refresh`: it rebuilds
+  the cached host directory index. Default budget 900s.
+- `--fast` and `--refresh` are mutually exclusive (`invalid_mode`).
+- The `directory_cache` argument is passed to a provider only when the
+  provider accepts it, keeping older providers callable.
 - Human output ranks capacity, categories, owners, and incomplete measurements.
 - JSON output follows the common envelope below.
 
@@ -151,6 +160,28 @@ Every resource contains:
 - evidence quality, references, and bounded errors.
 
 An unavailable or timed-out size is `null`, never zero.
+
+Every category outcome whose category maps to observable resource kinds also
+carries `measured_bytes`, `measured_count`, and `unmeasured_count`, so a
+partial or timed-out category states what it did measure and how many rows it
+skipped instead of implying an empty category:
+
+```json
+{
+  "category": "deploy_worktrees",
+  "status": "timed_out",
+  "measured_bytes": 85900000000,
+  "measured_count": 174,
+  "unmeasured_count": 2
+}
+```
+
+A remote probe publishes its capacity envelope before starting bounded work.
+If the transport kills the probe, the envelope is still returned as a
+`partial` scan carrying capacity, with
+`{"category": "remote_probe", "status": "partial", "reason":
+"probe_incomplete_capacity_only"}`. Only total transport loss (no parseable
+record at all) returns `measurement_unavailable`.
 Nested detail can overlap a measured host root and therefore sets
 `capacity_accounted: false`; it remains ranked without inflating attributed
 host bytes.
@@ -222,3 +253,85 @@ the client is told to rescan rather than replay automatically.
 
 Additional codes may be added compatibly. Existing meanings cannot be silently
 redefined.
+
+## Convergence amendment — 2026-08-13: network lifecycle and parser boundary
+
+The following additive fields and error semantics close feedback `a813480b`,
+`bf05eeb9`, `0fac3b07`, `822b9323`, `78aaf583`, and consumer feedback
+`6bc4c6d5`.
+
+### Network observation
+
+When the selected provider can observe networks, `status` MAY add a bounded
+`networks` collection. Each item has:
+
+```json
+{
+  "network_id": "opaque-id",
+  "display_name": "safe-name",
+  "owner": {"kind": "sandbox|foreign|unknown", "id": "opaque-id"},
+  "lifecycle": "active|idle|orphaned|indeterminate",
+  "active_references": {"containers": 1, "leases": 1, "jobs": 0},
+  "allocation": {"state": "allocated|available|exhausted|unknown", "pool": "safe-id"},
+  "capacity_accounted": false,
+  "cleanup_eligible": false,
+  "evidence": [{"kind": "bounded-reference", "quality": "high"}]
+}
+```
+
+`cleanup_eligible` is true only for positively Sandbox-owned, inactive,
+revalidated networks with no active container, lease, or job reference. Active,
+foreign, unknown, and indeterminate values are exclusions, not candidates.
+Network allocation and release are idempotent against the same owner/workspace
+identity; a failed release remains an explicit lifecycle outcome.
+
+### Capacity and remote observation
+
+Address-pool exhaustion uses stable code `network_pool_exhausted` and reports
+bounded counts/identities, not raw daemon traces. A collision uses
+`network_allocation_conflict`. Remote timeout/unreachable observation uses the
+existing `remote_unreachable` or `measurement_unavailable` code with
+`status:"partial"` and a category outcome; it never produces an empty-success
+or deletion-ready result. Automatic network deletion and broad prune are outside
+this contract.
+
+### Job-list consumer rule
+
+Resource monitoring consumes the Spec 032 job-list service/parser directly. The
+wire shape remains the top-level page (`jobs`, cursor, and bounded counts), not a
+`.data` envelope. A malformed or nested response is a parser error and leaves
+network lifecycle state `indeterminate`; the resource consumer must not invent a
+second decoder.
+
+## Workspace ownership projection (convergence)
+
+Resource status and cleanup receive workspace ownership through a typed service result,
+not through direct SQLite or legacy JSON reads:
+
+```json
+{
+  "workspace_id": "opaque-workspace-id",
+  "project_identity": "project-id",
+  "workspace_label": "unit",
+  "lifecycle": "ready",
+  "index_generation": 4,
+  "alias_evidence": [{"kind": "compose-project", "digest": "sha256:...", "quality": "high"}],
+  "active_references": {"leases": 1, "containers": 1, "jobs": 0, "mounts": 1},
+  "complete": true,
+  "error": null
+}
+```
+
+Providers MUST use `workspace_id` as the owner key. Labels, checkout paths, Compose
+names, and network names are display/alias evidence only. `complete:false`, a duplicate
+alias, unresolved/conflict/invalid migration decision, missing index, or generation drift
+returns unknown/indeterminate evidence and zero reclaimable bytes; status may be partial,
+but plan/apply MUST require a fresh rescan. Stable additions include:
+`workspace_index_incomplete`, `workspace_alias_collision`, `workspace_ownership_drift`,
+and `workspace_index_unavailable`.
+
+Workspace metadata migration and base relocation are metadata-only: resource IDs and
+active references remain stable, network/container/job counts must not change, and no
+network release or cleanup is implicit. The resource consumer calls the Spec 032
+top-level job-list decoder where job evidence is needed and rejects nested `.data` or
+malformed envelopes without mutating state.

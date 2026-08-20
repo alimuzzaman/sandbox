@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 from contextlib import redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from sandbox.commands.jobs_runtime import cmd_declared_test_plan
 def _target():
     return SimpleNamespace(
         kind="local", project_root="/project", remote_name=None, workspace_label="default",
+        sources={"identity": "project:declared"},
         runtime_policy={
             "executionProfile": "unit", "outputProfile": "smart", "maxParallel": 4,
             "executionProfiles": {"unit": {"timeoutSeconds": 120}},
@@ -53,6 +55,11 @@ class DeclaredTestPlanTests(unittest.TestCase):
         # prerequisite is mapped from stable step ID to workspace label.
         self.assertEqual(captured[2].depends_on, ("verify-unit", "verify-lint"))
         self.assertEqual(captured[1].artifact_paths, ("reports",))
+        self.assertEqual({item.project_identity for item in captured}, {"project:declared"})
+        self.assertEqual(
+            {item.source.identity for item in captured},
+            {"sha256:" + hashlib.sha256("/project".encode()).hexdigest()},
+        )
         self.assertEqual(captured[0].deadline_seconds, 120)
         self.assertEqual(captured[0].deadline_source, "plan:verify")
         self.assertIn('"plan": "verify"', output.getvalue())

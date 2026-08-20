@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import time
 import argparse
+import shlex
+import shutil
+import sys
 from pathlib import Path
 
 from sandbox.application.context import preflight_instance_capability, runtime_service
@@ -40,6 +42,57 @@ _GUIDES = {
         ("deploy", "./sb deploy --remote <name> --ensure --expose", "Deploy to a provisioned remote."),
     ),
 }
+
+# The registry is the source of truth for the public command inventory.  Keep
+# this exclusion explicit even when it is empty: a future controller-only
+# command must opt out here rather than silently disappearing from `sb guide`.
+# These names are intentionally not inferred from module ownership or parser
+# shape, because those are implementation details rather than public API.
+GUIDE_INTERNAL_ONLY_COMMANDS = frozenset()
+GUIDE_COMMAND_EXCLUSIONS = GUIDE_INTERNAL_ONLY_COMMANDS
+
+
+def _guide_invocation() -> str:
+    """Return a command users can actually run from this checkout.
+
+    Release/source archives may contain the Python package without the tracked
+    `sb` wrapper.  Prefer a local/installed `sb`, otherwise show the portable
+    module invocation instead of emitting a dead `./sb ...` recipe.
+    """
+    argv0 = Path(sys.argv[0]).expanduser()
+    if argv0.name == "sb" and argv0.exists():
+        return "./sb"
+    local = Path.cwd() / "sb"
+    if local.is_file() and local.stat().st_mode & 0o111:
+        return "./sb"
+    installed = shutil.which("sb")
+    if installed:
+        return "sb"
+    return f"{shlex.quote(sys.executable)} -m sandbox.cli"
+
+
+def _with_invocation(command: str, invocation: str) -> str:
+    """Replace the checked-in wrapper prefix in a curated guide command."""
+    return command.replace("./sb", invocation, 1)
+
+
+def _public_command_catalog(invocation: str) -> list[dict[str, str]]:
+    """Render every public command registered by the CLI manifest."""
+    from sandbox.registry import COMMAND_SPECS
+
+    catalog = []
+    for spec in COMMAND_SPECS.specs():
+        if spec.name in GUIDE_INTERNAL_ONLY_COMMANDS:
+            continue
+        doc = (getattr(spec.handler, "__doc__", "") or "").strip().splitlines()
+        purpose = doc[0].strip() if doc else f"Run the {spec.name} command."
+        catalog.append({
+            "name": spec.name,
+            "command": f"{invocation} {spec.name}",
+            "purpose": purpose,
+            "aliases": ", ".join(spec.aliases),
+        })
+    return catalog
 
 
 def configure_exec_parser(parser) -> None:
@@ -103,7 +156,8 @@ def cmd_exec(cfg, args) -> None:
                                  (target is not None and target.kind == "remote")):
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
-        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.jobs.models import JobSubmission, TargetRequest
+        from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
         if target is None:
             try:
                 target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
@@ -114,9 +168,9 @@ def cmd_exec(cfg, args) -> None:
             except TargetResolutionError as exc:
                 die(f"{exc.code}: {exc}")
         timeout = args.timeout or 900
-        source = SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest())
+        source = _source_identity(target.project_root)
         submission = JobSubmission("runtime-exec" if target.kind == "remote" else "exec", target.project_root,
-            hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind,
+            _resolved_project_identity(target), target.kind,
             target.workspace_label, tuple(command), timeout, source,
             remote_name=target.remote_name, output_profile=args.output_profile,
             output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
@@ -215,6 +269,7 @@ def cmd_exec(cfg, args) -> None:
 def cmd_guide(_cfg, args) -> None:
     """Print the no-MCP command catalog, optionally tailored to a project."""
     project_dir = getattr(args, "project_dir", None)
+    invocation = _guide_invocation()
     kind = None
     root = None
     if project_dir:
@@ -237,16 +292,19 @@ def cmd_guide(_cfg, args) -> None:
     if selected not in _GUIDES:
         die(f"no CLI guide for project kind {selected!r}")
     commands = [
-        {"name": name, "command": command, "purpose": purpose}
+        {"name": name, "command": _with_invocation(command, invocation), "purpose": purpose}
         for name, command, purpose in _GUIDES[selected]
     ]
+    command_catalog = _public_command_catalog(invocation)
     payload = {
         "mode": "cli-first",
         "project_kind": selected,
         "project_root": root,
-        "skill": "./sb skill show sandbox-cli",
+        "skill": f"{invocation} skill show sandbox-cli",
         "commands": commands,
-        "mcp": "optional; use ./sb mcp only when an MCP client needs live tools",
+        "command_catalog": command_catalog,
+        "command_catalog_exclusions": sorted(GUIDE_INTERNAL_ONLY_COMMANDS),
+        "mcp": f"optional; use {invocation} mcp only when an MCP client needs live tools",
     }
     if getattr(args, "json", False):
         print(json.dumps(payload))
@@ -254,11 +312,13 @@ def cmd_guide(_cfg, args) -> None:
     print(f"CLI-first Sandbox guide ({selected})")
     if root:
         print(f"  project: {root}")
-    print("  skill:   ./sb skill show sandbox-cli")
+    print(f"  skill:   {invocation} skill show sandbox-cli")
     print("  Configured remote execution is the default; use --local deliberately.")
     print("  MCP is optional; for live remote jobs prefer the co-located remote MCP server.")
     for item in commands:
         print(f"  {item['command']:<58} {item['purpose']}")
+    print("  public command catalog:")
+    print("    " + ", ".join(item["name"] for item in command_catalog))
 
 
 register_specs((

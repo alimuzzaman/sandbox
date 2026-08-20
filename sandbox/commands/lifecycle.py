@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 import types as _types
+from collections.abc import Mapping
 from contextlib import contextmanager
 import io
 import threading
@@ -22,7 +23,7 @@ from sandbox.core import (
     _ensure_proxy_up,
     _herd_db_name, _instance_reachable, _is_herd_instance, _local_yaml,
     _pin_wp_constants_in_config, _remove_obsolete_builder_authoring_assets,
-    _tld, _web_services, _write_abilities_muplugin, _write_debug_muplugins,
+    _tld, _web_services, _write_host_runtime_muplugins,
     _write_dl_cache_muplugin, _write_licensing_muplugin, _write_local_yaml,
     _write_mail_muplugin, _write_ondemand_muplugin, _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
@@ -30,6 +31,7 @@ from sandbox.core import (
     proxy_available, resolve_instances, run, save_local_app_password,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
     runtime_health_lines, wp_dir, wpcli,
+    php_extension_status,
 )
 
 from sandbox.registry import register
@@ -37,6 +39,11 @@ from sandbox.application.context import (
     preflight_instance_capability, runtime_service, wordpress_runtime_dependencies,
 )
 from sandbox.runtimes.base import OperationError, OperationRequest
+
+
+def _target_is_remote(target) -> bool:
+    """Return whether target resolution selected the remote adapter."""
+    return getattr(target, "kind", None) == "remote"
 
 
 
@@ -54,6 +61,7 @@ def cmd_up(cfg: dict, args) -> None:
         # Host-served by Herd — nothing to boot; Herd serves linked sites
         # whenever it's running.
         if wp_dir(inst).exists():
+            _write_host_runtime_muplugins(inst)
             _remove_obsolete_builder_authoring_assets(inst)
         ok(f"WordPress: {site_url(inst_cfg)}  (host-served by Herd)")
         return
@@ -66,6 +74,17 @@ def cmd_up(cfg: dict, args) -> None:
     compose("up", "-d", "--remove-orphans",
             *_web_services(inst_cfg.get("server", "nginx")),
             instance=inst)
+    if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
+        # Verify the image that just started before any project/WP wiring is
+        # allowed to run.  The probe is standalone PHP and does not touch the
+        # database or uploads; a drift/missing/version error is therefore a
+        # safe, actionable startup failure rather than a half-provisioned site.
+        extension_status = php_extension_status(inst_cfg, instance=inst)
+        if extension_status and extension_status.get("drift", {}).get("state") != "ready":
+            issues = extension_status.get("drift", {}).get("issues") or []
+            detail = issues[0].get("message", "PHP extension planes are not verified") \
+                if isinstance(issues[0], dict) else "PHP extension planes are not verified"
+            die(f"PHP extension verification blocked: {detail}")
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
@@ -74,7 +93,7 @@ def cmd_up(cfg: dict, args) -> None:
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
-        _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
         _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
         _remove_obsolete_builder_authoring_assets(inst)
         # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
@@ -88,7 +107,6 @@ def cmd_up(cfg: dict, args) -> None:
                       instance=inst, check=False)
         except Exception:
             pass
-        _write_debug_muplugins(inst)     # spec 007 — dump()/dd() + QM capture (host-file, ok on herd)
         try:  # spec 004 — reap old background-job artifacts (>24h)
             from sandbox.commands.jobs import prune_jobs
             prune_jobs(inst)
@@ -147,13 +165,31 @@ def cmd_down(cfg, args) -> None:
 def cmd_status(cfg, args) -> None:
     remote_result = _remote_lifecycle(cfg, args, "status")
     if remote_result is not None:
+        remote_exit = _status_exit_code(remote_result)
+        if remote_exit or "exit_code" in remote_result:
+            remote_result = dict(remote_result)
+            remote_result["exit_code"] = remote_exit
+            if remote_exit:
+                remote_result["ok"] = False
         if getattr(args, "json", False):
-            print(json.dumps(remote_result, sort_keys=True))
+            print(json.dumps(_public_status_json(remote_result), sort_keys=True))
         else:
             print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
                   f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
+            if isinstance(remote_result.get("php_extensions"), Mapping):
+                public_extensions = _public_status_json(remote_result["php_extensions"])
+                if isinstance(public_extensions, Mapping):
+                    print(_render_php_extension_text(public_extensions))
+        if remote_exit:
+            raise SystemExit(remote_exit)
         return
     inst = args.resolved_instance
+    if getattr(args, "json", False):
+        payload = _status_json_payload(cfg, inst)
+        print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))
+        if _status_exit_code(payload):
+            raise SystemExit(_status_exit_code(payload))
+        return
     owner = _core().registry_find_instance(inst)
     runtime_data = None
     if owner and owner.get("kind") == "compose":
@@ -203,6 +239,153 @@ def cmd_status(cfg, args) -> None:
     # no bridge — Tools → Sandbox Snapshots would fail to connect).
     if not _is_herd_instance(inst) and _bridge_token_for(inst):
         _ensure_bridge_server()
+    extension_data = php_extension_status(resolve_instances(cfg)[inst], instance=inst)
+    if extension_data is not None:
+        print(_render_php_extension_text(extension_data))
+        if _status_exit_code({"php_extensions": extension_data}):
+            raise SystemExit(_status_exit_code({"php_extensions": extension_data}))
+
+
+_STATUS_SENSITIVE_KEY = re.compile(
+    r"(?:login_url|token|password|passphrase|secret|credential|cookie|authorization)",
+    re.IGNORECASE,
+)
+_STATUS_AUTOLOGIN_VALUE = re.compile(
+    r"(?i)(sandbox_autologin=)[^&#\s\"']*",
+)
+
+
+def _public_status_json(value):
+    """Copy status data while omitting credential-like fields for JSON output."""
+    if isinstance(value, Mapping):
+        return {
+            _public_status_string(str(key)): _public_status_json(child)
+            for key, child in value.items()
+            if not _STATUS_SENSITIVE_KEY.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_public_status_json(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_public_status_json(child) for child in value)
+    if isinstance(value, str):
+        return _public_status_string(_STATUS_AUTOLOGIN_VALUE.sub(r"\1[REDACTED]", value))
+    return value
+
+
+def _public_status_string(value: str) -> str:
+    """Apply shared credential detection/redaction without rewriting safe URLs."""
+    from sandbox.services.redaction import argv_contains_credentials, redact_text
+
+    return redact_text(value) if argv_contains_credentials([value]) else value
+
+
+def _status_exit_code(payload: Mapping[str, object]) -> int:
+    """Return the emitted status document's stable process result."""
+    extension = payload.get("php_extensions")
+    failed = payload.get("ok", True) is False or (
+        isinstance(extension, Mapping) and extension.get("ok", True) is False)
+    values = [payload.get("exit_code")]
+    if isinstance(extension, Mapping):
+        values.append(extension.get("exit_code"))
+    for value in values:
+        if isinstance(value, int) and not isinstance(value, bool) and value != 0:
+            return max(1, min(value, 255)) if value > 0 else 1
+    return 1 if failed else 0
+
+
+def _render_php_extension_text(report: Mapping[str, object]) -> str:
+    """Render the canonical extension report without introducing new data."""
+    desired = report.get("desired") if isinstance(report.get("desired"), Mapping) else {}
+    catalog = desired.get("catalog") if isinstance(desired.get("catalog"), Mapping) else {}
+    readiness = report.get("readiness") if isinstance(report.get("readiness"), Mapping) else {}
+    staleness = report.get("staleness") if isinstance(report.get("staleness"), Mapping) else {}
+    drift = report.get("drift") if isinstance(report.get("drift"), Mapping) else {}
+    lines = ["\nPHP extensions:"]
+    lines.append(f"  Profile: {desired.get('profile') or 'none'}")
+    lines.append("  Catalog: revision " + str(catalog.get("revision", "unknown"))
+                 + " (" + str(catalog.get("digest", "unavailable")) + ")")
+    lines.append(f"  Resolution digest: {desired.get('resolution_digest', 'unavailable')}")
+    if desired.get("build_digest"):
+        lines.append(f"  Build digest: {desired['build_digest']}")
+    lines.append("  Readiness: " + str(readiness.get("state", "unknown"))
+                 + "; staleness: " + str(staleness.get("state", "unknown"))
+                 + "; drift: " + str(drift.get("state", "unknown")))
+    observed = report.get("observed") if isinstance(report.get("observed"), Mapping) else {}
+    for plane in ("web", "cli", "exec", "phpunit"):
+        row = observed.get(plane) if isinstance(observed.get(plane), Mapping) else {}
+        detail = str(row.get("state", "unavailable"))
+        if row.get("php_version"):
+            detail += " (PHP " + str(row["php_version"]) + ")"
+        lines.append(f"  {plane}: {detail}")
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    for issue in issues:
+        if isinstance(issue, Mapping):
+            suffix = f" [{issue.get('extension')}]" if issue.get("extension") else ""
+            lines.append(f"  ! {issue.get('code', 'plane_drift')}{suffix}: "
+                         f"{issue.get('message', '')}")
+    return "\n".join(lines)
+
+
+def _status_json_payload(cfg, inst: str) -> dict:
+    """Return one bounded, machine-readable status document.
+
+    The human status path intentionally has progress output and health hints.
+    Keep the JSON path independent so Docker's command banner, focus hints,
+    and bridge reconciliation can never corrupt a parser's single document.
+    """
+    owner = _core().registry_find_instance(inst) or {}
+    if owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner.get("root", ""), "status", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            return {"ok": False, "instance": inst,
+                    "error": {"code": result.code, "message": result.message}}
+        return {"ok": bool(result.ok), "instance": inst, "kind": "compose",
+                **dict(result.data)}
+
+    runtime_data = None
+    runtime_error = None
+    if owner.get("root"):
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], "status", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            runtime_error = {"code": result.code, "message": result.message}
+        else:
+            runtime_data = dict(result.data)
+
+    instance_cfg = (resolve_instances(cfg).get(inst) or {})
+    containers = []
+    if not _is_herd_instance(inst) and instance_cfg:
+        ps = compose("ps", "--format", "json", instance=inst,
+                     check=False, capture=True)
+        for line in (getattr(ps, "stdout", "") or "").splitlines():
+            try:
+                containers.append(json.loads(line))
+            except (TypeError, ValueError):
+                continue
+    reachable = _instance_reachable(owner) if owner else False
+    fallback_url = site_url(instance_cfg) if instance_cfg else None
+    payload = {
+        "ok": bool(runtime_data is not None or reachable),
+        "instance": inst,
+        "kind": "wordpress",
+        "label": owner.get("label", "default"),
+        "root": owner.get("root"),
+        "url": owner.get("url") or instance_cfg.get("url") or fallback_url,
+        "server": instance_cfg.get("server", owner.get("server", "nginx")),
+        "reachable": reachable,
+        "containers": containers,
+    }
+    if runtime_data is not None:
+        payload["runtime"] = runtime_data
+    if runtime_error is not None:
+        payload["error"] = runtime_error
+    extension_data = php_extension_status(instance_cfg, instance=inst)
+    if extension_data is not None:
+        payload["php_extensions"] = extension_data
+        payload["ok"] = bool(payload["ok"] and extension_data.get("ok"))
+        payload["exit_code"] = 0 if payload["ok"] else 1
+    return payload
 
 def cmd_logs(cfg, args) -> None:
     remote_result = _remote_lifecycle(cfg, args, "logs")
@@ -235,7 +418,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     try:
         target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=project_dir, local=bool(getattr(args, "local", False)), remote=remote_name,
-            workspace=workspace, required_capability="job.exec"))
+            workspace=workspace, required_capability="job.exec",
+            # Instance lifecycle never infers a remote: `sb ensure`/`status`/
+            # `logs` with no selector boot and inspect the LOCAL instance, as
+            # they did before target inference existed. A remote is used only
+            # for --remote NAME or a project whose runtime default is remote.
+            allow_inferred_remote=False))
     except TargetResolutionError as exc:
         # Legacy compatibility tests and callers may invoke ensure from a
         # non-project directory without a target selector. Preserve the
@@ -244,11 +432,13 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         if exc.code == "invalid_project" and not remote_name and not getattr(args, "local", False):
             return None
         die(f"{exc.code}: {exc}")
-    if target.kind != "remote":
+    if not _target_is_remote(target):
         return None
     remote = target.remote or _remote.get_remote(target.remote_name)
     if action == "ensure":
-        deployed = _remote.deploy_exact_working_tree(remote, target.project_root)
+        deployed = _remote.deploy_exact_working_tree(
+            remote, target.project_root, remote_name=target.remote_name,
+        )
         target_path = _remote.prepare_remote_workspace(
             remote, target.project_root, target.workspace_label,
             deployed_path=deployed["target_path"])
@@ -260,12 +450,54 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     command = [sb, action, "--local", "--project-dir", target_path, "--label", target.workspace_label]
     if action == "ensure":
         command.append("--create")
-    if action == "status":
+    # `ensure` must report the instance record (url, ports, instance name) the
+    # same way the local path does; without --json the remote prints human text,
+    # `_last_json` finds nothing, and callers get a bare {"ok": true} with no URL.
+    if action in ("status", "ensure"):
         command.append("--json")
-    result = _remote.ssh_run(remote, __import__("shlex").join(command), timeout=900 if action == "ensure" else 25)
-    if result.returncode != 0:
+    reveal_login = action == "ensure" and bool(getattr(args, "reveal_login", False))
+    if reveal_login:
+        # The remote redacts its own JSON, so the token has to be asked for on
+        # the VPS side too; asking here alone would only reveal a placeholder.
+        command.append("--reveal-login")
+    shlex_join = __import__("shlex").join
+    result = _remote.ssh_run(remote, shlex_join(command), timeout=900 if action == "ensure" else 25)
+    if reveal_login and result.returncode != 0 \
+            and "--reveal-login" in (result.stderr or "") \
+            and "unrecognized arguments" in (result.stderr or ""):
+        # A remote staged from an older runtime has no such flag. Losing the
+        # token is worth far less than losing the instance, so boot it anyway
+        # and let the record carry the redacted placeholder; `sb remote
+        # provision` restages the runtime when the token is actually needed.
+        info(f"remote '{target.remote_name}' runtime predates --reveal-login; "
+             "ensuring without it (run `./sb remote provision` to restage)")
+        command.remove("--reveal-login")
+        reveal_login = False
+        result = _remote.ssh_run(remote, shlex_join(command), timeout=900)
+    payload = None
+    if action == "status":
+        try:
+            payload = json.loads((result.stdout or "").strip())
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, Mapping) and result.returncode != 0:
+            die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
+        if isinstance(payload, Mapping) and result.returncode != 0:
+            payload = dict(payload)
+            payload["ok"] = False
+            payload["exit_code"] = result.returncode
+    elif result.returncode != 0:
         die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
-    payload = _remote._last_json(result.stdout or "") if action != "logs" else None
+    elif action != "logs":
+        payload = _remote._last_json(result.stdout or "")
+        if reveal_login and isinstance(payload, dict):
+            # Lift ONE field out of the unredacted remote document: the
+            # autologin URL the operator explicitly asked for. Everything else
+            # stays as the redacted parse produced it.
+            raw = _remote._last_json(result.stdout or "", redact=False) or {}
+            revealed = raw.get("login_url")
+            if isinstance(revealed, str) and "sandbox_autologin=" in revealed:
+                payload["login_url"] = revealed
     if action == "logs":
         return {"ok": True, "action": action, "output": result.stdout or "",
                 "target": {"remote": target.remote_name, "workspace": target.workspace_label}}
@@ -382,6 +614,7 @@ def cmd_install(cfg, args) -> None:
     # the bind-mounted mu-plugin directory. Reapply its narrowly scoped shared
     # write mode before generating the autologin, snapshot, and mail plugins.
     _prepare_mu_plugin_directory(inst)
+    _write_host_runtime_muplugins(inst)
 
     # The OpenLiteSpeed image's vhost template does `autoLoadHtaccess`, but
     # WordPress only writes a physical .htaccess under Apache — under OLS it
@@ -515,35 +748,61 @@ def _project_declares_plugin_check(project_root: str | Path) -> bool:
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
+    json_mode = bool(getattr(args, "json", False))
     error = preflight_instance_capability(cfg, inst, "wordpress.cli")
     if error is not None:
+        if json_mode:
+            payload = {"ok": False, "exit_code": 1, "instance": inst,
+                       "checks": [{"section": "preflight", "label": error.message,
+                                   "ok": False}]}
+            print(json.dumps(_public_status_json(payload), sort_keys=True))
+            raise SystemExit(1)
         die(error.message)
     inst_cfg = resolve_instances(cfg)[inst]
     adm = inst_cfg["admin"]
     port = inst_cfg["wordpress_port"]
     problems = 0
+    checks: list[dict] = []
+    current_section = "summary"
+    extension_data = None
+
+    def section(label: str) -> None:
+        nonlocal current_section
+        current_section = label
+        if not json_mode:
+            print(f"\n{label}:")
+
+    def note(message: str) -> None:
+        if not json_mode:
+            info(message)
 
     # Spec 009: nudge (once, non-disruptive) if machine-state is still in the repo
     # and a per-user base hasn't been adopted. Everything works via fallback until
     # then; this is purely discoverability for `./sb migrate`.
     if (ROOT / "runtime" / "registry.json").exists() and \
             not (BASE / "runtime" / "registry.json").exists():
-        info(f"Machine-state is still in the repo. Relocate it under {BASE} with "
+        note(f"Machine-state is still in the repo. Relocate it under {BASE} with "
              f"`./sb migrate --apply` (spec 009). Harmless to defer.")
 
-    print(f"\nInstance: {inst}  (http://localhost:{port})")
+    if not json_mode:
+        print(f"\nInstance: {inst}  (http://localhost:{port})")
 
-    def check(label: str, ok_: bool, hint: str = "") -> None:
+    def check(label: str, ok_: bool, hint: str = "", *, emit: bool = True) -> None:
         nonlocal problems
+        row = {"section": current_section, "label": label, "ok": bool(ok_)}
+        if not ok_ and hint:
+            row["hint"] = hint
+        checks.append(row)
         mark = "✓" if ok_ else "✗"
         line = f"  {mark} {label}"
         if not ok_:
             problems += 1
             if hint:
                 line += f"\n      → {hint}"
-        print(line)
+        if emit and not json_mode:
+            print(line)
 
-    print("\nRuntime:")
+    section("Runtime")
     owner = _core().registry_find_instance(inst)
     runtime_data = None
     runtime_error = ""
@@ -564,9 +823,22 @@ def cmd_doctor(cfg, args) -> None:
         check("runtime and isolation health", healthy,
               "inspect ./sb status and native recovery state before running payloads")
         for line in runtime_health_lines(runtime_data):
-            info("  " + line)
+            note("  " + line)
 
-    print("\nContainers:")
+    # PHP extension intent is checked independently of WordPress bootstrap.
+    # A configured project must show desired state and all four observation
+    # planes; unavailable observations are an honest doctor failure rather than
+    # an implicit pass based on a stale cache.
+    extension_data = php_extension_status(inst_cfg, instance=inst)
+    if extension_data is not None:
+        current_section = "PHP extensions"
+        check("PHP extension readiness", bool(extension_data.get("ok")),
+              hint="inspect the structured extension issues and reconcile every plane",
+              emit=False)
+        if not json_mode:
+            print(_render_php_extension_text(extension_data).lstrip("\n"))
+
+    section("Containers")
     ps = compose("ps", "--format", "json", instance=inst,
                  check=False, capture=True)
     containers = []
@@ -580,13 +852,13 @@ def cmd_doctor(cfg, args) -> None:
         check(f"{svc} running", services.get(svc) == "running",
               hint=f"./sb up --instance {inst}   (currently: {services.get(svc, 'missing')})")
 
-    print("\nWordPress:")
+    section("WordPress")
     r = wpcli(["core", "is-installed"], instance=inst,
               check=False, capture=True)
     check("core installed", r.returncode == 0,
           hint=f"./sb install --instance {inst}")
 
-    print("\nMCP wiring:")
+    section("MCP wiring")
     app_pw = ((cfg.get("instances", {}) or {}).get(inst, {}) or {}
               ).get("app_password", "")
     check("application_password set", bool(app_pw),
@@ -644,7 +916,7 @@ def cmd_doctor(cfg, args) -> None:
     check("MCP server importable", mcp_ok,
           hint=mcp_hint)
 
-    print("\nState:")
+    section("State")
     # Per-project model: the instance maps to a project root in the registry.
     proj_root = owner.get("root") if owner else None
     check(f"project: {proj_root or '—'}", True,
@@ -661,25 +933,25 @@ def cmd_doctor(cfg, args) -> None:
     check(f"focused plugin: {focus or '—'}", True,
           hint="(optional — set with ./sb focus <slug>)")
 
-    print("\nDomains / proxy:")
+    section("Domains / proxy")
     from sandbox.core._domains import proxy_health_checks
     proxy_checks = proxy_health_checks(cfg)
     if not proxy_checks:
-        info("  (no proxy-managed domains)")
+        note("  (no proxy-managed domains)")
     for pc in proxy_checks:
         check(pc["label"], pc["ok"], hint=pc["hint"])
 
     from sandbox.core._remote import list_remotes, remote_doctor_checks
     remotes = list_remotes()
-    print("\nRemote targets:")
+    section("Remote targets")
     if not remotes:
-        info("  (none configured)")
+        note("  (none configured)")
     for name, remote in sorted(remotes.items()):
         for remote_check in remote_doctor_checks(remote):
             check(f"{name}: {remote_check['label']}", remote_check["ok"],
                   hint=remote_check["hint"])
 
-    print("\nLinked plugins:")
+    section("Linked plugins")
     plug_dir = plugins_dir(inst)
     if plug_dir.exists():
         linked = []
@@ -690,9 +962,9 @@ def cmd_doctor(cfg, args) -> None:
                 check(f"{entry.name} → {tgt}", tgt.exists(),
                       hint="source missing — re-run `./sb ensure` for the project")
         if not linked:
-            info("  (no source-symlinked plugins)")
+            note("  (no source-symlinked plugins)")
 
-    print("\nCredentials:")
+    section("Credentials")
     local = _local_yaml()
     # FluentBoards — optional but warn if URL saved but unreachable.
     fb = local.get("fluentboards", {}) or {}
@@ -711,7 +983,7 @@ def cmd_doctor(cfg, args) -> None:
         check(f"FluentBoards reachable ({fb_url})", fb_ok,
               hint="check the URL in sandbox.local.yml or re-run `./sb connect fb`")
     else:
-        info("  FluentBoards not configured (optional — ./sb connect fb)")
+        note("  FluentBoards not configured (optional — ./sb connect fb)")
 
     # GitHub org
     gh_org = (local.get("defaults", {}) or {}).get("github_org", "").strip()
@@ -724,8 +996,17 @@ def cmd_doctor(cfg, args) -> None:
         check(f".env.local permissions ({mode})", mode == "600",
               hint=f"run: chmod 600 {SECRETS_ENV}")
     else:
-        info("  .env.local not yet created (run `./sb connect` to populate)")
+        note("  .env.local not yet created (run `./sb connect` to populate)")
 
+    if json_mode:
+        payload = {"ok": problems == 0, "exit_code": 0 if problems == 0 else 1,
+                   "instance": inst, "checks": checks}
+        if extension_data is not None:
+            payload["php_extensions"] = extension_data
+        print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))
+        if problems:
+            raise SystemExit(1)
+        return
     print()
     if problems:
         info(f"{problems} issue(s) — see → hints above")
@@ -892,7 +1173,8 @@ def configure_parser(sub) -> None:
         parser.add_argument("--json", action="store_true")
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
-    sub.add_parser("doctor", help="Audit the stack and report problems")
+    doctor = sub.add_parser("doctor", help="Audit the stack and report problems")
+    doctor.add_argument("--json", action="store_true")
     sub.add_parser("smoke", help="Self-test: boot a fresh instance, REST probe, tear down")
     sub.add_parser("update", help="git pull the project repo this instance tracks")
     op = sub.add_parser("open", help="Open admin / site / mailpit in browser")

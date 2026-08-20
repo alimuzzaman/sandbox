@@ -3,13 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from .descriptors import _load_mapping
+from .descriptors import config_home, config_layer, primary_config, _load_mapping
 from .domains import raw_domain_layer
+from .secrets import merge_secret_layers, raw_secret_layer
 from .wordpress_runtime import raw_wordpress_runtime_layer
 
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _DEFAULT_RESOURCES = {"cpus": 2.0, "memoryMB": 4096, "pids": 512}
+
+
+def _reject_php_extensions(document: object) -> None:
+    """Generic Compose does not own PHP extension provisioning.
+
+    The descriptor is still parsed far enough to give a deterministic error;
+    no user-supplied image/package/build instructions are inferred.
+    """
+    if isinstance(document, dict) and "phpExtensions" in document:
+        raise ValueError(
+            "generic Compose projects do not support phpExtensions; "
+            "declare a WordPress PHP runtime adapter"
+        )
 
 
 def _valid_port(value: object) -> bool:
@@ -26,32 +40,43 @@ class ComposeSchemaProvider:
     def resolve(self, root: Path, *, label: str | None = None) -> dict:
         if label is not None and (not isinstance(label, str) or not _SAFE_LABEL.fullmatch(label)):
             raise ValueError("compose configuration label is invalid")
-        config_path = next((root / name for name in ("sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml") if (root / name).exists()), None)
+        home = config_home(root)
+        config_path = primary_config(root)
         if config_path is None:
             raise ValueError("generic Compose project requires sandbox.config.json or sandbox.config.yml")
         document = _load_mapping(config_path)
+        _reject_php_extensions(document)
         project_domains = raw_domain_layer(document)
         project_runtime = raw_wordpress_runtime_layer(document)
+        project_secrets = raw_secret_layer(document)
         machine_domains = {}
         machine_runtime = {}
-        override = next((root / name for name in (
+        machine_secrets = {}
+        override = config_layer(root, (
             "sandbox.config.override.json", "sandbox.config.override.yml",
             "sandbox.config.override.yaml",
-        ) if (root / name).exists()), None)
+        ), home=home)
         if override is not None:
             override_doc = _load_mapping(override)
+            _reject_php_extensions(override_doc)
             document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
             document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
             machine_domains.update(raw_domain_layer(override_doc))
             machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
+            merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
         if label:
-            override = next((root / f"sandbox.config.{label}{suffix}" for suffix in (".json", ".yml", ".yaml") if (root / f"sandbox.config.{label}{suffix}").exists()), None)
+            override = config_layer(root, tuple(
+                f"sandbox.config.{label}{suffix}"
+                for suffix in (".json", ".yml", ".yaml")
+            ), home=home)
             if override is not None:
                 override_doc = _load_mapping(override)
+                _reject_php_extensions(override_doc)
                 document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
                 document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
                 machine_domains.update(raw_domain_layer(override_doc))
                 machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
+                merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
@@ -125,4 +150,6 @@ class ComposeSchemaProvider:
                                  "machine_override": machine_domains},
                 "_wordpress_runtime_raw": {"project": project_runtime,
                                             "machine_override": machine_runtime},
+                "_secrets_raw": {"project": project_secrets,
+                                  "machine_override": machine_secrets},
                 "root": str(root), "source": config_path.name}

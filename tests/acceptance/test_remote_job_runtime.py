@@ -82,7 +82,7 @@ class DurableRuntimeAcceptanceFixtures(unittest.TestCase):
         ])
         self.assertEqual({child["workspace"] for child in matrix["children"]}, {"cell-a", "cell-b"})
         workspaces = WorkspaceService(_LocalTarget(), JobStorage(root, free_disk_reserve=0))
-        request = TargetRequest(root, local=True, workspace="reuse")
+        request = TargetRequest(root, local=True, workspace="reuse", confirm=True)
         self.assertTrue(workspaces.create(request)["created"])
         self.assertFalse(workspaces.create(request)["created"])
         self.assertTrue(workspaces.reset(request)["reset"])

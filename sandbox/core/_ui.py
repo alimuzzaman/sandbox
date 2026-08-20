@@ -35,17 +35,27 @@ class _RunResult:
 
 
 def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
+    if capture and (kw.get("stdin") is not None or kw.get("stdout") is not None):
+        raise ValueError("capture cannot be combined with explicit stdin/stdout")
     if not capture:
         print(f"  $ {' '.join(cmd)}")
 
     # Web-streaming path: only when not capturing (capture callers want the
     # buffered value back) and the flag is on. Merge stderr into stdout and
     # echo each line as it arrives so the console tails the real output.
-    if _WEB_STREAM[0] and not capture:
-        kw.pop("capture_output", None)
+    # An explicit stdout sink is used for streaming large artifacts directly
+    # to a host-owned file. Never replace it with the web console's merged pipe.
+    # stdin-only callers still use this path so their input is forwarded while
+    # output remains live in the web console.
+    if (_WEB_STREAM[0] and not capture and kw.get("stdout") is None):
+        popen_kw = dict(kw)
+        popen_kw.pop("capture_output", None)
+        # subprocess.Popen has no timeout keyword; compose passes its optional
+        # timeout through this layer, so omit it from the streaming constructor.
+        popen_kw.pop("timeout", None)
         proc = subprocess.Popen(cmd, text=True, cwd=str(ROOT),
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, **kw)
+                                stderr=subprocess.STDOUT, **popen_kw)
         collected = []
         for line in proc.stdout:
             collected.append(line)
@@ -55,8 +65,13 @@ def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
             sys.exit(proc.returncode)
         return _RunResult(proc.returncode, "".join(collected))
 
-    res = subprocess.run(cmd, check=False, text=True,
-                         capture_output=capture, cwd=str(ROOT), **kw)
+    # Leave capture_output unset for ordinary commands.  Besides preserving
+    # subprocess's normal stdout/stderr inheritance, this matters for explicit
+    # file sinks: callers must receive the exact sink they supplied rather than
+    # an implicit capture request that conflicts with it.
+    if capture:
+        kw["capture_output"] = True
+    res = subprocess.run(cmd, check=False, text=True, cwd=str(ROOT), **kw)
     if check and res.returncode != 0:
         sys.exit(res.returncode)
     return res

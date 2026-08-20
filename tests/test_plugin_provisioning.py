@@ -113,6 +113,37 @@ class PluginActivationOrderTests(unittest.TestCase):
     @patch("sandbox.core._provision.wpcli")
     @patch("sandbox.core._provision.plugins_dir")
     @patch("sandbox.core._provision.wp_dir")
+    def test_missing_inactive_query_monitor_is_installed_then_deactivated(
+            self, wp_dir, plugins_dir, wpcli, _gate, _write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            provision._wire_project_plugins("fixture", str(root), {
+                "plugins_resolved": {
+                    "query-monitor": {
+                        "source": {"kind": "org", "value": None},
+                        "active": False,
+                        "on_demand": False,
+                    },
+                },
+            })
+
+            calls = [call.args[0] for call in wpcli.call_args_list]
+            self.assertEqual(calls, [
+                ["plugin", "install", "query-monitor"],
+                ["plugin", "deactivate", "query-monitor", "--skip-plugins"],
+            ])
+            self.assertFalse(any(call[:2] == ["plugin", "activate"] for call in calls))
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.wpcli")
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
     def test_missing_ondemand_path_stays_registered_for_fail_closed_install(
             self, wp_dir, plugins_dir, wpcli, _gate, write_sources):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,7 +163,7 @@ class PluginActivationOrderTests(unittest.TestCase):
             })
 
             write_sources.assert_called_once_with(
-                "fixture", {"optional": {"path": str(root / "missing-checkout")}})
+                "fixture", {"optional": {"path": str((root / "missing-checkout").resolve())}})
             self.assertEqual(wpcli.call_count, 0)
 
     @patch("sandbox.core._provision._managed_execution_gate", return_value=None)

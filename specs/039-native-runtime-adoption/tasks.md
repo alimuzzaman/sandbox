@@ -277,3 +277,35 @@ T023 credential/FD tests
 - [X] T079 Revalidate the digest-bound active egress-grant broker immediately before every isolated payload launch, with an execution-path regression test, per FR-011 and FR-016 (partial)
 - [ ] T080 Restore and prove the plan's <=3-second managed-host preflight bound before retaining T076 as complete; do not weaken the Spec 039 performance target to the current 6-second harness allowance (contradicts)
 - [X] T081 Record exact source revision/worktree identity and durable-job identifiers in generated live acceptance evidence, with harness coverage, per the evidence-index provenance contract and T077 (partial)
+
+## Phase 10: Convergence — 2026-08-13 (PHP extension requirements)
+
+These tasks record the implementation work and retain the remaining unsupported/live
+boundaries explicitly; a checked regression task is not remote release evidence.
+
+- [x] T082 [US1] Add failing schema/catalog tests for omitted `phpExtensions`, immutable
+  `wordpress@1`, required/recommended WordPress sets, shorthand/canonical states,
+  exact/`X.Y.*`/`php` versions, unknowns, profile conflicts, and pre-mutation refusal.
+- [x] T088 [US1/US2] Add manifest-policy regressions proving only explicitly
+  INI-disableable modules may honor `disabled`; all other disabled requests return
+  `unsupported_disable` without editing global/unknown INI state.
+- [x] T089 [US1/US2] Add image-capability regressions proving omitted GD/Imagick is
+  accepted only when a fresh plane observes one enabled or the official-image planner
+  provisions the allowlisted default GD; otherwise return `missing_capability` before
+  mutation (including both explicitly disabled).
+- [x] T083 [US1/US2] Add failing four-plane probes and readiness tests for web PHP,
+  WP-CLI, bounded exec, and PHPUnit, including exact version mismatch, unobservable
+  version, unsupported disable, and plane-drift classifications.
+- [x] T084 [US1/US2] Add official Apache/nginx allowlisted child-image recipe and digest
+  validation tests; custom images and LiteSpeed must remain validate-only, and generic
+  Compose must refuse the field without touching project-owned images or Compose.
+- [x] T085 [US2] Extend managed-native signed-APT plan fixtures for extension package
+  closure, exact provenance, source/package/image drift, TTY confirmation, host-service
+  preservation, and rejection of arbitrary PECL/packages/URLs/shell/INI inputs.
+- [ ] T086 [US3/US4] Add incumbent Herd/Valet zero-mutation validation tests and CLI/MCP
+  structured status coverage for profile, digest, provenance, plane observations, and
+  all unsupported/failure classes with secret-safe output.
+- [ ] T087 [US1/US2/US4] Add apply/cache regression coverage proving content-addressed
+  cache invalidation and preservation of database volumes, uploads, snapshots, project
+  files, instance identity, and rollback metadata; capture remote GD proof in web,
+  WP-CLI, and PHPUnit environments.

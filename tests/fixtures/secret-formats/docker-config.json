@@ -1,0 +1,11 @@
+{
+  "auths": {
+    "registry.example.invalid": {
+      "auth": "U0JfU1lOVEhFVElDX1VTRVI6U0JfU1lOVEhFVElDX1BBU1NXT1JE"
+    }
+  },
+  "credsStore": "synthetic-helper",
+  "credHelpers": {
+    "registry-helper.example.invalid": "synthetic-helper"
+  }
+}

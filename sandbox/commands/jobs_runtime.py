@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -13,6 +15,7 @@ from pathlib import Path
 from sandbox.application.context import durable_job_dependencies
 from sandbox.application.target_service import TargetResolutionError
 from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.registry import JobNotFound
 from sandbox.registry import CommandSpec, register_specs
 
 
@@ -21,10 +24,50 @@ def _die(message: str) -> None:
     die(message)
 
 
+def _emit_json_line(payload: dict) -> None:
+    """Publish one complete control-plane envelope before process teardown."""
+    encoded = json.dumps(payload, sort_keys=True)
+    print(encoded, flush=True)
+
+
+def _local_job_not_found(job_id: str) -> dict:
+    """Return a stable, path-free recovery receipt for local observation."""
+    return {
+        "ok": False,
+        "code": "job_not_found",
+        "job_id": job_id,
+        "error": "job was not found in the local durable-job ledger",
+        "hint": (
+            "The job may belong to a configured remote; run `./sb remote list` "
+            "and retry `./sb job-status <job-id> --remote <name> --json`."
+        ),
+    }
+
+
 def _source_identity(root: str) -> SourceIdentity:
     # Local execution still has an identity. Remote submission replaces this with
     # the deploy identity returned by the deployment transport before acceptance.
-    return SourceIdentity("sha256:" + hashlib.sha256(str(Path(root)).encode()).hexdigest())
+    canonical_root = str(Path(root).expanduser().resolve())
+    return SourceIdentity("sha256:" + hashlib.sha256(canonical_root.encode()).hexdigest())
+
+
+def _resolved_project_identity(target) -> str:
+    """Return only the resolver-owned canonical project identity.
+
+    A source-root digest is intentionally not a project identity fallback: the
+    same project can be submitted from a staged checkout whose path differs
+    from the caller's canonical root.  Detached nested controllers may pass an
+    explicit identity separately, but every producer that has a resolved target
+    must use this value for ``JobSubmission.project_identity``.
+    """
+    try:
+        value = target.project_identity
+    except (AttributeError, ValueError):
+        sources = getattr(target, "sources", None)
+        value = sources.get("identity") if isinstance(sources, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("resolved target has no canonical project identity")
+    return value
 
 
 def _download_artifact_file(destination: str | Path, metadata: dict, fetch) -> dict:
@@ -90,10 +133,14 @@ def _profile_timeout(target, name: str, explicit: int | None) -> tuple[int, str]
 def configure_start_parser(parser) -> None:
     parser.description = "Start a detached durable job from explicit argv after --."
     parser.add_argument("--project-dir", default=".")
+    parser.add_argument("--project-identity",
+                        help="canonical project identity supplied by a detached controller")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
     parser.add_argument("--workspace")
+    parser.add_argument("--cwd-relative", default=".",
+                        help="working directory relative to the resolved project checkout")
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--stall-seconds", type=int, default=300)
     parser.add_argument("--cancel-on-stall", action="store_true")
@@ -101,6 +148,8 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--output-profile", default="smart")
     parser.add_argument("--request-id")
     parser.add_argument("--source-identity")
+    parser.add_argument("--source-commit")
+    parser.add_argument("--source-dirty-digest")
     parser.add_argument("--wait", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("command", nargs="...", help="argv after --")
@@ -133,9 +182,14 @@ def configure_output_parser(parser) -> None:
 
 def configure_list_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--project-dir")
+    project = parser.add_mutually_exclusive_group()
+    project.add_argument("--project-dir")
+    project.add_argument("--project-identity", help=argparse.SUPPRESS)
     parser.add_argument("--workspace")
     parser.add_argument("--active-only", action="store_true")
+    parser.add_argument("--lifecycle", help=argparse.SUPPRESS)
+    parser.add_argument("--kind", help=argparse.SUPPRESS)
+    parser.add_argument("--cursor-job-id", help=argparse.SUPPRESS)
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -206,6 +260,8 @@ def configure_retention_parser(parser) -> None:
 def configure_matrix_parser(parser) -> None:
     parser.description = "Fan out one explicit argv into isolated durable workspace jobs."
     parser.add_argument("--project-dir", default=".")
+    parser.add_argument("--project-identity",
+                        help="canonical project identity supplied by a detached controller")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
@@ -219,7 +275,7 @@ def configure_matrix_parser(parser) -> None:
 
 
 def cmd_job_start(_cfg, args) -> None:
-    command = list(args.command or ())
+    command = list(getattr(args, "command", ()) or ())
     if command[:1] == ["--"]:
         command = command[1:]
     if not command:
@@ -227,22 +283,34 @@ def cmd_job_start(_cfg, args) -> None:
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(
-            project_dir=args.project_dir, local=args.local, remote=args.remote,
-            workspace=args.workspace, required_capability="job.exec" if args.remote else None,
+            project_dir=getattr(args, "project_dir", "."),
+            local=getattr(args, "local", False), remote=getattr(args, "remote", None),
+            workspace=getattr(args, "workspace", None),
+            required_capability="job.exec" if getattr(args, "remote", None) else None,
         ))
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
-    timeout, profile = _profile_timeout(target, args.profile, args.timeout)
-    source = SourceIdentity(args.source_identity) if args.source_identity else _source_identity(target.project_root)
+    timeout, profile = _profile_timeout(target, getattr(args, "profile", "exec"),
+                                        getattr(args, "timeout", None))
+    source = SourceIdentity(
+        getattr(args, "source_identity", None)
+        or _source_identity(target.project_root).identity,
+        getattr(args, "source_commit", None),
+        getattr(args, "source_dirty_digest", None),
+    )
+    project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
+    output_profile = getattr(args, "output_profile", "smart")
     submission = JobSubmission(
-        kind="exec", project_root=target.project_root, project_identity=hashlib.sha256(target.project_root.encode()).hexdigest(),
+        kind="exec", project_root=target.project_root, project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=timeout, source=source,
-        request_id=args.request_id, execution_profile=profile, output_profile=args.output_profile,
+        request_id=getattr(args, "request_id", None), execution_profile=profile, output_profile=output_profile,
         output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
-                                   .get(args.output_profile)),
-        deadline_source="explicit" if args.timeout else f"profile:{profile}",
-        stall_seconds=args.stall_seconds, cancel_on_stall=args.cancel_on_stall,
+                                   .get(output_profile)),
+        deadline_source="explicit" if getattr(args, "timeout", None) else f"profile:{profile}",
+        cwd_relative=getattr(args, "cwd_relative", "."),
+        stall_seconds=getattr(args, "stall_seconds", 300),
+        cancel_on_stall=getattr(args, "cancel_on_stall", False),
     )
     if target.kind == "remote":
         from sandbox.core import _remote
@@ -252,15 +320,15 @@ def cmd_job_start(_cfg, args) -> None:
             remote_sb_path=_remote.remote_sb_path).submit(submission)
     else:
         accepted = dependencies["job_service"].submit(submission)
-    if args.wait and target.kind != "remote":
+    if getattr(args, "wait", False) and target.kind != "remote":
         while True:
             state = dependencies["job_service"].get(accepted["job_id"])
             if state["lifecycle"] in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
                 accepted["result"] = state
                 break
             time.sleep(.2)
-    if args.json:
-        print(json.dumps(accepted, sort_keys=True))
+    if getattr(args, "json", False):
+        _emit_json_line(accepted)
     else:
         target_info = accepted.get("target", {})
         target_name = target_info.get("remote") or target_info.get("kind", target.kind)
@@ -276,7 +344,14 @@ def cmd_job_status(_cfg, args) -> None:
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
     else:
-        result = durable_job_dependencies()["job_service"].get(args.job_id)
+        try:
+            result = durable_job_dependencies()["job_service"].get(args.job_id)
+        except JobNotFound:
+            missing = _local_job_not_found(args.job_id)
+            if args.json:
+                print(json.dumps(missing, sort_keys=True))
+                raise SystemExit(1)
+            _die(f"{missing['code']}: {missing['error']}. {missing['hint']}")
     if args.json:
         print(json.dumps({"ok": True, **result}, sort_keys=True))
         return
@@ -335,26 +410,79 @@ def cmd_job_output(_cfg, args) -> None:
 
 
 def cmd_job_list(_cfg, args) -> None:
-    if args.remote:
+    remote_name = getattr(args, "remote", None)
+    project_dir = getattr(args, "project_dir", None)
+    explicit_identity = getattr(args, "project_identity", None)
+    if (explicit_identity is not None
+            and not re.fullmatch(r"(?:project:)?[a-f0-9]{64}", explicit_identity)):
+        raise ValueError(
+            "project identity must be project:<sha256> or a legacy 64-character lowercase SHA-256 digest"
+        )
+    workspace = getattr(args, "workspace", None)
+    active_only = getattr(args, "active_only", False)
+    lifecycle = getattr(args, "lifecycle", None)
+    category = getattr(args, "kind", None)
+    cursor_job_id = getattr(args, "cursor_job_id", None)
+    limit = getattr(args, "limit", 50)
+    dependencies = durable_job_dependencies()
+    project_identity = explicit_identity
+    if project_identity is None and project_dir:
+        target_service = dependencies.get("target_service")
+        if target_service is not None:
+            try:
+                target = target_service.resolve(TargetRequest(
+                    project_dir, local=not bool(remote_name), remote=remote_name,
+                    workspace=workspace,
+                ))
+                project_identity = _resolved_project_identity(target)
+            except TargetResolutionError as exc:
+                _die(f"{exc.code}: {exc}")
+        else:
+            _die("workspace_identity_unavailable: canonical target resolver is unavailable")
+    if remote_name:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        list_options = {
+            "limit": limit, "project_identity": project_identity,
+            "workspace": workspace, "active_only": active_only,
+        }
+        if lifecycle:
+            list_options["lifecycle"] = lifecycle
+        if category:
+            list_options["kind"] = category
+        if cursor_job_id:
+            list_options["cursor_job_id"] = cursor_job_id
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(args.remote, limit=args.limit,
-                project_dir=args.project_dir, workspace=args.workspace, active_only=args.active_only)
-        result = result.get("jobs", result)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(
+                remote_name, **list_options)
     else:
-        from pathlib import Path
-        query = {"limit": args.limit}
-        if args.project_dir:
-            query["project_identity"] = hashlib.sha256(
-                str(Path(args.project_dir).expanduser().resolve()).encode()).hexdigest()
-        if args.workspace:
-            query["workspace_label"] = args.workspace
-        result = durable_job_dependencies()["job_service"].list(query)
-    if args.active_only:
+        query = {"limit": limit}
+        if project_identity:
+            query["project_identity"] = project_identity
+        if workspace:
+            query["workspace_label"] = workspace
+        if lifecycle:
+            query["lifecycle"] = lifecycle
+        if category:
+            query["kind"] = category
+        if cursor_job_id:
+            query["cursor_job_id"] = cursor_job_id
+        if active_only:
+            query["active_only"] = True
+        result = dependencies["job_service"].list(query)
+    # The application service returns a list while remote control returns a
+    # bounded JobPage object. Normalize both at this adapter boundary so the
+    # public envelope remains exactly {ok, jobs} for every caller.
+    if isinstance(result, dict):
+        if result.get("ok") is False:
+            _die(str(result.get("error") or result.get("code") or "job list failed"))
+        result = result.get("jobs")
+    if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+        _die("job list returned an invalid page")
+    if active_only:
         result = [item for item in result if item.get("lifecycle") in {
             "accepted", "queued", "running", "cancelling"}]
-    if args.json:
+    if getattr(args, "json", False):
         print(json.dumps({"ok": True, "jobs": result}, sort_keys=True))
     else:
         for item in result:
@@ -538,7 +666,7 @@ def cmd_declared_test_plan(_cfg, args) -> None:
     if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or not 1 <= max_parallel <= 64:
         _die(f"declared test plan {args.plan!r} has an invalid maxParallel")
     source = _source_identity(target.project_root)
-    project_identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     submissions = []
     for index, step in enumerate(raw_steps):
         argv = step.get("argv")
@@ -609,7 +737,7 @@ def cmd_job_matrix(_cfg, args) -> None:
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
     source = _source_identity(target.project_root)
-    project_identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    project_identity = _resolved_project_identity(target)
     if args.spec_json:
         try:
             decoded = base64.b64decode(args.spec_json.encode(), validate=True).decode()
@@ -641,7 +769,7 @@ def cmd_job_matrix(_cfg, args) -> None:
                         raise ValueError("matrix project directory must remain under the deployed project")
                 submissions.append(JobSubmission(
                     kind=item.get("kind", "test"), project_root=project_root,
-                    project_identity=hashlib.sha256(project_root.encode()).hexdigest(), target_kind=target.kind,
+                    project_identity=item.get("project_identity", project_identity), target_kind=target.kind,
                     remote_name=target.remote_name, workspace_label=item["workspace"],
                     argv=tuple(item["argv"]), deadline_seconds=item.get("timeout", args.timeout),
                     source=SourceIdentity(**item.get("source", {"identity": source.identity})),

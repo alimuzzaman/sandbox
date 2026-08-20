@@ -5,7 +5,91 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+- `sb apply --project-dir` / `apply_config` now reconcile WordPress core itself:
+  a pinned `wpVersion` is installed exactly (`wp core update --version=<pin>
+  --force`, upgrade or downgrade) and an UNPINNED project is moved to the
+  current release, each followed by `wp core update-db` (`--network` on
+  multisite). Core lives in the bind mount and survives every container
+  recreate, so editing or deleting a pin previously changed nothing about a
+  running instance. Non-fatal: a failed update warns and leaves the site on its
+  current core. Reported as `wp_core: {from, to, changed}`.
+- The version-drift warning on `ensure` now points at `./sb apply` (which
+  reconciles both pins in place) instead of telling the operator to delete and
+  recreate the instance.
+
+### Docs
+- `wpVersion` is documented as an EXACT build, not a version line: `"7.0"` is
+  the 7.0.0 release and never tracks 7.0.4. Leave it unset unless one specific
+  build is required; the `bug-repro` and `sandbox-cli` skills now say so at the
+  point where a reported stack gets transcribed into config.
+- Corrected the stale server/pin table in `docs/sandbox-config-reference.md`:
+  `wpVersion` never enters an image tag on ANY server — every stack downloads
+  core in-container.
+
+## [0.2.2] — 2026-08-13
+
+### Fixed
+- Remote resource observation now converts a client-side SSH timeout into
+  structured `timed_out` partial evidence instead of leaking a traceback or
+  retrying an ambiguous probe.
+
+## [0.2.1] — 2026-08-13
+
+### Fixed
+- Feedback list date filters now return RFC 3339 strings in JSON response
+  receipts instead of leaking internal `datetime` objects to the encoder.
+- Detached `job-start --json` acceptance is flushed as one complete line after
+  durable acceptance, while replay-safe request guidance treats missing output
+  as unknown rather than success.
+
+## [0.2.0] — 2026-08-13
+
+### Added
+- Durable, owner-only workspace identity and migration index with byte-preserved
+  legacy metadata, checkout-independent CLI/MCP controls, and plan-bound migration.
+- WordPress PHP-extension requirements, deterministic image/package planning,
+  four-plane verification, and rollback-safe apply behavior.
+- Secret-redacted feedback detail/export/retention controls and conservative
+  workspace-aware resource ownership diagnostics.
+- A confirmation-gated `remote docker-pool` transaction that backs up and
+  validates Docker daemon configuration, restarts Docker, recovers previously
+  running containers, and reports only bounded host-capacity evidence.
+- Restart-state-backed, confirmation-gated recovery for containers stopped by an
+  interrupted Docker-pool transaction.
+- A read-only `remote domains` inventory combining instance-registry URLs with
+  Sandbox-owned Caddy routes without returning login tokens or route contents.
+
+### Changed
+- Remote job and workspace protocols now use canonical project identity, durable
+  acceptance receipts, and strict top-level response envelopes.
+- Remote deployment and hosting preserve exact nested source roots and immutable
+  source provenance.
+- Agents must verify local and installed remote revisions before depending on a
+  changed CLI/MCP protocol.
+- Remote revision receipts now cover every shipped CLI, service, workspace, and
+  MCP Python source instead of a small proxy subset.
+
+### Security
+- Destructive restore requires explicit confirmation.
+- Workspace migration is metadata-only and cannot authorize workspace destruction,
+  network cleanup, or ambiguous ownership adoption.
+
+### Fixed
+- `job-list --active-only` now applies the active-lifecycle predicate before the
+  bounded page, preventing older active jobs from disappearing behind newer
+  terminal records.
+
 ## [Unreleased] — v1.0.0 target
+
+### Fixed
+- Local `job-status --json` now returns a stable `job_not_found` receipt with
+  an explicit configured-remote retry hint instead of leaking a registry traceback.
+- Confirmed remote provisioning now keeps an owner-only, redacted milestone
+  journal and exposes incomplete prior attempts in the next plan instead of
+  leaving a receipt-less update opaque.
 
 ### Added
 - `./sb smoke` — self-test subcommand: boots a fresh instance, verifies WP + REST, tears down.
@@ -25,6 +109,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Caddy route, so a failed proxy step no longer leaves an unrepairable half-state.
 - `domains setup` wires new routes before deciding each site's URL, so freshly
   assigned domains reach WP's `siteurl`/`home` instead of staying on localhost.
+- Snapshot database capture and restore now stream through host-owned `0600`
+  files instead of bind-mounting snapshot directories, avoiding remote
+  `Permission denied` without chowning paths to MariaDB's `mysql` UID or
+  weakening global permissions.
 
 ---
 

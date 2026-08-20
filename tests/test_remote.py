@@ -11,14 +11,17 @@ live-verification pass against a real VPS.
 """
 import json
 import importlib.util
+import io
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -377,6 +380,41 @@ class TestRemoteDiagnostics(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "bearer token"):
             sr.remote_diagnostics({"control_url": "https://control.example.test"})
 
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_verify_remote_returns_safe_authenticated_envelope(self, urlopen):
+        response = MagicMock(status=400)
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        token = "super-secret-token"
+        result = sr.verify_remote({
+            "control_url": "https://control.example.test",
+            "bearer_token": token,
+            "mcp_service": {"runtime_revision": "abc123"},
+        }, name="myvps")
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(result["endpoint"], {"scheme": "https", "host": "control.example.test"})
+        self.assertEqual(result["revision"], "abc123")
+        self.assertNotIn(token, json.dumps(result))
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
+
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_verify_remote_redacts_auth_failure_and_userinfo(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://control.example.test/mcp", 401, "Unauthorized", {}, None,
+        )
+        result = sr.verify_remote({
+            "control_url": "https://control.example.test",
+            "bearer_token": "secret-token",
+        })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "remote_auth_failed")
+        with self.assertRaisesRegex(RuntimeError, "auth_verification_unavailable"):
+            sr.verify_remote({
+                "control_url": "https://user:password@control.example.test",
+                "bearer_token": "secret-token",
+            })
+
 
 class TestCheckReachable(unittest.TestCase):
     @patch("subprocess.run")
@@ -433,6 +471,143 @@ class TestDeployTargetPath(unittest.TestCase):
 
 
 class TestPushCommits(unittest.TestCase):
+    def test_nested_source_root_pushes_subtree_without_outer_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-secret.txt").write_text("must stay outside\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "site/compose.yml", "outer-secret.txt"],
+                           cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "initial",
+            ], cwd=outer, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (source / "dirty.yml").write_text("services: {}\n")
+            push_calls = []
+            real_run = sr.subprocess.run
+
+            def run(*args, **kwargs):
+                argv = args[0]
+                if argv[:2] == ["git", "push"]:
+                    push_calls.append(argv)
+                    return _completed(returncode=0)
+                return real_run(*args, **kwargs)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr.subprocess, "run", side_effect=run):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", "main",
+                    source_root=source,
+                )
+
+            self.assertEqual(len(push_calls), 1)
+            source_spec = push_calls[0][-1]
+            self.assertTrue(source_spec.startswith(
+                f"{pushed}:refs/heads/sandbox-source-{pushed}"
+            ))
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", pushed],
+                cwd=outer, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(committed, ["compose.yml"])
+            self.assertNotIn("outer-secret.txt", committed)
+
+    def test_nested_source_ref_keeps_immutable_ref_and_subtree_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-only.txt").write_text("outside\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "."], cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "initial",
+            ], cwd=outer, check=True)
+            source_ref = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            push_calls = []
+            real_run = sr.subprocess.run
+
+            def run(*args, **kwargs):
+                argv = args[0]
+                if argv[:2] == ["git", "push"]:
+                    push_calls.append(argv)
+                    return _completed(returncode=0)
+                return real_run(*args, **kwargs)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr.subprocess, "run", side_effect=run):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", None,
+                    source_ref="HEAD", resolved_sha=source_ref, source_root=source,
+                )
+
+            self.assertEqual(len(push_calls), 1)
+            self.assertIn(f"refs/heads/sandbox-source-{pushed}", push_calls[0][-1])
+            self.assertNotEqual(pushed, source_ref)
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", pushed],
+                cwd=outer, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(committed, ["compose.yml"])
+
+    def test_nested_source_root_avoids_preseeded_full_tree_branch(self):
+        """A legacy full-tree branch must survive nested subtree deployment."""
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-only.txt").write_text("legacy outer file\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "."], cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "legacy full tree",
+            ], cwd=outer, check=True)
+            full_tree_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            bare = outer / "target.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+            subprocess.run([
+                "git", "push", str(bare), f"{full_tree_sha}:refs/heads/main",
+            ], cwd=outer, check=True, capture_output=True, text=True)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr, "git_ssh_url", return_value=str(bare)):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", "main",
+                    source_root=source,
+                )
+
+            main_names = subprocess.run(
+                ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "refs/heads/main"],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            staging_ref = f"refs/heads/sandbox-source-{pushed}"
+            staged_names = subprocess.run(
+                ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", staging_ref],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(main_names, ["outer-only.txt", "site/compose.yml"])
+            self.assertEqual(staged_names, ["compose.yml"])
+
     @patch("subprocess.run")
     def test_pushes_head_to_the_correct_branch_and_url(self, mock_run):
         # first call: git push; second call: git rev-parse HEAD
@@ -524,8 +699,58 @@ class TestPushCommits(unittest.TestCase):
         push_args = mock_run.call_args_list[0][0][0]
         self.assertNotIn("origin", push_args)
 
+    @patch("subprocess.run")
+    def test_source_ref_resolves_full_sha_and_rejects_dirty_tree(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="A" * 40 + "\n"),
+            _completed(returncode=0, stdout="diff --git a/x b/x\n"),
+            _completed(returncode=0, stdout=""),
+        ]
+        with self.assertRaisesRegex(ValueError, "clean working tree"):
+            sr.resolve_source_ref("/local/proj", "refs/tags/v1")
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertTrue(all("commit" not in " ".join(map(str, call.args[0]))
+                            for call in mock_run.call_args_list[1:]))
+
+    @patch("subprocess.run")
+    def test_source_ref_push_uses_sha_derived_immutable_destination(self, mock_run):
+        sha = "b" * 40
+        mock_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/local/proj", "/srv/deploy/proj",
+                    None, source_ref="refs/tags/v1", resolved_sha=sha,
+                )
+        self.assertEqual(pushed, sha)
+        push_args = mock_run.call_args_list[0].args[0]
+        self.assertIn(f"{sha}:refs/heads/sandbox-source-{sha}", push_args)
+        self.assertNotIn("git commit", " ".join(push_args))
+        self.assertNotIn("git stash", " ".join(push_args))
+
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
+    def test_appledouble_filter_is_basename_only(self):
+        kept, skipped = sr.filter_appledouble_paths([
+            "._root-sidecar", "nested/._nested-sidecar", ".env",
+            "nested/.env", "notes._suffix",
+        ])
+        self.assertEqual(skipped, 2)
+        self.assertEqual(kept, [".env", "nested/.env", "notes._suffix"])
+
+    def test_deploy_descriptor_includes_primary_but_not_machine_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sandbox.config.json").write_text('{"slug":"demo"}')
+            (root / "sandbox.config.override.json").write_text(
+                '{"plugins":{"private":"/machine/path"}}'
+            )
+
+            self.assertEqual(
+                sr.deploy_project_descriptor_files(root),
+                ["sandbox.config.json"],
+            )
+
     @patch("subprocess.run")
     def test_capture_returns_diff_and_untracked_files(self, mock_run):
         mock_run.side_effect = [
@@ -535,6 +760,40 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         diff_text, untracked = sr.capture_uncommitted("/local/proj")
         self.assertIn("diff --git", diff_text)
         self.assertEqual(untracked, ["new-file.txt", "sub/new2.txt"])
+
+    @patch("subprocess.run")
+    def test_capture_excludes_appledouble_untracked_but_keeps_dotfiles(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=""),
+            _completed(
+                returncode=0,
+                stdout=(
+                    "?? ._root-sidecar\n"
+                    "?? .env\n"
+                    "?? nested/._nested-sidecar\n"
+                    "?? nested/.env\n"
+                ),
+            ),
+        ]
+        diagnostic = StringIO()
+        with redirect_stderr(diagnostic):
+            diff_text, untracked = sr.capture_uncommitted("/local/proj")
+        self.assertEqual(diff_text, "")
+        self.assertEqual(untracked, [".env", "nested/.env"])
+        self.assertIn("skipped 2", diagnostic.getvalue())
+        self.assertNotIn("._root-sidecar", diagnostic.getvalue())
+        self.assertNotIn("nested/._nested-sidecar", diagnostic.getvalue())
+
+    @patch("subprocess.run")
+    def test_capture_ignores_tracked_appledouble_only_diff(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="diff --git a/._tracked b/._tracked\n"),
+            _completed(returncode=0, stdout=" M ._tracked\n"),
+        ]
+        with redirect_stderr(StringIO()):
+            diff_text, untracked = sr.capture_uncommitted("/local/proj")
+        self.assertEqual(diff_text, "")
+        self.assertEqual(untracked, [])
 
     @patch("subprocess.run")
     def test_uses_untracked_files_all_so_nested_new_files_are_not_collapsed(self, mock_run):
@@ -639,6 +898,50 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             self.assertIn("b.php", tar_args)
             mock_ssh_run.assert_called_once()
             self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", mock_ssh_run.call_args[0][1])
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_dirty_archive_excludes_sidecars_and_preserves_dotfiles_bytes(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as d:
+            project = Path(d)
+            nested = project / "nested"
+            nested.mkdir()
+            (project / "._root-sidecar").write_bytes(b"sidecar-root")
+            (nested / "._nested-sidecar").write_bytes(b"sidecar-nested")
+            (project / ".env").write_bytes(b"SECRET=keep-this-byte-sequence\x00\xff")
+            (nested / ".env").write_bytes(b"NESTED=keep")
+            (project / "ordinary.bin").write_bytes(b"\x00\x01\xfe\xff")
+            untracked = [
+                "._root-sidecar", "nested/._nested-sidecar", ".env",
+                "nested/.env", "ordinary.bin",
+            ]
+            diagnostic = StringIO()
+            with redirect_stderr(diagnostic):
+                applied = sr.apply_uncommitted(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/remote/project", project,
+                    "", untracked,
+                )
+            self.assertEqual(applied, 3)
+            self.assertIn("skipped 2", diagnostic.getvalue())
+            self.assertNotIn("._root-sidecar", diagnostic.getvalue())
+            archive_bytes = mock_ssh_run.call_args.kwargs["input_data"]
+            with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+                members = {
+                    member.name[2:] if member.name.startswith("./") else member.name
+                    for member in archive.getmembers()
+                }
+                self.assertEqual(
+                    members,
+                    {".env", "nested/.env", "ordinary.bin"},
+                )
+                files = {
+                    (member.name[2:] if member.name.startswith("./") else member.name):
+                    archive.extractfile(member).read()
+                    for member in archive.getmembers() if member.isfile()
+                }
+                self.assertEqual(files[".env"], b"SECRET=keep-this-byte-sequence\x00\xff")
+                self.assertEqual(files["nested/.env"], b"NESTED=keep")
+                self.assertEqual(files["ordinary.bin"], b"\x00\x01\xfe\xff")
 
     @patch("sandbox.core._remote.ssh_run_batch")
     @patch("subprocess.run")
@@ -764,6 +1067,8 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertIn(".cli-venv", tar_args)
         self.assertIn("mcp/wp-server/.venv", tar_args)
         self.assertIn("runtime", tar_args)
+        self.assertIn("._*", tar_args)
+        self.assertIn("*/._*", tar_args)
         self.assertEqual(mock_run.call_args_list[0][1]["cwd"], str(ROOT))
 
         ssh_args = mock_run.call_args_list[1][0][0]
@@ -773,6 +1078,41 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertNotIn("rm -rf", ssh_args[-1])
         self.assertEqual(mock_run.call_args_list[1][1]["input"], b"tarball")
         self.assertFalse(mock_run.call_args_list[1][1]["text"])
+
+    def test_upload_runtime_source_archive_excludes_sidecars_and_preserves_dotfiles(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sandbox").mkdir()
+            (root / "nested").mkdir()
+            (root / "._runtime-sidecar").write_bytes(b"sidecar")
+            (root / "nested" / "._runtime-nested-sidecar").write_bytes(b"sidecar")
+            (root / ".env").write_bytes(b"RUNTIME=keep\x00\xff")
+            (root / "nested" / ".gitignore").write_bytes(b"*.tmp\n")
+            (root / "ordinary.bin").write_bytes(b"\x00\x01\xfe\xff")
+            ssh_result = _completed(returncode=0, stdout=b"", stderr=b"")
+            with patch.object(remote_cmd, "ROOT", root), \
+                 patch.object(sr, "ssh_process", return_value=ssh_result) as ssh, \
+                 redirect_stderr(StringIO()) as diagnostic:
+                remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+            payload = ssh.call_args.kwargs["input_data"]
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                members = {
+                    member.name[2:] if member.name.startswith("./") else member.name
+                    for member in archive.getmembers()
+                }
+                self.assertEqual(
+                    members,
+                    {".", "sandbox", "nested", ".env", "nested/.gitignore", "ordinary.bin"},
+                )
+                files = {
+                    (member.name[2:] if member.name.startswith("./") else member.name):
+                    archive.extractfile(member).read()
+                    for member in archive.getmembers() if member.isfile()
+                }
+                self.assertEqual(files[".env"], b"RUNTIME=keep\x00\xff")
+                self.assertEqual(files["nested/.gitignore"], b"*.tmp\n")
+                self.assertEqual(files["ordinary.bin"], b"\x00\x01\xfe\xff")
+            self.assertNotIn("._runtime-sidecar", diagnostic.getvalue())
 
     @patch("subprocess.run")
     def test_upload_runtime_source_uses_custom_ssh_port(self, mock_run):
@@ -806,6 +1146,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control_host = "sandbox.example.com"
                 args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)), \
+                     patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "configure_https_proxy"), \
                      patch.object(sr, "start_remote_mcp_server"), \
                      patch("builtins.print") as mock_print:
@@ -816,6 +1157,14 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertNotIn("token", json.dumps(result).lower())
                 self.assertEqual(result["control_transport"], "https")
                 self.assertEqual(result["control_url"], "https://sandbox.example.com")
+                self.assertEqual(result["provision_log"]["status"], "complete")
+                journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
+                self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+                events = json.loads(journal.read_text())["events"]
+                self.assertEqual([event["stage"] for event in events], [
+                    "started", "runtime_staging", "runtime_staged", "bootstrap_running",
+                    "bootstrap_complete", "control_service_starting", "complete",
+                ])
 
     def test_provision_can_explicitly_use_tailscale(self):
         with tempfile.TemporaryDirectory() as d:
@@ -827,6 +1176,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control_host = None
                 args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
+                     patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
                      patch.object(sr, "start_remote_mcp_server"), \
                      patch("builtins.print") as mock_print:
@@ -867,6 +1217,42 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertEqual(payload["status"], "planned")
                 self.assertFalse(payload["provisioned"])
                 self.assertTrue(payload["data"]["requires_confirm"])
+
+    def test_failed_staging_leaves_a_redacted_owner_only_journal(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = types.SimpleNamespace(name="myvps", control="https",
+                                             control_host="sandbox.example.com", confirm=True)
+                with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  side_effect=RuntimeError("token=private-value staging failed")):
+                    with self.assertRaises(SystemExit):
+                        remote_cmd._cmd_provision(args, as_json=True)
+                journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
+                payload = json.loads(journal.read_text())
+                self.assertEqual(payload["status"], "failed")
+                self.assertEqual(payload["events"][-1]["stage"], "runtime_staging_failed")
+                self.assertNotIn("private-value", journal.read_text())
+                self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+
+    def test_next_plan_surfaces_an_incomplete_previous_provision_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"):
+                    journal = remote_cmd._new_provision_log("myvps", "https")
+                    remote_cmd._record_provision_event(journal, "runtime_staged")
+                    args = types.SimpleNamespace(name="myvps", control="https",
+                                                 control_host="sandbox.example.com", confirm=False)
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        remote_cmd._cmd_provision(args, as_json=True)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["previous_provision_log"], {
+                    "log_id": journal["log_id"], "status": "in_progress",
+                    "updated_at": journal["updated_at"],
+                })
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):
@@ -1093,6 +1479,22 @@ class TestRemotePreviewInstances(unittest.TestCase):
         self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_reconcile_remote_instance_applies_deployed_config(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            stdout='progress\n{"instance":"preview-a","wordpress_port":8123}\n'
+        )
+
+        result = sr.reconcile_remote_instance(
+            {"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a"
+        )
+
+        self.assertEqual(result["instance"], "preview-a")
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("apply --project-dir /srv/project", command)
+        self.assertIn("--label preview-a --json", command)
+        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_ensure_remote_instance_reports_timeout_once(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox/sb\n"),
@@ -1148,6 +1550,34 @@ class TestStopRemoteMcpServer(unittest.TestCase):
 
 
 class TestRemoteMcpServiceStatus(unittest.TestCase):
+    def test_runtime_revision_sources_ignore_appledouble_sidecars(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "VERSION").write_text("1.0\n")
+            (root / "sb").write_text("#!/bin/sh\n")
+            (root / "sandbox").mkdir()
+            (root / "sandbox" / "good.py").write_text("value = 1\n")
+            (root / "sandbox" / "._sidecar.py").write_bytes(b"resource-fork")
+            relative = {
+                source.relative_to(root).as_posix()
+                for source in sr._remote_mcp_revision_sources(root)
+            }
+            self.assertIn("sandbox/good.py", relative)
+            self.assertNotIn("sandbox/._sidecar.py", relative)
+
+    def test_runtime_revision_covers_the_shipped_cli_and_mcp_surface(self):
+        root = Path(sr.__file__).resolve().parents[2]
+        relative = {
+            source.relative_to(root).as_posix()
+            for source in sr._remote_mcp_revision_sources(root)
+        }
+        self.assertIn("VERSION", relative)
+        self.assertIn("sb", relative)
+        self.assertIn("sandbox/commands/jobs_runtime.py", relative)
+        self.assertIn("sandbox/workspaces/repository.py", relative)
+        self.assertIn("mcp/wp-server/server.py", relative)
+        self.assertFalse(any(".venv" in source for source in relative))
+
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
@@ -1172,6 +1602,269 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_reports_matching_local_and_installed_runtime_revisions(self, mock_ssh_run):
+        local_revision = sr._remote_mcp_runtime_revision()
+        mock_ssh_run.return_value = _completed(
+            stdout=f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n"
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["local_runtime_revision"], local_revision)
+        self.assertEqual(status["installed_runtime_revision"], local_revision)
+        self.assertEqual(status["runtime_revision_state"], "match")
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_embedded_probe_extracts_hash_after_full_environment_prefix(self, mock_ssh_run):
+        local_revision = sr._remote_mcp_runtime_revision()
+        remote = {
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            unit = Path(temporary) / "sandbox-mcp-remote.service"
+            unit.write_text(
+                "[Service]\n"
+                f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={local_revision}\n"
+            )
+            # Capture the exact embedded parser from the generated SSH command,
+            # execute it against a realistic unit file, then feed its bounded
+            # output through the normal status parser.
+            mock_ssh_run.return_value = _completed()
+            sr.remote_mcp_service_status(remote)
+            command = mock_ssh_run.call_args.args[1]
+            parser = shlex.split(command)[shlex.split(command).index("-c") + 1]
+            probe = subprocess.run(
+                [sys.executable, "-c", parser, str(unit)],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(probe.stdout.strip(), f"remote_revision={local_revision}")
+            mock_ssh_run.return_value = _completed(
+                stdout=f"enabled=enabled\nactive=active\n{probe.stdout}"
+            )
+            status = sr.remote_mcp_service_status(remote)
+        self.assertEqual(status["installed_runtime_revision"], local_revision)
+        self.assertEqual(status["runtime_revision_state"], "match")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_reports_mismatching_runtime_revisions_without_reclassifying_ownership(self, mock_ssh_run):
+        local_revision = "a" * 24
+        installed_revision = "b" * 24
+        mock_ssh_run.return_value = _completed(
+            stdout=f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n"
+        )
+        with patch.object(sr, "_remote_mcp_runtime_revision", return_value=local_revision):
+            record = sr.remote_mcp_service_record("127.0.0.1", 9174)
+            status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": record})
+        self.assertEqual(status["ownership"], "proven")
+        self.assertEqual(status["local_runtime_revision"], local_revision)
+        self.assertEqual(status["installed_runtime_revision"], installed_revision)
+        self.assertEqual(status["runtime_revision_state"], "mismatch")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_distinguishes_unavailable_and_malformed_runtime_revision_evidence(self, mock_ssh_run):
+        remote = {"ssh": "registered-target", "mcp_service": {}}
+        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nremote_revision=unavailable\n")
+        unavailable = sr.remote_mcp_service_status(remote)
+        self.assertIsNone(unavailable["installed_runtime_revision"])
+        self.assertEqual(unavailable["runtime_revision_state"], "unavailable")
+
+        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\nremote_revision=unknown\n")
+        unknown = sr.remote_mcp_service_status(remote)
+        self.assertIsNone(unknown["installed_runtime_revision"])
+        self.assertEqual(unknown["runtime_revision_state"], "unknown")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_rejects_non_hash_remote_revision_values(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            stdout="enabled=enabled\nremote_revision=not-a-revision\n"
+        )
+        status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": {}})
+        self.assertIsNone(status["installed_runtime_revision"])
+        self.assertEqual(status["runtime_revision_state"], "unknown")
+        self.assertNotIn("not-a-revision", json.dumps(status))
+
+
+class TestRemoteDockerPool(unittest.TestCase):
+    def _run_transaction(self, root: Path, *, systemctl_ok: bool = True):
+        binary = root / "bin"
+        binary.mkdir()
+        scripts = {
+            "docker": '''#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args[:2] == ["ps", "-q"]: print("container-one")
+elif args[:2] == ["network", "ls"]: print("network-one")
+elif args[:2] == ["network", "inspect"]:
+    print(json.dumps([{"Id":"a" * 64,"Options":{"com.docker.network.bridge.name":"docker-test"}}]))
+elif args and args[0] == "inspect": print("no")
+raise SystemExit(0)
+''',
+            "ip": '''#!/usr/bin/env python3
+print("[]")
+''',
+            "dockerd": '''#!/usr/bin/env python3
+import json, sys
+path = sys.argv[sys.argv.index("--config-file") + 1]
+json.load(open(path))
+''',
+            "systemctl": "#!/usr/bin/env python3\nraise SystemExit(%d)\n" % (
+                0 if systemctl_ok else 1),
+        }
+        for name, source in scripts.items():
+            target = binary / name
+            target.write_text(source)
+            target.chmod(0o755)
+        config = root / "daemon.json"
+        config.write_text('{"log-driver":"json-file"}\n')
+        config.chmod(0o600)
+        source = sr._remote_docker_pool_program(confirm=True)
+        source = source.replace(
+            'pathlib.Path("/etc/docker/daemon.json")', f'pathlib.Path({str(config)!r})')
+        source = source.replace(
+            'pathlib.Path("/run/lock/sandbox-docker-pool.lock")',
+            f'pathlib.Path({str(root / "transaction.lock")!r})')
+        env = dict(os.environ)
+        env["PATH"] = str(binary) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [sys.executable, "-c", source], text=True, capture_output=True,
+            timeout=15, env=env, check=False)
+        return result, config
+
+    def test_fixed_transaction_program_compiles_and_has_rollback_recovery(self):
+        source = sr._remote_docker_pool_program(confirm=True)
+        compile(source, "<remote-docker-pool>", "exec")
+        self.assertIn('"172.16.0.0/12"', source)
+        self.assertIn('"10.201.0.0/16"', source)
+        self.assertIn('"10.202.0.0/16"', source)
+        self.assertIn('"size": 24', source)
+        self.assertIn("dockerd", source)
+        self.assertIn("rollback_attempted", source)
+        self.assertIn("docker\", \"start", source)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_plan_uses_registered_remote_and_returns_bounded_counts(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "planned", "requires_confirm": True,
+            "network_count": 31, "running_container_count": 74,
+            "restart_policy_none_count": 3,
+            "current_pools_configured": False, "current_pool_count": 0,
+            "current_pools_digest": "sha256:" + "a" * 64,
+            "desired_pools": list(sr.REMOTE_DOCKER_ADDRESS_POOLS),
+            "subnet_capacity": 4608, "restart_required": True,
+            "route_overlap_count": 0, "apply_safe": True,
+        }))
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, confirm=False)
+        self.assertEqual(result["network_count"], 31)
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_structured_apply_failure_is_preserved(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            returncode=3,
+            stdout=json.dumps({
+                "ok": False, "code": "docker_pool_apply_failed",
+                "status": "failed", "message": "unsafe remote detail",
+                "rollback_attempted": True, "rollback_succeeded": True,
+                "containers_missing": 0,
+            }),
+        )
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rollback_attempted"])
+        self.assertEqual(result["message"], "Docker pool update failed")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_remote_response_rejects_unexpected_fields(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "planned", "secret": "must-not-pass",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
+            sr.remote_docker_pool({"ssh": "registered-target"})
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_remote_response_rejects_false_complete_receipt(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "complete",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "incomplete evidence"):
+            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_recovery_plan_requires_exact_bounded_evidence(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "recovery_planned", "requires_confirm": True,
+            "recovery_candidate_count": 20, "recovery_window_seconds": 180,
+            "recovery_expected_count": 72, "recovery_evidence_count": 72,
+            "recovery_removed_count": 0,
+        }))
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, recover_interrupted=True,
+            expected_running=72)
+        self.assertEqual(result["recovery_candidate_count"], 20)
+        decoded_command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", decoded_command)
+
+    def test_transaction_validates_then_applies_and_preserves_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config = self._run_transaction(Path(temporary))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "complete")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                json.loads(config.read_text())["default-address-pools"],
+                list(sr.REMOTE_DOCKER_ADDRESS_POOLS),
+            )
+            self.assertNotIn("log-driver", payload)
+            self.assertEqual(len(list(config.parent.glob("daemon.json.bak-*"))), 1)
+
+    def test_failed_restart_atomically_restores_original_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config = self._run_transaction(
+                Path(temporary), systemctl_ok=False)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["code"], "docker_pool_apply_failed")
+            self.assertEqual(json.loads(config.read_text()), {"log-driver": "json-file"})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+
+class TestRemoteDomainInventory(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_inventory_is_bounded_and_secret_free(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "count": 1, "domains": [{
+                "domain": "example.com", "owners": ["site-production"],
+                "sources": ["instance_registry", "caddy_route"],
+                "statuses": ["ready"],
+            }],
+        }))
+        result = sr.remote_domain_inventory({
+            "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
+        })
+        self.assertEqual(result["domains"][0]["domain"], "example.com")
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_inventory_rejects_unknown_fields(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "count": 0, "domains": [], "secret": "no",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "invalid envelope"):
+            sr.remote_domain_inventory({
+                "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
+            })
+
     @patch("sandbox.core._remote.remote_mcp_service_status")
     @patch("sandbox.core._remote.check_reachable", return_value=True)
     @patch("urllib.request.build_opener")
@@ -1194,6 +1887,22 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_status_json_passes_through_secret_safe_revision_evidence(self):
+        args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
+        status = {
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "runtime_revision_state": "match",
+        }
+        with patch.object(remote_cmd.sr, "get_remote", return_value={
+            "ssh": "ubuntu@1.2.3.4", "bearer_token": "secret-token",
+        }), patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=status), \
+                redirect_stdout(StringIO()) as output:
+            remote_cmd._cmd_service(args, as_json=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["data"], status)
+        self.assertNotIn("secret-token", output.getvalue())
+
     def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
@@ -1356,6 +2065,23 @@ class TestRejectHerdProjects(unittest.TestCase):
 
 
 class TestDeployEnsureExpose(unittest.TestCase):
+    def test_remote_plugin_activation_targets_returned_instance_explicitly(self):
+        remote = {"ssh": "ubuntu@example.test"}
+        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with patch.object(sr, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(sr, "remote_sb_path", return_value="/usr/local/bin/sb"), \
+             patch.object(sr, "ssh_run", return_value=result) as run:
+            sr.activate_remote_plugin(
+                remote, "/srv/deploy/demo", "demo-default", "demo"
+            )
+
+        command = run.call_args.args[1]
+        self.assertIn(
+            "/usr/local/bin/sb --instance demo-default wp plugin activate demo",
+            command,
+        )
+
     def test_default_instance_domain_uses_hyphenated_label_and_slug(self):
         self.assertEqual(
             sr.default_instance_domain("default", "templately.ai.builder"),
@@ -1379,6 +2105,9 @@ class TestDeployEnsureExpose(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
                 args = MagicMock()
@@ -1404,10 +2133,12 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "push_commits", return_value="abc123"), \
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "apply_uncommitted", return_value=0) as mock_overlay, \
                      patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
                      patch.object(sr, "configure_instance_https_route") as mock_route, \
+                     patch.object(sr, "instance_route_hosts", return_value=[]), \
                      patch.object(sr, "set_remote_instance_url") as mock_url, \
                      patch("builtins.print") as mock_print:
                     deploy_cmd.cmd_deploy(None, args)
@@ -1421,6 +2152,13 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
                 )
                 mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
+                mock_overlay.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo", root, "",
+                    ["sandbox.config.json"],
+                )
+                mock_apply.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo"
+                )
                 mock_activate.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo", "demo", "demo"
                 )
@@ -1431,6 +2169,141 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
+
+    def _expose_with_aliases(self, *, alias_arg, project_aliases=None,
+                             existing_routes=(), prune=False):
+        """Run one `deploy --ensure --expose` and report what it routed."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                args.alias = alias_arg
+                args.prune_routes = prune
+                args.pro_plugins = False
+                inst = {"instance": "demo", "label": "default",
+                        "wordpress_port": 8188, "url": "http://localhost:8188"}
+                pconf = {"root": str(root), "slug": "demo"}
+                if project_aliases is not None:
+                    pconf["aliases"] = project_aliases
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value=pconf), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=inst), \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst), \
+                     patch.object(sr, "activate_remote_plugin"), \
+                     patch.object(sr, "configure_instance_https_route") as route, \
+                     patch.object(sr, "instance_route_hosts",
+                                  return_value=list(existing_routes)), \
+                     patch.object(sr, "remove_instance_https_route") as remove, \
+                     patch.object(sr, "set_remote_instance_url"), \
+                     patch("builtins.print") as mock_print:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                routed = [c.args[1] for c in route.call_args_list]
+                removed = [c.args[1] for c in remove.call_args_list]
+                return result, routed, removed
+
+    def test_expose_routes_each_declared_alias_to_the_same_port(self):
+        result, routed, _ = self._expose_with_aliases(
+            alias_arg=["cdn.example.com", "assets.example.com"])
+        # The primary hostname is configured first: a failing alias must never
+        # leave the instance unreachable on its own domain.
+        self.assertEqual(routed, ["default-demo.sandbox.asb.bd",
+                                  "cdn.example.com", "assets.example.com"])
+        self.assertEqual(result["instance"]["alias_urls"],
+                         ["https://cdn.example.com", "https://assets.example.com"])
+
+    def test_expose_falls_back_to_the_project_declaration(self):
+        _, routed, _ = self._expose_with_aliases(
+            alias_arg=None, project_aliases=["cdn.example.com"])
+        self.assertIn("cdn.example.com", routed)
+
+    def test_an_explicit_alias_flag_overrides_the_project_declaration(self):
+        _, routed, _ = self._expose_with_aliases(
+            alias_arg=["only.example.com"], project_aliases=["cdn.example.com"])
+        self.assertIn("only.example.com", routed)
+        self.assertNotIn("cdn.example.com", routed)
+
+    def test_stale_routes_are_reported_but_not_deleted_by_default(self):
+        result, _, removed = self._expose_with_aliases(
+            alias_arg=["cdn.example.com"],
+            existing_routes=["default-demo.sandbox.asb.bd", "cdn.example.com",
+                             "old-name.sandbox.asb.bd"])
+        self.assertEqual(removed, [])
+        self.assertEqual(result["instance"]["stale_routes"],
+                         ["old-name.sandbox.asb.bd"])
+
+    def test_prune_routes_deletes_only_the_undeclared_hostnames(self):
+        result, _, removed = self._expose_with_aliases(
+            alias_arg=["cdn.example.com"],
+            existing_routes=["default-demo.sandbox.asb.bd", "cdn.example.com",
+                             "old-name.sandbox.asb.bd"],
+            prune=True)
+        self.assertEqual(removed, ["old-name.sandbox.asb.bd"])
+        self.assertEqual(result["instance"]["pruned_routes"],
+                         ["old-name.sandbox.asb.bd"])
+        self.assertEqual(result["instance"]["stale_routes"], [])
+
+    def test_an_unreadable_route_inventory_does_not_fail_the_deploy(self):
+        # The instance is already exposed and serving by then; losing the
+        # inventory read is a reporting gap, not a deploy failure.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                args.alias = []
+                args.prune_routes = False
+                args.pro_plugins = False
+                inst = {"instance": "demo", "label": "default",
+                        "wordpress_port": 8188, "url": "http://localhost:8188"}
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": str(root), "slug": "demo"}), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=inst), \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst), \
+                     patch.object(sr, "activate_remote_plugin"), \
+                     patch.object(sr, "configure_instance_https_route"), \
+                     patch.object(sr, "instance_route_hosts",
+                                  side_effect=RuntimeError("ssh died")), \
+                     patch.object(sr, "set_remote_instance_url"), \
+                     patch("builtins.print") as mock_print:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
+        self.assertEqual(result["instance"]["stale_routes"], [])
 
     def test_malformed_ensure_result_returns_actionable_json_error(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1488,6 +2361,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "activate_remote_plugin") as activate, \
                      patch.object(sr, "set_remote_instance_url") as set_url, \
                      patch.object(sr, "configure_instance_https_route") as route, \
+                     patch.object(sr, "instance_route_hosts", return_value=[]), \
                      patch("builtins.print") as printed:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(printed.call_args[0][0])

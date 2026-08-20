@@ -56,6 +56,26 @@ def _resource_service(remote=None):
     return resource_service(remote)
 
 
+def _feedback_service():
+    from sandbox.feedback.context import feedback_service
+    return feedback_service()
+
+
+def _secret_service(project_dir: str):
+    from sandbox.secrets.context import build_secret_service
+    from sandbox.core._paths import BASE
+    from sandbox.core._secrets import secret_file
+    root = Path(project_dir).expanduser().resolve()
+    if _project_scope and root != Path(_project_scope).expanduser().resolve():
+        from sandbox.secrets import SecretBrokerError
+        raise SecretBrokerError("source_scope_denied", "project is outside the MCP secret scope")
+    config = _core().load_project_config(str(root))
+    return build_secret_service(
+        project_root=root, config=config, personal_path=secret_file(),
+        runtime_root=BASE / "runtime", project_scope=_project_scope or None,
+    )
+
+
 def _durable_job_dependencies():
     import sys
     repository_root = str(Path(__file__).resolve().parents[2])
@@ -140,6 +160,8 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "native_preflight": _native_preflight,
     "managed_package_planner": _managed_package_planner,
     "resource_service_factory": _resource_service,
+    "feedback_service_factory": _feedback_service,
+    "secret_service_factory": _secret_service,
     "hermes_service": _HermesCommandAdapter(),
     **_job_dependencies,
 }))

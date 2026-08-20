@@ -1134,3 +1134,43 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   are likewise not a 100-disconnect measurement.
 - T156 and T157 in `tasks.md` remain intentionally open pending separately
   approved disposable-remote measurement. No live result is claimed here.
+
+## Convergence acceptance receipt — 2026-08-13
+
+- Feedback `3c4f9059a8509b919774072acb8aa63d` and
+  `38efeba54f4a86c202a045b7cc55020a` reported direct-host submissions with no
+  acceptance payload and no recoverable durable row. The CLI now flushes its
+  one-line JSON envelope immediately after durable acceptance. Documentation
+  requires a stable request ID and classifies missing output as
+  `acceptance_unknown`; it does not claim transport delivery is infallible.
+- Focused feedback/job CLI, service, registry, transport, runtime, MCP,
+  architecture, and modularity suites passed. Full unittest discovery passed
+  2,443 tests with seven intentional skips after synchronizing the canonical
+  built-in skill mirrors and making the macOS temporary-path expectation use
+  the resolved path.
+- Supported remote provisioning installed runtime revision
+  `01ec6e42d43e9bca2b18eaca`, exactly matching the local complete shipped-source
+  digest for version `0.2.1`.
+- Live remote request `sandbox-remote-ack-live-20260813` returned job
+  `f8d13839ddbc3ff22817a042eba77fa5` with `status: accepted`. It reached
+  `succeeded`, exit code 0, and retained the expected stdout. Replaying the
+  identical request returned the same job ID with `idempotent_replay: true`.
+  No credential, host address, or sensitive path is retained here.
+- This closes T162. It is one live acknowledgement/replay proof, not the
+  separately open 100-disconnect measurement (T156) or status-latency study
+  (T157).
+
+## Active status latency measurement — 2026-08-13
+
+- A bounded 12-second remote job produced five independent `job-status` reads
+  through `scaleway-sandbox`. Observed end-to-end latencies were 3.179, 2.551,
+  3.050, 2.845, and 2.671 seconds; maximum was 3.179 seconds and every sample
+  remained below SC-004's five-second target.
+- The first three samples reported `running`/`active` with a 30-second explicit
+  deadline. The final two reported `succeeded`/`terminal`, exit code 0. The
+  retained heartbeat recorded child observation, last activity, last progress,
+  supervisor, and metrics timestamps; no path, command output, credential, or
+  host address is retained in this evidence.
+- Job `afb859d68372daae541e8b410fb5e187` reached its authoritative terminal
+  state. This closes T157 for the selected reachable remote; T156 remains a
+  separate controlled 100-disconnect requirement.

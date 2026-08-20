@@ -420,3 +420,84 @@ semantics, and outcomes.
   presentation aids and may be rounded.
 - A plan validity window is short enough to limit stale evidence and is always
   followed by per-candidate revalidation.
+
+## Convergence amendment — 2026-08-13 (27-feedback network lifecycle)
+
+This dated section tightens the read-only network accounting and lifecycle
+boundary without authorizing broad Docker pruning. It maps
+`a813480b`, `bf05eeb9`, `0fac3b07`, `822b9323`, `78aaf583`, and the shared
+`6bc4c6d5` decoder issue (whose canonical contract lives in Spec 032).
+
+### Normative requirements
+
+- **FR-012**: Network observations MUST use one lifecycle model with stable
+  identity, owner evidence, active references, workspace/job references,
+  allocation state, and last observation. Allocation, reconciliation, planning,
+  and cleanup MUST consume that model rather than independently guessing from a
+  name (`a813480b`).
+- **FR-013**: Create/stop/destroy/recreate cycles MUST be idempotent and bounded:
+  a stopped or destroyed Sandbox-owned workspace releases only its own network
+  after no active lease/container/job reference remains; repeated cycles MUST not
+  create orphan or duplicate allocations (`bf05eeb9`).
+- **FR-014**: Active, foreign, unattributed, or indeterminate networks MUST be
+  excluded from cleanup. A candidate can be planned only with positive Sandbox
+  ownership plus current inactive evidence; the plan/apply path MUST never delete
+  an active or foreign network (`0fac3b07`).
+- **FR-015**: Address-pool exhaustion or allocation collision MUST produce a
+  structured capacity/unavailable result containing bounded observations and a
+  recovery hint. It MUST not auto-delete networks, retry indefinitely, or claim
+  that disk capacity remediation solved address exhaustion (`822b9323`).
+- **FR-016**: A remote inventory timeout, stale control record, or missing
+  observation MUST become `partial`/`unavailable` evidence with a bounded error;
+  it MUST not leak a traceback or turn missing evidence into a deletion
+  candidate. A subsequent rescan is required before any plan (`78aaf583`).
+- **FR-017**: Resource-monitoring consumers MUST use the Spec 032 feature-owned
+  top-level job-list decoder and MUST reject malformed or nested `.data` shapes;
+  they MUST not add a second parser (`6bc4c6d5`).
+
+### Acceptance evidence required before closing this amendment
+
+The fixture matrix MUST cover constrained-pool allocation, repeated
+create/stop/destroy, active and foreign networks, collision, exhaustion and
+recovery, remote observation timeout, and top-level job-list decoding. All
+checks are read-only unless an already-authorized exact cleanup plan is under
+test; no broad prune or automatic retention deletion is implied.
+
+## Convergence amendment — 2026-08-13 (workspace index ownership projection)
+
+Resource monitoring must remain a typed consumer of durable workspace ownership. This
+amendment closes the workspace metadata/index boundary without making resource monitoring
+an owner of workspace migration or authorizing network cleanup.
+
+### Normative requirements
+
+- **WM-FR-001**: Workspace resources MUST be attributed through a typed projection keyed
+  by opaque `workspace_id` and `project_identity`; resource providers MUST NOT open
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` or legacy `workspace.json` files.
+- **WM-FR-002**: A projection MUST include workspace label, owner kind, lifecycle state,
+  alias evidence, active lease/container/job references, locator/evidence digests, and
+  observation time. Paths and names alone MUST NOT establish ownership.
+- **WM-FR-003**: Missing, unresolved, conflicting, duplicate, stale, or generation-drifted
+  workspace bindings MUST produce explicit unknown/indeterminate evidence and zero
+  reclaimable bytes; an empty/incomplete workspace index MUST surface
+  `workspace_index_incomplete` rather than an empty-success resource status.
+- **WM-FR-004**: Resource status, plan, and apply MUST consume one projection and one
+  lifecycle model. Alias collisions, duplicate owner bindings, active references, and
+  foreign/unknown networks MUST remain exclusions across rescans; monitoring MUST not
+  repair ownership by guessing or by mutating workspace metadata.
+- **WM-FR-005**: Workspace metadata migration or base relocation MUST be observable as
+  metadata-only. It MUST not change network, container, job, volume, upload, snapshot, or
+  project-file counts and MUST not create a cleanup candidate merely because a locator
+  moved.
+- **WM-FR-006**: Remote resource status MUST obtain the projection through the supported
+  workspace/job service and strict top-level job-list decoder. A remote timeout, stale
+  generation, or unavailable index yields bounded partial evidence and requires a fresh
+  rescan before planning or apply.
+
+### Acceptance evidence required before closing this amendment
+
+Fixtures MUST cover complete, missing, unresolved, conflicting, duplicate, stale, and
+relocated workspace bindings; active/foreign/indeterminate network references; and remote
+partial results. Checks must prove no direct SQLite/legacy JSON consumer and unchanged
+resource counts across a metadata-only migration. No broad prune, network release, reset,
+or destroy is implied.

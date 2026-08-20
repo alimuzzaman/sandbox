@@ -153,6 +153,83 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 - One worker is the default execution model for this side project; parallel work is optional only for independent tests or review and does not justify overlapping file ownership.
 - A remote generic-service deployment requires a committed service build contract (Dockerfile, Compose service definition, health endpoint, storage mount, and route configuration) before Sandbox may create DNS or proxy routes. Discovery of replay application source alone is insufficient to deploy it.
 
+## Convergence amendment — 2026-08-13 (27-feedback identity and observation)
+
+This dated amendment maps generic identity feedback `cf5e49ed`, CLI/MCP parity
+feedback `2b080bf5`, and stale plugin/runtime state feedback `108318d9`.
+
+### Normative requirements
+
+- **FR-021**: Project identity MUST be kind-neutral and derived from the
+  canonical project root plus explicit instance label/remote context. It MUST
+  not require a plugin slug, WordPress container, or plugin-shaped manifest;
+  display name, runtime-safe identifier, kind, and capabilities are separate
+  fields (`cf5e49ed`).
+- **FR-022**: CLI and MCP MUST call the same identity resolver and return the
+  same canonical root/identity, label, kind, adapter, and capability set. An
+  adapter or transport MUST NOT independently hash, slugify, or infer a
+  different project identity (`2b080bf5`).
+- **FR-023**: Instance/plugin state observation MUST be live or carry an explicit
+  freshness/session generation. A new observation session, `status --refresh`,
+  and every state mutation MUST invalidate prior cached state; stale cache may
+  be shown only as stale and MUST NOT be used to claim active/inactive truth
+  (`108318d9`).
+- **FR-024**: Capability checks occur after identity resolution but before any
+  runtime side effect. A generic identity must never be coerced into a
+  WordPress/plugin identity merely to satisfy a WordPress-only operation.
+
+### Acceptance evidence required before closing this amendment
+
+The matrix MUST include a non-plugin generic project, WordPress compatibility,
+same-root labels/remotes, CLI/MCP identity comparison, state mutation between
+sessions, explicit refresh, and a stale-cache negative case. Evidence records
+the resolver generation and observation timestamp without source secrets.
+
+## Convergence amendment — 2026-08-13 (PHP extension requirements)
+
+This amendment adds a WordPress-only, additive extension contract. It does not change
+the root-or-`.config/sandbox` placement decision in Spec 042, and it deliberately
+keeps generic Compose images outside the v1 provisioning authority.
+
+### Normative requirements
+
+- **FR-025**: A WordPress descriptor MAY declare top-level `phpExtensions`. When it is
+  omitted, the existing image, package, and readiness behavior MUST remain byte-for-
+  byte compatible; no extension validation or build work is introduced by omission.
+- **FR-026**: The `phpExtensions` schema MUST support immutable profile `wordpress@1`,
+  extension values `true`, exact/version strings, `false`, and canonical
+  `{state,version}` objects. Versions MUST be exact, `X.Y.*`, or `php` only.
+- **FR-027**: `wordpress@1` MUST expand to the documented WordPress required set and
+  require an image capability from GD/Imagick, with the documented recommended
+  warnings. The capability may be satisfied by a fresh runtime observation or an
+  allowlisted official-image build (the config need not name the member); if neither
+  can be observed/provisioned, readiness fails with a missing-capability result. A
+  profile-required extension MUST NOT be disabled; explicit requirements are hard
+  failures, not best-effort hints.
+- **FR-028**: Unknown names/keys/profiles/states, malformed version constraints,
+  unsupported disabled modules, and contradictory requirements MUST fail before
+  runtime, image, package, database, or filesystem mutation. A disabled request may
+  actively change only an extension whose checked-in manifest entry explicitly marks
+  it INI-disableable; all other disabled requests return `unsupported_disable`.
+- **FR-029**: A generic `kind: "compose"` descriptor containing `phpExtensions` MUST
+  fail with an explicit unsupported-capability result in v1 and MUST NOT mutate the
+  project-owned image or Compose model.
+- **FR-030**: Normalization MUST produce one content digest and immutable catalog/profile
+  revision; the digest MUST include the parent image digest, PHP version, server flavor,
+  platform, and architecture so any relevant input change invalidates reuse.
+- **FR-031**: The WordPress extension resolver MUST expose requested and observed state
+  for web PHP, WP-CLI, bounded exec, and PHPUnit. A missing, unobservable, or
+  version-mismatched plane MUST block readiness and identify the failing plane.
+
+### Acceptance evidence required before closing this amendment
+
+The config matrix MUST cover omission, root and `.config/sandbox` homes, labels,
+canonical/shorthand forms, exact/`X.Y.*`/`php` versions, unknowns, profile conflicts,
+disabled capability errors, generic Compose refusal, digest changes, and repeated
+cache hits. Runtime evidence must show matching web/CLI/exec/PHPUnit observations and
+that applying a changed extension set preserves database volumes, uploads, snapshots,
+and project files.
+
 ## Out of Scope
 
 - Becoming a general-purpose replacement for Dev Containers, Docker Compose, or cloud application platforms.

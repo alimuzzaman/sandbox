@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+  <servers>
+    <server>
+      <id>synthetic-repository</id>
+      <username>synthetic-user</username>
+      <privateKey>/synthetic/not-a-real-key</privateKey>
+      <passphrase>SB_SYNTHETIC_MAVEN_PASSPHRASE_NOT_REAL</passphrase>
+    </server>
+  </servers>
+</settings>

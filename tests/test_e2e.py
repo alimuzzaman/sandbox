@@ -6,6 +6,7 @@ detection logic. Run from the repo root:
     .cli-venv/bin/python -m unittest discover -s tests -v
 """
 import sys
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,7 +97,8 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
         self.config = self.root / "playwright.config.js"
         self.config.write_text("module.exports = {}\n")
         self.target = SimpleNamespace(project_root=str(self.root), remote_name="vps",
-                                      workspace_label="e2e-dev")
+                                      workspace_label="e2e-dev",
+                                      sources={"identity": "project:e2e"})
         self.args = SimpleNamespace(concurrency=2, grep="smoke", keep_on_fail=True,
                                     strict_provision=True, passthrough=["--", "--headed"])
 
@@ -111,6 +113,11 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
         self.assertEqual(len(submissions), 3)
         self.assertEqual(len({item.workspace_label for item in submissions}), 3)
         self.assertTrue(all(item.workspace_mode == "isolated" for item in submissions))
+        self.assertEqual({item.project_identity for item in submissions}, {"project:e2e"})
+        self.assertEqual(
+            {item.source.identity for item in submissions},
+            {"sha256:" + hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()},
+        )
         for index, submission in enumerate(submissions):
             self.assertEqual(submission.argv[0:7],
                              ("sb", "e2e", "--local", "--project-dir", ".", "--workers", "1"))
@@ -150,7 +157,7 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
                 patch("sandbox.application.context.durable_job_dependencies", return_value={
                     "target_service": SimpleNamespace(resolve=lambda _request: SimpleNamespace(
                         kind="remote", project_root=str(self.root), remote_name="vps",
-                        workspace_label="e2e-dev")),
+                        workspace_label="e2e-dev", sources={"identity": "project:e2e"})),
                 }), \
                 patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport):
             output = StringIO()

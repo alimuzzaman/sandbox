@@ -117,8 +117,8 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     """Token-authed snapshot bridge for the wp-admin mu-plugin (spec 002).
 
     Only these verbs, only for `instance`, only with the matching Bearer token:
-      GET /snapshots · POST /snapshot {name,force,db_only} · POST /restore {name}
-      POST /reset · DELETE /snapshot/<name> · GET /job/<id>
+      GET /snapshots · POST /snapshot {name,force,db_only}
+      POST /restore {name,confirm} · POST /reset {confirm}
       DELETE /snapshot/<name> · GET /job/<id>
     Snapshot/restore run out-of-band via the existing job machinery so a restore
     never severs the caller's request. NO arbitrary host commands (FR-010)."""
@@ -186,16 +186,37 @@ def _bridge_handle(method: str, instance: str, subpath: str,
             return 400, {"ok": False, "error": "invalid snapshot name"}
         if not (snapshots_dir(instance) / name).exists():
             return 404, {"ok": False, "error": "no such snapshot"}
-        ns = _types.SimpleNamespace(resolved_instance=instance, name=name)
+        # Restoring drops and recreates the current database.  The dashboard
+        # bridge is a mutation boundary, so an explicit boolean acknowledgement
+        # is required before accepting the asynchronous job; a prior prompt or
+        # caller identity must never imply consent.
+        if body.get("confirm") is not True:
+            return 400, {
+                "ok": False,
+                "error": "confirmation_required",
+                "reason": "restore requires confirm=true",
+            }
+        ns = _types.SimpleNamespace(
+            resolved_instance=instance, name=name, yes=True, confirm=True,
+        )
         jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
         return 202, {"ok": True, "job_id": jid, "name": name}
 
     if method == "POST" and subpath == "/reset":
         # The wp-admin proxy enforces nonce + manage_options before this
-        # token-authenticated bridge call. Run asynchronously because reset
-        # drops and imports the database, which would otherwise outlive HTTP.
+        # token-authenticated bridge call. Authentication does not imply consent:
+        # refuse synchronously before accepting a job unless the proxy carries
+        # the explicit boolean acknowledgement from the confirmed UI action.
+        if body.get("confirm") is not True:
+            return 400, {
+                "ok": False,
+                "error": "confirmation_required",
+                "reason": "reset requires confirm=true",
+            }
+        # Run asynchronously because reset drops and imports the database,
+        # which would otherwise outlive the originating HTTP request.
         ns = _types.SimpleNamespace(resolved_instance=instance, yes=True,
-                                    rebaseline=False)
+                                    confirm=True, rebaseline=False)
         jid = _start_job("reset to fresh install", lambda: cmd_reset(cfg, ns))
         return 202, {"ok": True, "job_id": jid}
 

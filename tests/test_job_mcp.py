@@ -1,4 +1,5 @@
 import sys
+import hashlib
 import importlib.util
 import types
 import unittest
@@ -36,6 +37,59 @@ def _load_wp_tool():
 
 
 class JobMcpTests(unittest.TestCase):
+    def test_remote_runner_exception_is_not_serialized_by_job_start(self):
+        from tools import jobs
+
+        fixture = "runner-private-value"
+        target = SimpleNamespace(
+            kind="remote", project_root="/project", remote_name="vps",
+            workspace_label="unit", runtime_policy={}, sources={"identity": "project:remote"},
+        )
+        transport = SimpleNamespace(submit=Mock(side_effect=RuntimeError(fixture)))
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=lambda _request: target)), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport):
+            result = jobs.job_start(["tool", "safe"], "/project", remote="vps")
+
+        self.assertEqual(result, {
+            "ok": False, "code": "supervisor_launch_failed", "error": "job submission failed",
+        })
+        self.assertFalse(fixture in str(result))
+
+    def test_job_list_forwards_project_workspace_and_pages_filtered_results(self):
+        from tools import jobs
+
+        target = SimpleNamespace(
+            project_root="/project", kind="local", remote_name=None,
+            workspace_label="unit", sources={"identity": "project:one"},
+        )
+        rows = [
+            {"job_id": "a" * 32, "lifecycle": "running", "kind": "test"},
+            {"job_id": "b" * 32, "lifecycle": "running", "kind": "test"},
+            {"job_id": "c" * 32, "lifecycle": "succeeded", "kind": "test"},
+        ]
+        service = SimpleNamespace(list=Mock(
+            side_effect=lambda query: rows[1:2] if query.get("cursor_job_id") else rows))
+        with patch.object(jobs, "_target_service", SimpleNamespace(
+                resolve=lambda _request: target)), \
+                patch.object(jobs, "_job_service", service):
+            first = jobs.job_list(
+                "/project", workspace="unit", lifecycle="running",
+                kind="test", limit=1,
+            )
+            second = jobs.job_list(
+                "/project", workspace="unit", lifecycle="running",
+                kind="test", limit=1, cursor=first["next_cursor"],
+            )
+        self.assertEqual(service.list.call_args_list[0].args[0], {
+            "limit": 2, "project_identity": "project:one",
+            "workspace_label": "unit", "lifecycle": "running", "kind": "test",
+        })
+        self.assertEqual(service.list.call_args_list[1].args[0]["cursor_job_id"], "a" * 32)
+        self.assertEqual([item["job_id"] for item in first["jobs"]], ["a" * 32])
+        self.assertTrue(first["has_more"])
+        self.assertEqual([item["job_id"] for item in second["jobs"]], ["b" * 32])
+        self.assertFalse(second["has_more"])
+
     def test_follow_returns_bounded_monotonic_request_progress(self):
         from tools import jobs
 
@@ -65,7 +119,8 @@ class JobMcpTests(unittest.TestCase):
         from tools import jobs
 
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
-                                 workspace_label="unit", runtime_policy={})
+                                 workspace_label="unit", runtime_policy={},
+                                 sources={"identity": "project:remote"})
         started = {"ok": True, "job_id": "a" * 32, "workspace": "unit", "remote": "vps"}
         calls = []
         transport = SimpleNamespace(
@@ -87,6 +142,11 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(status, {"ok": True, "job_id": "a" * 32, "lifecycle": "running"})
         self.assertTrue(output["bounded"])
         self.assertEqual(calls[0][1].deadline_seconds, 120)
+        self.assertEqual(calls[0][1].project_identity, "project:remote")
+        self.assertEqual(
+            calls[0][1].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
         self.assertEqual(calls[-1], ("output", "vps", "a" * 32, {
             "stream": "combined", "cursor": "opaque", "offset": None, "tail_bytes": None,
             "lines": None, "since": None, "max_bytes": 4096, "wait_seconds": 0,
@@ -97,9 +157,12 @@ class JobMcpTests(unittest.TestCase):
         wp = _load_wp_tool()
 
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
-                                 workspace_label="php", runtime_policy={})
+                                 workspace_label="php", runtime_policy={},
+                                 sources={"identity": "project:remote"})
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
-        transport = SimpleNamespace(submit=lambda _submission: {"ok": True, "job_id": "b" * 32})
+        submissions = []
+        transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {
+            "ok": True, "job_id": "b" * 32})
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
                 patch.object(wp, "_remote_job_transport", return_value=transport):
             result = wp.run_tests("/project", mode="unit", remote="vps", workspace="php",
@@ -108,11 +171,17 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True, "passed": None, "summary": "remote test job accepted",
                                   "output": "", "mode": "unit", "job_id": "b" * 32,
                                   "lifecycle": "accepted", "workspace": "php", "remote": "vps"})
+        self.assertEqual(submissions[0].project_identity, "project:remote")
+        self.assertEqual(
+            submissions[0].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
 
     def test_remote_run_tests_reports_config_resolved_mode_not_auto(self):
         wp = _load_wp_tool()
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
-                                 workspace_label="php", runtime_policy={})
+                                 workspace_label="php", runtime_policy={},
+                                 sources={"identity": "project:remote"})
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
         submissions = []
         transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {

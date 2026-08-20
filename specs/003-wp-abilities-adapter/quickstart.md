@@ -29,6 +29,14 @@ Paste the emitted config into a fresh MCP client; confirm it lists the abilities
 can call `sandbox/execute-php`. This real-client acceptance remains separate from
 the local command/documentation checks.
 
+Call `mcp-adapter-discover-abilities` and confirm its existing `abilities` list is
+unchanged and the result also contains `sandbox_environment` with the validated
+focused plugin (or `null`), a credential-free base instance URL, and the exact
+reminder `Before destructive changes, use the supported Sandbox snapshot workflow.`.
+The Sandbox server transport requires an authenticated `manage_options` user; the
+local harness verifies the shape, permission callback, and server scoping, while the
+authenticated external-client call remains the live acceptance gate.
+
 ## 4. File abilities are jailed
 
 - From the direct client, call `sandbox/write-file` for a file under `wp-content/`

@@ -83,3 +83,27 @@ Capability sets are returned to callers but derived from the adapter so stale re
 ## Astro Preset
 
 An initialization-only value proposal with package manager, development command, bind flag, port, health path, and output Compose/config paths. It is never persisted as an instance kind; the resulting project descriptor is `compose`.
+
+## WordPress PHP Extension Requirements
+
+This object is valid only when `kind` resolves to `wordpress`; omission preserves the
+legacy descriptor behavior.
+
+| Field | Type | Rules |
+|---|---|---|
+| `profile` | string/null | `null` for no profile or the immutable `wordpress@1`; unknown profiles fail before mutation |
+| `extensions` | map | Canonical extension name → requirement object |
+| `extensions.<name>.state` | enum | `enabled` or `disabled`; shorthand booleans/strings normalize before validation |
+| `extensions.<name>.version` | string/null | Exact version, `X.Y.*`, or `php`; only enabled requirements may carry a version |
+| `catalog_revision` | string | Machine-local resolved catalog/profile revision; never accepted from project input |
+| `normalized_digest` | digest | Hash of normalized requirements, profile revision, PHP/version/image inputs, and platform; derived, not user-supplied |
+
+`wordpress@1` expands to required modules `curl`, `dom`, `exif`, `fileinfo`, `hash`,
+`json`, `mbstring`, `mysqli`, `openssl`, `pcre`, and `xml`, an image capability of
+`gd` or `imagick` (satisfied by observation or allowlisted provisioning), and
+recommended warnings for `intl`, `sodium`, `zip`, and `opcache`. The normalized
+result carries the selected/satisfied capability so omission of both image names is
+not confused with a missing requirement.
+The normalized result also carries per-plane observations for web PHP, WP-CLI,
+bounded exec, and PHPUnit; a missing, unobservable, or version-mismatched plane cannot
+be represented as `ready`.

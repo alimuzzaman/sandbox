@@ -246,6 +246,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Do:** `phpVersion`/`wpVersion`/`core` resolve to the image tag
   (`wordpress:<wp>-php<php>`) / `wp core download --version` / lsphp version. Absent → stays
   `wordpress:latest`. The cloned test suite (T1.1) matches the resolved WP version.
+  > Superseded: `wpVersion` was later removed from the image tag on EVERY server
+  > (patch-level tags Docker Hub never published 404'd). All stacks download core
+  > in-container; see `docs/sandbox-config-reference.md` § "Version pins".
 - **Verify:** a config pinning `phpVersion: 8.1` boots an 8.1 container (`wp_exec php -v`).
 
 ### [x] T2.3 — Distribution: npm package + `sandbox` bin + brew

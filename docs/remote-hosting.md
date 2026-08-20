@@ -25,6 +25,21 @@ They may use the same VPS, but one is not an implicit substitute for another.
 | Inspect or control those remote jobs from an agent | The co-located `sandbox-NAME` MCP server | Reads durable job status/output and calls the same VPS-side operations without keeping SSH pipes open. | It is a control plane, not a source-sync or deployment mechanism. |
 | Operate a declared public service | `./sb host plan` then `./sb host apply --confirm` | Applies a checked hosting manifest, health checks, Caddy/DNS policy, and declared secrets for an environment. | It is separately confirmation-gated and never inferred from a development deploy or job. |
 
+Before remote workspace staging or durable test/job submission, Sandbox performs
+a read-only Docker network-capacity admission at the shared exact-tree staging
+seam. The probe must
+observe the configured address pools and every user-defined network's IPAM
+subnet, then report usable subnet capacity. Foreign and unattributed networks
+reduce usable capacity just like Sandbox-owned networks; a raw network count or
+filesystem free-space value is not evidence. Missing or partial probe data, and
+pool exhaustion, allocation collisions, or ambiguous inventory fail before the
+source tree is staged. The admission makes one bounded probe call; it does not
+retry or delete networks automatically. A blocked admission can recover only
+after a fresh complete probe proves usable capacity. The bounded refusal points
+to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
+operators must not remove Docker networks directly or treat disk capacity as a
+network-capacity fix.
+
 For command examples and operational boundaries, see
 [`docs/remote-hosting-implementation.md`](remote-hosting-implementation.md). Durable
 job recovery and retention are documented separately in
@@ -66,6 +81,14 @@ interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
 `--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit
 `--confirm` to inspect the selected transport without modifying the VPS.
 
+Every confirmed provision creates an owner-only, secret-redacted journal under
+`$SANDBOX_HOME/runtime/remote-provision/<name>/`. Its opaque ID is included in
+the final JSON receipt. If the caller is interrupted before that receipt, the
+next plan reports the last journal's ID and `in_progress` state, so operators
+can inspect the local evidence before deciding whether a new provision attempt
+is safe. Journals record milestones only; they never retain SSH targets,
+bearer tokens, or raw remote output.
+
 For HTTPS mode, `provision` SSHes in and, non-interactively, installs Docker CE +
 compose plugin, Caddy, the `sb` runtime itself, the MCP server venv, and the `visit`
 tools venv (Playwright + headless Chromium — needed server-side, since `visit` must
@@ -106,6 +129,12 @@ the host is unavailable. Long-lived MCP HTTP access uses the remote server's
 HTTPS/Tailscale transport rather than an SSH tunnel; a tunnel would add
 forwarding lifecycle without reducing ordinary command-shell latency.
 
+Both archive paths omit macOS AppleDouble sidecars whose basename starts with
+`._` (at any directory depth). The filter is deliberately basename-only:
+ordinary dotfiles such as `.env` and `.gitignore` remain eligible, and transferred
+files keep their local bytes. When sidecars are encountered, Sandbox reports only
+a bounded count of skipped entries; it never prints their paths or contents.
+
 Register the second MCP server through your client’s supported secret mechanism. The
 remote bearer credential is never printed, returned in JSON, embedded in a command,
 or copied into a service definition. It stays in Sandbox's owner-only local secret
@@ -127,9 +156,13 @@ This is a **one-way, on-demand** push — never a continuous sync. Every deploy:
 existing SSH connection).
 2. Resets the VPS's working tree to that commit.
 3. Applies your CURRENT uncommitted changes on top — both edits to tracked files and
-   brand-new untracked files. This step REPLACES whatever a previous deploy applied; it
-   never stacks. "Is my code live on the VPS" always has one answer: "as of my last
-   `./sb deploy`."
+   brand-new untracked files (excluding only `._*` AppleDouble sidecars by basename).
+   This step REPLACES whatever a previous deploy applied; it never stacks. "Is my code
+   live on the VPS" always has one answer: "as of my last `./sb deploy`."
+4. Transfers the selected primary project descriptor (`sandbox.config.*` or
+   `.wp-env.json`) even when the checkout keeps that file out of Git, so the remote can
+   reproduce plugin mounts. Machine-only `sandbox.config.override.*` and secret files
+   are never included by this exception.
 
 Before the remote instance is considered ready, `ensure` reconciles each instance's
 published WordPress, database, and Mailpit ports against listeners already present on
@@ -165,6 +198,27 @@ DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)
 defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
 public URL path unless they explicitly opt out.
 
+#### Extra hostnames (`--alias`)
+
+`--alias HOSTNAME` (repeatable) exposes the instance on additional hostnames
+pointing at the same port — a CDN pull-zone origin, for example. It defaults to
+the project's `sandbox.config.json` `aliases`, so declared aliases travel with
+the project and do not have to be repeated on the command line. Aliases also
+reach the instance's `WP_HOME`/`WP_SITEURL` so WordPress serves them as
+themselves instead of redirecting to the primary domain; see **Aliases** in
+`docs/sandbox-config-reference.md` for what that does and does not trust.
+
+The primary `--domain` is routed first, so a bad alias never leaves the
+instance unreachable on its own hostname. DNS for every hostname must already
+point at the VPS.
+
+Routes are per-hostname files on the remote, so changing `--domain` between
+deploys leaves the old route serving. Deploy reports those as `stale_routes` in
+its JSON and in the human output. `--prune-routes` deletes the ones that proxy
+to this instance's port and are neither the current domain nor a declared
+alias. It is opt-in: the inventory is read from the whole host, so a route may
+belong to a checkout whose config this project cannot see.
+
 ### Generic Compose projects
 
 The same command works for an explicit non-WordPress Compose project. Its
@@ -174,6 +228,43 @@ working tree and runs the normal generic lifecycle on the remote; `--expose` rou
 the resulting generic HTTP port through Caddy and returns the public URL. No plugin
 activation or WordPress URL update is performed. `--plugin-slug` is WordPress-only and
 is rejected for generic projects so an accidental flag cannot be silently ignored.
+
+### Pro plugins on the remote host
+
+Pro plugins are not project code — they are a machine-level catalog. Locally they
+live in one store directory (`defaults.pro_plugins_home`, default
+`~/Sites/plugins-pro`) and are registered slug -> path in the user-global catalog,
+which is what makes every local instance list them on **Plugins -> Sandbox
+On-Demand** without installing them.
+
+`./sb deploy` mirrors that whole store to `<remote $SANDBOX_HOME>/plugins-pro` and
+merges its slugs into the REMOTE user-global catalog, so **every** instance on that
+host offers the same on-demand plugins. Run it on its own with:
+
+```bash
+./sb remote plugins myvps            # mirror now
+./sb remote plugins myvps --dry-run  # what would go up, transfers nothing
+./sb remote plugins myvps --force    # re-push even when nothing changed
+./sb deploy --remote myvps --no-pro-plugins   # skip the mirror for this deploy
+```
+
+Behavior:
+
+- Only directories carrying a WordPress `Plugin Name:` header are advertised; loose
+  files and zips still ride along in the mirror, but never enter the catalog.
+- The mirror is `rsync --archive --delete`: the remote store is a copy of the local
+  store as of the last push, never a continuous sync. `.git/`, `node_modules/`,
+  `.DS_Store`, `.idea/`, `.vscode/` are excluded.
+- A content fingerprint is recorded per remote under
+  `$SANDBOX_HOME/runtime/pro-plugins/<remote>.json`, so an unchanged re-push is a
+  no-op and deploying stays fast.
+- Catalog entries are written as bare paths, which resolve to **on-demand**: present
+  on the On-Demand page, never auto-activated. A slug the host configured itself
+  (an object entry, or a path outside the store) is reported as a conflict and left
+  untouched. A slug removed from the local store is unregistered on the next push.
+- Mirroring is fail-soft inside `deploy`: the project deploy still succeeds and the
+  JSON result carries `pro_plugins.ok=false` with the reason.
+- Licensing is unchanged — mirroring ships the code, not the keys (`./sb license`).
 
 ## 5. Using a remote instance
 
@@ -217,6 +308,13 @@ stores a required value through a hidden prompt.
 Use `compose.background_services` for declared long-lived workers that must be built,
 recreated, and started with the web service. Keep one-shot migration/setup jobs in
 `compose.init_services`; each service name must be unique across the three fields.
+
+`compose.build` (default `true`) controls whether apply rebuilds images. Set it to
+`false` for an environment whose image build does not fit the 900s deploy timeout: apply
+then deploys config, secrets, and routing onto the image the remote already has, and
+skips the explicit `init_services` build. Compose still builds a service that has no
+image at all, so a first deploy works either way, and new application code only ships
+once the image is rebuilt.
 
 An environment may also protect its public origin with Basic Auth:
 
@@ -412,7 +510,7 @@ reference. Summary:
 | `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
-| `./sb deploy --remote <name> --ensure --expose [--domain <host>]` | One-shot deploy, boot/refresh the remote WP instance, activate the plugin, and expose a public HTTPS URL |
+| `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.
@@ -421,13 +519,28 @@ plus `url` when exposure succeeds.
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
-listener scope, and an authenticated `/mcp` probe. It treats unavailable evidence as
+listener scope, and an authenticated `/mcp` probe. Its JSON evidence includes the
+current `local_runtime_revision`, an `installed_runtime_revision` only when the
+selected unit declares a valid non-secret digest, and `runtime_revision_state`
+(`match`, `mismatch`, `unavailable`, or `unknown`). A configured service record is
+not treated as proof of the installed revision. It treats unavailable evidence as
 degraded; it never reads a credential into command arguments or output.
 
 When an older PID-file-managed MCP process is detected, confirmed migration proves that
 exact process's PID, working directory, bind, and port before handing it off. If the
 new unit cannot start, its prior files are restored and only that proven legacy process
 is restarted. No generic process search or termination is used.
+
+Remote workspace list, status, migration planning, creation, reset, and destroy all
+run the same read-only service preflight before sending a workspace request. The
+selected owned MCP service must report `ownership=proven` and
+`runtime_revision_state=match`; mismatch, unavailable, unknown, or unproven evidence
+is refused without dispatching the workspace command. Refresh the service through the
+supported lifecycle command, then retry:
+
+```sh
+./sb remote service migrate <name> --confirm --json
+```
 
 Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
 environments before stopping a proven legacy process, so a runtime refresh cannot leave

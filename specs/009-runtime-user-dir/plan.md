@@ -145,3 +145,45 @@ relocation. No new top-level structure; no new dependencies.
 ## Complexity Tracking
 
 > No constitution violations — table intentionally omitted.
+
+## Convergence amendment — 2026-08-13 (durable workspace metadata/index)
+
+The existing base relocation plan now includes an additive workspace metadata index. The
+index is not a replacement for the project/instance registry and does not alter the
+global project identity. Its owner is a workspace repository under
+`$SANDBOX_HOME/runtime/workspaces/index.sqlite3`.
+
+### Design and migration gates
+
+1. Create the versioned SQLite schema/repository with WAL, foreign keys, bounded busy
+   handling, owner-only permissions, and an opaque `workspace_id` unique for each
+   `(project_identity, workspace_label)`.
+2. Discover exact-depth legacy metadata under
+   `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` without mutating
+   or rewriting it. Correlate only exact job project-root/namespace evidence and a single
+   project identity; record adopted, unresolved, conflict, or invalid decisions.
+3. Produce a target-bound plan containing the full inventory digest, index generation,
+   candidate decisions, and expiry. Hold global/per-workspace locks, rescan before apply,
+   reject drift, and commit adoption atomically. An unresolved record keeps the index
+   visibly incomplete and never becomes a false empty list.
+4. Route workspace create/list/status/reset/destroy through the repository/service. Remote
+   controls use project identity and opaque workspace ID; checkout paths are only deploy
+   locators. Reset/destroy remain confirmation-gated and busy-locked; startup marks
+   interrupted operations indeterminate instead of retrying destructive work.
+5. Expose a typed workspace ownership projection to resource monitoring. The resource
+   feature consumes that projection and never opens the workspace SQLite file or legacy
+   JSON directly. Migration/relocation performs no network cleanup and must preserve
+   resource counts.
+
+### Validation gates
+
+- Unit/fixture coverage proves idempotent initialization, exact adoption, unresolved and
+  conflict handling, malformed/symlink/oversized rejection, alias collision, missing
+  checkout status, plan expiry/digest drift, lock contention, and relocation byte
+  preservation.
+- CLI/MCP contract coverage proves remote controls do not require a project directory,
+  return stable incomplete/busy/ownership errors, and use workspace IDs for destructive
+  controls.
+- Read-only live evidence records workspace inventory and resource/job/network counts
+  before and after an index migration; no reset, destroy, cleanup, or network release is
+  part of this gate.

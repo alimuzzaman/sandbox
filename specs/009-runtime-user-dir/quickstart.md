@@ -110,3 +110,41 @@ Expected: `600`, `NO_LEAK`.
 | Base relocation → instances boot from new base, no stale refs | SC-004, US3 |
 | CLI & MCP same base | SC-005 |
 | `.env.local` 600, no secret leak | SC-007 |
+
+## §6 — Durable workspace metadata/index migration (convergence)
+
+Use an isolated `SANDBOX_HOME` fixture for the metadata migration checks. Keep the
+legacy `workspace.json` files under the fixture immutable and do not run reset, destroy,
+cleanup, or network-release commands.
+
+```bash
+export SANDBOX_HOME="$(mktemp -d)/sandbox"
+mkdir -p "$SANDBOX_HOME/runtime/jobs/workspaces/legacy-demo/demo"
+# Populate a bounded fixture through the supported workspace/job test helpers; do not
+# hand-edit a live user's metadata.
+./sb workspace migrate --project-identity PROJECT_ID --json   # plan only
+```
+
+Expected plan output includes an opaque plan ID, target project identity, complete
+inventory digest, index generation, expiry, and one decision per legacy record. Apply is
+allowed only after a rescan confirms the same digest/generation and returns no collision:
+
+```bash
+./sb workspace migrate --plan-id PLAN_ID --confirm --json
+./sb workspace list --project-identity PROJECT_ID --json
+./sb workspace status --workspace-id WORKSPACE_ID --json
+```
+
+Verify all of the following:
+
+- `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` is present with stable workspace IDs;
+- each source `workspace.json` is byte-for-byte unchanged;
+- unresolved, conflicting, malformed, symlink, or oversized sources report
+  `workspace_index_incomplete`/an explicit migration decision and are not omitted;
+- status still works when the checkout locator is absent;
+- relocating the base changes only index/locator paths and preserves database volumes,
+  project files, uploads, snapshots, and network/container/job counts;
+- resource status consumes typed ownership output and never reads the SQLite file.
+
+The index migration is complete only when repeated plan/apply is idempotent and a changed
+inventory or index generation fails closed with `workspace_migration_plan_stale`.

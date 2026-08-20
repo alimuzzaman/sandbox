@@ -298,3 +298,54 @@ T037: Update exact MCP manifest tests in tests/test_mcp_composition.py and tests
 - Tests precede implementation within each story.
 - Existing `sb cache` remains compatible.
 - No task authorizes deployment, release, or cleanup of permanent resources.
+
+## Phase 10: Convergence — 2026-08-13 (27-feedback network lifecycle)
+
+These tasks are intentionally open and do not change the completion state of
+T001-T044.
+
+- [X] T045 [US1/US5] Add the canonical network lifecycle model regression for
+  `a813480b`, covering owner identity, active references, allocation/release,
+  reconciliation, and one authoritative state across status, plan, and apply.
+- [X] T046 [US3/US5] Add repeated create/stop/destroy/recreate fixture coverage
+  for `bf05eeb9` proving idempotence, no orphan/duplicate growth, and release
+  only after leases, containers, and jobs are inactive.
+- [x] T047 [US3/US5] Add active/foreign/unattributed network protection cases for
+  `0fac3b07`; each must remain an explicit exclusion before and after a plan
+  revalidation and must not be deleted by an exact cleanup apply.
+- [X] T048 [US1/US2] Add constrained-pool collision/exhaustion and recovery
+  coverage for `822b9323`; assert stable capacity errors, bounded retries, and
+  no automatic deletion or disk-capacity misclassification.
+- [X] T049 [US2] Add remote timeout/stale-control observation coverage for
+  `78aaf583`; assert structured partial/unavailable evidence, no traceback or
+  false success, and a required fresh rescan before planning.
+- [x] T050 [US1/US6] Add the `6bc4c6d5` consumer regression proving resource
+  monitoring uses the Spec 032 top-level job-list decoder and rejects a nested
+  `.data` response without changing network state.
+
+## Phase 11: Convergence — workspace index ownership projection (2026-08-13)
+
+These tasks add typed consumption of the workspace index and do not authorize cleanup,
+reset, destroy, network release, or broad prune. Completion marks reflect only the
+implementation and evidence actually present in this branch.
+
+- [X] T051 [US1/US2] Define the typed workspace resource binding/projection keyed by
+  opaque `workspace_id` and `project_identity`, including lifecycle, alias/evidence
+  digests, active references, index generation, completeness, and bounded errors.
+- [X] T052 [US1/US2] Add complete/missing/unresolved/conflict/invalid/duplicate/stale
+  workspace-index fixtures; prove unknown/indeterminate classifications, zero
+  reclaimable bytes, and `workspace_index_incomplete`/`workspace_ownership_drift` errors.
+- [X] T053 [US1/US5] Route local/remote resource providers through the typed projection
+  and shared Spec 032 top-level job-list decoder; add boundary tests proving no direct
+  SQLite or legacy `workspace.json` consumer exists.
+- [X] T054 [US1/US3/US5] Add network/resource lifecycle tests proving a moved checkout or
+  metadata locator does not release an active network and active/foreign/unknown aliases
+  remain exclusions across rescan and plan/apply.
+- [X] T055 [US6] Add CLI/MCP parity tests for checkout-independent workspace identity,
+  incomplete index, alias collision, generation drift, remote timeout, and fresh-rescan
+  requirements before planning.
+- [ ] T056 [US1/US2] Record read-only before/after evidence for metadata migration and
+  base relocation showing unchanged network/container/job/volume/upload/snapshot counts
+  and no cleanup mutation.
+- [X] T057 [US1/US2/US6] Update resource status/plan quickstart and operator guidance to
+  keep unresolved ownership visible and forbid guessing from labels, paths, or age.

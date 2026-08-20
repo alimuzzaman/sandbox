@@ -4,6 +4,7 @@ import hashlib
 import io
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import types
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 import sandbox.core._cloudflare as cloudflare  # noqa: E402
 import sandbox.core._hosting as hosting  # noqa: E402
+import sandbox.core._remote as remote  # noqa: E402
 import sandbox.core._secrets as personal_secrets  # noqa: E402
 import sandbox.commands.preview as preview  # noqa: E402
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
@@ -88,6 +90,103 @@ class TestHostingManifest(unittest.TestCase):
             Path(directory, "compose.yml").unlink()
             with self.assertRaisesRegex(hosting.HostingError, "does not exist"):
                 hosting.validate_manifest(directory)
+
+    def test_nested_manifest_uses_its_parent_as_source_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            nested = outer / "site"
+            nested.mkdir()
+            (nested / "sandbox.hosting.yml").write_text(_manifest())
+            (nested / "compose.yml").write_text("services: {}\n")
+            # An outer checkout may contain unrelated Compose files.  Passing
+            # the nested project path must never select that outer source.
+            (outer / "compose.yml").write_text("services: outer\n")
+            result = hosting.validate_manifest(nested)
+        self.assertEqual(Path(result["manifest_path"]), (nested / "sandbox.hosting.yml").resolve())
+        self.assertEqual(Path(result["source_root"]), nested.resolve())
+        self.assertEqual(Path(result["project_root"]), nested.resolve())
+        self.assertEqual(result["compose"]["files"], ["compose.yml"])
+
+    def test_nested_manifest_rejects_source_root_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nested = Path(directory) / "site"
+            nested.mkdir()
+            manifest = _manifest().replace("project: example-site", "project: example-site\nsource_root: ..")
+            (nested / "sandbox.hosting.yml").write_text(manifest)
+            (nested / "compose.yml").write_text("services: {}\n")
+            with self.assertRaisesRegex(hosting.HostingError, "source_root"):
+                hosting.validate_manifest(nested)
+
+    def test_nested_manifest_declared_source_root_is_the_transfer_root(self):
+        """A nested manifest's declared root drives validation and dirty apply.
+
+        This is intentionally a local, live-ish transfer regression: it uses a
+        real nested Git checkout and tar archive, while recording the one SSH
+        extraction call.  The archive and Compose command must both be rooted
+        at ``site``; an outer checkout file must never be included.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            config = outer / "config"
+            source = outer / "site"
+            config.mkdir()
+            source.mkdir()
+            (config / "sandbox.hosting.yml").write_text(
+                _manifest().replace("project: example-site", "project: example-site\nsource_root: ../site")
+            )
+            (source / "compose.yml").write_text("services: {}\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "config/sandbox.hosting.yml", "site/compose.yml"],
+                           cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "initial",
+            ], cwd=outer, check=True)
+
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            committed_sha, _ = remote._source_tree_commit(source, source, head)
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", committed_sha],
+                cwd=outer, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(committed, ["compose.yml"])
+            self.assertNotIn("unrelated-outer.txt", committed)
+
+            (source / "compose.yml").write_text("services:\n  web: {}\n")
+            (source / "local.yml").write_text("services: {}\n")
+            (outer / "unrelated-outer.txt").write_text("must not deploy\n")
+            validated = hosting.validate_manifest(config)
+            self.assertEqual(Path(validated["source_root"]), source.resolve())
+            self.assertTrue(validated["source_root_nested"])
+
+            diff_text, untracked = remote.capture_uncommitted(source)
+            self.assertIn("a/compose.yml b/compose.yml", diff_text)
+            self.assertEqual(untracked, ["local.yml"])
+            self.assertNotIn("unrelated-outer.txt", diff_text)
+            self.assertNotIn("unrelated-outer.txt", untracked)
+
+            with patch.object(remote, "ssh_run", return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="", stderr="")) as ssh:
+                applied = remote.apply_uncommitted(
+                    {"ssh": "ubuntu@example.test"}, "/srv/deploy/example-site", source,
+                    diff_text, untracked,
+                )
+            self.assertEqual(applied, 2)
+            command = ssh.call_args.args[1]
+            self.assertIn("tar -xzf - -C /srv/deploy/example-site", command)
+            self.assertNotIn("/srv/deploy/example-site/site", command)
+            archive = tarfile.open(fileobj=io.BytesIO(ssh.call_args.kwargs["input_data"]), mode="r:gz")
+            names = {name for name in archive.getnames() if not name.startswith("._")}
+            self.assertEqual(names, {"compose.yml", "local.yml"})
+
+            compose_command = hosting_cmd._compose_prefix(
+                validated, "/srv/deploy/example-site", "/runtime/override.yml", "/runtime/env"
+            )
+            self.assertIn("-f /srv/deploy/example-site/compose.yml", compose_command)
+            self.assertNotIn("/srv/deploy/example-site/site/compose.yml", compose_command)
 
     def test_renders_caddy_serve_and_redirect_routes(self):
         with self._write(_manifest()) as directory:
@@ -466,6 +565,34 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
         self.assertTrue(commands[-1].endswith("up -d web worker"))
 
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_false_deploys_without_rebuilding_any_image(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080",
+                "container_port: 8080\n      build: false\n      init_services: [setup]",
+            ))
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertNotIn("--build", commands[0])
+        self.assertIn("up -d --force-recreate --renew-anon-volumes --remove-orphans web", commands[0])
+        self.assertFalse(any(command.endswith("build setup") for command in commands))
+        self.assertTrue(any(command.endswith("run --rm setup") for command in commands))
+
+    def test_build_defaults_to_true_and_rejects_a_non_boolean(self):
+        with self._write(_manifest()) as directory:
+            self.assertTrue(hosting.validate_manifest(directory)["compose"]["build"])
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      build: cached"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "compose.build must be true or false"):
+                hosting.validate_manifest(directory)
+
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.remote.ssh_run")
     def test_remote_health_retries_startup_connection_reset(self, ssh_run, _sleep):
@@ -743,6 +870,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(restored, list(reversed(previous)))
         restore_caddy.assert_called_once_with({}, "sandbox-host-example-site-production", "old caddy")
         save_state.assert_not_called()
+
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_basic_auth_edge_probe_streams_credentials_only_in_memory(self, build_opener):
+        opener = build_opener.return_value
+        challenge = urllib.error.HTTPError(
+            "https://example.test/", 401, "Unauthorized", {}, io.BytesIO(),
+        )
+        authenticated = MagicMock(status=200)
+        authenticated.__enter__.return_value = authenticated
+        opener.open.side_effect = [challenge, authenticated]
+        secret = "do-not-print-this-secret"
+        hosting_cmd._verify_edge(
+            [{"hostname": "example.test", "mode": "serve"}],
+            basic_auth_enabled=True,
+            basic_auth_credentials=("operator", secret),
+        )
+        authenticated_request = opener.open.call_args_list[1].args[0]
+        self.assertTrue(authenticated_request.get_header("Authorization").startswith("Basic "))
+        self.assertNotIn(secret, authenticated_request.full_url)
+        self.assertNotIn(secret, repr(authenticated_request))
 
 
 class _Response:

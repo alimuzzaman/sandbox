@@ -90,5 +90,123 @@ class TestManagedPlan(unittest.TestCase):
                                             target.machine_id))
             self.assertNotIn(target.digest, calls[0])
 
+    def test_managed_php_extensions_map_only_to_catalogued_signed_apt_rows(self):
+        from sandbox.runtimes.managed.plan import ManagedExtensionPackagePlanner
+
+        versions = {"php8.3-imagick": "3.7.0", "php8.3-common": "8.3.6", **__import__(
+            "tests.test_managed_package_plan", fromlist=["VERSIONS"]
+        ).VERSIONS}
+        base = __import__("tests.test_managed_package_plan",
+                          fromlist=["TestManagedPackagePlan"]).TestManagedPackagePlan().planner(
+                              versions=versions)
+        package_plan, extension_plan = ManagedExtensionPackagePlanner(base).resolve(
+            requirements={"profile": "wordpress@1", "extensions": {
+                "gd": True,
+                "imagick": {"state": "enabled", "version": "3.7.0"},
+            }}
+        )
+        self.assertEqual(extension_plan.profile, "wordpress@1")
+        self.assertEqual(len(extension_plan.digest), 64)
+        image_rows = [dict(row) for row in package_plan.image_packages
+                      if row.get("php_extensions")]
+        self.assertTrue(image_rows)
+        imagick = next(row for row in image_rows
+                       if any(item["name"] == "imagick" for item in row["php_extensions"]))
+        self.assertEqual(imagick["name"], "php8.3-imagick")
+        evidence = next(item for item in imagick["php_extensions"] if item["name"] == "imagick")
+        self.assertEqual(evidence["package_version"], "3.7.0")
+        self.assertTrue(evidence["catalog_digest"].startswith("sha256:"))
+        self.assertEqual(evidence["source"], "official-distribution")
+        self.assertTrue(all(item["source"] == "official-distribution"
+                            for item in imagick["php_extensions"]))
+
+    def test_profile_only_request_selects_deterministic_gd_capability(self):
+        from sandbox.runtimes.managed.plan import ManagedExtensionPackagePlanner
+
+        package_tests = __import__("tests.test_managed_package_plan",
+                                   fromlist=["TestManagedPackagePlan", "VERSIONS"])
+        base = package_tests.TestManagedPackagePlan().planner(
+            versions={"php8.3-common": "8.3.6", **package_tests.VERSIONS},
+        )
+        package_plan, extension_plan = ManagedExtensionPackagePlanner(base).resolve(
+            requirements={"profile": "wordpress@1"},
+        )
+        names = {item["name"] for item in extension_plan.requirements}
+        self.assertIn("gd", names)
+        self.assertNotIn("imagick", names)
+        gd_rows = [row for row in package_plan.image_packages
+                   if any(item["name"] == "gd"
+                          for item in row.get("php_extensions", ()))]
+        self.assertTrue(gd_rows)
+
+    def test_managed_php_extension_requirements_reject_packages_sources_and_observation_only(self):
+        from sandbox.runtimes.managed.plan import ManagedExtensionPackagePlanner
+        base = __import__("tests.test_managed_package_plan",
+                          fromlist=["TestManagedPackagePlan"]).TestManagedPackagePlan().planner()
+        planner = ManagedExtensionPackagePlanner(base)
+        for requirements in (
+            {"extensions": {"gd": {"state": "enabled", "package": "apt-evil"}}},
+            {"extensions": {"gd": "8.3; rm -rf /"}},
+            {"extensions": {"bcmath": True}},
+        ):
+            with self.subTest(requirements=requirements), self.assertRaises(ValueError):
+                planner.resolve(requirements=requirements)
+
+    def test_extension_requirement_or_catalog_drift_invalidates_existing_approval(self):
+        from sandbox.runtimes.managed.packages import ManagedPackageService
+        from sandbox.runtimes.managed.plan import ManagedExtensionPackagePlanner
+        base = __import__("tests.test_managed_package_plan",
+                          fromlist=["TestManagedPackagePlan"]).TestManagedPackagePlan().planner()
+        planner = ManagedExtensionPackagePlanner(base)
+        approved, _ = planner.resolve(requirements={"extensions": {"gd": True}})
+        changed, _ = planner.resolve(requirements={"extensions": {"gd": "8.3.*"}})
+        applied = []
+        service = ManagedPackageService(
+            replanner=lambda: changed,
+            apply_transaction=lambda plan: applied.append(plan) or {"ok": True, "mutated": True},
+            baseline_observer=lambda: {"digest": "same"},
+            confirmation=lambda _plan: True,
+        )
+        result = service.apply(approved, interactive=True)
+        self.assertEqual(result["state"], "drifted")
+        self.assertFalse(applied)
+
+    def test_invalid_php_extensions_are_rejected_before_network_reservation(self):
+        from sandbox.isolation.resources import ResourcePolicyCompiler
+        from sandbox.runtimes.managed.plan import ManagedPlanBuilder
+        from sandbox.runtimes.managed.repository import NativeRepository
+
+        package_tests = __import__(
+            "tests.test_managed_package_plan", fromlist=["TestManagedPackagePlan"]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state.json"
+            repository = NativeRepository(state_path)
+            repository.put_owned("backends", "unrelated", {
+                "owner": "unrelated", "value": "preserve",
+            })
+            before_bytes = state_path.read_bytes()
+            before_state = repository.snapshot()
+            builder = ManagedPlanBuilder(
+                repository=repository,
+                packages=package_tests.TestManagedPackagePlan().planner(),
+                resources=ResourcePolicyCompiler(), network=Network(), image=Component(),
+                apparmor=Component(), machine=Component(), database=Database(),
+                services=Services(),
+            )
+            request = SimpleNamespace(
+                project_root=temp,
+                label="default",
+                arguments={"phpExtensions": {
+                    "extensions": {"gd": {"state": "enabled", "package": "apt-foreign"}},
+                }},
+            )
+            with self.assertRaises(ValueError):
+                builder(request)
+            self.assertEqual(state_path.read_bytes(), before_bytes)
+            after_state = repository.snapshot()
+            self.assertEqual(after_state, before_state)
+            self.assertEqual(len(after_state["networks"]), 0)
+
 
 if __name__ == "__main__": unittest.main()

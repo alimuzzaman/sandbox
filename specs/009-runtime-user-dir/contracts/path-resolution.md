@@ -30,7 +30,9 @@ $SANDBOX_HOME/
 │   ├── proxy/{certs,Caddyfile,proxy.yml}
 │   ├── herd-shims/<instance>/   # herd php PATH shims
 │   ├── .venv-tools/             # tools venv (recreated, never moved)
+│   ├── build/php-extensions/<digest>/ # recreatable, content-addressed extension contexts
 │   ├── wp-cli.phar              # shared built-in wp-cli
+│   ├── workspaces/index.sqlite3 # durable workspace metadata/index (owner-only)
 │   └── registry.json            # project-root → instance map (authoritative)
 ├── config.json                  # user-global config (was ~/.config/sandbox/config.json)
 ├── sandbox.local.yml            # per-machine instance blocks + secrets
@@ -91,3 +93,32 @@ base-relative location first; if absent, read the legacy location
 (`~/.config/sandbox/config.json`, `<repo>/sandbox.local.yml`, `<repo>/.env.local`,
 `<repo>/runtime/registry.json`). Fallback is read-only and logged once (no contents).
 Fallback is removed only after migration is proven on the live stack (constitution VI).
+
+## C6 — Durable workspace metadata/index
+
+The base MUST contain the owner-only SQLite index at
+`$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. It is versioned, WAL-backed, and
+accessed only through the workspace repository/service. The index has an opaque stable
+`workspace_id` and enforces one owner for each `(project_identity, workspace_label)`.
+
+Legacy metadata remains at the exact compatibility path
+`runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` and MUST be preserved
+byte-for-byte. Discovery records an explicit `adopted`, `unresolved`, `conflict`, or
+`invalid` decision using exact job/project evidence; name or age alone is insufficient.
+
+`sb workspace migrate --project-identity ID --json` creates a target-bound plan with a
+full inventory digest, current index generation, and expiry. Applying by `--plan-id` is
+confirmation-gated, lock-serialized, re-scans before one transaction, and fails with
+`workspace_migration_plan_stale` on drift. An incomplete legacy inventory surfaces
+`workspace_index_incomplete` rather than an empty list. Migration and base relocation
+never remove legacy metadata or release networks.
+
+`sb workspace list` reports that incompleteness without failing: the payload stays
+`ok: true` with `index.complete=false`, `index.code="workspace_index_incomplete"`, and an
+`on_disk` inventory of the deployment root so unindexed storage cannot become invisible.
+Mutating workspace operations continue to refuse a degraded or non-ready record.
+
+Remote workspace status/list/migrate operations MUST accept project identity or
+workspace ID and MUST NOT require a checkout path. Reset/destroy remain confirmation-
+gated and busy-locked; resource monitoring consumes a typed ownership projection rather
+than opening the index.

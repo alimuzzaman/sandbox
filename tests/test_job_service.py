@@ -17,7 +17,8 @@ class JobServiceTests(unittest.TestCase):
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None)
             service._launch(Path(temp) / "descriptor.json")
-            self.assertEqual(Path(launch.call_args.kwargs["cwd"]).name, "sandbox")
+            package_root = Path(__file__).resolve().parents[1]
+            self.assertEqual(Path(launch.call_args.kwargs["cwd"]).resolve(), package_root)
             repository.close()
 
     def test_acceptance_precedes_launcher_and_idempotency_replays(self):
@@ -31,6 +32,68 @@ class JobServiceTests(unittest.TestCase):
             self.assertFalse(first["idempotent_replay"]); self.assertTrue(second["idempotent_replay"])
             self.assertTrue(launched[0].exists())
             self.assertEqual(first["deadline"], {"seconds": 60, "source": "explicit"})
+            repository.close()
+
+    def test_workspace_registration_precedes_durable_job_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            observed = []
+
+            class Registry:
+                def ensure_submission(self, submission):
+                    observed.append((submission.project_identity, repository.list()))
+
+            service = JobService(
+                repository, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _descriptor: None, workspace_registry=Registry(),
+            )
+            result = service.submit(JobSubmission(
+                "test", temp, "project-identity", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+            ))
+            self.assertTrue(result["ok"])
+            self.assertEqual(observed, [("project-identity", [])])
+            self.assertEqual(len(repository.list()), 1)
+            repository.close()
+
+    def test_workspace_registration_failure_cannot_accept_a_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+
+            class Registry:
+                def ensure_submission(self, _submission):
+                    raise RuntimeError("workspace_index_unavailable")
+
+            service = JobService(
+                repository, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _descriptor: None, workspace_registry=Registry(),
+            )
+            with self.assertRaisesRegex(RuntimeError, "workspace_index_unavailable"):
+                service.submit(JobSubmission(
+                    "test", temp, "project-identity", "local", "default",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                ))
+            self.assertEqual(repository.list(), [])
+            repository.close()
+
+    def test_workspace_resource_binding_failure_precedes_job_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+
+            class Registry:
+                def ensure_submission(self, _submission):
+                    raise RuntimeError("workspace_ownership_drift")
+
+            service = JobService(
+                repository, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _descriptor: None, workspace_registry=Registry(),
+            )
+            with self.assertRaisesRegex(RuntimeError, "workspace_ownership_drift"):
+                service.submit(JobSubmission(
+                    "test", temp, "project-identity", "local", "default",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                ))
+            self.assertEqual(repository.list(), [])
             repository.close()
 
     def test_launch_failure_is_durably_failed_never_running_or_successful(self):

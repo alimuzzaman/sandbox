@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -51,7 +52,8 @@ class ComposeDeclaredTests(unittest.TestCase):
                         "tests": {"modes": {"fast": {"argv": ["pnpm", "test:fast"]}}}}
 
         target = SimpleNamespace(kind="remote", project_root="/fixture",
-                                 workspace_label="lenzora-test", remote_name="scaleway-sandbox")
+                                 workspace_label="lenzora-test", remote_name="scaleway-sandbox",
+                                 sources={"identity": "project:compose"})
 
         def resolve(request):
             captured["request"] = request
@@ -73,4 +75,9 @@ class ComposeDeclaredTests(unittest.TestCase):
         self.assertEqual(captured["request"].required_capability, "job.exec")
         self.assertEqual(captured["submission"].argv, ("pnpm", "test:fast"))
         self.assertEqual(captured["submission"].workspace_label, "lenzora-test")
+        self.assertEqual(captured["submission"].project_identity, "project:compose")
+        self.assertEqual(
+            captured["submission"].source.identity,
+            "sha256:" + hashlib.sha256("/fixture".encode()).hexdigest(),
+        )
         self.assertEqual(json.loads(output.getvalue())["job_id"], "job-1")

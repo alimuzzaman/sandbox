@@ -8,6 +8,7 @@ import httpx
 import re as _re
 
 from dependencies import ToolDependencies
+from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 
 SANDBOX_ROOT = None
 _compose = _herd_host_env = _host_run = _is_herd = None
@@ -216,7 +217,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         # sent by the deploy layer rather than the caller's local filesystem.
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
-        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.jobs.models import JobSubmission, TargetRequest
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
@@ -227,10 +228,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
             command = ["sb", "test", resolved_mode, "--local", "--project-dir", "."]
             if phpunit_args.strip():
                 command += ["--", *shlex.split(phpunit_args)]
-            source = "sha256:" + __import__("hashlib").sha256(target.project_root.encode()).hexdigest()
             accepted = _remote_job_transport().submit(JobSubmission(
-                    "test", target.project_root, source.removeprefix("sha256:"), "remote",
-                    target.workspace_label, tuple(command), timeout_seconds, SourceIdentity(source),
+                    "test", target.project_root, _resolved_project_identity(target), "remote",
+                    target.workspace_label, tuple(command), timeout_seconds, _source_identity(target.project_root),
                     remote_name=target.remote_name, output_profile=output_profile,
                     deadline_source="explicit"))
         except (TargetResolutionError, ValueError) as exc:

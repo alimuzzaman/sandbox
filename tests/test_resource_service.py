@@ -106,6 +106,43 @@ class CancellationAwareAdapter(FakeAdapter):
         )
 
 
+class NetworkPressureAdapter(FakeAdapter):
+    def __init__(self, count, **kwargs):
+        networks = tuple(
+            observation(
+                f"network-{index}",
+                kind="network",
+                classification="active",
+                size_bytes=0,
+                owner_kind="project",
+                owner_id=f"sandbox-project-{index}",
+                locator=f"network-{index}",
+                capacity_accounted=False,
+            )
+            for index in range(count)
+        )
+        super().__init__(networks, **kwargs)
+
+    def observe(self, *, thorough, budget_seconds, progress=None, focus=None,
+                deep=False):
+        snapshot = super().observe(
+            thorough=thorough,
+            budget_seconds=budget_seconds,
+            progress=progress,
+            focus=focus,
+            deep=deep,
+        )
+        return ProviderSnapshot(
+            snapshot.target,
+            snapshot.capacity,
+            snapshot.resources,
+            ({"category": "docker_networks", "status": "complete"},),
+            snapshot.drift,
+            snapshot.deep_attribution,
+            snapshot.capacity_scope_id,
+        )
+
+
 class TestResourceService(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -151,6 +188,36 @@ class TestResourceService(unittest.TestCase):
             "sandbox:sandbox",
         )
         self.assertNotIn("hunter2", str(payload))
+
+    def test_capacity_pressure_is_additive_and_thresholded(self):
+        for count, level, code in (
+            (23, "low", None),
+            (24, "medium", "network_capacity_pressure"),
+            (28, "high", "network_pool_exhausted"),
+        ):
+            with self.subTest(count=count):
+                payload = self.service(NetworkPressureAdapter(count)).status(
+                    budget_seconds=15,
+                )
+                self.assertTrue(payload["ok"])
+                pressure = payload["data"]["capacity_pressure"]
+                self.assertEqual(pressure["level"], level)
+                self.assertEqual(
+                    pressure["managed_user_defined_network_count"], count,
+                )
+                self.assertEqual(pressure["threshold"], 28)
+                self.assertEqual(pressure["recovery"]["code"], code)
+                self.assertFalse(pressure["recovery"]["automatic_cleanup"])
+                self.assertNotIn("network_pool_exhausted", str(payload["error"]))
+
+    def test_pressure_guidance_never_implies_active_network_cleanup(self):
+        payload = self.service(NetworkPressureAdapter(31)).status(
+            budget_seconds=15,
+        )
+        guidance = payload["data"]["capacity_pressure"]["recovery"]["guidance"]
+        self.assertIn("workspace destroy", guidance)
+        self.assertIn("rescan", guidance)
+        self.assertIn("Do not delete active", guidance)
 
     def test_secret_corpus_is_redacted_from_status(self):
         item = observation(
@@ -502,6 +569,27 @@ class TestResourceService(unittest.TestCase):
         self.assertEqual(result["data"]["drift"]["reason"],
                          "concurrent_or_shared_storage_change")
 
+    def test_owner_identity_is_stable_across_status_plan_and_apply(self):
+        item = observation(
+            "workspace-container", kind="container", owner_kind="workspace",
+            owner_id="ws_unit", locator="container-id", size_bytes=500,
+        )
+        adapter = FakeAdapter((item,))
+        service = self.service(adapter)
+
+        status = service.status()
+        plan = service.plan("cache", thorough=True, budget_seconds=15)
+        self.assertEqual(
+            status["data"]["resources"][0]["owner"]["id"], "ws_unit",
+        )
+        self.assertEqual(
+            plan["data"]["candidates"][0]["expected_owner"]["id"], "ws_unit",
+        )
+
+        applied = service.cleanup(plan["data"]["plan_id"], confirm=True)
+        self.assertTrue(applied["ok"])
+        self.assertEqual(adapter.removed, ["workspace-container"])
+
     def test_remote_or_local_measurement_without_capacity_fails_safely(self):
         adapter = FakeAdapter()
         adapter.observe = lambda **_kwargs: ProviderSnapshot(
@@ -512,6 +600,94 @@ class TestResourceService(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "unavailable")
         self.assertEqual(payload["error"]["code"], "measurement_unavailable")
+
+
+class DirectoryCacheAwareAdapter(FakeAdapter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.directory_cache_calls = []
+
+    def observe(
+        self, *, thorough, budget_seconds, progress=None, focus=None,
+        deep=False, directory_cache=None,
+    ):
+        self.directory_cache_calls.append(directory_cache)
+        return super().observe(
+            thorough=thorough, budget_seconds=budget_seconds,
+            progress=progress, focus=focus, deep=deep,
+        )
+
+
+class TestPartialEvidenceIsUsable(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.now = NOW
+
+    def service(self, adapter):
+        return ResourceService(
+            adapter,
+            PlanStore(Path(self.temp.name), clock=lambda: self.now),
+            clock=lambda: self.now,
+        )
+
+    def test_live_capacity_jitter_does_not_discard_deep_attribution(self):
+        # Capacity and the deep pass read the same filesystem moments apart.
+        deep = DeepAttribution(
+            status="complete", filesystems=(), findings=(), capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=79_999, directory_allocated_bytes=60_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            (observation("managed", size_bytes=20_000),),
+            deep_attribution=deep,
+        )).status(deep=True)
+
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 60_000)
+        self.assertNotIn({
+            "category": "reconciliation", "status": "partial",
+            "reason": "capacity_scope_mismatch",
+        }, payload["data"]["category_outcomes"])
+
+    def test_directory_cache_mode_reaches_a_supporting_provider(self):
+        adapter = DirectoryCacheAwareAdapter(
+            (observation("managed", size_bytes=20_000),),
+        )
+        self.service(adapter).status(deep=True, directory_cache="cache_only")
+        self.assertEqual(adapter.directory_cache_calls, ["cache_only"])
+
+    def test_directory_cache_mode_is_omitted_for_older_providers(self):
+        adapter = FakeAdapter((observation("managed", size_bytes=20_000),))
+        payload = self.service(adapter).status(
+            deep=True, directory_cache="cache_only",
+        )
+        self.assertTrue(payload["ok"])
+
+
+class TestCategoryOutcomeEnrichment(unittest.TestCase):
+    def test_measured_bytes_and_skipped_rows_are_reported(self):
+        from sandbox.resources.service import enrich_outcomes
+
+        outcomes = enrich_outcomes(
+            (
+                {"category": "docker_images", "status": "timed_out"},
+                {"category": "mount_inventory", "status": "complete"},
+            ),
+            (
+                observation("image-a", kind="image", size_bytes=20_000),
+                observation("image-b", kind="image", size_bytes=None),
+            ),
+        )
+        self.assertEqual(outcomes[0], {
+            "category": "docker_images", "status": "timed_out",
+            "measured_bytes": 20_000, "measured_count": 1,
+            "unmeasured_count": 1,
+        })
+        self.assertEqual(
+            outcomes[1], {"category": "mount_inventory", "status": "complete"},
+        )
 
 
 if __name__ == "__main__":

@@ -42,12 +42,26 @@ def cmd_wp(cfg, args) -> None:
                 "transport; host/legacy job fallback is disabled")
         from sandbox.commands.jobs import launch_job
         jid = launch_job(args.resolved_instance, pt)
-        ok(f"started background job {jid}")
-        print(f"  poll:   ./sb job {jid}")
-        print(f"  follow: ./sb job {jid} --follow")
-        print(f"  kill:   ./sb job {jid} --kill")
+        print(jid)
+        print(f"started background job {jid}", file=sys.stderr)
+        print(f"  poll:   ./sb job {jid}", file=sys.stderr)
+        print(f"  follow: ./sb job {jid} --follow", file=sys.stderr)
+        print(f"  kill:   ./sb job {jid} --kill", file=sys.stderr)
         return
-    wpcli(pt, instance=args.resolved_instance)
+    if pt and pt[0] == "--":
+        pt = pt[1:]
+    if not pt:
+        die("usage: ./sb wp <wp-cli args>")
+    result = wpcli(pt, instance=args.resolved_instance, check=False, capture=True)
+    stdout = getattr(result, "stdout", "") or ""
+    stderr = getattr(result, "stderr", "") or ""
+    if stdout:
+        print(stdout, end="")
+    if stderr:
+        print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
+    returncode = int(getattr(result, "returncode", 0) or 0)
+    if returncode:
+        die(f"wp command failed with exit code {returncode}", code=returncode)
 
 def cmd_seed(cfg, args) -> None:
     if not args.file:

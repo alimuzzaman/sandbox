@@ -100,3 +100,47 @@ If a registry/runtime record with data exists and requested mode/adapter differs
 ordinary operation returns `runtime_mode_change` with `mutated: false`. Only a separately
 specified export/recreate/import operation may cross modes.
 
+## PHP extension resolution
+
+For a WordPress runtime with `phpExtensions`, preflight normalizes the request and
+returns the immutable profile/catalog revision, content digest, safe provenance, and
+four execution-plane observations. The request is not considered ready unless web PHP,
+WP-CLI, bounded exec, and PHPUnit agree on enabled/disabled state and each requested
+version. A missing or unobservable module, exact-version mismatch, unsupported disable,
+or plane drift returns `mutated: false` before image/package/runtime work.
+
+For `wordpress@1`, an image capability is satisfied when a fresh plane observation
+reports GD or Imagick enabled, or when the selected official Apache/nginx builder
+provisions the allowlisted default GD recipe. If neither condition holds, preflight
+returns a missing-capability result before mutation.
+
+An active `disabled` request is allowed only for a checked-in manifest entry marked
+INI-disableable and only through an owned runtime INI artifact. Every other disable
+request returns `unsupported_disable`; it never edits shared/global INI or guesses a
+module-specific mechanism.
+
+Official WordPress Apache/nginx images may be extended only through checked-in
+allowlisted child-image recipes after digest validation. Custom images, LiteSpeed,
+Herd, Valet, and other incumbent native runtimes are validate-only in v1; no shared
+host PHP or global INI mutation is permitted. Generic Compose returns
+`unsupported_capability` when the field is present.
+
+The extension resolution is additive to the normal operation envelope:
+
+```json
+{
+  "php_extensions": {
+    "profile": "wordpress@1",
+    "digest": "sha256:…",
+    "state": "ready",
+    "planes": { "web": {}, "wp_cli": {}, "exec": {}, "phpunit": {} },
+    "provenance": []
+  }
+}
+```
+
+The digest covers normalized requirements, profile/catalog revision, parent image
+digest, PHP version, server flavor, platform, and architecture. Cache/build contexts
+are recreated under `$SANDBOX_HOME/runtime/build/php-extensions/<digest>/`; apply may
+reconcile only web/runtime artifacts and preserves database volumes, uploads, snapshots,
+and project files.

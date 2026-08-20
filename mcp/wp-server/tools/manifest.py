@@ -9,13 +9,13 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 
 BUILTIN_TOOL_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
-    "resources",
-    "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
+    "resources", "feedback",
+    "abilities", "skills", "debug", "e2e", "ci", "asyncjobs", "secrets",
     "plugin_check", "remote", "hermes", "recovery",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources", "feedback",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -24,10 +24,10 @@ DEFAULT_MCP_GROUPS = (
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
-    "resources",
+    "resources", "feedback",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "net", "remote", "resources",
+    "instances", "domains", "runtime", "jobs", "net", "remote", "resources", "feedback",
 )
 
 
@@ -61,6 +61,8 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
     "resources": ("resource_service_factory",),
+    "feedback": ("feedback_service_factory",),
+    "secrets": ("secret_service_factory",),
 }
 
 # Exact registration ownership and order, kept separate from implementation
@@ -70,7 +72,7 @@ BUILTIN_TOOL_NAMES = {
     "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support", "ingress_plan", "ingress_cleanup", "ingress_reconcile", "ingress_reconsider", "ingress_apply"),
     "runtime": ("instance_status", "instance_logs", "instance_exec",
                 "native_support", "native_preflight", "native_install_plan"),
-    "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
+    "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy", "workspace_migration_plan", "workspace_migration_apply"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),
     "data": ("db_query", "import_content", "snapshot", "wp_reset"),
@@ -81,6 +83,7 @@ BUILTIN_TOOL_NAMES = {
     "resources": (
         "resource_status", "resource_cleanup_plan", "resource_cleanup_apply",
     ),
+    "feedback": ("feedback_submit", "feedback_list"),
     "abilities": ("wp_eval_live",),
     "skills": ("list_skills", "skill_write", "skill_edit", "skill_delete"),
     "debug": ("qm_capture", "xdebug"),
@@ -91,6 +94,9 @@ BUILTIN_TOOL_NAMES = {
     "remote": ("remote_deploy",),
     "hermes": ("hermes_status", "hermes_run", "hermes_job_status", "hermes_job_kill", "hermes_cron_list", "hermes_cron_validate", "hermes_cron_create", "hermes_cron_route", "hermes_cron_run", "hermes_cron_output", "hermes_authorization_sync", "hermes_authorization_list", "hermes_authorization_show", "hermes_authorization_request", "hermes_authorization_approve", "hermes_health", "hermes_worktree_list", "hermes_worktree_inspect", "hermes_worktree_preserve", "hermes_repo_sync", "hermes_gateway_converge", "hermes_cron_catalog", "hermes_cron_reconcile", "hermes_cron_verify"),
     "recovery": ("recovery_profiles", "recovery_plan", "recovery_list", "recovery_verify", "recovery_create", "recovery_restore_plan", "recovery_restore_apply", "recovery_schedule_plan", "recovery_retention_plan"),
+    "secrets": (
+        "secret_source_info", "secret_inspect", "secret_validate", "secret_use_profile",
+    ),
 }
 
 

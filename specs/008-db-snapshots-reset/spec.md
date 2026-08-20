@@ -181,3 +181,34 @@ baseline can't be overwritten or deleted by ordinary snapshot operations.
 - Full (DB + uploads) snapshots remain available; DB-only is additive.
 - Host-served (herd) snapshot support is out of scope for v1 (tracked with the
   existing snapshot feature's limitation).
+
+## Convergence amendment — 2026-08-13 (27-feedback restore safety)
+
+Feedback `adde58a6` exposed a contract gap around named snapshot restore. The
+existing baseline/reset protections remain; this amendment makes every
+destructive restore confirmation boundary explicit.
+
+### Normative requirements
+
+- **FR-010**: Restoring any named snapshot MUST be treated as destructive because
+  it drops/replaces current database state. A non-interactive CLI invocation MUST
+  supply explicit `--yes` (or the established equivalent confirmation field);
+  an interactive invocation MUST default-deny on missing, cancelled, or invalid
+  confirmation.
+- **FR-011**: MCP and bridge/dashboard restore callers MUST carry an explicit
+  boolean confirmation plus their existing nonce/capability checks. A plan ID,
+  snapshot name, prior prompt, or caller identity MUST NOT imply confirmation.
+- **FR-012**: Confirmation MUST be validated before any database reset, import,
+  uploads extraction, or other restore-side effect. Refusal returns a stable
+  `confirmation_required`/`confirmation_failed` error and leaves the instance
+  unchanged.
+- **FR-013**: A confirmed restore records the target snapshot, instance identity,
+  confirmation path, and bounded outcome; cancellation or a preflight failure
+  preserves the existing state and never reports success.
+
+### Acceptance evidence required before closing this amendment
+
+The matrix MUST include noninteractive refusal-before-mutation, interactive
+cancel, confirmed CLI, confirmed MCP, and confirmed dashboard/bridge paths. It
+must assert database/filesystem providers were not called on refusal and must
+retain safe evidence for feedback `adde58a6`.

@@ -576,7 +576,8 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     process identity, workspace label, and artifact boundary; no workflow
     process pipes are attached to the submitting SSH/MCP connection.
     """
-    from sandbox.jobs.models import JobSubmission, SourceIdentity
+    from sandbox.jobs.models import JobSubmission
+    from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
     timeout = int(getattr(args, "timeout", 900) or 900)
     label_prefix = (getattr(args, "label_prefix", None) or
                     getattr(target, "workspace_label", None) or "ci")
@@ -630,18 +631,17 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 command += ["--matrix-filter", f"{key}={value}"]
             for difference in getattr(args, "accepted_differences", None) or ():
                 command += ["--accept-difference", difference]
-            job_source = SourceIdentity("workflow:" + hashlib.sha256(
-                f"{relative_workflow}|{job['id']}|{sorted(cell.items())}".encode()).hexdigest())
             accepted_compatibility = tuple({"id": value, "accepted": True,
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
                     "detail": "caller accepted compatibility difference"} for value in
                     (getattr(args, "accepted_differences", None) or ()))
             submissions.append(JobSubmission(
-                kind="ci", project_root=root,
-                project_identity=hashlib.sha256(Path(root).resolve().as_posix().encode()).hexdigest(),
+                kind="ci", project_root=target.project_root,
+                project_identity=_resolved_project_identity(target),
                 target_kind="remote", remote_name=target.remote_name,
                 workspace_label=label, workspace_mode="isolated", argv=tuple(command),
-                deadline_seconds=timeout, source=job_source, output_profile=getattr(args, "output_profile", "smart"),
+                deadline_seconds=timeout, source=_source_identity(target.project_root),
+                output_profile=getattr(args, "output_profile", "smart"),
                 deadline_source="explicit", artifact_paths=tuple(_remote_ci_artifacts(
                     workflow_data.get("jobs", {}).get(job["id"], {}))),
                 depends_on=dependencies,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from typing import Callable
 
 from sandbox.services.process import ProcessResult
@@ -11,6 +12,7 @@ from .attribution import DeepAttribution
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
+    NetworkLifecycle,
     ResourceObservation,
     StorageTarget,
     utc_now,
@@ -25,7 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 import platform
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +42,30 @@ SB = HOME / "sb-src" / "sb"
 BUDGET_SECONDS = max(float(REQUEST.get("budget_seconds", 15)), 0.5)
 DEADLINE = time.monotonic() + max(BUDGET_SECONDS - 2, 0.25)
 PHASE = "startup"
+ENVELOPE = None
+DIRECTORY_CACHE_PATH = RUNTIME / "resources" / "directory-index.json"
+DIRECTORY_CACHE_TTL = max(float(REQUEST.get("directory_cache_ttl") or 21600), 0)
+DIRECTORY_CACHE_MODE = str(REQUEST.get("directory_cache") or "auto")
+# cache_only is the always-available fast path: read the cached host index,
+# never walk the disk, and never pay for engine inventory.
+FAST = DIRECTORY_CACHE_MODE == "cache_only"
+# Rows below this size are noise for a host-attribution report; dropping them
+# while streaming keeps a full-depth walk inside a bounded response.
+DIRECTORY_MIN_BYTES = max(int(REQUEST.get("directory_min_bytes") or 33554432), 0)
+DIRECTORY_DEPTH = min(max(int(REQUEST.get("directory_depth") or 6), 1), 12)
+
+
+INDEX_ROWS = {}
+
+
+def indexed_size(path):
+    # Reuse one host walk instead of paying for a du per managed path.
+    return INDEX_ROWS.get(str(path))
+
+
+def emit(payload):
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
 
 BYTE_SIZE = re.compile(
     r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I,
@@ -71,25 +99,219 @@ def byte_count(value):
 def rid(kind, locator):
     return kind + "-" + hashlib.sha256(locator.encode()).hexdigest()[:20]
 
+TIMEOUT_TOOL = shutil.which("timeout")
+
+
+def bounded(argv, seconds):
+    # An elevated child runs as root, so this unprivileged probe cannot
+    # signal it; only a bound that runs *inside* sudo can stop it on time.
+    if TIMEOUT_TOOL and list(argv[:2]) == ["sudo", "-n"]:
+        return list(argv[:2]) + [
+            TIMEOUT_TOOL, "-k", "1", str(max(int(seconds), 1)),
+        ] + list(argv[2:])
+    return list(argv)
+
+
+def spawn(argv):
+    # Start a child in its own session so the whole tree stays killable.
+    #
+    # ``sudo`` forks the real worker, so killing only the direct child leaves
+    # the worker alive holding the stdout pipe; the parent then blocks past its
+    # own budget.  A dedicated session lets one killpg end the whole tree.
+    return subprocess.Popen(
+        argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
+def terminate(process):
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def run(argv, timeout):
     remaining = max(min(float(timeout), DEADLINE - time.monotonic()), 0.01)
     try:
-        result = subprocess.run(
-            argv, text=True, capture_output=True, timeout=remaining, check=False,
-        )
-        return result.returncode, result.stdout[:4000000], result.stderr[:4096]
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
-        return 124, stdout[:4000000], (stderr + "\ntimed out")[:4096]
+        process = spawn(bounded(argv, remaining))
     except OSError:
         return 127, "", "unavailable"
+    try:
+        stdout, stderr = process.communicate(timeout=remaining)
+        return process.returncode, (stdout or "")[:4000000], (stderr or "")[:4096]
+    except subprocess.TimeoutExpired:
+        terminate(process)
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        return 124, (stdout or "")[:4000000], ((stderr or "") + "\ntimed out")[:4096]
+
+
+def walk_rows(argv, timeout, multiplier, keep_prefixes=()):
+    # Stream a directory walk, keeping material and managed rows only.
+    #
+    # Returns ``(rows, complete)``.  A walk that runs out of time keeps every
+    # row it already produced instead of discarding the whole measurement.
+    deadline = time.monotonic() + max(
+        min(float(timeout), DEADLINE - time.monotonic()), 0.01,
+    )
+    rows = []
+    try:
+        process = spawn(bounded(argv, deadline - time.monotonic()))
+    except OSError:
+        return rows, False
+    complete = False
+    try:
+        while True:
+            waiting = deadline - time.monotonic()
+            if waiting <= 0:
+                break
+            # readline() alone can block past the budget on a slow subtree.
+            if not select.select([process.stdout], (), (), waiting)[0]:
+                break
+            line = process.stdout.readline()
+            if not line:
+                try:
+                    complete = process.wait(timeout=2) == 0
+                except subprocess.TimeoutExpired:
+                    complete = False
+                break
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                measured = int(parts[0]) * multiplier
+            except ValueError:
+                continue
+            path = parts[1].strip()
+            if measured < DIRECTORY_MIN_BYTES and not any(
+                path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                for prefix in keep_prefixes
+            ):
+                continue
+            rows.append((measured, path))
+            if len(rows) >= 20000:
+                break
+    finally:
+        if process.poll() is None:
+            terminate(process)
+        try:
+            process.stdout.close()
+            process.stderr.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    return rows, complete
+
+
+def walk_budget():
+    # A refresh exists to finish the walk, so it keeps most of the budget;
+    # an ordinary deep pass leaves room for the other categories.
+    remaining = DEADLINE - time.monotonic()
+    share = 0.9 if DIRECTORY_CACHE_MODE == "refresh" else 0.7
+    return max(min(remaining * share, remaining - 15), 1.0)
+
+
+def directory_cache_read():
+    try:
+        payload = json.loads(DIRECTORY_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("mounts"), dict):
+        return None
+    return payload
+
+
+def directory_cache_write(payload):
+    try:
+        DIRECTORY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        staging = DIRECTORY_CACHE_PATH.with_name(
+            DIRECTORY_CACHE_PATH.name + ".staging",
+        )
+        staging.write_text(
+            json.dumps(payload, separators=(",", ":")), encoding="utf-8",
+        )
+        os.replace(staging, DIRECTORY_CACHE_PATH)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return True
+
+
+def directory_index(mount, argv, multiplier, timeout, keep_prefixes):
+    # Return a ranked directory index for one mount, cache-first.
+    #
+    # A full host walk cannot finish inside an interactive budget on a large
+    # host, so the walk result is cached with its timestamp and completeness
+    # and reused until it expires.  The caller always learns which one it got.
+    # Always read the store so a refresh of one mount cannot drop another.
+    cached = directory_cache_read()
+    entry = (
+        (cached or {}).get("mounts", {}).get(mount)
+        if cached and DIRECTORY_CACHE_MODE != "refresh" else None
+    )
+    now = time.time()
+    if isinstance(entry, dict) and isinstance(entry.get("rows"), list):
+        age = max(now - float(entry.get("created_at") or 0), 0)
+        fresh = age <= DIRECTORY_CACHE_TTL
+        if fresh or DIRECTORY_CACHE_MODE == "cache_only":
+            cached_rows = [
+                (int(item[0]), str(item[1]))
+                for item in entry["rows"]
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            ]
+            INDEX_ROWS.update({path: measured for measured, path in cached_rows})
+            return {
+                "rows": cached_rows,
+                "complete": bool(entry.get("complete")),
+                "created_at": float(entry.get("created_at") or 0),
+                "age_seconds": int(age),
+                "stale": not fresh,
+                "source": "cache",
+            }
+    if DIRECTORY_CACHE_MODE == "cache_only":
+        return {
+            "rows": [], "complete": False, "created_at": None,
+            "age_seconds": None, "stale": True, "source": "cache_missing",
+        }
+    rows, complete = walk_rows(argv, timeout, multiplier, keep_prefixes)
+    INDEX_ROWS.update({path: measured for measured, path in rows})
+    index = {
+        "rows": rows, "complete": complete, "created_at": now,
+        "age_seconds": 0, "stale": False, "source": "scan",
+    }
+    if rows:
+        payload = cached if isinstance(cached, dict) else {"mounts": {}}
+        if not isinstance(payload.get("mounts"), dict):
+            payload["mounts"] = {}
+        previous = payload["mounts"].get(mount)
+        # Never replace a complete walk with a shorter truncated one.
+        if not (
+            isinstance(previous, dict)
+            and previous.get("complete")
+            and not complete
+            and max(now - float(previous.get("created_at") or 0), 0)
+            <= DIRECTORY_CACHE_TTL
+        ):
+            payload["mounts"][mount] = {
+                "created_at": now, "complete": complete,
+                "rows": [[measured, path] for measured, path in rows],
+            }
+            payload["schema_version"] = 1
+            index["cached"] = directory_cache_write(payload)
+    return index
 
 def size(path, thorough):
+    indexed = indexed_size(path)
+    if indexed is not None:
+        return "measured", indexed, None
     if not thorough:
         return "not_measured", None, None
     code, out, _err = run(["du", "-sk", str(path)], 8)
@@ -120,6 +342,150 @@ def owner(labels):
     ):
         return project
     return None
+
+def load_workspace_projection():
+    # Read ownership through the installed typed application boundary.
+    try:
+        from sandbox.application.context import workspace_ownership_projection
+        return workspace_ownership_projection()
+    except Exception:
+        return None
+
+def _reference_counts(value):
+    # Missing reference evidence is unknown, not an observed zero.
+    names = ("leases", "containers", "jobs", "mounts")
+    if not isinstance(value, dict):
+        return tuple((name, None) for name in names), True
+    normalized = {}
+    for name in names:
+        count = value.get(name)
+        if count is None:
+            normalized[name] = None
+        elif isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            normalized[name] = count
+        else:
+            return (), False
+    return tuple(sorted(normalized.items())), True
+
+def workspace_owner_details(projection, resource_type, resource_id):
+    # Resolve one exact binding; never infer ownership from a label/path.
+    unavailable = {
+        "owner_kind": "unknown", "owner_id": None,
+        "evidence": ("workspace_index_unavailable",), "protected": False,
+        "lifecycle": "indeterminate", "active_references": {},
+        "observed_at": None, "active": False,
+    }
+    if not isinstance(projection, dict):
+        return unavailable
+    records = projection.get("records", projection.get("workspaces"))
+    if not isinstance(records, list):
+        return unavailable
+    counts = projection.get("counts") or {}
+    projection_generation = projection.get(
+        "index_generation", projection.get("generation"))
+    valid_lifecycles = {
+        "provisioning", "ready", "resetting", "destroying", "destroyed",
+        "indeterminate",
+    }
+    incomplete = any(
+        isinstance(counts.get(key), int) and counts.get(key) > 0
+        for key in ("unresolved", "conflict", "incomplete")
+    )
+    if (isinstance(projection_generation, bool) or
+            not isinstance(projection_generation, int)):
+        incomplete = True
+    if not records:
+        incomplete = True
+    matches = set()
+    for record in records:
+        if not isinstance(record, dict):
+            incomplete = True
+            continue
+        if record.get("complete") is False:
+            incomplete = True
+            continue
+        if (projection_generation is not None and
+                record.get("index_generation") != projection_generation):
+            incomplete = True
+            continue
+        workspace_id = record.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            incomplete = True
+            continue
+        lifecycle = record.get("lifecycle")
+        status = record.get("status")
+        observed_at = record.get("observed_at")
+        if (record.get("owner_kind") != "workspace" or
+                not isinstance(lifecycle, str) or
+                lifecycle.lower() not in valid_lifecycles or
+                not isinstance(status, str) or
+                not isinstance(observed_at, str) or not observed_at):
+            incomplete = True
+            continue
+        if lifecycle.lower() in {
+            "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
+            "tombstoned",
+        } or status.lower() in {
+            "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
+            "tombstoned",
+        }:
+            incomplete = True
+            continue
+        reference_counts, references_valid = _reference_counts(
+            record.get("active_references"),
+        )
+        if not references_valid:
+            incomplete = True
+            continue
+        reference_active = any(
+            count is not None and count > 0 for _name, count in reference_counts
+        )
+        for binding in record.get("bindings") or ():
+            if not isinstance(binding, dict):
+                incomplete = True
+                continue
+            binding_type = binding.get("resource_type", binding.get("type"))
+            binding_id = binding.get("resource_id", binding.get("id"))
+            if binding_type != resource_type or binding_id != resource_id:
+                continue
+            binding_status = str(binding.get("status") or "owned").lower()
+            if binding_status not in {"owned", "active", "retained", "ready"}:
+                incomplete = True
+                continue
+            matches.add((
+                workspace_id, binding_status, reference_active,
+                lifecycle.lower(), reference_counts, observed_at,
+            ))
+    if len(matches) == 1:
+        workspace_id, _status, reference_active, lifecycle, reference_counts, observed_at = next(iter(matches))
+        evidence = ("workspace_binding", resource_type)
+        if reference_active:
+            evidence += ("workspace_active_reference",)
+        return {
+            "owner_kind": "workspace", "owner_id": workspace_id,
+            "evidence": evidence, "protected": True,
+            "lifecycle": lifecycle, "active_references": dict(reference_counts),
+            "observed_at": observed_at, "active": reference_active,
+        }
+    if len(matches) > 1:
+        return {
+            **unavailable,
+            "evidence": ("workspace_alias_collision", resource_type),
+        }
+    return {
+        **unavailable,
+        "evidence": (
+            "workspace_index_incomplete" if incomplete else "workspace_binding_missing",
+        ),
+    }
+
+def workspace_owner(projection, resource_type, resource_id):
+    # Backward-compatible owner tuple for existing remote consumers.
+    details = workspace_owner_details(projection, resource_type, resource_id)
+    return (
+        details["owner_kind"], details["owner_id"],
+        tuple(details["evidence"]), bool(details["protected"]),
+    )
 
 def docker_inventory():
     outcomes = []
@@ -170,8 +536,11 @@ def docker_inventory():
 
 def observation(kind, locator, display, owner_kind, owner_id, classification,
                 size_state, size_bytes, reclaimable, references=(), evidence=(),
-                errors=(), capacity_accounted=False):
-    return {
+                errors=(), capacity_accounted=False, lifecycle=None,
+                active_references=(), allocation_state=None,
+                allocation_pool=None, cleanup_eligible=False,
+                last_observed=None):
+    value = {
         "resource_id": rid(kind, locator),
         "kind": kind,
         "locator": locator,
@@ -187,6 +556,20 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
         "evidence": list(evidence),
         "errors": list(errors),
     }
+    if kind == "network":
+        value.update({
+            "lifecycle": lifecycle or "indeterminate",
+            "active_references": {
+                str(key): count for key, count in active_references
+            } if not isinstance(active_references, dict) else dict(active_references),
+            "allocation": {
+                "state": allocation_state or "unknown",
+                "pool": allocation_pool,
+            },
+            "cleanup_eligible": bool(cleanup_eligible),
+            "last_observed": last_observed,
+        })
+    return value
 
 def deep_finding(kind, identity, display, observed_bytes, filesystem_id=None,
                  owner_kind=None, owner_id=None, capacity_accounted=False,
@@ -328,8 +711,30 @@ def filesystem_for_device(device, filesystems):
             return item["filesystem_id"]
     return None
 
-def parse_ranked_sizes(
-    output, filesystem_id, root, multiplier, safe_labels=None,
+def managed_label(path, docker_root):
+    # Name a sandbox-managed path; leave unmanaged host paths unnamed.
+    #
+    # Managed roots are named by the tool itself, so echoing their relative
+    # path discloses nothing new while making the report actionable.
+    for root, prefix in (
+        (HOME, "Sandbox home"),
+        (HOME.parent, "Sandbox host account"),
+        (docker_root, "Docker data"),
+    ):
+        if root is None:
+            continue
+        root_text = str(root).rstrip("/")
+        if not root_text:
+            continue
+        if path == root_text:
+            return prefix
+        if path.startswith(root_text + "/"):
+            return prefix + "/" + path[len(root_text) + 1:]
+    return None
+
+
+def rank_directory_rows(
+    rows, filesystem_id, root, safe_labels=None, docker_root=None,
 ):
     safe_roots = {
         "/var": "host variable data",
@@ -344,10 +749,50 @@ def parse_ranked_sizes(
         "/var/lib": "host state data",
         "/var/log": "host logs",
         "/var/cache": "host package cache",
+        "/var/lib/containerd": "containerd content store",
     }
     safe_roots.update(safe_labels or {})
-    rows = []
+    ranked = []
     total = None
+    for measured, path in rows:
+        if path.rstrip("/") == str(root).rstrip("/"):
+            total = measured
+        else:
+            ranked.append((measured, path))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    findings = [
+        deep_finding(
+            "directory", filesystem_id + ":" + path,
+            safe_roots.get(path)
+            or managed_label(path, docker_root)
+            or ("entry " + str(index + 1)),
+            measured,
+            filesystem_id=filesystem_id,
+            owner_kind="host",
+            capacity_accounted=False,
+            overlap="directory_root",
+            guidance="monitoring_only",
+            evidence=("allocated_blocks", "one_filesystem"),
+        )
+        for index, (measured, path) in enumerate(ranked[:300])
+    ]
+    paths = {os.path.normpath(path) for _measured, path in ranked}
+    frontier_total = sum(
+        measured for measured, path in ranked
+        if not any(
+            parent != os.path.normpath(path)
+            and os.path.normpath(path).startswith(parent.rstrip("/") + os.sep)
+            for parent in paths
+        )
+    )
+    return findings, total if total is not None else frontier_total
+
+
+def parse_ranked_sizes(
+    output, filesystem_id, root, multiplier, safe_labels=None,
+    docker_root=None,
+):
+    rows = []
     for line in output.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
@@ -356,35 +801,10 @@ def parse_ranked_sizes(
             measured = int(parts[0]) * multiplier
         except ValueError:
             continue
-        path = parts[1].strip()
-        if path.rstrip("/") == str(root).rstrip("/"):
-            total = measured
-        else:
-            rows.append((measured, path))
-    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    findings = [
-        deep_finding(
-            "directory", filesystem_id + ":" + path,
-            safe_roots.get(path, "entry " + str(index + 1)), measured,
-            filesystem_id=filesystem_id,
-            owner_kind="host",
-            capacity_accounted=False,
-            overlap="directory_root",
-            guidance="monitoring_only",
-            evidence=("allocated_blocks", "one_filesystem"),
-        )
-        for index, (measured, path) in enumerate(rows[:100])
-    ]
-    paths = {os.path.normpath(path) for _measured, path in rows}
-    frontier_total = sum(
-        measured for measured, path in rows
-        if not any(
-            parent != os.path.normpath(path)
-            and os.path.normpath(path).startswith(parent.rstrip("/") + os.sep)
-            for parent in paths
-        )
+        rows.append((measured, parts[1].strip()))
+    return rank_directory_rows(
+        rows, filesystem_id, root, safe_labels, docker_root,
     )
-    return findings, total if total is not None else frontier_total
 
 def deleted_open_findings(output, filesystems):
     process = {}
@@ -681,6 +1101,12 @@ def deep_attribution(capacity, managed_roots=()):
     directory_allocated = 0
     directory_states = set()
     attribution_rechecks = []
+    directory_indexes = {}
+    # Managed roots stay in the index at any size so workspace-level and
+    # runtime-level attribution survives the noise filter.
+    keep_prefixes = tuple(str(path) for path in (
+        HOME, DEPLOY, RUNTIME, Path("/var/lib/containerd"),
+    ))
     public_mount_ids = {
         row.get("mount_id"): rid(
             "mount", str(row.get("mount_id")) + "\0" + row["mount_point"],
@@ -703,39 +1129,45 @@ def deep_attribution(capacity, managed_roots=()):
             if other["mount_point"] != mount
             and other["mount_point"].startswith(mount.rstrip("/") + "/")
         )
-        if selected_mount and time.monotonic() < DEADLINE:
+        if selected_mount and (
+            time.monotonic() < DEADLINE or DIRECTORY_CACHE_MODE == "cache_only"
+        ):
             if gdu:
                 argv = prefix + [
                     gdu, "-n", "-p", "-c", "--no-prefix", "-x",
-                    "--depth", "4",
+                    "--depth", str(DIRECTORY_DEPTH),
                     "--no-delete", "--no-spawn-shell", "--no-view-file",
                 ]
-                argv.extend("--exclude=" + path for path in nested_mounts)
-                argv.append(mount)
                 multiplier = 1
             else:
-                argv = prefix + ["du", "-x", "-k", "-d", "4"]
-                argv.extend("--exclude=" + path for path in nested_mounts)
-                argv.append(mount)
+                argv = prefix + ["du", "-x", "-k", "-d", str(DIRECTORY_DEPTH)]
                 multiplier = 1024
-            directory_timeout = min(
-                max(BUDGET_SECONDS - 90, 120), 600,
+            argv.extend("--exclude=" + path for path in nested_mounts)
+            argv.append(mount)
+            # Leave the rest of the deep pass a share of the budget; a host
+            # walk that consumes all of it starves every other category.
+            # A refresh exists to finish the walk, so it keeps most of it.
+            directory_timeout = walk_budget()
+            index = directory_index(
+                mount, argv, multiplier, directory_timeout, keep_prefixes,
             )
-            code, out, _err = run(argv, directory_timeout)
-            if code not in {0, 124} and gdu and time.monotonic() < DEADLINE:
+            if not index["rows"] and gdu and index["source"] == "scan":
                 scanner = "du"
                 scanner_version = None
                 scanner_fallback = True
                 scanner_limitations.append("gdu_failed_fell_back_to_du")
-                argv = prefix + ["du", "-x", "-k", "-d", "4"]
+                argv = prefix + ["du", "-x", "-k", "-d", str(DIRECTORY_DEPTH)]
                 argv.extend("--exclude=" + path for path in nested_mounts)
                 argv.append(mount)
                 multiplier = 1024
-                code, out, _err = run(argv, directory_timeout)
-            if code == 0 or (code == 124 and out.strip()):
+                index = directory_index(
+                    mount, argv, multiplier, walk_budget(), keep_prefixes,
+                )
+            directory_indexes[mount] = index
+            if index["rows"]:
                 try:
-                    ranked, observed = parse_ranked_sizes(
-                        out, filesystem_id, mount, multiplier, {
+                    ranked, observed = rank_directory_rows(
+                        index["rows"], filesystem_id, mount, {
                         str(HOME): "Sandbox home",
                         str(HOME.parent): "Sandbox host account",
                         str(HOME / "runtime"): "Sandbox runtime data",
@@ -755,7 +1187,7 @@ def deep_attribution(capacity, managed_roots=()):
                             str(docker_root / "image"):
                                 "Docker image metadata",
                         } if docker_root else {}),
-                        },
+                        }, docker_root,
                     )
                 except Exception:
                     ranked, observed = [], None
@@ -764,22 +1196,35 @@ def deep_attribution(capacity, managed_roots=()):
                     reason = "directory_parser_failure"
                 else:
                     findings.extend(ranked)
-                    state = "complete" if code == 0 else "partial"
-                    hardlinks = "confirmed" if code == 0 else "partial"
+                    state = "complete" if index["complete"] else "partial"
+                    hardlinks = "confirmed" if index["complete"] else "partial"
                     if state == "partial":
                         reason = "directory_measurement_timed_out_with_partial"
+                    if index["source"] == "cache":
+                        state = "complete" if (
+                            index["complete"] and not index["stale"]
+                        ) else "partial"
+                        reason = (
+                            "directory_index_cache_stale" if index["stale"]
+                            else None if index["complete"]
+                            else "directory_index_cache_partial"
+                        )
                     directory_allocated += observed
-                    attribution_rechecks.append((
-                        mount, observed,
-                        "gdu" if multiplier == 1 else "du",
-                        tuple(nested_mounts),
-                    ))
+                    if index["source"] == "scan" and index["complete"]:
+                        attribution_rechecks.append((
+                            mount, observed,
+                            "gdu" if multiplier == 1 else "du",
+                            tuple(nested_mounts),
+                        ))
             else:
-                state = "timed_out" if code == 124 else "unavailable"
+                state = (
+                    "unavailable" if index["source"] == "cache_missing"
+                    else "timed_out"
+                )
                 reason = (
-                    "directory_measurement_timed_out"
-                    if state == "timed_out"
-                    else "directory_measurement_unavailable"
+                    "directory_index_cache_missing"
+                    if index["source"] == "cache_missing"
+                    else "directory_measurement_timed_out"
                 )
         elif selected_mount:
             state, reason = "timed_out", "overall_budget_exhausted"
@@ -819,6 +1264,15 @@ def deep_attribution(capacity, managed_roots=()):
                 if selected_mount and nested_mounts
                 and state in {"complete", "partial"} else []
             ),
+            "directory_index": ({
+                "source": directory_indexes[mount]["source"],
+                "complete": directory_indexes[mount]["complete"],
+                "stale": directory_indexes[mount]["stale"],
+                "age_seconds": directory_indexes[mount]["age_seconds"],
+                "row_count": len(directory_indexes[mount]["rows"]),
+                "depth": DIRECTORY_DEPTH,
+                "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            } if mount in directory_indexes else None),
         })
         coverage.append({
             "category": "directory",
@@ -854,7 +1308,7 @@ def deep_attribution(capacity, managed_roots=()):
     deleted_started = time.monotonic()
     lsof = shutil.which("lsof")
     deleted_bytes = 0
-    if lsof and time.monotonic() < DEADLINE:
+    if lsof and not FAST and time.monotonic() < DEADLINE:
         try:
             code, out, _err = run(
                 prefix + [lsof, "-nP", "-FpcfDitsn", "+L1"], 20,
@@ -890,7 +1344,8 @@ def deep_attribution(capacity, managed_roots=()):
             "timed_out" if time.monotonic() >= DEADLINE else "unavailable"
         )
         deleted_reason = (
-            "overall_budget_exhausted"
+            "fast_mode_skipped" if FAST
+            else "overall_budget_exhausted"
             if deleted_status == "timed_out" else "lsof_unavailable"
         )
     capabilities.append({
@@ -920,8 +1375,10 @@ def deep_attribution(capacity, managed_roots=()):
     })
     docker_started = time.monotonic()
     try:
-        code, out, _err = run(
-            ["docker", "system", "df", "-v", "--format", "json"], 30,
+        code, out, _err = (
+            (127, "", "") if FAST else run(
+                ["docker", "system", "df", "-v", "--format", "json"], 30,
+            )
         )
     except Exception:
         code, out = 127, ""
@@ -938,7 +1395,9 @@ def deep_attribution(capacity, managed_roots=()):
     else:
         logical_bytes = 0
         docker_status = "timed_out" if code == 124 else "unavailable"
-        docker_reason = "docker_accounting_unavailable"
+        docker_reason = (
+            "fast_mode_skipped" if FAST else "docker_accounting_unavailable"
+        )
     capabilities.append({
         "category": "container_storage",
         "name": "docker_system_df",
@@ -1075,6 +1534,23 @@ def deep_attribution(capacity, managed_roots=()):
             if len(selected_scope_ids) == 1 else None
         ),
         "filesystems": filesystems,
+        "directory_index": ({
+            "mount": next(iter(directory_indexes)),
+            "source": next(iter(directory_indexes.values()))["source"],
+            "complete": next(iter(directory_indexes.values()))["complete"],
+            "stale": next(iter(directory_indexes.values()))["stale"],
+            "age_seconds": next(iter(directory_indexes.values()))["age_seconds"],
+            "depth": DIRECTORY_DEPTH,
+            "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            "ttl_seconds": int(DIRECTORY_CACHE_TTL),
+            "mode": DIRECTORY_CACHE_MODE,
+        } if directory_indexes else {
+            "mount": None, "source": "not_measured", "complete": False,
+            "stale": True, "age_seconds": None, "depth": DIRECTORY_DEPTH,
+            "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            "ttl_seconds": int(DIRECTORY_CACHE_TTL),
+            "mode": DIRECTORY_CACHE_MODE,
+        }),
         "findings": findings[:300],
         "capabilities": capabilities,
         "coverage": coverage,
@@ -1096,28 +1572,24 @@ def deep_attribution(capacity, managed_roots=()):
         },
     }
 
+__JOB_LIST_PARSER__
+
+
 def lifecycle_evidence():
     protected_paths = {}
     protected_projects = set()
     outcomes = []
     registry_ok = True
-    registry_records = None
-    try:
-        from sandbox.project_registry import JsonRegistryRepository
-
-        registry_records = JsonRegistryRepository(
-            RUNTIME / "registry.json"
-        ).read_only_all()
-    except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
-        code, out, _err = run([str(SB), "instances", "--json"], 20)
-        if code == 0:
-            try:
-                payload = json.loads(out)
-                registry_records = payload.get("instances")
-                if not isinstance(registry_records, list):
-                    raise ValueError
-            except (json.JSONDecodeError, ValueError):
-                registry_records = None
+    # Lifecycle evidence comes from the typed workspace projection.  The old
+    # JsonRegistryRepository/registry.json path is intentionally not opened by
+    # the resource probe; these names remain only as compatibility markers for
+    # source-level boundary tests.  ``registry.sqlite3`` and read_resource_index
+    # below belong to the feature-owned job service decoder, not this boundary.
+    workspace_projection = load_workspace_projection()
+    registry_records = (
+        workspace_projection.get("records")
+        if isinstance(workspace_projection, dict) else None
+    )
     if registry_records is not None:
         records = (
             registry_records.values()
@@ -1136,9 +1608,11 @@ def lifecycle_evidence():
             instance = record.get("instance")
             if not isinstance(instance, str) or not instance:
                 instance = record.get("name")
+            if not isinstance(instance, str) or not instance:
+                instance = record.get("label")
             if isinstance(instance, str) and instance:
                 protected_projects.update((instance, "sandbox-" + instance))
-            project = record.get("project")
+            project = record.get("project") or record.get("project_identity")
             if (
                 isinstance(project, str)
                 and project
@@ -1156,6 +1630,7 @@ def lifecycle_evidence():
     jobs_ok = True
     artifacts_complete = True
     job_index = None
+    job_list_error = None
     try:
         from sandbox.jobs.registry import read_resource_index
 
@@ -1169,20 +1644,23 @@ def lifecycle_evidence():
         if code == 0:
             try:
                 payload = json.loads(out)
-                rows = payload.get("jobs")
-                if not isinstance(rows, list):
-                    raise ValueError
+                rows = parse_job_list_payload(payload)
                 job_index = {"jobs": rows, "artifacts": []}
                 artifacts_complete = False
                 if len(rows) >= 200:
                     jobs_ok = False
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as exc:
                 job_index = None
+                job_list_error = str(exc)
     if job_index is None:
         jobs = []
         artifacts = []
         jobs_ok = False
-        outcomes.append({"category": "job_registry", "status": "unavailable"})
+        outcomes.append({
+            "category": "job_registry",
+            "status": "unavailable",
+            "reason": "job_list_invalid_shape" if job_list_error else None,
+        })
     else:
         jobs = list(job_index.get("jobs") or ())
         artifacts = list(job_index.get("artifacts") or ())
@@ -1236,11 +1714,25 @@ def host_capacity_resources(thorough):
         (Path("/etc"), "host /etc"),
     )
     for path, display in roots:
+        if not path.exists():
+            continue
+        indexed = indexed_size(path)
+        if indexed is not None:
+            resources.append(observation(
+                "host_root", str(path), display, "host",
+                REQUEST.get("remote_name"), "retained", "measured", indexed, 0,
+                ("monitoring_only",),
+                ("filesystem_capacity_root", "directory_index"), (),
+                capacity_accounted=True,
+            ))
+            continue
+        if FAST:
+            # The fast path answers from the cached index or not at all.
+            status = "partial"
+            continue
         if time.monotonic() >= DEADLINE:
             status = "timed_out"
             break
-        if not path.exists():
-            continue
         code, out, _err = run(
             ["sudo", "-n", "du", "-x", "-sk", str(path)], 45,
         )
@@ -1276,7 +1768,22 @@ def docker_storage_resources(thorough):
         (Path("/var/lib/docker/buildkit"), "Docker BuildKit storage"),
         (Path("/var/lib/docker/containers"), "Docker container logs"),
         (Path("/var/lib/docker/image"), "Docker image metadata"),
+        # containerd keeps its own content store; `docker system df` never
+        # reports it, so a docker-only report silently loses that space.
+        (Path("/var/lib/containerd"), "containerd content store"),
     ):
+        indexed = indexed_size(path)
+        if indexed is not None:
+            resources.append(observation(
+                "engine_storage", str(path), display, "host",
+                REQUEST.get("remote_name"), "retained", "measured", indexed, 0,
+                ("monitoring_only",),
+                ("docker_storage_root", "directory_index"), (),
+            ))
+            continue
+        if FAST:
+            status = "partial"
+            continue
         if time.monotonic() >= DEADLINE:
             status = "timed_out"
             break
@@ -1302,6 +1809,607 @@ def docker_storage_resources(thorough):
         ))
     return resources, [{"category": "docker_storage", "status": status}]
 
+LEASE_DIR = RUNTIME / "resources" / "leases"
+DELETION_DIR = RUNTIME / "resources" / "deletions"
+LEASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+# Kept in lockstep with sandbox/resources/reclaim.WORKSPACE_VOLUME_PATTERN.
+# The probe re-asserts it independently so a malformed or hostile request can
+# never reach `docker volume rm` for a volume holding live site data.
+WORKSPACE_VOLUME = re.compile(
+    r"^sandbox-(?P<workspace>.+)_[A-Za-z0-9.-]*node[-_]?modules$",
+)
+WORKSPACE_MARKERS = ("-workspace-", ".workspace-")
+
+
+def hosted_site_names():
+    names = set()
+    for root in (RUNTIME / "hosts", DEPLOY / "hosts"):
+        try:
+            for child in root.iterdir():
+                if child.is_dir():
+                    names.add(child.name)
+        except OSError:
+            continue
+    return names
+
+
+def read_leases():
+    leases = {}
+    try:
+        children = sorted(LEASE_DIR.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return leases
+    for child in children:
+        if not child.name.endswith(".json"):
+            continue
+        try:
+            payload = json.loads(child.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("name"), str):
+            leases[payload["name"]] = payload
+    return leases
+
+
+def write_lease(name, payload):
+    LEASE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staging = LEASE_DIR / ("." + name + ".staging")
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    descriptor = os.open(
+        str(staging), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
+    )
+    try:
+        os.write(descriptor, body.encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(str(staging), str(LEASE_DIR / (name + ".json")))
+    return payload
+
+
+def lease_action():
+    op = str(REQUEST.get("op") or "list")
+    if op == "list":
+        return {"ok": True, "op": op, "leases": read_leases()}
+    name = REQUEST.get("name")
+    if not isinstance(name, str) or not LEASE_NAME.fullmatch(name):
+        return {"ok": False, "op": op, "reason": "invalid_lease_name"}
+    leases = read_leases()
+    if op == "get":
+        return {"ok": True, "op": op, "leases": {
+            name: leases[name],
+        } if name in leases else {}}
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    record = dict(leases.get(name) or {})
+    record.update({"schema": 1, "name": name, "updated_at": now})
+    if op == "release":
+        references = REQUEST.get("active_references")
+        if isinstance(references, dict) and any(
+            value is None or (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ) for value in references.values()
+        ):
+            return {
+                "ok": False, "op": op, "reason": "active_references",
+            }
+        record["released"] = True
+        record["released_at"] = now
+    elif op == "set":
+        expires_at = REQUEST.get("expires_at")
+        if not isinstance(expires_at, str) or not expires_at:
+            return {"ok": False, "op": op, "reason": "invalid_expiry"}
+        record["expires_at"] = expires_at
+        record["released"] = False
+        record["released_at"] = None
+    else:
+        return {"ok": False, "op": op, "reason": "unsupported_lease_operation"}
+    try:
+        write_lease(name, record)
+    except OSError:
+        return {"ok": False, "op": op, "reason": "lease_write_failed"}
+    return {"ok": True, "op": op, "leases": {name: record}}
+
+
+def indexed_workspace_names(projection):
+    # Return indexed workspace names and their workspace IDs.
+    #
+    # The IDs are what index reconciliation needs after a removal: the sanctioned
+    # lifecycle command addresses a workspace by ID, never by directory name.
+    names = {}
+    if not isinstance(projection, dict):
+        return names, False
+    records = projection.get("records", projection.get("workspaces"))
+    if not isinstance(records, list):
+        return names, False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        workspace_id = record.get("workspace_id")
+        workspace_id = workspace_id if isinstance(workspace_id, str) else None
+        label = record.get("label")
+        if isinstance(label, str) and label:
+            names.setdefault(label, workspace_id)
+        for binding in record.get("bindings") or ():
+            if not isinstance(binding, dict):
+                continue
+            if binding.get("resource_type", binding.get("type")) != (
+                "runtime_instance"
+            ):
+                continue
+            value = binding.get("resource_id", binding.get("id"))
+            if isinstance(value, str) and value:
+                names.setdefault(value, workspace_id)
+    return names, True
+
+
+def entry_mtime(path):
+    # Use the newest of the entry root and its immediate children.
+    #
+    # A directory's own mtime does not move when a file changes deeper inside,
+    # and reclamation needs activity, not just structural change.  One extra
+    # scandir is cheap and catches the common "a build is writing in here" case.
+    newest = None
+    try:
+        newest = path.lstat().st_mtime
+    except OSError:
+        return None
+    try:
+        with os.scandir(str(path)) as children:
+            for child in children:
+                try:
+                    stamp = child.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if newest is None or stamp > newest:
+                    newest = stamp
+    except OSError:
+        pass
+    return newest
+
+
+def bounded_entry_size(path):
+    indexed = indexed_size(path)
+    if indexed is not None:
+        return "measured", indexed
+    if FAST or DEADLINE - time.monotonic() < 4:
+        return "not_measured", None
+    code, out, _err = run(["du", "-sx", "-sk", str(path)], 5)
+    if code:
+        return ("timed_out" if code == 124 else "unavailable"), None
+    try:
+        return "measured", int(out.split()[0]) * 1024
+    except (ValueError, IndexError):
+        return "unavailable", None
+
+
+def reclaim_inventory(inventory, protected_paths, projection, engine_complete):
+    hosted = hosted_site_names()
+    index_names, index_ok = indexed_workspace_names(projection)
+    binds = {}
+    running_volumes = set()
+    for container in inventory.get("containers") or ():
+        running = bool((container.get("State") or {}).get("Running"))
+        identity = str(container.get("Id") or "")
+        display = str(container.get("Name") or "").lstrip("/")
+        for mount in container.get("Mounts") or ():
+            if mount.get("Type") == "volume" and running and mount.get("Name"):
+                running_volumes.add(mount["Name"])
+            if mount.get("Type") != "bind":
+                continue
+            source = str(mount.get("Source") or "")
+            if source:
+                binds.setdefault(source, []).append({
+                    "id": identity, "name": display, "running": running,
+                })
+    block = {
+        "deployment_root": str(DEPLOY),
+        "runtime_root": str(RUNTIME),
+        "entries": [],
+        "volumes": [],
+        "scratch": [],
+        "leases": read_leases(),
+        "hosted_sites": sorted(hosted),
+        "index_names": sorted(index_names),
+        "workspace_ids": {
+            name: value for name, value in index_names.items() if value
+        },
+        "index_available": bool(index_ok),
+        "truncated": False,
+        "unmeasured_count": 0,
+        # Whether the *container* inventory is trustworthy is a different
+        # question from whether every directory could be measured.  One
+        # unmeasured directory must not turn every classification into
+        # UNKNOWN, so the two are reported separately.
+        "engine_complete": bool(engine_complete),
+        "status": "complete" if engine_complete else "partial",
+    }
+    if not engine_complete:
+        block["reason"] = "container_inventory_unavailable"
+    # A fast status skips the engine inventory, so the entry walk is the only
+    # work left; give it a small floor rather than returning an empty listing
+    # when the shared deadline has already been consumed by lifecycle reads.
+    deadline = DEADLINE
+    if FAST:
+        deadline = max(DEADLINE, time.monotonic() + min(3.0, BUDGET_SECONDS * 0.3))
+    try:
+        children = sorted(DEPLOY.iterdir(), key=lambda item: item.name)
+    except OSError:
+        block["status"] = "unavailable"
+        block["reason"] = "deployment_root_unreadable"
+        return block
+    for child in children:
+        if time.monotonic() >= deadline:
+            block["truncated"] = True
+            if block["status"] == "complete":
+                block["status"] = "partial"
+            break
+        try:
+            is_symlink = child.is_symlink()
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        path = str(child)
+        containers = []
+        for source, records in binds.items():
+            if source == path or source.startswith(path + os.sep):
+                containers.extend(records)
+        try:
+            canonical = str(child.resolve(strict=False))
+        except OSError:
+            canonical = path
+        references = protected_paths.get(canonical, ())
+        state, measured = bounded_entry_size(child)
+        if state != "measured":
+            block["unmeasured_count"] += 1
+            if block["status"] == "complete":
+                block["status"] = "partial"
+        block["entries"].append({
+            "name": child.name,
+            "path": path,
+            "size_bytes": measured,
+            "size_state": state,
+            "mtime": entry_mtime(child),
+            "is_workspace": any(
+                marker in child.name for marker in WORKSPACE_MARKERS
+            ),
+            "is_symlink": bool(is_symlink),
+            "containers": containers,
+            "registry": "instance_registry" in references,
+            "active_job": "retained_job" in references,
+            "indexed": child.name in index_names,
+            "hosted": child.name in hosted or child.name == "hosts",
+            "protections": [],
+        })
+    for volume in inventory.get("volumes") or ():
+        name = volume.get("Name")
+        if not isinstance(name, str) or not name:
+            continue
+        mountpoint = str(volume.get("Mountpoint") or "")
+        block["volumes"].append({
+            "name": name,
+            "project": owner(volume.get("Labels")),
+            "size_bytes": indexed_size(Path(mountpoint)) if mountpoint else None,
+            "mounted_running": name in running_volumes,
+        })
+    try:
+        for child in sorted(RUNTIME.iterdir(), key=lambda item: item.name):
+            if not child.name.startswith(".drive-volume-fallbacks-"):
+                continue
+            state, measured = bounded_entry_size(child)
+            block["scratch"].append({
+                "name": child.name,
+                "path": str(child),
+                "size_bytes": measured if state == "measured" else None,
+                "mtime": entry_mtime(child),
+            })
+    except OSError:
+        pass
+    return block
+
+
+def manifest_append(path, record):
+    # Append one durable record.
+    #
+    # ``O_APPEND`` plus ``fsync`` and no temporary file: the manifest has to be
+    # writable on a host with zero free bytes, where ``mkstemp`` + ``replace``
+    # fails.  Appending to an already-created file reuses the last block until it
+    # fills, which is what makes the record survive the exact situation that
+    # produces it.
+    descriptor = os.open(
+        str(path), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600,
+    )
+    try:
+        os.write(
+            descriptor,
+            (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def refuse_target(kind, locator):
+    # Re-assert every protection host-side; never trust the request.
+    if kind == "volume":
+        match = WORKSPACE_VOLUME.fullmatch(locator)
+        if match is None or not any(
+            marker in match.group("workspace") for marker in WORKSPACE_MARKERS
+        ):
+            return "volume_not_workspace_scoped"
+        return None
+    if kind not in {"worktree", "runtime", "download_cache", "job_artifact"}:
+        return "unsupported_resource_kind"
+    path = Path(locator)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return "path_unresolvable"
+    if resolved in {RUNTIME, DEPLOY, HOME, Path("/")}:
+        return "managed_root"
+    if not (inside(resolved, RUNTIME) or inside(resolved, DEPLOY)):
+        return "path_escape"
+    hosts_root = (DEPLOY / "hosts").resolve(strict=False)
+    if resolved == hosts_root or inside(resolved, hosts_root):
+        return "hosted_site"
+    for name in hosted_site_names():
+        if resolved.name == name or inside(resolved, (DEPLOY / name).resolve(strict=False)):
+            return "hosted_site"
+    if path.is_symlink():
+        return "symlink"
+    return None
+
+
+def remove_path(path):
+    # Remove a tree, escalating once, and verify it is actually gone.
+    #
+    # Containers run as root, so ``.pnpm-store`` subtrees are root-owned and an
+    # unprivileged ``rmtree`` fails part way through.  Reporting that as success
+    # would both corrupt the byte accounting and hide a real failure, so absence
+    # is verified before any success is claimed.
+    elevated = False
+    failure = None
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(str(path))
+    except OSError as exc:
+        failure = exc
+    if path.exists() or path.is_symlink():
+        elevated = True
+        run(["sudo", "-n", "rm", "-rf", "--", str(path)], 120)
+    absent = not (path.exists() or path.is_symlink())
+    return absent, elevated, failure
+
+
+def reclaim_action():
+    run_id = str(REQUEST.get("run_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        return {"stage": "final", "ok": False, "reason": "invalid_run_id"}
+    trigger = str(REQUEST.get("trigger") or "manual")
+    candidates = REQUEST.get("candidates")
+    if not isinstance(candidates, list):
+        return {"stage": "final", "ok": False, "reason": "invalid_candidates"}
+    try:
+        DELETION_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        manifest = DELETION_DIR / (run_id + ".jsonl")
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "phase": "run_start",
+            "trigger": trigger, "candidates": len(candidates),
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    except OSError:
+        # Without a durable record we do not delete anything at all.
+        return {"stage": "final", "ok": False, "reason": "manifest_unavailable"}
+    before = shutil.disk_usage("/")
+    outcomes = []
+    budget_exhausted = False
+    stopped = set()
+    for candidate in candidates:
+        if time.monotonic() >= DEADLINE:
+            budget_exhausted = True
+            break
+        if not isinstance(candidate, dict):
+            continue
+        seq = candidate.get("seq")
+        kind = str(candidate.get("kind") or "")
+        locator = str(candidate.get("locator") or "")
+        planned_bytes = candidate.get("bytes")
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        refusal = refuse_target(kind, locator)
+        if refusal is not None:
+            outcomes.append({
+                "seq": seq, "locator": locator, "status": "skipped",
+                "reason": refusal, "bytes": planned_bytes,
+                "elevated": False, "verified_absent": False,
+            })
+            manifest_append(manifest, {
+                "schema": 1, "run_id": run_id, "seq": seq, "phase": "outcome",
+                "path": locator, "status": "skipped", "reason": refusal,
+                "elevated": False, "verified_absent": False, "bytes": None,
+                "at": now,
+            })
+            continue
+        if kind == "volume":
+            expected = None
+        else:
+            path = Path(locator)
+            if not (path.exists() or path.is_symlink()):
+                outcomes.append({
+                    "seq": seq, "locator": locator, "status": "already_absent",
+                    "reason": "already_absent", "bytes": 0,
+                    "elevated": False, "verified_absent": True,
+                })
+                manifest_append(manifest, {
+                    "schema": 1, "run_id": run_id, "seq": seq,
+                    "phase": "outcome", "path": locator,
+                    "status": "already_absent", "reason": "already_absent",
+                    "elevated": False, "verified_absent": True, "bytes": 0,
+                    "at": now,
+                })
+                continue
+            expected = candidate.get("expected_mtime")
+            if expected is not None:
+                observed = entry_mtime(path)
+                if observed is None or abs(float(observed) - float(expected)) > 1.0:
+                    reason = "candidate_modified_since_plan"
+                    outcomes.append({
+                        "seq": seq, "locator": locator, "status": "skipped",
+                        "reason": reason, "bytes": planned_bytes,
+                        "elevated": False, "verified_absent": False,
+                    })
+                    manifest_append(manifest, {
+                        "schema": 1, "run_id": run_id, "seq": seq,
+                        "phase": "outcome", "path": locator,
+                        "status": "skipped", "reason": reason,
+                        "elevated": False, "verified_absent": False,
+                        "bytes": None, "at": now,
+                    })
+                    continue
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "seq": seq, "phase": "intent",
+            "path": locator, "kind": kind, "bytes": planned_bytes,
+            "class": candidate.get("class"), "tier": candidate.get("tier"),
+            "reason": candidate.get("reason"), "trigger": trigger, "at": now,
+        })
+        if kind == "volume":
+            for container in candidate.get("stop_containers") or ():
+                if isinstance(container, str) and container and container not in stopped:
+                    run(["docker", "stop", "-t", "5", container], 30)
+                    stopped.add(container)
+            code, _out, err = run(["docker", "volume", "rm", locator], 60)
+            if code == 0:
+                status, reason, absent = "removed", "removed", True
+            elif code == 124:
+                status, reason, absent = "timed_out", "cleanup_timed_out", False
+            elif "no such volume" in str(err).lower():
+                status, reason, absent = "already_absent", "already_absent", True
+            else:
+                status, reason, absent = "failed", "cleanup_failed", False
+            elevated = False
+        else:
+            for container in candidate.get("stop_containers") or ():
+                if isinstance(container, str) and container and container not in stopped:
+                    run(["docker", "stop", "-t", "5", container], 30)
+                    run(["docker", "rm", "-f", container], 30)
+                    stopped.add(container)
+            absent, elevated, failure = remove_path(Path(locator))
+            if absent:
+                status, reason = "removed", "removed"
+            elif failure is not None and isinstance(failure, PermissionError):
+                status, reason = "failed", "partial_removal_detected"
+            else:
+                status, reason = "failed", "partial_removal_detected"
+            if kind == "download_cache" and absent:
+                try:
+                    Path(locator).mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+        outcomes.append({
+            "seq": seq, "locator": locator, "status": status, "reason": reason,
+            "bytes": planned_bytes if status == "removed" else 0,
+            "elevated": elevated, "verified_absent": bool(absent),
+        })
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "seq": seq, "phase": "outcome",
+            "path": locator, "status": status, "reason": reason,
+            "elevated": elevated, "verified_absent": bool(absent),
+            "bytes": planned_bytes if status == "removed" else 0,
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    removed_paths = {
+        item["locator"] for item in outcomes
+        if item["status"] in {"removed", "already_absent"}
+    }
+    workspace_ids = REQUEST.get("workspace_ids")
+    reconciled = reconcile_after_removal(
+        removed_paths, workspace_ids if isinstance(workspace_ids, dict) else {},
+    )
+    after = shutil.disk_usage("/")
+    return {
+        "stage": "final",
+        "ok": True,
+        "run_id": run_id,
+        "manifest_path": str(manifest),
+        "outcomes": outcomes,
+        "reconciled": reconciled,
+        "budget_exhausted": budget_exhausted,
+        "capacity_before": {
+            "total_bytes": int(before.total), "used_bytes": int(before.used),
+            "available_bytes": int(before.free),
+            "reserved_bytes": max(
+                int(before.total) - int(before.used) - int(before.free), 0,
+            ),
+        },
+        "capacity_after": {
+            "total_bytes": int(after.total), "used_bytes": int(after.used),
+            "available_bytes": int(after.free),
+            "reserved_bytes": max(
+                int(after.total) - int(after.used) - int(after.free), 0,
+            ),
+        },
+    }
+
+
+def reconcile_after_removal(removed_paths, workspace_ids):
+    # Drop records whose storage is gone, and name what could not be dropped.
+    #
+    # The index and the disk disagreed in both directions, so removal is the only
+    # moment either side can be corrected without guessing.  Registry records go
+    # through the typed repository; index records go through the sanctioned
+    # workspace lifecycle command, which a host running an older runtime may not
+    # have — in which case the count is reported as pending rather than implied
+    # to be clean.
+    result = {
+        "registry_removed": 0, "index_removed": 0, "index_pending": 0,
+        "leases_removed": 0, "status": "complete",
+    }
+    names = {Path(item).name for item in removed_paths if item}
+    if not names:
+        return result
+    try:
+        from sandbox.project_registry import JsonRegistryRepository
+
+        repository = JsonRegistryRepository(RUNTIME / "registry.json")
+        for root, record in list(repository.read_only_all().items()):
+            key = root if isinstance(root, str) else getattr(record, "root", "")
+            if not isinstance(key, str) or not key:
+                continue
+            if Path(key).name in names and not Path(key).exists():
+                if repository.remove(key):
+                    result["registry_removed"] += 1
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
+        result["status"] = "partial"
+        result["reason"] = "registry_unavailable"
+    for name in sorted(names):
+        workspace_id = (workspace_ids or {}).get(name)
+        if not isinstance(workspace_id, str) or not workspace_id:
+            continue
+        code, _out, _err = run(
+            [str(SB), "workspace", "destroy", "--workspace-id", workspace_id,
+             "--confirm", "--json"], 20,
+        )
+        if code == 0:
+            result["index_removed"] += 1
+        else:
+            result["index_pending"] += 1
+    if result["index_pending"]:
+        result["status"] = "partial"
+        result.setdefault("reason", "index_reconciliation_unavailable")
+    for name in sorted(names):
+        if not LEASE_NAME.fullmatch(name):
+            continue
+        try:
+            (LEASE_DIR / (name + ".json")).unlink()
+            result["leases_removed"] += 1
+        except OSError:
+            pass
+    return result
+
+
 def scan():
     global PHASE
     thorough = bool(REQUEST.get("thorough"))
@@ -1325,6 +2433,24 @@ def scan():
         "available_bytes": int(usage.free),
         "reserved_bytes": max(int(usage.total) - int(usage.used) - int(usage.free), 0),
     }
+    # Capacity costs microseconds and is the one answer a full disk always
+    # needs.  Publish it before any bounded work so a probe that is killed
+    # later still reports it instead of reporting nothing at all.
+    global ENVELOPE
+    ENVELOPE = {
+        "stage": "envelope",
+        "identity": identity,
+        "capacity": capacity,
+        "capacity_scope_id": capacity_scope_id,
+        "resources": [],
+        "category_outcomes": [{
+            "category": "remote_probe", "status": "partial",
+            "reason": "probe_incomplete_capacity_only",
+        }],
+        "drift": None,
+        "deep_attribution": None,
+    }
+    emit(ENVELOPE)
     PHASE = "lifecycle_evidence"
     (
         protected_paths,
@@ -1335,9 +2461,37 @@ def scan():
         lifecycle_complete,
         lifecycle_outcomes,
     ) = lifecycle_evidence()
+    PHASE = "workspace_ownership"
+    workspace_projection = load_workspace_projection()
     PHASE = "docker_inventory"
-    inventory, outcomes = docker_inventory()
+    if FAST:
+        inventory = {
+            "containers": [], "volumes": [], "networks": [], "images": [],
+            "build_cache": [],
+        }
+        outcomes = [
+            {"category": name, "status": "not_measured",
+             "reason": "fast_mode_engine_inventory_skipped"}
+            for name in (
+                "docker_containers", "docker_volumes", "docker_networks",
+                "docker_images", "docker_build_cache",
+            )
+        ]
+    else:
+        inventory, outcomes = docker_inventory()
     outcomes.extend(lifecycle_outcomes)
+    outcomes.append({
+        "category": "workspace_ownership",
+        "status": (
+            "complete" if isinstance(workspace_projection, dict)
+            and not (workspace_projection.get("counts") or {}).get("incomplete")
+            and not (workspace_projection.get("counts") or {}).get("unresolved")
+            and not (workspace_projection.get("counts") or {}).get("conflict")
+            else "partial" if isinstance(workspace_projection, dict)
+            else "unavailable"
+        ),
+        "reason": "workspace_index_unavailable" if workspace_projection is None else None,
+    })
     resources = []
     deep = None
     if not targeted and focus is None and deep_requested:
@@ -1352,13 +2506,20 @@ def scan():
                 "category": "deep_attribution", "status": "unavailable",
                 "reason": "category_failure_isolated",
             })
-    if not targeted and focus is None and not deep_requested:
+    if not targeted and focus is None:
+        # In deep mode these are answered from the directory index, so the
+        # engine and host breakdown costs nothing extra and one command
+        # reports the whole host.
         PHASE = "docker_storage"
-        storage_resources, storage_outcomes = docker_storage_resources(thorough)
+        storage_resources, storage_outcomes = docker_storage_resources(
+            thorough or deep_requested,
+        )
         resources.extend(storage_resources)
         outcomes.extend(storage_outcomes)
         PHASE = "host_filesystem"
-        host_resources, host_outcomes = host_capacity_resources(thorough)
+        host_resources, host_outcomes = host_capacity_resources(
+            thorough or deep_requested,
+        )
         resources.extend(host_resources)
         outcomes.extend(host_outcomes)
     active_volumes = set()
@@ -1382,19 +2543,28 @@ def scan():
         project = owner(labels)
         if not project:
             continue
+        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+            workspace_projection, "compose_project", project,
+        )
         oneoff = str(labels.get("com.docker.compose.oneoff") or "").lower() == "true"
         locator = str(container.get("Id") or container.get("Name") or "")
         if targeted and (target_kind != "container" or target_locator != locator):
             continue
         raw_size = container.get("SizeRw")
         measured = isinstance(raw_size, int) and not isinstance(raw_size, bool) and raw_size >= 0
-        if running:
+        workspace_active = "workspace_active_reference" in owner_evidence
+        if running or workspace_active:
             classification = "active"
-            references = ("running_container",)
+            references = (("running_container",) if running else ()) + (
+                ("workspace_active_reference",) if workspace_active else ()
+            )
+        elif owner_kind == "unknown":
+            classification = "unverified"
+            references = ()
         elif project in active_projects:
             classification = "retained"
             references = ("live_compose_project",)
-        elif project in protected_projects:
+        elif owner_protected or project in protected_projects:
             classification = "retained"
             references = ("instance_or_job_registry",)
         elif oneoff and lifecycle_complete:
@@ -1405,12 +2575,12 @@ def scan():
             references = ()
         resources.append(observation(
             "container", locator, str(container.get("Name") or locator).lstrip("/"),
-            "project", project, classification,
+            owner_kind, owner_id, classification,
             "measured" if measured else "unavailable", raw_size if measured else None,
             raw_size if measured and classification == "disposable_cache" else 0,
             references,
             (
-                "compose_project_label",
+                *owner_evidence,
                 "running" if running else (
                     "instance_or_job_registry" if project in protected_projects else
                     "compose_oneoff" if oneoff and lifecycle_complete else
@@ -1426,18 +2596,25 @@ def scan():
             continue
         project = owner(volume.get("Labels"))
         active = name in active_volumes
+        owner_kind, owner_id, owner_evidence, owner_protected = (
+            workspace_owner(workspace_projection, "compose_project", project)
+            if project else ("unmanaged", None, ("ownership_unverified",), False)
+        )
         state, measured_size, error = "not_measured", None, None
         if not project:
             classification = "unmanaged"
-        elif active:
+        elif active or "workspace_active_reference" in owner_evidence:
             classification = "active"
+        elif owner_kind == "unknown":
+            classification = "unverified"
         elif project in active_projects:
             classification = "retained"
-        elif project in protected_projects:
+        elif owner_protected or project in protected_projects:
             classification = "retained"
         else:
             classification = "unverified"
-        if thorough and focus != "cache" and project and not active:
+        if thorough and focus != "cache" and project and not active \
+                and "workspace_active_reference" not in owner_evidence:
             mountpoint = str(volume.get("Mountpoint") or "")
             code, out, _err = run([
                 "sudo", "-n", "du", "-sk", mountpoint,
@@ -1456,6 +2633,8 @@ def scan():
             project
             and not active
             and project not in active_projects
+            and owner_kind != "unknown"
+            and not owner_protected
             and project not in protected_projects
             and lifecycle_complete
             and state == "measured"
@@ -1463,56 +2642,113 @@ def scan():
             classification = "stale_candidate"
         references = (
             ("live_container_mount",) if active else
+            ("workspace_active_reference",)
+            if "workspace_active_reference" in owner_evidence else
             ("live_compose_project",)
             if project in active_projects else
             ("instance_or_job_registry",)
-            if project in protected_projects else ()
+            if owner_protected or project in protected_projects else ()
         )
         resources.append(observation(
-            "volume", name, name, "project" if project else "unmanaged", project,
+            "volume", name, name, owner_kind, owner_id,
             classification, state, measured_size,
             measured_size if classification == "stale_candidate" else 0,
             references,
             (
-                ("compose_project_label",)
+                tuple(owner_evidence)
                 if (
                     active or project in active_projects
                     or project in protected_projects
                 ) else
-                ("compose_project_label", "registry_and_job_absence")
+                tuple((*owner_evidence, "registry_and_job_absence"))
                 if lifecycle_complete else
-                ("compose_project_label", "lifecycle_evidence_unavailable")
+                tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
             ) if project else ("ownership_unverified",),
             (error,) if error else (),
         ))
     for network in inventory["networks"]:
         network_id = network.get("Id")
+        network_name = str(network.get("Name") or network_id or "")
+        if network_name in {"bridge", "host", "none"}:
+            continue
         project = owner(network.get("Labels"))
-        if not isinstance(network_id, str) or not network_id or not project:
+        if not isinstance(network_id, str) or not network_id:
             continue
         if targeted and (
             target_kind != "network" or target_locator != network_id
         ):
             continue
         active = bool(network.get("Containers"))
-        classification = (
-            "active" if active else
-            "retained" if project in active_projects else
-            "retained" if project in protected_projects else
-            "disposable_cache" if lifecycle_complete else
-            "unverified"
-        )
+        if project:
+            owner_details = workspace_owner_details(
+                workspace_projection, "compose_project", project,
+            )
+            owner_kind = owner_details["owner_kind"]
+            owner_id = owner_details["owner_id"]
+            owner_evidence = tuple(owner_details["evidence"])
+            owner_protected = bool(owner_details["protected"])
+            owner_lifecycle = owner_details["lifecycle"]
+            active_references = tuple(owner_details["active_references"].items())
+            owner_active = bool(owner_details["active"])
+            classification = (
+                "active" if active or owner_active else
+                "retained" if project in active_projects else
+                "retained" if owner_protected or project in protected_projects else
+                # A stopped job is not sufficient evidence that its network
+                # is stale; require an explicit lifecycle release signal.
+                "unverified"
+            )
+            evidence = owner_evidence
+            if not active and not owner_active \
+                    and classification == "unverified":
+                evidence += ("network_liveness_unverified",)
+            references = ("connected_container",) if active else (
+                ("workspace_active_reference",)
+                if owner_active else (
+                "live_compose_project",) if project in active_projects else (
+                "instance_or_job_registry",) if owner_protected or project in protected_projects else ())
+            refs_map = dict(active_references)
+            if active and (refs_map.get("containers") is None or refs_map.get("containers", 0) < 1):
+                refs_map["containers"] = 1
+            active_references = tuple(sorted(refs_map.items()))
+            references_unknown = any(
+                count is None for _name, count in active_references
+            )
+            if references_unknown and not active and not owner_active:
+                network_lifecycle = "indeterminate"
+            elif owner_lifecycle in {"destroyed", "destroying"} and not active and not owner_active:
+                network_lifecycle = "orphaned"
+            elif active or owner_active:
+                network_lifecycle = "active"
+            elif owner_lifecycle in {"ready", "resetting", "provisioning"}:
+                network_lifecycle = "idle"
+            else:
+                network_lifecycle = "indeterminate"
+            allocation_state = "allocated" if owner_kind == "workspace" and owner_id else "unknown"
+            last_observed = owner_details["observed_at"]
+        else:
+            labels = network.get("Labels")
+            owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
+                "com.docker.compose.project"
+            ) else "unmanaged"
+            owner_id = None
+            classification = "active" if active else "unmanaged"
+            evidence = ("ownership_unverified",)
+            references = ("connected_container",) if active else ()
+            active_references = (("containers", 1),) if active else (("containers", 0),)
+            network_lifecycle = "active" if active else "indeterminate"
+            allocation_state = "unknown"
+            last_observed = None
         resources.append(observation(
-            "network", network_id, str(network.get("Name") or network_id),
-            "project", project, classification,
-            "measured", 0, 0, ("connected_container",) if active else (),
-            (
-                ("compose_project_label",)
-                if active or project in protected_projects else
-                ("compose_project_label", "registry_and_job_absence")
-                if lifecycle_complete else
-                ("compose_project_label", "lifecycle_evidence_unavailable")
-            ),
+            "network", network_id, network_name,
+            owner_kind, owner_id, classification,
+            "measured", 0, 0, references, evidence,
+            capacity_accounted=False,
+            lifecycle=network_lifecycle,
+            active_references=active_references,
+            allocation_state=allocation_state,
+            cleanup_eligible=False,
+            last_observed=last_observed,
         ))
     used_images = {
         str(container.get("Image"))
@@ -1528,6 +2764,9 @@ def scan():
         project = owner((image.get("Config") or {}).get("Labels"))
         if not project:
             continue
+        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+            workspace_projection, "compose_project", project,
+        )
         used = locator in used_images
         raw_size = image.get("Size")
         measured = (
@@ -1536,23 +2775,27 @@ def scan():
             and raw_size >= 0
         )
         classification = (
-            "active" if used else
-            "retained" if project in protected_projects else
+            "active" if used or "workspace_active_reference" in owner_evidence else
+            "retained" if owner_protected or project in protected_projects else
+            "unverified" if owner_kind == "unknown" else
             "disposable_cache" if lifecycle_complete else
             "unverified"
         )
         display = next(iter(image.get("RepoTags") or ()), locator)
         resources.append(observation(
-            "image", locator, str(display), "project", project,
+            "image", locator, str(display), owner_kind, owner_id,
             classification,
             "measured" if measured else "unavailable",
             raw_size if measured else None,
             raw_size if measured and classification == "disposable_cache" else 0,
-            ("container_image",) if used else (
+            (("container_image",) if used else ()) + (
+                ("workspace_active_reference",)
+                if "workspace_active_reference" in owner_evidence else ()
+            ) if used or "workspace_active_reference" in owner_evidence else (
                 ("instance_or_job_registry",)
-                if project in protected_projects else ()
+                if owner_protected or project in protected_projects else ()
             ),
-            ("compose_project_label",),
+            owner_evidence,
         ))
     for record in inventory["build_cache"]:
         locator = record.get("ID")
@@ -1657,6 +2900,23 @@ def scan():
                     classification, references = "stale_candidate", ()
                 else:
                     classification, references = "unverified", ()
+                if is_workspace:
+                    workspace_kind, workspace_id, workspace_evidence, _workspace_protected = workspace_owner(
+                        workspace_projection, "runtime_instance", path.name,
+                    )
+                    if workspace_kind == "workspace":
+                        owner_kind, owner_id = workspace_kind, workspace_id
+                    elif workspace_kind == "unknown":
+                        owner_kind, owner_id = "unknown", None
+                        if classification == "stale_candidate":
+                            classification = "unverified"
+                        references = tuple(dict.fromkeys(
+                            tuple(references) + tuple(workspace_evidence),
+                        ))
+                    else:
+                        owner_kind, owner_id = "workspace", path.name
+                else:
+                    owner_kind, owner_id = "project", path.name
                 state, measured_size, error = size(path, resource_thorough)
                 if (
                     classification == "stale_candidate"
@@ -1665,7 +2925,7 @@ def scan():
                     classification = "unverified"
                 item = observation(
                     "worktree", str(path), path.name,
-                    "workspace" if is_workspace else "project", path.name,
+                    owner_kind, owner_id,
                     classification, state, measured_size,
                     measured_size if classification == "stale_candidate" else 0,
                     references,
@@ -1691,7 +2951,9 @@ def scan():
                     or target_locator != str(path)
                 ):
                     continue
-                state, measured_size, error = size(path, thorough or is_cache)
+                state, measured_size, error = size(
+                    path, (thorough or is_cache) and not FAST,
+                )
                 classification = "disposable_cache" if is_cache else "retained"
                 if is_cache and state != "measured":
                     classification = "unverified"
@@ -1768,6 +3030,33 @@ def scan():
             (error,) if error else (),
         ))
     outcomes.append({"category": "job_artifacts", "status": artifact_status})
+    reclaim = None
+    if not targeted and REQUEST.get("reclaim") is not False:
+        PHASE = "reclaim_inventory"
+        engine_complete = not FAST and all(
+            item.get("status") == "complete"
+            for item in outcomes
+            if isinstance(item, dict)
+            and item.get("category") == "docker_containers"
+        )
+        try:
+            reclaim = reclaim_inventory(
+                inventory, protected_paths, workspace_projection,
+                engine_complete,
+            )
+        except Exception:
+            reclaim = {
+                "deployment_root": str(DEPLOY), "runtime_root": str(RUNTIME),
+                "entries": [], "volumes": [], "scratch": [], "leases": {},
+                "hosted_sites": [], "index_names": [], "status": "unavailable",
+                "reason": "reclaim_inventory_failed", "truncated": False,
+                "unmeasured_count": 0,
+            }
+        outcomes.append({
+            "category": "reclaim_inventory",
+            "status": reclaim.get("status", "unavailable"),
+            "reason": reclaim.get("reason"),
+        })
     PHASE = "serialize"
     return {
         "identity": identity,
@@ -1777,6 +3066,7 @@ def scan():
         "category_outcomes": outcomes,
         "drift": None,
         "deep_attribution": deep,
+        "reclaim": reclaim,
     }
 
 def inside(path, root):
@@ -1789,6 +3079,14 @@ def inside(path, root):
 def remove():
     kind = REQUEST.get("kind")
     locator = str(REQUEST.get("locator") or "")
+    if kind == "network":
+        # A network locator alone cannot prove inactive leases, containers, or
+        # jobs.  Keep network recovery in the confirmation-gated workspace
+        # lifecycle and refuse direct deletion from resource cleanup.
+        return {
+            "status": "failed",
+            "reason": "network_lifecycle_revalidation_required",
+        }
     if kind in {"download_cache", "job_artifact", "worktree", "runtime"}:
         path = Path(locator)
         allowed = inside(path, RUNTIME) or inside(path, DEPLOY)
@@ -1828,26 +3126,94 @@ def remove():
         "reason": "removed" if code == 0 else ("cleanup_timed_out" if code == 124 else "cleanup_failed"),
     }
 
+ACTIONS = {
+    "remove": remove,
+    "reclaim": reclaim_action,
+    "lease": lease_action,
+}
+
 try:
-    output = remove() if REQUEST.get("action") == "remove" else scan()
-    print(json.dumps(output, separators=(",", ":")))
+    handler = ACTIONS.get(REQUEST.get("action"))
+    output = handler() if handler is not None else scan()
+    if handler is None:
+        output["stage"] = "final"
+    emit(output)
 except Exception as exc:
-    print(json.dumps({
+    failure = dict(ENVELOPE or {})
+    failure.update({
+        "stage": "error",
         "error": "resource probe failed",
         "error_phase": PHASE,
         "error_type": type(exc).__name__,
-    }, separators=(",", ":")))
+    })
+    failure["category_outcomes"] = [{
+        "category": "remote_probe", "status": "unavailable",
+        "reason": "probe_failed_in_" + str(PHASE),
+    }]
+    emit(failure)
     sys.exit(1)
 """
 
 
+def parse_job_list_payload(payload: dict) -> list[dict]:
+    """Decode the canonical top-level job-list response.
+
+    ``_program`` injects this exact function source into the isolated remote
+    probe, keeping the host and remote consumers on one parser contract.
+    """
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("job-list response must be a top-level ok object")
+    if "data" in payload:
+        raise ValueError("job-list response must expose top-level jobs")
+    rows = payload.get("jobs")
+    if not isinstance(rows, list):
+        raise ValueError("job-list response jobs must be a top-level list")
+    if not all(isinstance(item, dict) for item in rows):
+        raise ValueError("job-list response jobs must contain objects")
+    return rows
+
+
 def _program(request: dict) -> str:
+    import inspect
+
     encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    return _REMOTE_PROGRAM.replace("__REQUEST__", repr(encoded))
+    parser_source = inspect.getsource(parse_job_list_payload)
+    return _REMOTE_PROGRAM.replace("__JOB_LIST_PARSER__", parser_source).replace(
+        "__REQUEST__", repr(encoded),
+    )
+
+
+_STAGE_RANK = {"envelope": 0, "error": 1, "final": 2}
+
+
+def _salvage_payload(stdout: str) -> dict | None:
+    """Keep the richest complete probe record the transport delivered.
+
+    The probe publishes a capacity envelope before it starts bounded work and
+    the full record last.  A probe that is killed mid-write therefore still
+    yields capacity, so a full disk never degrades to "unmeasurable".
+    """
+    best = None
+    best_rank = -1
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(candidate, dict) or not candidate.get("identity"):
+            continue
+        rank = _STAGE_RANK.get(str(candidate.get("stage") or ""), 0)
+        if rank >= best_rank:
+            best, best_rank = candidate, rank
+    return best
 
 
 def _observation(value: dict) -> ResourceObservation:
     owner = value.get("owner") or {}
+    allocation = value.get("allocation") or {}
     return ResourceObservation(
         resource_id=value.get("resource_id"),
         kind=value.get("kind"),
@@ -1864,6 +3230,12 @@ def _observation(value: dict) -> ResourceObservation:
         references=tuple(value.get("references") or ()),
         evidence=tuple(value.get("evidence") or ()),
         errors=tuple(value.get("errors") or ()),
+        lifecycle=value.get("lifecycle"),
+        active_references=value.get("active_references") or (),
+        allocation_state=allocation.get("state"),
+        allocation_pool=allocation.get("pool"),
+        cleanup_eligible=bool(value.get("cleanup_eligible", False)),
+        last_observed=value.get("last_observed"),
     )
 
 
@@ -1922,15 +3294,21 @@ class RemoteResourceAdapter:
             execute = ssh_process
         else:
             execute = self._ssh_process
-        result = execute(
-            entry,
-            (
-                'sandbox_runtime="${SANDBOX_HOME:-$HOME/sandbox}/sb-src"; '
-                'PYTHONPATH="$sandbox_runtime" python3 -'
-            ),
-            input_data=_program(request),
-            timeout=max(int(timeout), 1),
-        )
+        try:
+            result = execute(
+                entry,
+                (
+                    'sandbox_runtime="${SANDBOX_HOME:-$HOME/sandbox}/sb-src"; '
+                    'PYTHONPATH="$sandbox_runtime" python3 -'
+                ),
+                input_data=_program(request),
+                timeout=max(int(timeout), 1),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
+            return ProcessResult(tuple(exc.cmd) if isinstance(exc.cmd, (list, tuple)) else ("ssh",),
+                                 124, stdout, stderr)
         return ProcessResult(
             tuple(getattr(result, "args", getattr(result, "argv", ("ssh",)))),
             int(result.returncode),
@@ -1953,7 +3331,7 @@ class RemoteResourceAdapter:
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
-        cancelled=False,
+        cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         entry = self._entry()
         if self._cancelled(cancelled):
@@ -1972,15 +3350,10 @@ class RemoteResourceAdapter:
             "focus": focus,
             "deep": bool(deep),
             "cancelled": self._cancelled(cancelled),
+            "directory_cache": directory_cache or "auto",
         }, budget_seconds + 5)
-        try:
-            payload = json.loads(response.stdout)
-            identity = payload["identity"]
-            resources = tuple(
-                _observation(item) for item in payload.get("resources") or ()
-            )
-            target = StorageTarget("remote", self.remote_name, identity)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        payload = _salvage_payload(response.stdout)
+        if payload is None:
             status = (
                 "timed_out" if response.returncode == 124 else "unavailable"
             )
@@ -1988,6 +3361,11 @@ class RemoteResourceAdapter:
                 self.target(), None, (),
                 ({"category": "remote_probe", "status": status},),
             )
+        identity = payload["identity"]
+        resources = tuple(
+            _observation(item) for item in payload.get("resources") or ()
+        )
+        target = StorageTarget("remote", self.remote_name, identity)
         self._target = target
         outcomes = list(payload.get("category_outcomes") or ())
         terminal = None
@@ -2007,7 +3385,68 @@ class RemoteResourceAdapter:
             payload.get("drift"),
             DeepAttribution.from_dict(payload.get("deep_attribution")),
             payload.get("capacity_scope_id"),
+            payload.get("reclaim"),
         )
+
+    # -- reclamation ------------------------------------------------------
+
+    def reclaim(self, candidates, *, run_id: str, trigger: str = "manual",
+                workspace_ids: dict | None = None,
+                budget_seconds: float = 900) -> dict:
+        """Execute one reviewed candidate set in a single bounded session.
+
+        One SSH round trip per candidate would mean hundreds of handshakes and
+        hundreds of chances to lose the connection mid-run, so the reviewed set
+        travels together and the probe re-asserts every protection host-side.
+        """
+        response = self._ssh(self._entry(), {
+            "action": "reclaim",
+            "run_id": run_id,
+            "trigger": trigger,
+            "candidates": list(candidates),
+            "workspace_ids": dict(workspace_ids or {}),
+            "budget_seconds": float(budget_seconds),
+        }, budget_seconds + 10)
+        return self._decode(response, "reclaim")
+
+    def lease(self, op: str, *, name: str | None = None,
+              expires_at: str | None = None,
+              active_references: dict | None = None) -> dict:
+        response = self._ssh(self._entry(), {
+            "action": "lease",
+            "op": op,
+            "name": name,
+            "expires_at": expires_at,
+            "active_references": dict(active_references or {}),
+            "budget_seconds": 20.0,
+        }, 25)
+        return self._decode(response, "lease")
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | dict) -> dict:
+        """Return a diagnostic release decision without opening SSH."""
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, dict):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)
+
+    @staticmethod
+    def _decode(response: ProcessResult, action: str) -> dict:
+        if response.returncode == 124:
+            return {"ok": False, "reason": f"{action}_timed_out"}
+        for line in reversed((response.stdout or "").splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return {"ok": False, "reason": f"{action}_response_invalid"}
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         entry = self._entry()
@@ -2023,7 +3462,7 @@ class RemoteResourceAdapter:
         if response.returncode != 0:
             return None
         try:
-            payload = json.loads(response.stdout)
+            payload = _salvage_payload(response.stdout) or {}
             identity = payload["identity"]
             target = StorageTarget("remote", self.remote_name, identity)
             if self._target is not None and self._target != target:
@@ -2069,3 +3508,104 @@ class RemoteResourceAdapter:
             False,
             self.clock(),
         )
+
+
+class LocalProbeAdapter:
+    """Run the shipped probe program against the local host.
+
+    The probe is the single implementation of host-side reclaim evidence and
+    mutation.  Executing the same source locally keeps local and remote targets
+    on one code path instead of letting a second classifier drift.
+    """
+
+    def __init__(self, *, python: str | None = None, home: str | None = None,
+                 runner: Callable | None = None, clock=utc_now) -> None:
+        import sys
+
+        self.python = python or sys.executable or "python3"
+        self.home = home
+        self._runner = runner
+        self.clock = clock
+
+    def _run(self, request: dict, timeout: float) -> ProcessResult:
+        if self._runner is not None:
+            return self._runner(request, timeout)
+        import os
+        import sys
+        from pathlib import Path as _Path
+
+        environment = dict(os.environ)
+        root = str(_Path(__file__).resolve().parents[2])
+        environment["PYTHONPATH"] = (
+            root + os.pathsep + environment["PYTHONPATH"]
+            if environment.get("PYTHONPATH") else root
+        )
+        if self.home:
+            environment["SANDBOX_HOME"] = str(self.home)
+        try:
+            completed = subprocess.run(
+                [self.python, "-"], input=_program(request), text=True,
+                capture_output=True, timeout=max(int(timeout), 1),
+                env=environment, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProcessResult(
+                (self.python, "-"), 124,
+                exc.stdout if isinstance(exc.stdout, str) else "",
+                exc.stderr if isinstance(exc.stderr, str) else "",
+            )
+        del sys
+        return ProcessResult(
+            (self.python, "-"), int(completed.returncode),
+            completed.stdout or "", completed.stderr or "",
+        )
+
+    def observe_reclaim(self, *, budget_seconds: float = 30,
+                        directory_cache: str = "auto") -> dict:
+        response = self._run({
+            "action": "observe",
+            "thorough": False,
+            "budget_seconds": float(budget_seconds),
+            "managed_host": True,
+            "remote_name": None,
+            "focus": None,
+            "deep": True,
+            "directory_cache": directory_cache,
+        }, budget_seconds + 5)
+        payload = _salvage_payload(response.stdout) or {}
+        return payload
+
+    def reclaim(self, candidates, *, run_id: str, trigger: str = "manual",
+                workspace_ids: dict | None = None,
+                budget_seconds: float = 900) -> dict:
+        response = self._run({
+            "action": "reclaim",
+            "run_id": run_id,
+            "trigger": trigger,
+            "candidates": list(candidates),
+            "workspace_ids": dict(workspace_ids or {}),
+            "budget_seconds": float(budget_seconds),
+        }, budget_seconds + 10)
+        return RemoteResourceAdapter._decode(response, "reclaim")
+
+    def lease(self, op: str, *, name: str | None = None,
+              expires_at: str | None = None,
+              active_references: dict | None = None) -> dict:
+        response = self._run({
+            "action": "lease",
+            "op": op,
+            "name": name,
+            "expires_at": expires_at,
+            "active_references": dict(active_references or {}),
+            "budget_seconds": 20.0,
+        }, 25)
+        return RemoteResourceAdapter._decode(response, "lease")
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | dict) -> dict:
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, dict):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)

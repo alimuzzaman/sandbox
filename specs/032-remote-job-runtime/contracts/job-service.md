@@ -236,3 +236,100 @@ policy/state. `child_outcomes_truncated` signals omitted references. Full curren
 difference, output, and cleanup detail remains inspectable through `children`; terminal rows
 and aggregate membership remain immutable.
 
+## Convergence amendment — 2026-08-13: acceptance and list identity
+
+The following wire rules are normative and retain the existing top-level list
+shape. They close feedback `79d775b4`, `b027d2ab`, `3da039b4`, `343d1a5a`, and
+`6bc4c6d5`.
+
+### Accepted submission
+
+`submit(...) -> JobAccepted` MUST persist the durable row before returning:
+
+```json
+{
+  "ok": true,
+  "status": "accepted",
+  "job_id": "opaque-nonempty-id",
+  "target": {"kind": "local|remote", "name": "safe-name"},
+  "workspace": {"label": "safe-label", "identity": "opaque-id"},
+  "source": {"kind": "working_tree|commit", "identity": "opaque-id"},
+  "error": null
+}
+```
+
+Rejected submission returns `ok:false`, `status:"rejected"`, a stable safe
+`error.code`, and no `job_id`; it exits nonzero at the CLI boundary. An empty,
+undecodable, or transport-lost acknowledgement is an explicit
+`acceptance_unknown` failure and is never rendered as accepted.
+
+### Canonical lookup and proof context
+
+Every control operation receives the returned `job_id` and resolves its target,
+workspace, source, and parent context from the durable row. A caller-provided
+label or process ID can narrow an observation but cannot replace the canonical
+identity. The accepted row stores the guide-resolved proof checkout/source
+identity and detached workers consume that stored value, not the submitter's
+later current directory.
+
+### Job-list decoder
+
+`list(...) -> JobPage` is the sole decoder owner. Its success payload remains a
+top-level object containing the page fields (`jobs`, `next_cursor`, and bounded
+counts as applicable), not `{ "data": { ... } }`. CLI, MCP, monitoring, and
+network consumers MUST call this decoder and MUST reject malformed envelopes
+without guessing another shape. The decoder is tolerant only of additive fields;
+it MUST NOT silently reinterpret a nested or unrelated response.
+
+## Workspace identity/index extension
+
+Workspace lifecycle calls use the durable workspace repository. A workspace response adds
+an opaque `workspace_id`, `project_identity`, label, lifecycle state, locator digests,
+index generation, and bounded migration decision summary. The compatibility metadata file
+at `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` is never rewritten.
+
+```json
+{
+  "ok": true,
+  "workspace_id": "opaque-id",
+  "project_identity": "project-id",
+  "workspace_label": "unit",
+  "state": "ready",
+  "checkout": {"present": false, "identity": "opaque-locator-digest"},
+  "index": {"generation": 4, "complete": true},
+  "migration": {"decision": "adopted", "source_digest": "sha256:..."},
+  "error": null
+}
+```
+
+### Migration
+
+`workspace_migrate(project_identity, plan_id?, confirm?)` first creates a no-write plan
+with target identity, complete legacy inventory digest, index generation, bounded
+candidate decisions, and expiry. Applying an exact plan is confirmation-gated, acquires
+the global/per-workspace locks, rescans, and commits all adoptable rows in one
+transaction. It returns `workspace_index_incomplete` when unresolved/conflicting legacy
+records remain and `workspace_migration_plan_stale` or `workspace_ownership_drift` when
+the inventory or generation changes. It never deletes or rewrites legacy metadata and
+never releases networks or performs cleanup.
+
+### Degraded-index reporting
+
+`WorkspaceService.list` is read-only reporting and stays `ok: true` when the index is
+degraded. It returns `index` (`generation`, `complete`, `code`, `counts`), a top-level
+`code`/`warning` carrying `workspace_index_incomplete` while degraded, and an `on_disk`
+inventory of the deployment root's children (`path`, `indexed`, `workspace_id`,
+`modified_at`, `age_seconds`, `size_bytes`, `size_reason`). Sizes are `null` unless
+`measure_sizes` is requested, and measurement is bounded by entry/time budgets rather
+than an unbounded walk. `WorkspaceService.status` and every mutating operation
+(create/reset/destroy/migration apply) keep failing on a degraded or non-ready record.
+
+### Remote controls
+
+Remote list/status/migrate use `project_identity` and/or `workspace_id`; they MUST NOT
+require `project_dir`, checkout path, or a derived namespace. Reset/destroy require the
+opaque workspace ID plus confirmation and a busy-lock check. Missing checkout locators
+are an observable state, not a reason to fail list/status. Stable errors include
+`workspace_identity_ambiguous`, `workspace_alias_collision`, `workspace_busy`,
+`workspace_index_unavailable`, `workspace_index_incomplete`,
+`workspace_migration_plan_stale`, and `workspace_ownership_drift`.

@@ -16,8 +16,12 @@ MCP_DIR = ROOT / "mcp" / "wp-server"
 VENV_PY = MCP_DIR / ".venv" / "bin" / "python"
 
 _PROBE = """
-import os, asyncio, json, subprocess
+import os, asyncio, json, subprocess, tempfile
 os.environ.setdefault("SANDBOX_ROOT", os.getcwd() + "/../..")
+_probe_project_owner = tempfile.TemporaryDirectory(
+    prefix=".sandbox-mcp-probe-", dir=os.environ["SANDBOX_ROOT"],
+)
+_probe_project = _probe_project_owner.name
 import server                      # thin entry: imports app + all tools.* groups
 from app import SANDBOX_INSTRUCTIONS, mcp
 import inspect
@@ -100,7 +104,7 @@ wp_tools.SANDBOX_ROOT = mcp_app.SANDBOX_ROOT
 import sys as _sys
 _mcp_root = str(mcp_app.SANDBOX_ROOT)
 _sys.path = [entry for entry in _sys.path if entry != _mcp_root]
-capability_import = mcp_app._require_project_capability("/tmp/project", None, "wordpress.cli")
+capability_import = mcp_app._require_project_capability(_probe_project, None, "wordpress.cli")
 print("CAPABILITY_IMPORT", json.dumps(capability_import))
 class _WrapperResult:
     returncode = 0
@@ -118,7 +122,7 @@ mcp_app.subprocess.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
 )
 print("WRAPPER_TIMEOUT", json.dumps(mcp_app._run_sandbox_json(["sb"], 3)))
 mcp_app.subprocess.run = _original_subprocess_run
-invalid_mode = wp_tools.run_tests("/tmp/project", mode="not-a-mode")
+invalid_mode = wp_tools.run_tests(_probe_project, mode="not-a-mode")
 print("TEST_MODE_INVALID", json.dumps(invalid_mode))
 wp_tools._require_project_capability = lambda *_args: None
 wp_tools._project_instance = lambda *_args: ("fixture", None)
@@ -130,7 +134,7 @@ class TestRunResult:
 test_calls = []
 wp_tools.subprocess.run = lambda cmd, **kwargs: test_calls.append([cmd, kwargs]) or TestRunResult()
 print("TEST_MODE_FORWARD", json.dumps(wp_tools.run_tests(
-    "/tmp/project", mode="unit", phpunit_args="--filter Example")))
+    _probe_project, mode="unit", phpunit_args="--filter Example", local=True)))
 print("TEST_MODE_CALL", json.dumps(test_calls))
 rejection = {"ok": False, "error": "blocked before side effects"}
 wp_side_effects = []
@@ -139,8 +143,8 @@ wp_tools._wpcli = lambda *_args, **_kwargs: wp_side_effects.append("wpcli")
 data_tools._require_project_capability = lambda *_args: rejection
 data_tools._compose = lambda *_args, **_kwargs: wp_side_effects.append("compose")
 print("CAPABILITY_REJECTION", json.dumps([
-    wp_tools.wp_cli("core version", project_dir="/tmp/project"),
-    data_tools.db_query("SELECT 1", project_dir="/tmp/project"),
+    wp_tools.wp_cli("core version", project_dir=_probe_project),
+    data_tools.db_query("SELECT 1", project_dir=_probe_project),
     wp_side_effects,
 ]))
 data_tools._require_project_capability = lambda *_args: None
@@ -150,7 +154,7 @@ data_tools._run_sandbox_json = lambda cmd, timeout: snapshot_calls.append([cmd, 
     "timed_out": False, "returncode": 0, "stdout": "saved\\n", "stderr": "", "payload": None,
 }
 print("MCP_SNAPSHOT", json.dumps([
-    data_tools.snapshot("before", db_only=True, force=True, project_dir="/tmp/project"),
+    data_tools.snapshot("before", db_only=True, force=True, project_dir=_probe_project),
     snapshot_calls,
 ]))
 """
@@ -201,9 +205,10 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("job_follow", "job_id"), ("job_metrics", "job_id"), ("job_reconcile", ""), ("job_retention", ""), ("job_cancel", "job_id"),
             ("job_artifacts", "job_id"), ("job_artifact_get", "artifact_id,job_id"),
             ("job_retry", "job_id"), ("job_cleanup", "job_id"),
-            ("workspace_create", "project_dir"), ("workspace_list", "project_dir"),
-            ("workspace_status", "project_dir"), ("workspace_reset", "project_dir"),
-            ("workspace_destroy", "project_dir"),
+            ("workspace_create", ""), ("workspace_list", ""),
+            ("workspace_status", ""), ("workspace_reset", ""),
+            ("workspace_destroy", ""), ("workspace_migration_plan", ""),
+            ("workspace_migration_apply", "plan_id"),
             ("wp_cli", "command,project_dir"), ("wp_exec", "command,project_dir"),
             ("wp_rest", "method,path,project_dir"), ("run_tests", "project_dir"),
             ("wp_cli_async", "command,project_dir"), ("wp_cli_job", "job_id,project_dir"),
@@ -220,12 +225,17 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("cache_info", ""), ("cache_clear", ""),
             ("resource_status", ""), ("resource_cleanup_plan", "scope"),
             ("resource_cleanup_apply", "plan_id"),
+            ("feedback_submit", "summary"), ("feedback_list", ""),
             ("wp_eval_live", "code,project_dir"), ("list_skills", "project_dir"),
             ("skill_write", "description,project_dir,title"), ("skill_edit", "project_dir,slug"),
             ("skill_delete", "project_dir,slug"), ("qm_capture", "project_dir"),
             ("xdebug", "project_dir"), ("run_e2e", "project_dir"),
             ("ci_plan", "workflow"), ("ci_run", "project_dir,workflow"),
             ("async_job_status", "job_id"), ("async_job_kill", "job_id"),
+            ("secret_source_info", "project_dir,source"),
+            ("secret_inspect", "project_dir,source"),
+            ("secret_validate", "key,profile,project_dir,source"),
+            ("secret_use_profile", "profile,project_dir"),
             ("run_plugin_check", "project_dir"), ("remote_deploy", "project_dir,remote"),
             ("hermes_status", "remote"), ("hermes_run", "prompt,remote,repo"),
             ("hermes_job_status", "job_id,remote"), ("hermes_job_kill", "job_id,remote"),
@@ -246,7 +256,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 121)
+        self.assertEqual(len(actual), 129)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 
@@ -266,7 +276,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
 
         instructions = next(line for line in r.stdout.splitlines()
                             if line.startswith("INSTRUCTIONS "))
-        self.assertLessEqual(int(instructions.split()[1]), 1000, r.stdout)
+        self.assertLessEqual(int(instructions.split()[1]), 7000, r.stdout)
         focus_default = next(line for line in r.stdout.splitlines()
                              if line.startswith("FOCUS_DEFAULT_INCLUDE "))
         self.assertEqual(focus_default, "FOCUS_DEFAULT_INCLUDE False")

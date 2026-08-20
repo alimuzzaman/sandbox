@@ -10,16 +10,18 @@ import platform
 import shutil
 import time
 import re
-from typing import Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from sandbox.services.process import BoundedProcessRunner, ProcessResult
 
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
+    NetworkLifecycle,
     ResourceRequest,
     ResourceObservation,
     StorageTarget,
+    normalize_active_references,
     utc_now,
 )
 from .attribution import (
@@ -70,6 +72,211 @@ class ProviderSnapshot:
     drift: dict | None = None
     deep_attribution: DeepAttribution | None = None
     capacity_scope_id: str | None = None
+    reclaim: dict | None = None
+
+
+@dataclass(frozen=True)
+class _WorkspaceOwner:
+    """One fail-closed result from the typed workspace ownership projection."""
+
+    owner_kind: str
+    owner_id: str | None
+    evidence: tuple[str, ...] = ()
+    references: tuple[str, ...] = ()
+    protected: bool = False
+    active: bool = False
+    lifecycle: str | None = None
+    active_references: tuple[tuple[str, int | None], ...] = ()
+    observed_at: str | None = None
+
+
+class _WorkspaceOwnership:
+    """Normalize an injected workspace projection without owning its storage.
+
+    Resource providers receive the projection from the workspace service.  The
+    adapter deliberately has no repository/path access: it only indexes the
+    serialisable records and exact resource bindings in that projection.
+    """
+
+    _BINDING_TYPES = frozenset({
+        "compose_project", "runtime_instance", "runtime", "instance",
+    })
+    _INVALID_STATUSES = frozenset({
+        "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
+        "tombstoned",
+    })
+    _LIFECYCLES = frozenset({
+        "provisioning", "ready", "resetting", "destroying", "destroyed",
+        "indeterminate",
+    })
+
+    def __init__(self, payload: Any, *, configured: bool) -> None:
+        self.configured = configured
+        self.available = False
+        self.incomplete = False
+        self.bindings: dict[
+            tuple[str, str],
+            set[tuple[str, str, str, bool, tuple[tuple[str, int | None], ...], str]],
+        ] = {}
+        self.reason = "workspace_index_unavailable"
+        if not configured:
+            self.reason = "workspace_projection_not_configured"
+            return
+        if callable(payload):
+            try:
+                payload = payload()
+            except Exception:
+                payload = None
+        if hasattr(payload, "ownership_projection"):
+            try:
+                payload = payload.ownership_projection()
+            except Exception:
+                payload = None
+        if not isinstance(payload, Mapping):
+            return
+        records = payload.get("records", payload.get("workspaces"))
+        if not isinstance(records, (list, tuple)):
+            return
+        self.available = True
+        if not records:
+            # An empty projection is not proof that a live resource is
+            # unowned; callers must surface an incomplete index instead of a
+            # false empty-success inventory.
+            self.incomplete = True
+        counts = payload.get("counts")
+        projection_generation = payload.get(
+            "index_generation", payload.get("generation"))
+        if (isinstance(projection_generation, bool) or
+                not isinstance(projection_generation, int)):
+            self.incomplete = True
+        if isinstance(counts, Mapping) and any(
+            isinstance(counts.get(key), int) and counts.get(key) > 0
+            for key in ("unresolved", "conflict", "incomplete")
+        ):
+            self.incomplete = True
+        for record in records:
+            if not isinstance(record, Mapping):
+                self.incomplete = True
+                continue
+            if record.get("complete") is False:
+                self.incomplete = True
+                continue
+            record_generation = record.get("index_generation")
+            if (projection_generation is not None and
+                    record_generation != projection_generation):
+                self.incomplete = True
+                continue
+            workspace_id = record.get("workspace_id")
+            if not isinstance(workspace_id, str) or not workspace_id:
+                self.incomplete = True
+                continue
+            lifecycle_value = record.get("lifecycle")
+            status_value = record.get("status")
+            observed_at = record.get("observed_at")
+            owner_class = record.get("owner_kind")
+            if (owner_class != "workspace" or
+                    not isinstance(lifecycle_value, str) or
+                    lifecycle_value.lower() not in self._LIFECYCLES or
+                    not isinstance(status_value, str) or
+                    not isinstance(observed_at, str) or not observed_at):
+                self.incomplete = True
+                continue
+            lifecycle = lifecycle_value.lower()
+            status = status_value.lower()
+            if lifecycle in self._INVALID_STATUSES or status in self._INVALID_STATUSES:
+                self.incomplete = True
+                continue
+            bindings = record.get("bindings")
+            if not isinstance(bindings, (list, tuple)):
+                continue
+            active_references = record.get("active_references")
+            if isinstance(active_references, Mapping):
+                try:
+                    reference_counts = normalize_active_references(active_references)
+                except ValueError:
+                    self.incomplete = True
+                    reference_counts = ()
+            else:
+                # Missing evidence is unknown, never an observed zero.
+                reference_counts = tuple(
+                    (name, None) for name in ("leases", "containers", "jobs", "mounts")
+                )
+            reference_active = False
+            if reference_counts:
+                reference_active = any(
+                    value is not None and value > 0 for _name, value in reference_counts
+                )
+            for binding in bindings:
+                if not isinstance(binding, Mapping):
+                    self.incomplete = True
+                    continue
+                resource_type = binding.get("resource_type", binding.get("type"))
+                resource_id = binding.get("resource_id", binding.get("id"))
+                if (
+                    not isinstance(resource_type, str)
+                    or resource_type not in self._BINDING_TYPES
+                    or not isinstance(resource_id, str)
+                    or not resource_id
+                ):
+                    self.incomplete = True
+                    continue
+                binding_status = str(binding.get("status") or "owned").lower()
+                if binding_status in self._INVALID_STATUSES:
+                    self.incomplete = True
+                    continue
+                self.bindings.setdefault((resource_type, resource_id), set()).add(
+                    (workspace_id, lifecycle, binding_status, reference_active, reference_counts, observed_at),
+                )
+        self.reason = "workspace_index_incomplete" if self.incomplete else "workspace_projection"
+
+    def resolve(self, resource_type: str, resource_id: str, *, legacy_owner: str | None = None,
+                legacy_protected: bool = False) -> _WorkspaceOwner:
+        """Resolve only an exact, unique typed binding.
+
+        A missing/ambiguous binding never falls back to a path or Compose name
+        once a projection is configured.  This keeps resource cleanup fail
+        closed while retaining old behaviour for direct legacy adapter users
+        that did not inject a projection.
+        """
+        if not self.configured:
+            if legacy_owner:
+                return _WorkspaceOwner(
+                    "project", legacy_owner,
+                    ("compose_project_label",),
+                    ("instance_registry",) if legacy_protected else (),
+                    legacy_protected,
+                )
+            return _WorkspaceOwner("unmanaged", None, ("ownership_unverified",))
+        if not self.available:
+            return _WorkspaceOwner("unknown", None, ("workspace_index_unavailable",))
+        matches = self.bindings.get((resource_type, resource_id), set())
+        if len(matches) == 1:
+            workspace_id, lifecycle, binding_status, active, reference_counts, observed_at = next(iter(matches))
+            if binding_status not in {"owned", "active", "retained", "ready"}:
+                return _WorkspaceOwner(
+                    "unknown", None,
+                    ("workspace_binding_unverified", self.reason),
+                )
+            return _WorkspaceOwner(
+                "workspace", workspace_id,
+                ("workspace_binding", resource_type),
+                ("workspace_index",),
+                True,
+                active,
+                lifecycle,
+                reference_counts,
+                observed_at,
+            )
+        if len(matches) > 1:
+            return _WorkspaceOwner(
+                "unknown", None,
+                ("workspace_alias_collision", resource_type),
+            )
+        return _WorkspaceOwner("unknown", None, (self.reason, "workspace_binding_missing"))
+
+
+def _is_unknown_workspace_owner(owner: _WorkspaceOwner) -> bool:
+    return owner.owner_kind == "unknown"
 
 
 class ResourceAdapter(Protocol):
@@ -108,6 +315,7 @@ class LocalResourceAdapter:
         runner=None,
         registry_records: Callable[[], object] | None = None,
         job_resource_records: Callable[[], object] | None = None,
+        workspace_projection: Callable[[], object] | object | None = None,
         deep_collector_factory=DeepAttributionCollector,
         clock=utc_now,
         host_root: Path = Path("/"),
@@ -120,9 +328,17 @@ class LocalResourceAdapter:
         self.job_resource_records = job_resource_records or (
             lambda: {"jobs": [], "artifacts": []}
         )
+        self.workspace_projection = workspace_projection
         self.deep_collector_factory = deep_collector_factory
         self.clock = clock
         self.host_root = Path(host_root)
+
+    def _workspace_ownership(self) -> _WorkspaceOwnership:
+        """Read the injected typed projection once per observation."""
+        return _WorkspaceOwnership(
+            self.workspace_projection,
+            configured=self.workspace_projection is not None,
+        )
 
     def target(self) -> StorageTarget:
         seed = f"{platform.node()}:{os.stat(self.host_root).st_dev}:{self.sandbox_home}"
@@ -463,6 +679,7 @@ class LocalResourceAdapter:
     def _path_resources(
         self, *, thorough: bool, deadline: float,
         active_sources: set[str], protected_paths: dict[str, tuple[str, ...]],
+        workspace_ownership: _WorkspaceOwnership | None = None,
     ) -> tuple[list[ResourceObservation], list[dict]]:
         resources = []
         outcomes = []
@@ -502,10 +719,28 @@ class LocalResourceAdapter:
                         classification, refs = "retained", ("permanent_or_base_deployment",)
                     else:
                         classification, refs = "stale_candidate", ()
+                    workspace_owner = (
+                        workspace_ownership.resolve("runtime_instance", path.name)
+                        if is_workspace and workspace_ownership is not None else None
+                    )
+                    owner_state = getattr(workspace_owner, "owner_kind", None)
+                    match owner_state:
+                        case "workspace":
+                            owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
+                        case "unknown":
+                            owner_kind, owner_id = "unknown", None
+                            if classification == "stale_candidate":
+                                classification = "unverified"
+                            refs = tuple(dict.fromkeys(
+                                refs + workspace_owner.evidence,
+                            ))
+                        case _:
+                            owner_kind, owner_id = (
+                                ("workspace", path.name) if is_workspace else ("project", path.name)
+                            )
                     resources.append(self._path_observation(
                         path, kind="worktree", classification=classification,
-                        owner_kind="workspace" if is_workspace else "project",
-                        owner_id=path.name, thorough=thorough,
+                        owner_kind=owner_kind, owner_id=owner_id, thorough=thorough,
                         timeout=min(remaining, 8),
                         evidence=("sandbox_deploy_root",),
                         references=refs,
@@ -548,9 +783,24 @@ class LocalResourceAdapter:
             outcomes.append({"category": category, "status": category_state})
         return resources, outcomes
 
+    @staticmethod
+    def _workspace_owner_for(
+        ownership: _WorkspaceOwnership,
+        owner: str | None,
+        protected_projects: set[str],
+    ) -> _WorkspaceOwner:
+        if not owner:
+            return _WorkspaceOwner("unmanaged", None, ("ownership_unverified",))
+        return ownership.resolve(
+            "compose_project", owner,
+            legacy_owner=owner,
+            legacy_protected=owner in protected_projects,
+        )
+
     def _docker_resources(
         self, inventory: dict, *, thorough: bool, deadline: float,
         protected_projects: set[str],
+        workspace_ownership: _WorkspaceOwnership,
     ) -> list[ResourceObservation]:
         resources = []
         active_volumes = {
@@ -564,6 +814,9 @@ class LocalResourceAdapter:
             owner = self._compose_owner(container.get("Config", {}).get("Labels"))
             if not owner:
                 continue
+            workspace_owner = self._workspace_owner_for(
+                workspace_ownership, owner, protected_projects,
+            )
             running = bool(container.get("State", {}).get("Running"))
             size = container.get("SizeRw")
             if isinstance(size, bool) or not isinstance(size, int) or size < 0:
@@ -575,43 +828,63 @@ class LocalResourceAdapter:
                 resource_id=_resource_id("container", locator),
                 kind="container", locator=locator,
                 display_name=str(container.get("Name") or locator).lstrip("/"),
-                owner_kind="project", owner_id=owner,
+                owner_kind=workspace_owner.owner_kind,
+                owner_id=workspace_owner.owner_id,
                 classification=(
-                    "active" if running else
-                    "retained" if owner in protected_projects else
+                    "active" if running or workspace_owner.active else
+                    "retained" if workspace_owner.protected else
+                    "unverified" if _is_unknown_workspace_owner(workspace_owner) else
                     "disposable_cache"
                 ),
                 size_state="measured" if size is not None else "unavailable",
                 size_bytes=size,
                 reclaimable_bytes=(
                     size or 0
-                    if not running and owner not in protected_projects
+                    if not running and not _is_unknown_workspace_owner(workspace_owner)
+                    and not workspace_owner.protected
                     and size is not None
                     else 0
                 ),
                 references=(
-                    ("running_container",) if running else
-                    ("instance_registry",) if owner in protected_projects else ()
+                    (("running_container",) if running else ())
+                    + (("workspace_active_reference",) if workspace_owner.active else ())
+                    + workspace_owner.references if running or workspace_owner.active else
+                    workspace_owner.references if workspace_owner.protected else ()
                 ),
-                evidence=("compose_project_label", "stopped" if not running else "running"),
+                evidence=tuple(dict.fromkeys(
+                    workspace_owner.evidence + ("stopped" if not running else "running",)
+                )),
             ))
         for volume in inventory.get("volumes", ()):
             name = volume.get("Name")
             if not isinstance(name, str) or not name:
                 continue
             owner = self._compose_owner(volume.get("Labels"))
+            workspace_owner = self._workspace_owner_for(
+                workspace_ownership, owner, protected_projects,
+            )
             if not owner:
-                classification, owner_kind = "unmanaged", "unmanaged"
+                classification, owner_kind, owner_id = "unmanaged", "unmanaged", None
             elif name in active_volumes:
-                classification, owner_kind = "active", "project"
-            elif owner in protected_projects:
-                classification, owner_kind = "retained", "project"
+                classification = "active"
+                owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
+            elif workspace_owner.active:
+                classification = "active"
+                owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
+            elif workspace_owner.protected:
+                classification = "retained"
+                owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
+            elif _is_unknown_workspace_owner(workspace_owner):
+                classification = "unverified"
+                owner_kind, owner_id = "unknown", None
             else:
-                classification, owner_kind = "unverified", "project"
+                classification = "unverified"
+                owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
             size_state, size, error = "not_measured", None, None
             if (
                 thorough and owner and name not in active_volumes
-                and owner not in protected_projects
+                and not workspace_owner.protected
+                and not _is_unknown_workspace_owner(workspace_owner)
             ):
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
@@ -624,41 +897,110 @@ class LocalResourceAdapter:
             resources.append(ResourceObservation(
                 resource_id=_resource_id("volume", name),
                 kind="volume", locator=name, display_name=name,
-                owner_kind=owner_kind, owner_id=owner,
+                owner_kind=owner_kind, owner_id=owner_id,
                 classification=classification,
                 size_state=size_state, size_bytes=size,
                 reclaimable_bytes=size or 0 if classification == "stale_candidate" else 0,
                 references=(
-                    ("live_container_mount",) if name in active_volumes else
-                    ("instance_registry",) if owner in protected_projects else ()
+                    (("live_container_mount",) + workspace_owner.references)
+                    if name in active_volumes else
+                    (("workspace_active_reference",) + workspace_owner.references)
+                    if workspace_owner.active else
+                    workspace_owner.references if workspace_owner.protected else ()
                 ),
-                evidence=("compose_project_label",) if owner else ("ownership_unverified",),
+                evidence=tuple(dict.fromkeys(
+                    workspace_owner.evidence if owner else ("ownership_unverified",)
+                )),
                 errors=(error,) if error else (),
             ))
         for network in inventory.get("networks", ()):
             network_id = network.get("Id")
             if not isinstance(network_id, str) or not network_id:
                 continue
-            owner = self._compose_owner(network.get("Labels"))
-            if not owner:
+            network_name = str(network.get("Name") or network_id)
+            # Docker's predefined bridge/host/none networks are not
+            # Sandbox-managed user-defined allocations.  Keep the inventory
+            # focused on networks for which lifecycle evidence is meaningful.
+            if network_name in {"bridge", "host", "none"}:
                 continue
+            owner = self._compose_owner(network.get("Labels"))
             active = bool(network.get("Containers"))
+            if owner:
+                workspace_owner = self._workspace_owner_for(
+                    workspace_ownership, owner, protected_projects,
+                )
+                owner_kind, owner_id = workspace_owner.owner_kind, workspace_owner.owner_id
+                classification = (
+                    "active" if active or workspace_owner.active else
+                    "retained" if workspace_owner.protected else
+                    # A stopped job/container is not proof that a network is
+                    # stale.  Keep inactive networks unverified until an
+                    # explicit lifecycle reference confirms release.
+                    "unverified"
+                )
+                evidence = workspace_owner.evidence
+                if not active and classification == "unverified":
+                    evidence += ("network_liveness_unverified",)
+                references = (
+                    (("connected_container",) if active else ())
+                    + (("workspace_active_reference",) if workspace_owner.active else ())
+                    + workspace_owner.references if active or workspace_owner.active else
+                    workspace_owner.references if workspace_owner.protected else ()
+                )
+                # Network lifecycle is derived from the same typed owner
+                # projection as status/plan/apply.  A destroyed workspace is
+                # represented as orphaned, while missing reference evidence
+                # remains active/unknown and therefore never cleanup-ready.
+                references_unknown = any(
+                    value is None for _name, value in workspace_owner.active_references
+                )
+                if references_unknown and not active and not workspace_owner.active:
+                    network_lifecycle = "indeterminate"
+                elif workspace_owner.lifecycle in {"destroyed", "destroying"} and not active and not workspace_owner.active:
+                    network_lifecycle = "orphaned"
+                elif active or workspace_owner.active:
+                    network_lifecycle = "active"
+                elif workspace_owner.lifecycle in {"ready", "resetting", "provisioning"}:
+                    network_lifecycle = "idle"
+                else:
+                    network_lifecycle = "indeterminate"
+                reference_map = dict(workspace_owner.active_references)
+                if active:
+                    # Docker connectivity is a bounded container reference;
+                    # do not overwrite an explicit larger count.
+                    if reference_map.get("containers") is None or reference_map.get("containers", 0) < 1:
+                        reference_map["containers"] = 1
+                active_references = tuple(sorted(reference_map.items()))
+                allocation_state = "allocated" if owner_kind == "workspace" and owner_id else "unknown"
+                last_observed = workspace_owner.observed_at
+            else:
+                labels = network.get("Labels")
+                owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
+                    "com.docker.compose.project"
+                ) else "unmanaged"
+                owner_id = None
+                classification = "active" if active else "unmanaged"
+                evidence = ("ownership_unverified",)
+                references = ("connected_container",) if active else ()
+                network_lifecycle = "active" if active else "indeterminate"
+                active_references = (("containers", 1),) if active else (("containers", 0),)
+                allocation_state = "unknown"
+                last_observed = None
             resources.append(ResourceObservation(
                 resource_id=_resource_id("network", network_id),
                 kind="network", locator=network_id,
-                display_name=str(network.get("Name") or network_id),
-                owner_kind="project", owner_id=owner,
-                classification=(
-                    "active" if active else
-                    "retained" if owner in protected_projects else
-                    "disposable_cache"
-                ),
+                display_name=network_name,
+                owner_kind=owner_kind, owner_id=owner_id,
+                classification=classification,
                 size_state="measured", size_bytes=0, reclaimable_bytes=0,
-                references=(
-                    ("connected_container",) if active else
-                    ("instance_registry",) if owner in protected_projects else ()
-                ),
-                evidence=("compose_project_label",),
+                capacity_accounted=False,
+                references=references,
+                evidence=evidence,
+                lifecycle=network_lifecycle,
+                active_references=active_references,
+                allocation_state=allocation_state,
+                cleanup_eligible=False,
+                last_observed=last_observed,
             ))
         used_images = {
             str(container.get("Image"))
@@ -674,20 +1016,25 @@ class LocalResourceAdapter:
             )
             if not image_owner:
                 continue
+            workspace_owner = self._workspace_owner_for(
+                workspace_ownership, image_owner, protected_projects,
+            )
             used = locator in used_images
             size = image.get("Size")
             if isinstance(size, bool) or not isinstance(size, int) or size < 0:
                 size = None
             display = next(iter(image.get("RepoTags") or ()), locator)
             classification = (
-                "active" if used else
-                "retained" if image_owner in protected_projects else
+                "active" if used or workspace_owner.active else
+                "retained" if workspace_owner.protected else
+                "unverified" if _is_unknown_workspace_owner(workspace_owner) else
                 "disposable_cache"
             )
             resources.append(ResourceObservation(
                 resource_id=_resource_id("image", locator),
                 kind="image", locator=locator, display_name=str(display),
-                owner_kind="project", owner_id=image_owner,
+                owner_kind=workspace_owner.owner_kind,
+                owner_id=workspace_owner.owner_id,
                 classification=classification,
                 size_state="measured" if size is not None else "unavailable",
                 size_bytes=size,
@@ -695,11 +1042,12 @@ class LocalResourceAdapter:
                     size or 0 if classification == "disposable_cache" else 0
                 ),
                 references=(
-                    ("container_image",) if used else
-                    ("instance_registry",)
-                    if image_owner in protected_projects else ()
+                    (("container_image",) if used else ())
+                    + (("workspace_active_reference",) if workspace_owner.active else ())
+                    + workspace_owner.references if used or workspace_owner.active else
+                    workspace_owner.references if workspace_owner.protected else ()
                 ),
-                evidence=("compose_project_label",),
+                evidence=workspace_owner.evidence,
             ))
         for record in inventory.get("build_cache", ()):
             locator = record.get("ID")
@@ -892,6 +1240,7 @@ class LocalResourceAdapter:
             )
         deadline = time.monotonic() + float(budget_seconds)
         capacity = self._capacity()
+        workspace_ownership = self._workspace_ownership()
         protected_paths, protected_projects, job_records = self._ownership_index()
         if progress:
             progress("docker")
@@ -908,6 +1257,7 @@ class LocalResourceAdapter:
         path_resources, path_outcomes = self._path_resources(
             thorough=thorough, deadline=deadline, active_sources=active_sources,
             protected_paths=protected_paths,
+            workspace_ownership=workspace_ownership,
         )
         job_resources, job_outcome = self._job_artifact_resources(
             job_records, thorough=thorough, deadline=deadline,
@@ -918,6 +1268,7 @@ class LocalResourceAdapter:
             *self._docker_resources(
                 inventory, thorough=thorough, deadline=deadline,
                 protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
             ),
         ]
         if thorough:
@@ -983,7 +1334,21 @@ class LocalResourceAdapter:
         )
         return ProviderSnapshot(
             self.target(), capacity, tuple(resources),
-            tuple((*docker_outcomes, *path_outcomes, job_outcome, *deep_outcomes)),
+            tuple((
+                *docker_outcomes,
+                *path_outcomes,
+                job_outcome,
+                {
+                    "category": "workspace_ownership",
+                    "status": (
+                        "complete" if workspace_ownership.available and not workspace_ownership.incomplete
+                        else "partial" if workspace_ownership.available
+                        else "unavailable"
+                    ),
+                    "reason": workspace_ownership.reason,
+                },
+                *deep_outcomes,
+            )),
             {
                 "overlap_categories": ["job_storage_contains_job_artifacts"],
             } if job_resources else None,
@@ -1000,6 +1365,21 @@ class LocalResourceAdapter:
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         return self._find_current(candidate)
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | Mapping[str, Any]) -> dict:
+        """Return a diagnostic release decision without mutating Docker.
+
+        Network cleanup is intentionally disabled at the resource adapter
+        boundary.  The typed lifecycle model still refuses active lease,
+        container, or job references before reporting that disabled state.
+        """
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, Mapping):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)
 
     def _remove_path(self, path: Path, *, recreate: bool = False) -> str:
         if not _inside(path, self.sandbox_home) or path == self.sandbox_home:
@@ -1047,10 +1427,11 @@ class LocalResourceAdapter:
                 "timed_out" if result.returncode == 124 else "failed"
             )
         elif candidate.kind == "network":
-            result = self._run(("docker", "network", "rm", candidate.locator), 60)
-            status = "removed" if result.returncode == 0 else (
-                "timed_out" if result.returncode == 124 else "failed"
-            )
+            # Network lifecycle state is intentionally diagnostic-only until
+            # leases, containers, and jobs have an explicit release record.
+            # Never turn a stale plan or a forged candidate into direct Docker
+            # network deletion.
+            status = "failed"
         elif candidate.kind == "image":
             result = self._run(("docker", "image", "rm", candidate.locator), 60)
             status = "removed" if result.returncode == 0 else (

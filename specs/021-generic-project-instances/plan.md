@@ -182,3 +182,17 @@ Each increment has a stop-and-review checkpoint. No commit, push, release, or de
 ## Complexity Tracking
 
 No new constitutional violation is planned. Existing wildcard imports, back-filled symbols, central parser ownership, and unrelated feature monoliths are documented debt; this feature must not expand them.
+
+## Plan amendment — 2026-08-13 (PHP extension requirements)
+
+The WordPress adapter owns normalization and capability validation for the additive
+`phpExtensions` field. It consumes the immutable catalog/profile and returns a
+content-addressed resolution; image/package mutation remains owned by the selected
+runtime (Spec 039 for managed-native). The generic Compose adapter is a deliberate
+v1 refusal path until a separately specified PHP-aware adapter exists.
+
+The implementation sequence is: normalize and reject before adapter side effects;
+probe all execution planes; select an allowlisted runtime strategy; then reconcile
+only the web/runtime artifacts while retaining the existing registry identity and
+project data. Focused config/adapter tests precede any live WordPress proof, and the
+omission path must be covered by the legacy regression suite.

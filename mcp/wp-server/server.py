@@ -56,6 +56,11 @@ def _resource_service(remote=None):
     return resource_service(remote)
 
 
+def _reclaim_service(remote=None):
+    from sandbox.resources.context import reclaim_service
+    return reclaim_service(remote)
+
+
 def _feedback_service():
     from sandbox.feedback.context import feedback_service
     return feedback_service()
@@ -160,6 +165,7 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "native_preflight": _native_preflight,
     "managed_package_planner": _managed_package_planner,
     "resource_service_factory": _resource_service,
+    "reclaim_service_factory": _reclaim_service,
     "feedback_service_factory": _feedback_service,
     "secret_service_factory": _secret_service,
     "hermes_service": _HermesCommandAdapter(),

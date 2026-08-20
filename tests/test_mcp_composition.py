@@ -176,7 +176,7 @@ class TestMcpComposition(unittest.TestCase):
                 ),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
-                "resources": ("resource_service_factory",),
+                "resources": ("resource_service_factory", "reclaim_service_factory"),
                 "feedback": ("feedback_service_factory",),
                 "secrets": ("secret_service_factory",),
             },

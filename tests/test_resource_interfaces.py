@@ -515,6 +515,7 @@ class TestResourceInterfaces(unittest.TestCase):
                 server,
                 ToolDependencies({
                     "resource_service_factory": lambda _remote: service,
+                    "reclaim_service_factory": lambda _remote: service,
                 }),
             )
             self.assertEqual(server.names, [
@@ -562,6 +563,7 @@ class TestResourceInterfaces(unittest.TestCase):
                 Server(),
                 ToolDependencies({
                     "resource_service_factory": lambda remote: calls.append(remote),
+                    "reclaim_service_factory": lambda remote: calls.append(remote),
                 }),
             )
             payload = resources.resource_cleanup_apply("a" * 32, confirm=False)

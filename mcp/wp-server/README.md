@@ -35,6 +35,12 @@ of WordPress catalogs. `SANDBOX_MCP_GROUPS` remains an explicit operator overrid
 | `tail_log` | tail `wp-content/debug.log` |
 | `activate_plugin` / `deactivate_plugin` | toggle plugins by slug |
 | `import_content` | import a WXR XML from `runtime/seeds/` |
+| `resource_cleanup_plan` / `resource_cleanup_apply` | review a legacy cache/stale scope or manually plan/apply one `safe`, `tmp`, or `all` reclaim tier; tier application requires `confirm: true` |
+
+The resource tools require exactly one selector: `scope` (`cache` or `stale`)
+for the legacy planner, or `tier` (`safe`, `tmp`, or `all`) for tiered
+reclamation. A tier application plans and executes the requested tier only when
+`confirm: true`; it never exposes the scheduled automatic-cleanup path.
 
 `snapshot` is capability-gated before it resolves or invokes an instance. Its
 `db_only` and `force` flags are forwarded to the CLI, and successful responses

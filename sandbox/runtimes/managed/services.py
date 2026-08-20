@@ -56,6 +56,11 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
         "pm.min_spare_servers = 1\npm.max_spare_servers = 4\nclear_env = yes\n"
         "security.limit_extensions = .php\ncatch_workers_output = yes\n"
         f"request_terminate_timeout = {runtime_seconds}s\n"
+        # Keep managed PHP aligned with config/php-sandbox.ini and the web
+        # server request ceiling so large WordPress imports are not truncated
+        # at a lower layer.
+        "php_admin_value[upload_max_filesize] = 1024M\n"
+        "php_admin_value[post_max_size] = 1024M\n"
         "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
         "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
         "php_admin_value[open_basedir] = /var/www/html:/workspace:/var/lib/sandbox:/tmp:/usr/share/php\n"
@@ -72,7 +77,7 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
                  "    include /etc/nginx/sites-enabled/*;\n}\n")
         web = (f"server {{\n    listen {guest}:{backend_port} default_server;\n"
                "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
-               "    client_max_body_size 64m;\n"
+               "    client_max_body_size 1024m;\n"
                "    location / { try_files $uri $uri/ /index.php?$args; }\n"
                "    location ~ \\.php$ { try_files $uri =404; include fastcgi_params; "
                "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; "

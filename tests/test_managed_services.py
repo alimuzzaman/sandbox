@@ -46,6 +46,7 @@ class TestManagedServices(unittest.TestCase):
         self.assertIn("root /var/www/html", web)
         self.assertNotIn("root /workspace", web)
         self.assertIn("fastcgi_pass unix:/run/php/sandbox.sock", web)
+        self.assertIn("client_max_body_size 1024m;", web)
         nginx = result["files"]["/etc/nginx/nginx.conf"]
         self.assertIn("worker_processes 1", nginx)
         self.assertIn("worker_connections 128", nginx)
@@ -67,8 +68,10 @@ class TestManagedServices(unittest.TestCase):
             self.assertIn("--tmpfs /run/sandbox-native-credentials", launcher)
             self.assertIn("--cap-drop ALL --uid 33 --gid 33", launcher)
         self.assertIn("/usr/sbin/php-fpm8.3", php)
-        self.assertIn("request_terminate_timeout = 900s",
-                      result["files"]["/etc/php/8.3/fpm/pool.d/sandbox.conf"])
+        php_pool = result["files"]["/etc/php/8.3/fpm/pool.d/sandbox.conf"]
+        self.assertIn("request_terminate_timeout = 900s", php_pool)
+        self.assertIn("php_admin_value[upload_max_filesize] = 1024M", php_pool)
+        self.assertIn("php_admin_value[post_max_size] = 1024M", php_pool)
         self.assertIn("/usr/bin/timeout --signal=TERM --kill-after=5s 900s", cron)
         self.assertIn("/usr/local/bin/wp cron event run", cron)
         self.assertIn("root /usr/local/libexec/sandbox-wordpress-cron",

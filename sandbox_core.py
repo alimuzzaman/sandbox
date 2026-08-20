@@ -653,12 +653,29 @@ _ROOT = Path(__file__).resolve().parent
 def sandbox_base() -> Path:
     """The single per-user base for ALL machine-state (spec 009).
 
-    Default ~/sandbox; overridable via SANDBOX_HOME. Both the `sb` CLI and the
-    MCP server resolve this identically so they never disagree about where state
-    lives. expanduser()+resolve() collapses ~, relatives, and symlinks to one
-    absolute path.
+    A non-empty ``SANDBOX_HOME`` is the explicit override.  When a new process
+    is launched without that environment variable, honour the owner-only
+    bootstrap selector written by ``sb home`` at
+    ``~/.config/sandbox/home``.  Empty, missing, or unreadable selectors fall
+    back to ``~/sandbox``.  Both the ``sb`` CLI and the MCP server resolve this
+    identically so they never disagree about where state lives.
+
+    ``expanduser()+resolve()`` collapses ``~``, relatives, and symlinks to one
+    absolute path.  The selector is deliberately only a path hint: it is not
+    consulted for registry migration, merging, or target discovery.
     """
-    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+    raw = os.environ.get("SANDBOX_HOME")
+    if not raw:
+        hint = Path.home() / ".config" / "sandbox" / "home"
+        try:
+            candidate = hint.read_text().strip()
+        except OSError:
+            candidate = ""
+        # The bootstrap hint is an owner-written absolute path.  Rejecting
+        # relative values prevents a separate launch from resolving the base
+        # against whichever directory happened to be its current directory.
+        raw = candidate if candidate and Path(candidate).is_absolute() else None
+    return Path(raw or "~/sandbox").expanduser().resolve()
 
 
 def _legacy_runtime_dir() -> Path:

@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import io
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -402,6 +404,136 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         hint = home / ".config" / "sandbox" / "home"
         self.assertEqual(hint.read_text().strip(), str(selected.resolve()))
         self.assertEqual(hint.stat().st_mode & 0o777, 0o600)
+
+    def _sandbox_base_probe(self, env, *, cwd=None):
+        """Resolve sandbox_core.sandbox_base in a fresh interpreter.
+
+        A subprocess matters here: the CLI and MCP are separately launched
+        processes, so an import-time path decision must not depend on this
+        test process having previously imported either composition root.
+        """
+        root = Path(__file__).resolve().parents[1]
+        probe = "import sandbox_core; print(sandbox_core.sandbox_base())"
+        child_env = dict(env)
+        child_env["PYTHONPATH"] = str(root)
+        result = subprocess.run(
+            [sys.executable, "-c", probe], cwd=str(cwd or root), env=child_env,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return Path(result.stdout.strip())
+
+    def test_sandbox_core_honours_persisted_selector_after_env_removed(self):
+        home = self.root / "process-home"
+        selected = self.root / "selected-base"
+        hint = home / ".config" / "sandbox" / "home"
+        hint.parent.mkdir(parents=True)
+        hint.write_text(f"  {selected}  \n")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("SANDBOX_HOME", None)
+        env.pop("SANDBOX_RUNTIME", None)
+        self.assertEqual(self._sandbox_base_probe(env), selected.resolve())
+
+    def test_sandbox_home_env_wins_over_persisted_selector(self):
+        home = self.root / "process-home"
+        selected = self.root / "selected-base"
+        explicit = self.root / "explicit-base"
+        hint = home / ".config" / "sandbox" / "home"
+        hint.parent.mkdir(parents=True)
+        hint.write_text(str(selected) + "\n")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["SANDBOX_HOME"] = str(explicit)
+        env.pop("SANDBOX_RUNTIME", None)
+        self.assertEqual(self._sandbox_base_probe(env), explicit.resolve())
+
+    def test_blank_missing_and_unreadable_selector_fall_back_to_default(self):
+        home = self.root / "process-home"
+        default = (home / "sandbox").resolve()
+        hint = home / ".config" / "sandbox" / "home"
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("SANDBOX_HOME", None)
+        env.pop("SANDBOX_RUNTIME", None)
+
+        for contents in (None, "\n  \n", "relative-state"):
+            with self.subTest(selector=contents):
+                if contents is None:
+                    if hint.exists():
+                        hint.unlink()
+                else:
+                    hint.parent.mkdir(parents=True, exist_ok=True)
+                    hint.write_text(contents)
+                self.assertEqual(self._sandbox_base_probe(env), default)
+
+        # A directory at the selector path is unreadable as a text file in a
+        # fresh process (IsADirectoryError), and exercises the same safe
+        # fallback without relying on uid-dependent chmod behavior.
+        if hint.exists():
+            hint.unlink()
+        hint.mkdir(parents=True)
+        try:
+            self.assertEqual(self._sandbox_base_probe(env), default)
+        finally:
+            shutil.rmtree(hint)
+
+    def test_relative_selector_is_ignored_independent_of_process_cwd(self):
+        home = self.root / "process-home"
+        hint = home / ".config" / "sandbox" / "home"
+        hint.parent.mkdir(parents=True)
+        hint.write_text("relative-state\n")
+        cwd_a = self.root / "cwd-a"
+        cwd_b = self.root / "cwd-b"
+        cwd_a.mkdir()
+        cwd_b.mkdir()
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("SANDBOX_HOME", None)
+        env.pop("SANDBOX_RUNTIME", None)
+        expected = (home / "sandbox").resolve()
+        self.assertEqual(self._sandbox_base_probe(env, cwd=cwd_a), expected)
+        self.assertEqual(self._sandbox_base_probe(env, cwd=cwd_b), expected)
+
+    def test_registry_uses_only_the_selected_base(self):
+        """A selector change does not search or merge another registry."""
+        import sandbox_core
+
+        home = self.root / "process-home"
+        selected = self.root / "selected-base"
+        fallback = home / "sandbox"
+        hint = home / ".config" / "sandbox" / "home"
+        hint.parent.mkdir(parents=True)
+        hint.write_text(str(selected) + "\n")
+        old_home = os.environ.get("HOME")
+        old_sandbox_home = os.environ.get("SANDBOX_HOME")
+        old_runtime = os.environ.get("SANDBOX_RUNTIME")
+        try:
+            os.environ["HOME"] = str(home)
+            os.environ.pop("SANDBOX_HOME", None)
+            os.environ.pop("SANDBOX_RUNTIME", None)
+            sandbox_core.registry_put(
+                str(self.root / "project"), instance="selected-instance",
+            )
+            self.assertTrue((selected / "runtime" / "registry.json").is_file())
+            self.assertFalse((fallback / "runtime" / "registry.json").exists())
+            self.assertEqual(
+                sandbox_core.registry_find_instance("selected-instance")["instance"],
+                "selected-instance",
+            )
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+            if old_sandbox_home is None:
+                os.environ.pop("SANDBOX_HOME", None)
+            else:
+                os.environ["SANDBOX_HOME"] = old_sandbox_home
+            if old_runtime is None:
+                os.environ.pop("SANDBOX_RUNTIME", None)
+            else:
+                os.environ["SANDBOX_RUNTIME"] = old_runtime
 
     def test_migration_help_exposes_the_documented_safety_flags(self):
         import subprocess

@@ -10,6 +10,7 @@ import os
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -168,6 +169,74 @@ print("MCP_SNAPSHOT_CAPABILITY_REJECTION", json.dumps(
 
 @unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
 class TestMcpServerSplit(unittest.TestCase):
+    def test_project_instance_uses_persisted_selector_after_env_removed(self):
+        """A separately launched MCP process sees the same project registry."""
+        with tempfile.TemporaryDirectory(prefix="sb-mcp-home-") as td:
+            base = Path(td)
+            home = base / "home"
+            selected = base / "selected"
+            project = home / "project"
+            (project / ".git").mkdir(parents=True)
+            (project / "sandbox.config.json").write_text("{}\n")
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text(str(selected) + "\n")
+
+            env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT)}
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            register = (
+                "import sandbox_core; sandbox_core.registry_put(%r, instance=%r)"
+                % (str(project), "mcp-instance")
+            )
+            created = subprocess.run(
+                [sys.executable, "-c", register], cwd=str(ROOT), env=env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+            probe = (
+                "import app; print(app._project_instance(%r)[0])"
+                % str(project)
+            )
+            resolved = subprocess.run(
+                [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
+                capture_output=True, text=True, timeout=90,
+                env={**env, "SANDBOX_ROOT": str(ROOT)},
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            self.assertEqual(resolved.stdout.strip(), "mcp-instance")
+
+    def test_mcp_relative_selector_falls_back_to_cwd_independent_default(self):
+        """MCP never interprets a relative bootstrap hint against its CWD."""
+        with tempfile.TemporaryDirectory(prefix="sb-mcp-relative-") as td:
+            base = Path(td)
+            home = base / "home"
+            cwd_a = base / "cwd-a"
+            cwd_b = base / "cwd-b"
+            cwd_a.mkdir(parents=True)
+            cwd_b.mkdir(parents=True)
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text("relative-state\n")
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "PYTHONPATH": str(MCP_DIR) + os.pathsep + str(ROOT),
+                "SANDBOX_ROOT": str(ROOT),
+            }
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            probe = "import app; print(app._sandbox_base())"
+            for cwd in (cwd_a, cwd_b):
+                with self.subTest(cwd=cwd.name):
+                    resolved = subprocess.run(
+                        [str(VENV_PY), "-c", probe], cwd=str(cwd),
+                        capture_output=True, text=True, timeout=90, env=env,
+                    )
+                    self.assertEqual(resolved.returncode, 0, resolved.stderr)
+                    self.assertEqual(resolved.stdout.strip(), str((home / "sandbox").resolve()))
+
     def test_wordpress_remote_tests_bind_the_staged_cli_path(self):
         probe = """
 from sandbox.core import _remote

@@ -114,12 +114,17 @@ all other machine-state. `config.yml` / `.yaml` also work. Backward-compat: unti
 `./sb migrate --apply` runs, the legacy `~/.config/sandbox/config.json`
 (honoring `$XDG_CONFIG_HOME`) is still read as a fallback.
 
-`SANDBOX_HOME` is the explicit, highest-priority location selector. `./sb home <dir>`
-relocates the base and, after verification, records the selected path in the non-secret
-owner-only bootstrap hint `~/.config/sandbox/home`, so subsequent CLI and MCP launches
-continue to agree without exporting the variable in every shell. A normal first command
-automatically migrates old repo/config-only state only when that selected base is empty;
-if both sides hold state, Sandbox stops without merging or deleting either source.
+`SANDBOX_HOME` is the explicit, highest-priority location selector when it is non-empty.
+Without it, both the CLI and MCP read the last verified **absolute** path from the
+non-secret, owner-only bootstrap hint `~/.config/sandbox/home` written by
+`./sb home <dir>`; a relative, blank, missing, or unreadable hint falls back to
+`~/sandbox`. This selector is only a path hint: it never triggers registry migration,
+merging, or target discovery. The `./sb home <dir>` command relocates the base and
+records the selected path only after
+verification, so subsequent CLI and MCP launches continue to agree without exporting
+the variable in every shell. A normal first command automatically migrates old
+repo/config-only state only when that selected base is empty; if both sides hold state,
+Sandbox stops without merging or deleting either source.
 
 It sits **under** the project in priority:
 

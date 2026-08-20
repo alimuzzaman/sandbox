@@ -439,6 +439,74 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("remote job submission blocked by Docker network capacity admission", errors)
 
+    def test_cwd_project_instance_survives_env_removal_via_persisted_selector(self):
+        """A separately launched CLI still finds the project-owned instance."""
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="sb-cli-home-") as td:
+            base = Path(td)
+            home = base / "home"
+            selected = base / "selected"
+            project = home / "project"
+            (project / ".git").mkdir(parents=True)
+            (project / "sandbox.config.json").write_text("{}\n")
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text(str(selected) + "\n")
+
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            env["PYTHONPATH"] = str(root)
+            register = (
+                "import sandbox_core; sandbox_core.registry_put(%r, instance=%r)"
+                % (str(project), "cli-instance")
+            )
+            created = subprocess.run(
+                [sys.executable, "-c", register], cwd=str(root), env=env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+            probe = "from sandbox.cli import _cwd_instance; print(_cwd_instance())"
+            resolved = subprocess.run(
+                [sys.executable, "-c", probe], cwd=str(project), env=env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            self.assertEqual(resolved.stdout.strip(), "cli-instance")
+
+    def test_cli_relative_selector_falls_back_to_cwd_independent_default(self):
+        """CLI path resolution never interprets a relative bootstrap hint."""
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="sb-cli-relative-") as td:
+            base = Path(td)
+            home = base / "home"
+            cwd_a = base / "cwd-a"
+            cwd_b = base / "cwd-b"
+            cwd_a.mkdir(parents=True)
+            cwd_b.mkdir(parents=True)
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text("relative-state\n")
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            env["PYTHONPATH"] = str(root)
+            probe = (
+                "import sandbox.cli; from sandbox.core._paths import _sandbox_base; "
+                "print(_sandbox_base())"
+            )
+            for cwd in (cwd_a, cwd_b):
+                with self.subTest(cwd=cwd.name):
+                    resolved = subprocess.run(
+                        [sys.executable, "-c", probe], cwd=str(cwd), env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(resolved.returncode, 0, resolved.stderr)
+                    self.assertEqual(resolved.stdout.strip(), str((home / "sandbox").resolve()))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -4,6 +4,32 @@
 applies only the exact candidates in a current confirmed plan. It is global:
 run it from any directory, with no instance boot required.
 
+## Run a storage-pressure monitor
+
+`monitor` is the bounded, cache-only pressure pass. It resolves the configured
+storage-monitor policy before constructing a host-facing service, then records
+the capacity level, thresholds, automatic-cleanup decision, and retention
+reap evidence for the selected target:
+
+```sh
+./sb resources monitor --json
+./sb resources monitor --remote scaleway-sandbox --scheduled --json
+```
+
+The default budget is 900 seconds. `--scheduled` changes only the recorded
+trigger; it grants no extra authority. `--dry-run` forces observation-only
+cleanup and reaping, so it cannot delete resources, but the monitor still
+writes its local last-run record and a dry reaping pass may persist a review
+plan. Automatic reclamation and real reaping remain off unless their separate
+policy switches are explicitly enabled. Warning and normal runs exit zero;
+critical, unknown, policy-refused, and action-failed runs exit one so a caller
+can surface them without parsing human output.
+
+For a warning or critical result, review the exact next command printed by the
+monitor (`resources plan --tier safe` for a warning and the confirmation-gated
+safe cleanup command for a critical result). A policy or target refusal is
+local and occurs before any host probe or service construction.
+
 ## Inspect storage
 
 Use fast status for capacity and cheap inventory:

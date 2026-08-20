@@ -43,6 +43,14 @@ resources monitor: normal (scaleway-sandbox)
 `--json` returns the standard `{ok, action, status, target, data, error}` envelope where
 `data` is the MonitorRunRecord.
 
+The monitor-only CLI surface accepts `--scheduled` and `--dry-run` only with
+the `monitor` action. Supplying either flag to `status`, `plan`, or `cleanup`,
+or supplying cleanup/status-only flags to `monitor`, is refused with
+`invalid_mode` before policy or service resolution. Policy resolution happens
+before host-facing service construction; a refusal therefore performs no host
+probe or deletion. `--dry-run` is non-deleting, not write-free: the run record
+and any dry review-plan metadata are local evidence.
+
 ### Refusals
 
 | Condition | Code | Effect |

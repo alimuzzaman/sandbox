@@ -14,6 +14,7 @@ from unittest.mock import patch
 class RecordingService:
     def __init__(self):
         self.calls = []
+        self.monitor_payload = None
 
     def status(
         self, *, thorough, budget_seconds, progress=None, deep=False,
@@ -185,6 +186,33 @@ class RecordingService:
             "data": {"plan_id": plan_id, "outcomes": []}, "error": None,
         }
 
+    def monitor(self, policy, *, trigger, dry_run, budget_seconds):
+        self.calls.append(("monitor", policy, trigger, dry_run, budget_seconds))
+        if self.monitor_payload is not None:
+            return self.monitor_payload
+        return {
+            "schema_version": 1, "ok": True, "action": "monitor",
+            "status": "normal", "target": {
+                "kind": "local", "name": "local", "identity": "fixture",
+            },
+            "data": {
+                "schema": 1,
+                "target": {"kind": "local", "name": "local"},
+                "at": "2026-08-21T00:00:00Z", "trigger": trigger,
+                "level": "normal", "free_bytes": 80, "total_bytes": 100,
+                "free_ratio": 0.8, "warn_ratio": 0.15,
+                "critical_ratio": 0.05, "auto_ratio": 0.05,
+                "threshold_crossed": None, "guidance": "no action required",
+                "auto": {"enabled": False, "eligible": False, "tier": None,
+                          "ran": False, "reclaimed_bytes": 0, "run_id": None,
+                          "reason": "disabled"},
+                "reap": {"enabled": False, "dry_run": True, "candidates": 0,
+                         "reclaimed_bytes": 0, "reason": "dry_run"},
+                "inventory_status": "complete", "errors": [],
+            },
+            "error": None,
+        }
+
 
 class TestResourceInterfaces(unittest.TestCase):
     def parser(self):
@@ -213,6 +241,13 @@ class TestResourceInterfaces(unittest.TestCase):
         self.assertFalse(deep.cancelled)
         cancelled = self.parser().parse_args(["status", "--cancelled"])
         self.assertTrue(cancelled.cancelled)
+        monitor = self.parser().parse_args([
+            "monitor", "--scheduled", "--dry-run", "--remote", "remote-a",
+        ])
+        self.assertEqual(
+            (monitor.action, monitor.scheduled, monitor.dry_run, monitor.remote),
+            ("monitor", True, True, "remote-a"),
+        )
 
     def test_cli_json_uses_shared_service_and_global_scope(self):
         from sandbox.commands import resources
@@ -478,6 +513,128 @@ class TestResourceInterfaces(unittest.TestCase):
              redirect_stdout(output), self.assertRaises(SystemExit):
             resources.cmd_resources({}, args)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "confirmation_required")
+
+    def test_monitor_resolves_policy_before_service_and_forwards_defaults(self):
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        events = []
+        args = self.parser().parse_args(["monitor", "--scheduled", "--dry-run"])
+        output = io.StringIO()
+        with patch.object(resources, "resolve_policy",
+                          side_effect=lambda remote: events.append(("policy", remote))
+                          or {"warn_ratio": 0.15}), \
+             patch.object(resources, "reclaim_service",
+                          side_effect=lambda remote: events.append(("service", remote))
+                          or service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        self.assertEqual(events, [("policy", None), ("service", None)])
+        self.assertEqual(
+            service.calls[0][0], "monitor",
+        )
+        self.assertEqual(service.calls[0][2:], ("scheduled", True, 900))
+
+    def test_monitor_invalid_modes_refuse_before_policy_or_service(self):
+        from sandbox.commands import resources
+
+        for argv in (("--scope", "cache"), ("--confirm",)):
+            with self.subTest(argv=argv):
+                service = RecordingService()
+                args = self.parser().parse_args(["monitor", *argv, "--json"])
+                output = io.StringIO()
+                with patch.object(resources, "resolve_policy") as policy, \
+                     patch.object(resources, "reclaim_service") as factory, \
+                     redirect_stdout(output), self.assertRaises(SystemExit):
+                    resources.cmd_resources({}, args)
+                self.assertEqual(json.loads(output.getvalue())["error"]["code"],
+                                 "invalid_mode")
+                policy.assert_not_called()
+                factory.assert_not_called()
+
+    def test_monitor_warning_human_output_preserves_capacity_guidance_and_errors(self):
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        service.monitor_payload = {
+            "schema_version": 1, "ok": False, "action": "monitor",
+            "status": "warning", "target": {
+                "kind": "remote", "name": "remote-a", "identity": "fixture",
+            },
+            "data": {
+                "schema": 1, "target": {"kind": "remote", "name": "remote-a"},
+                "at": "2026-08-21T00:00:00Z", "trigger": "manual",
+                "level": "warning", "free_bytes": 12, "total_bytes": 100,
+                "free_ratio": 0.12, "warn_ratio": 0.15,
+                "critical_ratio": 0.05, "auto_ratio": 0.05,
+                "threshold_crossed": "warn_ratio",
+                "guidance": "free space is below the warning threshold",
+                "auto": {"enabled": False, "eligible": False, "tier": None,
+                          "ran": False, "reclaimed_bytes": 0, "run_id": None,
+                          "reason": "disabled"},
+                "reap": {"enabled": False, "dry_run": True, "candidates": 3,
+                         "reclaimed_bytes": 4, "reason": "dry_run"},
+                "inventory_status": "partial",
+                "errors": [{"code": "reap_failed", "message": "bounded failure"}],
+            },
+            "error": {"code": "reap_failed", "message": "bounded failure",
+                       "retryable": False},
+        }
+        args = self.parser().parse_args(["monitor", "--remote", "remote-a"])
+        output = io.StringIO()
+        with patch.object(resources, "resolve_policy", return_value={}), \
+             patch.object(resources, "reclaim_service", return_value=service), \
+             redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                resources.cmd_resources({}, args)
+        self.assertEqual(raised.exception.code, 1)
+        rendered = output.getvalue()
+        self.assertIn("CAPACITY WARNING: 12.0 B free of 100.0 B (12.0%)", rendered)
+        self.assertIn("threshold warn_ratio (15.0%)", rendered)
+        self.assertIn("sb resources plan --tier safe --remote remote-a", rendered)
+        self.assertIn("reap: dry run — 3 candidates", rendered)
+        self.assertIn("reap_failed: bounded failure", rendered)
+
+    def test_monitor_normal_has_no_warning_line_and_json_preserves_record(self):
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        args = self.parser().parse_args(["monitor", "--json"])
+        output = io.StringIO()
+        with patch.object(resources, "resolve_policy", return_value={}), \
+             patch.object(resources, "reclaim_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["action"], "monitor")
+        self.assertEqual(payload["data"]["free_bytes"], 80)
+
+        args = self.parser().parse_args(["monitor"])
+        output = io.StringIO()
+        with patch.object(resources, "resolve_policy", return_value={}), \
+             patch.object(resources, "reclaim_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        self.assertNotIn("CAPACITY WARNING", output.getvalue())
+        self.assertNotIn("CAPACITY CRITICAL", output.getvalue())
+
+    def test_monitor_policy_refusal_is_bounded_and_does_not_construct_service(self):
+        from sandbox.commands import resources
+        from sandbox.config.storage_monitor import StorageMonitorConfigError
+
+        args = self.parser().parse_args(["monitor", "--remote", "missing", "--json"])
+        output = io.StringIO()
+        exc = StorageMonitorConfigError("unknown target " + "x" * 1000, "unknown_target")
+        with patch.object(resources, "resolve_policy", side_effect=exc) as policy, \
+             patch.object(resources, "reclaim_service") as factory, \
+             redirect_stdout(output), self.assertRaises(SystemExit):
+            resources.cmd_resources({}, args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["error"]["code"], "unknown_target")
+        self.assertLessEqual(len(payload["error"]["message"]), 240)
+        self.assertEqual(payload["target"]["name"], "missing")
+        policy.assert_called_once_with("missing")
+        factory.assert_not_called()
 
     def test_feature_command_is_manifest_owned_without_central_parser(self):
         from sandbox.commands.manifest import BUILTIN_COMMAND_MODULES, load_builtin_commands

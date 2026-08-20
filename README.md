@@ -341,9 +341,18 @@ Inspect local or named-remote storage without booting an instance:
 ./sb resources status --remote scaleway-sandbox --refresh --json
 # always-available: capacity plus the cached index, no disk walk
 ./sb resources status --remote scaleway-sandbox --fast
+./sb resources monitor --remote scaleway-sandbox --scheduled --json
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
+
+`resources monitor` performs a bounded cache-only pressure pass (900 seconds
+by default) and records the result. `--scheduled` is a trigger label only;
+`--dry-run` guarantees that automatic cleanup and reaping do not delete, while
+still allowing the local monitor record and review-plan metadata to be written.
+The monitor policy is resolved before any host-facing service is built, and
+warning/normal runs exit 0 while critical, unknown, refused, or failed runs
+exit 1. Automatic reclamation and real reaping are off by default.
 
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker

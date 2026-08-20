@@ -6,9 +6,11 @@ import json
 import math
 import time
 
+from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
-from sandbox.resources.context import resource_service
+from sandbox.resources.context import reclaim_service, resource_service
 from sandbox.resources.models import redact
+from sandbox.resources.monitor import record_path, resolve_policy
 
 
 def _remaining_status_budget(args, requested_budget: float) -> float:
@@ -50,9 +52,114 @@ def _budget_exhausted_payload(requested_budget: float) -> dict:
     )
 
 
+def _monitor_target(remote: str | None) -> dict[str, str]:
+    """Return the public target descriptor used for CLI-side refusals."""
+    if remote:
+        return {"kind": "remote", "name": str(remote)}
+    return {"kind": "local", "name": "local"}
+
+
+def _monitor_error(exc: Exception, fallback: str) -> dict[str, object]:
+    """Bound and redact policy/service errors before they reach the renderer."""
+    code = getattr(exc, "code", None)
+    if (
+        not isinstance(code, str)
+        or not code
+        or len(code) > 64
+        or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in code)
+    ):
+        code = fallback
+    message = str(exc).replace("\r", " ").replace("\n", " ").strip()
+    if not message:
+        message = fallback.replace("_", " ")
+    return {
+        "code": code,
+        "message": message[:240],
+        "retryable": bool(getattr(exc, "retryable", False)),
+    }
+
+
+def _monitor_refusal(remote: str | None, exc: Exception, fallback: str) -> dict:
+    """Build the standard monitor envelope without constructing a service."""
+    return {
+        "schema_version": 1,
+        "ok": False,
+        "action": "monitor",
+        "status": "refused",
+        "target": _monitor_target(remote),
+        "data": {},
+        "error": _monitor_error(exc, fallback),
+    }
+
+
+def _monitor_invalid_mode(args) -> dict | None:
+    """Reject options that belong to status/plan/cleanup before policy lookup."""
+    invalid = (
+        ("--scope", getattr(args, "scope", None) is not None),
+        ("--tier", getattr(args, "tier", None) is not None),
+        ("--plan-id", getattr(args, "plan_id", None) is not None),
+        ("--confirm", bool(getattr(args, "confirm", False))),
+        ("--thorough", bool(getattr(args, "thorough", False))),
+        ("--deep", bool(getattr(args, "deep", False))),
+        ("--fast", bool(getattr(args, "fast", False))),
+        ("--refresh", bool(getattr(args, "refresh", False))),
+        ("--cancelled", bool(getattr(args, "cancelled", False))),
+    )
+    for flag, present in invalid:
+        if present:
+            from sandbox.resources.service import ResourceError
+            return _monitor_refusal(
+                getattr(args, "remote", None),
+                ResourceError(
+                    f"{flag} is valid only for resources status, plan, or cleanup",
+                    "invalid_mode",
+                ),
+                "invalid_mode",
+            )
+    return None
+
+
+def _run_monitor(args) -> dict:
+    """Resolve monitor policy, then invoke the host-facing monitor service."""
+    invalid = _monitor_invalid_mode(args)
+    if invalid is not None:
+        return invalid
+
+    remote = getattr(args, "remote", None)
+    # This must remain before service construction: policy refusals (including
+    # unknown targets and unsafe automatic tiers) are local and host-free.
+    try:
+        policy = resolve_policy(remote)
+    except (StorageMonitorConfigError, ValueError, OSError) as exc:
+        return _monitor_refusal(remote, exc, "policy_resolution_failed")
+    except Exception as exc:
+        return _monitor_refusal(remote, exc, "policy_resolution_failed")
+
+    try:
+        service = reclaim_service(remote)
+        payload = service.monitor(
+            policy,
+            trigger="scheduled" if bool(getattr(args, "scheduled", False)) else "manual",
+            dry_run=bool(getattr(args, "dry_run", False)),
+            budget_seconds=(
+                args.budget if getattr(args, "budget", None) is not None else 900
+            ),
+        )
+    except Exception as exc:
+        return _monitor_refusal(remote, exc, "monitor_service_failed")
+    if not isinstance(payload, dict) or payload.get("action") != "monitor":
+        from sandbox.resources.service import ResourceError
+        return _monitor_refusal(
+            remote,
+            ResourceError("monitor returned an invalid result", "monitor_result_invalid"),
+            "monitor_result_invalid",
+        )
+    return payload
+
+
 def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
-    parser.add_argument("action", choices=("status", "plan", "cleanup"))
+    parser.add_argument("action", choices=("status", "plan", "cleanup", "monitor"))
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
     parser.add_argument(
@@ -91,6 +198,16 @@ def configure_parser(parser) -> None:
     )
     parser.add_argument("--plan-id", default=None)
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument(
+        "--scheduled",
+        action="store_true",
+        help="record this monitor invocation as a scheduled trigger",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="observe capacity and retention candidates without deleting",
+    )
     parser.add_argument("--json", action="store_true")
 
 
@@ -106,8 +223,164 @@ def _human_bytes(value) -> str:
     return f"{value} B"
 
 
+def _monitor_percent(value, *, fallback_bytes=None, total_bytes=None) -> str:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and 0 <= float(value) <= 1
+    ):
+        return f"{float(value) * 100:.1f}%"
+    if (
+        isinstance(fallback_bytes, int)
+        and isinstance(total_bytes, int)
+        and not isinstance(fallback_bytes, bool)
+        and not isinstance(total_bytes, bool)
+        and total_bytes > 0
+    ):
+        return f"{fallback_bytes * 100.0 / total_bytes:.1f}%"
+    return "unknown"
+
+
+def _monitor_next_command(target: dict, level: str, threshold: str | None) -> str:
+    """Return the review command for warning/critical output."""
+    remote = target.get("name") if target.get("kind") == "remote" else None
+    suffix = f" --remote {remote}" if remote else ""
+    if level == "critical" or threshold == "critical_ratio":
+        return f"sb resources cleanup --tier safe --confirm{suffix}"
+    return f"sb resources plan --tier safe{suffix}"
+
+
+def _emit_monitor(payload: dict, as_json: bool) -> None:
+    """Render a monitor record without hiding capacity evidence behind errors."""
+    payload = redact(payload)
+    if as_json:
+        # Keep the standard envelope and the complete MonitorRunRecord intact.
+        print(json.dumps(payload, sort_keys=True))
+        return
+
+    target = payload.get("target") or {}
+    target_name = target.get("name", "unresolved")
+    print(f"resources monitor: {payload.get('status', 'unknown')} ({target_name})")
+    if target:
+        print(
+            f"  target kind={target.get('kind', 'unknown')}; "
+            f"name={target_name}"
+        )
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    level = str(data.get("level") or payload.get("status") or "unknown")
+    free_bytes = data.get("free_bytes")
+    total_bytes = data.get("total_bytes")
+    free_ratio = data.get("free_ratio")
+    free_percent = _monitor_percent(
+        free_ratio, fallback_bytes=free_bytes, total_bytes=total_bytes,
+    )
+    warn_ratio = data.get("warn_ratio")
+    critical_ratio = data.get("critical_ratio")
+    threshold = data.get("threshold_crossed")
+
+    if data:
+        if level in {"warning", "critical"}:
+            threshold_ratio = data.get(threshold) if isinstance(threshold, str) else None
+            print(
+                f"  CAPACITY {level.upper()}: {_human_bytes(free_bytes)} free of "
+                f"{_human_bytes(total_bytes)} ({free_percent}); threshold "
+                f"{threshold or 'unknown'} ({_monitor_percent(threshold_ratio)})"
+            )
+            guidance = data.get("guidance")
+            if isinstance(guidance, str) and guidance:
+                print(f"    {guidance}")
+            print(
+                f"    next: `{_monitor_next_command(target, level, threshold)}`"
+            )
+        elif level == "unknown":
+            print(
+                f"  CAPACITY UNKNOWN: {_human_bytes(free_bytes)} free of "
+                f"{_human_bytes(total_bytes)} ({free_percent}); thresholds warn "
+                f"{_monitor_percent(warn_ratio)} / critical "
+                f"{_monitor_percent(critical_ratio)}"
+            )
+            guidance = data.get("guidance")
+            if isinstance(guidance, str) and guidance:
+                print(f"    {guidance}")
+        else:
+            # Normal output intentionally contains no warning line.
+            print(
+                f"  {_human_bytes(free_bytes)} free of {_human_bytes(total_bytes)} "
+                f"({free_percent}); thresholds warn {_monitor_percent(warn_ratio)} "
+                f"/ critical {_monitor_percent(critical_ratio)}"
+            )
+
+        auto = data.get("auto")
+        if isinstance(auto, dict):
+            state = "enabled" if auto.get("enabled") else "disabled"
+            details = [
+                f"eligible={auto.get('eligible', False)}",
+                f"tier={auto.get('tier') or 'none'}",
+                f"ran={auto.get('ran', False)}",
+                f"reclaimed {_human_bytes(auto.get('reclaimed_bytes'))}",
+            ]
+            if auto.get("reason"):
+                details.append(f"reason={auto['reason']}")
+            print(f"  automatic reclamation: {state}; " + "; ".join(details))
+
+        reap = data.get("reap")
+        if isinstance(reap, dict):
+            candidates = reap.get("candidates", 0)
+            if reap.get("dry_run"):
+                print(
+                    f"  reap: dry run — {candidates} candidates, "
+                    f"{_human_bytes(reap.get('reclaimed_bytes'))} would be reclaimed"
+                )
+            else:
+                print(
+                    f"  reap: enabled — {candidates} candidates, "
+                    f"{_human_bytes(reap.get('reclaimed_bytes'))} reclaimed"
+                )
+
+        try:
+            record_target = {
+                "kind": target.get("kind"), "name": target.get("name"),
+            }
+            if record_target["kind"] and record_target["name"]:
+                print(f"  record: {record_path(record_target)}")
+        except (TypeError, ValueError, OSError):
+            # A refusal or malformed test seam has no record path to report.
+            pass
+
+    errors = data.get("errors")
+    if isinstance(errors, list) and errors:
+        print("  errors:")
+        for error in errors:
+            if isinstance(error, dict):
+                print(
+                    f"    {error.get('code', 'monitor_error')}: "
+                    f"{error.get('message', 'monitor failed')}"
+                )
+    top_error = payload.get("error")
+    if isinstance(top_error, dict):
+        # Run records can carry the same error in ``data.errors``.  Avoid
+        # printing a duplicate while still preserving refusal evidence.
+        top_pair = (top_error.get("code"), top_error.get("message"))
+        data_pairs = {
+            (item.get("code"), item.get("message"))
+            for item in errors or () if isinstance(item, dict)
+        }
+        if top_pair not in data_pairs:
+            print(
+                f"  {top_error.get('code', 'monitor_error')}: "
+                f"{top_error.get('message', 'monitor failed')}"
+            )
+
+
 def _emit(payload: dict, as_json: bool) -> None:
     payload = redact(payload)
+    if payload.get("action") == "monitor":
+        _emit_monitor(payload, as_json)
+        return
     if as_json:
         print(json.dumps(payload, sort_keys=True))
         return
@@ -528,6 +801,23 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if action == "monitor":
+        payload = _run_monitor(args)
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
+    if getattr(args, "scheduled", False) or getattr(args, "dry_run", False):
+        from sandbox.resources.service import ResourceError, result
+        flag = "--scheduled" if getattr(args, "scheduled", False) else "--dry-run"
+        payload = result(
+            False, action, status="failed",
+            error=ResourceError(
+                f"{flag} is valid only for resources monitor", "invalid_mode",
+            ),
+        )
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
     if getattr(args, "tier", None) and getattr(args, "scope", None):
         from sandbox.resources.service import ResourceError, result
         _emit(result(

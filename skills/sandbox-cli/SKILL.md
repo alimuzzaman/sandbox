@@ -19,6 +19,8 @@ sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 sb resources status --remote scaleway-sandbox --refresh --json
 # always available, even at 97% full: capacity plus the cached index
 sb resources status --remote scaleway-sandbox --fast --json
+sb resources monitor --json
+sb resources monitor --remote scaleway-sandbox --scheduled --dry-run --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
 # tiered reclamation of deploy-src (classes, reasons, manifest, retention)
@@ -70,6 +72,14 @@ partial and cannot be combined with the outer capacity summary. Use
 `sb resources status --deep --cancelled --json` or MCP
 `resource_status(deep=true, cancelled=true)` only as non-mutating
 pre-cancellation test seams.
+
+`sb resources monitor` is a cache-only pressure pass with a 900-second default
+budget. `--scheduled` labels the trigger and adds no authority. `--dry-run`
+prevents automatic cleanup and real reaping from deleting anything, although
+the local last-run record and a dry review plan may be written. Automatic
+reclamation and real reaping are off by default; policy is resolved before any
+host-facing service is constructed. Normal/warning/skipped runs exit zero;
+critical, unknown, refusal, or action failure exits one.
 
 Deep status is diagnostic only. `existing_cache_scope` and
 `existing_stale_scope` may reference only eligibility independently established

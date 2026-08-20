@@ -498,7 +498,9 @@ def _web_do_action(payload: dict) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor
     from sandbox.commands.instances_cmd import cmd_focus, cmd_instance
     from sandbox.commands.debug import cmd_introspect, cmd_xdebug
-    from sandbox.commands.data import cmd_reset, cmd_restore, cmd_snapshot
+    from sandbox.commands.data import (
+        _is_reserved_baseline_name, cmd_reset, cmd_restore, cmd_snapshot,
+    )
     from sandbox.commands.wp import cmd_seed, cmd_wp
     from sandbox.commands.net import cmd_server
     """Dispatch a UI action to the matching cmd_*. Fast actions return output
@@ -573,10 +575,24 @@ def _web_do_action(payload: dict) -> dict:
     if action in OPS:
         if not name:
             return {"ok": False, "output": "missing instance"}
-        if action == "restore" and payload.get("confirm") is not True:
-            # Refuse synchronously so callers cannot receive an accepted job
-            # whose worker later fails the same destructive-action gate.
-            return {"ok": False, "output": "restore requires confirm=true"}
+        if action == "restore":
+            raw_restore = (payload.get("name") or "").strip()
+            if _is_reserved_baseline_name(raw_restore):
+                # The protected @install baseline is a reset target, not a
+                # named snapshot. Refuse before creating a background job.
+                return {"ok": False,
+                        "output": "@install is the protected reset baseline; use reset --rebaseline"}
+            if payload.get("confirm") is not True:
+                # Refuse synchronously so callers cannot receive an accepted job
+                # whose worker later fails the same destructive-action gate.
+                return {"ok": False, "output": "restore requires confirm=true"}
+        if action == "snapshot":
+            raw_snapshot = (payload.get("name") or "").strip()
+            if _is_reserved_baseline_name(raw_snapshot):
+                # The protected @install baseline is not a normal snapshot;
+                # refuse before creating a background job.
+                return {"ok": False,
+                        "output": "@install is the protected reset baseline; use reset --rebaseline"}
         ns_base = {"resolved_instance": name}
 
         def run_op():

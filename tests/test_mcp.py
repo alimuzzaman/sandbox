@@ -7,6 +7,7 @@ importing the thin server.py registers every grouped tool/prompt on the shared
 code review caught once already.
 """
 import os
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -157,6 +158,10 @@ print("MCP_SNAPSHOT", json.dumps([
     data_tools.snapshot("before", db_only=True, force=True, project_dir=_probe_project),
     snapshot_calls,
 ]))
+data_tools._require_project_capability = lambda *_args: rejection
+print("MCP_SNAPSHOT_CAPABILITY_REJECTION", json.dumps(
+    data_tools.snapshot("before", db_only=True, force=True, project_dir=_probe_project)
+))
 """
 
 
@@ -367,10 +372,20 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             snapshot_line.removeprefix("MCP_SNAPSHOT ")
         )
         self.assertTrue(snapshot["ok"])
-        self.assertEqual(snapshot["output"], "saved")
+        self.assertEqual(snapshot["instance"], "fixture")
+        self.assertEqual(snapshot["snapshot"], "before")
+        self.assertEqual(snapshot["mode"], "db-only")
+        self.assertTrue(snapshot["forced"])
+        self.assertNotIn("saved", snapshot)
         self.assertEqual(calls[0], [
             [str(ROOT / "sb"), "--instance", "fixture", "snapshot", "before", "--db-only", "--force"], 300,
         ])
+        capability_line = next(line for line in r.stdout.splitlines()
+                               if line.startswith("MCP_SNAPSHOT_CAPABILITY_REJECTION "))
+        capability_result = __import__("json").loads(
+            capability_line.removeprefix("MCP_SNAPSHOT_CAPABILITY_REJECTION ")
+        )
+        self.assertEqual(capability_result, {"ok": False, "error": "blocked before side effects"})
         capability_import_line = next(line for line in r.stdout.splitlines()
                                       if line.startswith("CAPABILITY_IMPORT "))
         capability_import = __import__("json").loads(
@@ -387,6 +402,75 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
                             if line.startswith("WRAPPER_TIMEOUT "))
         self.assertTrue(__import__("json").loads(
             timeout_line.removeprefix("WRAPPER_TIMEOUT "))["timed_out"])
+
+
+@unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
+class TestMcpDataBoundaries(unittest.TestCase):
+    """Keep reset responses bounded at the MCP tool boundary.
+
+    The child process imports the real MCP tool module, while its CLI call is
+    replaced with a local fake. This exercises the public function without
+    contacting a runtime or exposing command/path diagnostics.
+    """
+
+    def _run_probe(self, stdout: str, stderr: str, returncode: int) -> dict:
+        probe = f"""
+import json, os
+os.environ.setdefault("SANDBOX_ROOT", os.getcwd() + "/../..")
+from tools import data as data_tools
+data_tools._require_project_capability = lambda *_args: None
+data_tools._project_instance = lambda *_args: ("fixture", None)
+class Result:
+    returncode = {returncode!r}
+    stdout = {stdout!r}
+    stderr = {stderr!r}
+calls = []
+def fake_run(command, **kwargs):
+    calls.append([command, kwargs])
+    return Result()
+data_tools.subprocess.run = fake_run
+result = data_tools.wp_reset(confirm=True, project_dir="/tmp/project")
+print("WP_RESET_RESULT", json.dumps({{"result": result, "calls": calls}}, default=str))
+"""
+        completed = subprocess.run(
+            [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT)},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        line = next(line for line in completed.stdout.splitlines()
+                     if line.startswith("WP_RESET_RESULT "))
+        return json.loads(line.removeprefix("WP_RESET_RESULT "))
+
+    def test_confirmed_reset_returns_bounded_metadata(self):
+        payload = self._run_probe(
+            "success diagnostics: /private/fixture/wp db reset --yes",
+            "",
+            0,
+        )
+        self.assertEqual(payload["result"], {
+            "ok": True,
+            "instance": "fixture",
+            "operation": "reset",
+            "rebaseline": False,
+            "confirmed": True,
+        })
+        self.assertNotIn("output", payload["result"])
+        self.assertEqual(payload["calls"][0][0], [
+            str(ROOT / "sb"), "--instance", "fixture", "reset", "--yes",
+        ])
+
+    def test_reset_failure_maps_diagnostics_to_bounded_error(self):
+        sentinel_path = "/private/fixture/wp-db-reset-command"
+        payload = self._run_probe(
+            f"failed command: {sentinel_path} wp db reset --yes",
+            f"traceback includes {sentinel_path}",
+            1,
+        )
+        self.assertEqual(payload["result"], {"ok": False, "error": "reset_failed"})
+        self.assertNotIn("output", payload["result"])
+        self.assertNotIn(sentinel_path, json.dumps(payload["result"]))
+        self.assertNotIn("wp db reset", json.dumps(payload["result"]))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,20 @@ from sandbox.registry import register
 from sandbox.application.context import preflight_instance_capability
 
 
+# Reserved directory for the post-install baseline (spec 008).  ``@install``
+# is the public label; the on-disk name is deliberately not a valid ordinary
+# snapshot name.  Keep both labels guarded before slugification so callers
+# cannot accidentally create a normal ``install`` snapshot from the baseline
+# label.
+_BASELINE_DIR = "__install__"
+_BASELINE_LABELS = frozenset((_BASELINE_DIR, "@install"))
+
+
+def _is_reserved_baseline_name(name: str | None) -> bool:
+    """Return whether *name* is an explicit ``@install`` baseline label."""
+    return (name or "").strip().lower() in _BASELINE_LABELS
+
+
 
 def cmd_snapshot(cfg, args) -> None:
     """Save the current DB + uploads under runtime/snapshots/<instance>/<name>/.
@@ -34,7 +48,10 @@ def cmd_snapshot(cfg, args) -> None:
     error = preflight_instance_capability(cfg, inst, "wordpress.snapshot")
     if error is not None:
         die(error.message)
-    name = _slug_snapshot_name(args.name)
+    raw_name = (getattr(args, "name", "") or "").strip()
+    if _is_reserved_baseline_name(raw_name):
+        die(f"'{raw_name}' is reserved for the install baseline — use `./sb reset --rebaseline`")
+    name = _slug_snapshot_name(raw_name)
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "
             "use `./sb wp db export` / `db import` directly")
@@ -48,16 +65,12 @@ def cmd_snapshot(cfg, args) -> None:
     snap_root = snapshots_dir(inst)
     snap_root.mkdir(parents=True, exist_ok=True)
     target = snap_root / name
-    if target.exists() and not args.force:
+    if target.exists() and not bool(getattr(args, "force", False)):
         die(f"snapshot '{name}' exists — pass --force to overwrite")
     db_only = bool(getattr(args, "db_only", False))
     _capture_snapshot(inst, snap_root, name, db_only=db_only)
     ok(f"Snapshot '{name}' saved ({'db-only' if db_only else 'full'}).")
 
-
-# Reserved dir for the post-install baseline (spec 008). Not a valid user snapshot
-# name (leading underscore), so it can never collide with `./sb snapshot <name>`.
-_BASELINE_DIR = "__install__"
 
 def _open_snapshot_dump(path: Path):
     """Open a new host-owned snapshot dump for direct child stdout streaming."""
@@ -218,6 +231,9 @@ def cmd_restore(cfg, args) -> None:
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "
             "use `./sb wp db export` / `db import` directly")
+    raw_name = (getattr(args, "name", "") or "").strip()
+    if _is_reserved_baseline_name(raw_name):
+        die(f"'{raw_name}' is the protected install baseline — use `./sb reset` instead")
     snap_root = snapshots_dir(inst)
     # Accept the name as stored OR its slug, so `restore "snapshot 2"` resolves
     # the snapshot saved as "snapshot-2" (legacy exact names still match too).

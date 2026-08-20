@@ -36,6 +36,15 @@ of WordPress catalogs. `SANDBOX_MCP_GROUPS` remains an explicit operator overrid
 | `activate_plugin` / `deactivate_plugin` | toggle plugins by slug |
 | `import_content` | import a WXR XML from `runtime/seeds/` |
 
+`snapshot` is capability-gated before it resolves or invokes an instance. Its
+`db_only` and `force` flags are forwarded to the CLI, and successful responses
+contain only the safe instance/snapshot identifier, mode, force flag, and
+bounded outcome. CLI progress (host paths, command lines, or archive/database
+bytes) is not returned through MCP. `wp_reset` requires `confirm: true` for a
+destructive reset; `rebaseline: true` only captures the current DB baseline.
+The dashboard bridge's named restore route also requires `confirm: true` before
+it accepts a job.
+
 ## Install
 
 ```bash

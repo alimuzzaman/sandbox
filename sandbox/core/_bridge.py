@@ -132,8 +132,10 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     if _is_herd_instance(instance):
         return 409, {"ok": False, "error": "unsupported", "reason": "herd"}
     _ok_name = _valid_snapshot_name  # applied to EVERY name the bridge turns into
-    from sandbox.commands.data import (_BASELINE_DIR, cmd_reset, cmd_snapshot,
-                                       cmd_restore)  # late: avoid cycle
+    from sandbox.commands.data import (
+        _BASELINE_DIR, _is_reserved_baseline_name, cmd_reset, cmd_snapshot,
+        cmd_restore,
+    )  # late: avoid cycle
     cfg = load_config()
 
     if method == "GET" and subpath == "/snapshots":
@@ -167,6 +169,12 @@ def _bridge_handle(method: str, instance: str, subpath: str,
 
     if method == "POST" and subpath == "/snapshot":
         raw = (body.get("name") or "").strip()
+        if _is_reserved_baseline_name(raw):
+            return 400, {
+                "ok": False,
+                "error": "reserved_snapshot",
+                "reason": "@install is the protected reset baseline",
+            }
         # Slugify free-form input instead of rejecting it: "snapshot 2" → the
         # snapshot "snapshot-2". Empty input → a timestamped default.
         name = _slug_snapshot_name(raw) if raw else time.strftime("snap-%Y%m%d-%H%M%S")
@@ -182,6 +190,12 @@ def _bridge_handle(method: str, instance: str, subpath: str,
 
     if method == "POST" and subpath == "/restore":
         name = (body.get("name") or "").strip()
+        if _is_reserved_baseline_name(name):
+            return 400, {
+                "ok": False,
+                "error": "reserved_snapshot",
+                "reason": "@install is a reset target, not a named snapshot",
+            }
         if not _ok_name(name):
             return 400, {"ok": False, "error": "invalid snapshot name"}
         if not (snapshots_dir(instance) / name).exists():
@@ -223,6 +237,12 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     if method == "DELETE" and subpath.startswith("/snapshot/"):
         from urllib.parse import unquote
         name = unquote(subpath[len("/snapshot/"):])
+        if _is_reserved_baseline_name(name):
+            return 400, {
+                "ok": False,
+                "error": "reserved_snapshot",
+                "reason": "@install is a protected reset baseline",
+            }
         if not _ok_name(name):
             return 400, {"ok": False, "error": "invalid snapshot name"}
         d = snapshots_dir(instance) / name

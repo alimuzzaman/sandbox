@@ -16,8 +16,9 @@ All checks are live (constitution IV). (herd: snapshots/reset unsupported in v1.
 ## 2. DB-only restore leaves uploads alone
 
 - Dirty the DB (e.g. `wp option update blogname "dirty"`), add an upload.
-- `./sb restore before-migration` → DB rolled back; the upload still present (no error
-  about a missing `uploads.tgz`).
+- `./sb restore before-migration --yes` (or answer the interactive default-deny
+  prompt with `yes`) → DB rolled back; the upload still present (no error about
+  a missing `uploads.tgz`).
 
 ## 3. Reset to fresh install
 
@@ -34,11 +35,23 @@ All checks are live (constitution IV). (herd: snapshots/reset unsupported in v1.
 
 - `./sb reset` without `--yes` prompts before dropping the DB; `wp_reset` without
   `confirm=true` refuses.
-- Ordinary `./sb snapshot @install` / snapshot-delete cannot overwrite/delete the
-  reserved baseline.
+- Named restore also requires `--yes` (or an explicit interactive `yes`), and
+  bridge restore/reset calls require `confirm=true` before a job is accepted.
+- Ordinary `./sb snapshot @install` / `./sb restore @install` and bridge
+  snapshot-delete cannot overwrite, restore, or delete the reserved baseline.
+- MCP mutation results are safe JSON metadata only; they do not include command
+  lines, host paths, credentials, or snapshot contents.
 
 ## 5. Dashboard
 
 - In wp-admin (spec-002 snapshot screen): capture with **"DB only"** checked → produces
   a db-only snapshot; click **"Reset to fresh install"** → restores the baseline. Both
+  carry explicit confirmation through the nonce/capability-checked bridge and
   complete via the existing out-of-band bridge + polling.
+
+## Source-ready versus live gates
+
+The focused source/tests cover DB-only overwrite, protected baseline listing and
+guards, MCP registration/forwarding, and confirmation boundaries. Live proof of
+new-instance seed ordering and the wp-admin bridge restart/polling round trip
+remains open (T016/T019; T013 tracks the same dashboard restart dependency).

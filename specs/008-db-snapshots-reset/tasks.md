@@ -102,11 +102,11 @@ full/db snapshot"):
   install plus final plugin/theme wiring and proves the ready-instance fast path does
   not recapture. Seed-completion ordering and the required live new-instance proof
   remain open.
-- [ ] T017 Remove a pre-existing `uploads.tgz` when `snapshot --db-only --force` overwrites a full snapshot, so its recorded mode and restore behavior remain DB-only per FR-001/FR-002 (partial).
-- [ ] T018 Make `./sb snapshots` and the dashboard bridge represent the protected `@install` baseline explicitly and separately from normal snapshots, without exposing it as an ordinary restore/delete target, per FR-003/FR-006 (partial).
+- [x] T017 Remove a pre-existing `uploads.tgz` when `snapshot --db-only --force` overwrites a full snapshot, so its recorded mode and restore behavior remain DB-only per FR-001/FR-002. **DONE 2026-08-20 (source/tests): staged `_capture_snapshot` replacement removes stale archives; focused CLI-path and helper tests assert no `uploads.tgz`, `mode=db-only`, and no uploads archive restore.**
+- [x] T018 Make `./sb snapshots` and the dashboard bridge represent the protected `@install` baseline explicitly and separately from normal snapshots, without exposing it as an ordinary restore/delete target, per FR-003/FR-006. **DONE 2026-08-20 (source/tests): CLI and bridge list the baseline as a protected reset target; CLI, bridge, and dashboard capture/restore/delete paths reject reserved baseline labels before dispatch.**
 - [ ] T019 Dispatch the dashboard’s reset operation through `cmd_reset` with its explicit confirmed arguments and add focused coverage, per FR-008. **PARTIAL (2026-08-14): the wp-admin AJAX proxy now recognizes reset and forwards the UI's explicit boolean confirmation; the bridge refuses missing/false confirmation before job acceptance and passes `yes=true`, `confirm=true`, and `rebaseline=false` to `cmd_reset`. Focused template/bridge tests pass. Live wp-admin reset and polling remain unverified.**
-- [ ] T020 Add the MCP `snapshot` tool with `db_only` support, register it in the data manifest, and cover its capability and CLI forwarding behavior per FR-009 (missing).
-- [ ] T021 Update the Spec 008 contract, quickstart, snapshot skill, and focused tests to describe and verify the corrected baseline, DB-only overwrite, dashboard, and MCP semantics per Constitution V (partial).
+- [x] T020 Add the MCP `snapshot` tool with `db_only` support, register it in the data manifest, and cover its capability and CLI forwarding behavior per FR-009. **DONE 2026-08-20 (source/tests): `tools.data.snapshot` is manifest-owned, capability-gated before instance resolution, forwards `db_only`/`force`, and returns bounded metadata.**
+- [x] T021 Update the Spec 008 contract, quickstart, snapshot skill, and focused tests to describe and verify the corrected baseline, DB-only overwrite, dashboard, and MCP semantics per Constitution V. **DONE 2026-08-20 (source/tests/docs): docs and fixtures now match the current confirmation and safe-output boundaries; live dashboard and seed-order evidence remain explicitly open.**
 
 ## Phase 9: Convergence — 2026-08-13 (27-feedback restore safety)
 
@@ -118,6 +118,9 @@ These tasks remain open; no prior task is marked complete by this amendment.
 - [x] T023 [US4] Add interactive-cancel and explicit-confirmation tests covering
   CLI, MCP, and bridge/dashboard callers; cancellation must preserve state and
   confirmation must dispatch exactly the requested snapshot.
-- [ ] T024 [US4] Reconcile `contracts/cli-contract.md`, quickstart, and the
+- [x] T024 [US4] Reconcile `contracts/cli-contract.md`, quickstart, and the
   command/MCP interface fixtures with the one confirmation contract, including
-  safe JSON/error output and no secret or snapshot-content disclosure.
+  safe JSON/error output and no secret or snapshot-content disclosure. **DONE
+  2026-08-20 (source/tests/docs): named restore requires `--yes`/`confirm=true`
+  before provider dispatch; adapter responses are bounded metadata/errors and
+  omit command lines, paths, credentials, and snapshot contents.**

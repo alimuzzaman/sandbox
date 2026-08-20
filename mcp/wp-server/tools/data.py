@@ -14,6 +14,31 @@ from app import (SANDBOX_ROOT, _is_herd, _project_instance,
                  _require_project_capability, _run_sandbox_json, _wpcli, mcp)
 
 
+def _snapshot_identifier(name: str) -> str:
+    """Return the CLI's safe snapshot slug without exposing caller text."""
+    return _re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+
+
+def _safe_cli_error(result: dict, fallback: str) -> str:
+    """Map CLI diagnostics to a bounded, path/content-free error code."""
+    text = ((result.get("stderr") or "") + "\n" +
+            (result.get("stdout") or "")).lower()
+    markers = (
+        ("requires --yes", "confirmation_required"),
+        ("requires confirm=true", "confirmation_required"),
+        ("reserved for the install baseline", "reserved_snapshot"),
+        ("protected install baseline", "reserved_snapshot"),
+        ("exists", "snapshot_exists"),
+        ("no snapshot", "snapshot_not_found"),
+        ("no @install baseline", "baseline_missing"),
+        ("unsupported", "unsupported"),
+    )
+    for marker, code in markers:
+        if marker in text:
+            return code
+    return fallback
+
+
 
 @mcp.tool()
 def db_query(sql: str, mutate: bool = False, *, project_dir: str, label: str | None = None) -> dict:
@@ -77,7 +102,8 @@ def snapshot(name: str, db_only: bool = False, force: bool = False, *,
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
-    if not (name or "").strip():
+    safe_name = _snapshot_identifier(name)
+    if not safe_name:
         return {"ok": False, "error": "snapshot name is required"}
     command = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "snapshot", name]
     if db_only:
@@ -87,13 +113,13 @@ def snapshot(name: str, db_only: bool = False, force: bool = False, *,
     result = _run_sandbox_json(command, 300)
     if result["timed_out"]:
         return {"ok": False, "error": "snapshot timed out after 300s"}
-    payload = result["payload"]
-    if isinstance(payload, dict):
-        return payload
-    output = ((result["stdout"] or "") + (result["stderr"] or "")).strip()
     if result["returncode"] == 0:
-        return {"ok": True, "output": output}
-    return {"ok": False, "error": output or "snapshot failed"}
+        # Keep the MCP boundary to safe identifiers and bounded outcome data;
+        # CLI progress may contain host paths or command lines and is not API
+        # payload.  ``safe_name`` mirrors the CLI slugification for callers.
+        return {"ok": True, "instance": inst, "snapshot": safe_name,
+                "mode": "db-only" if db_only else "full", "forced": bool(force)}
+    return {"ok": False, "error": _safe_cli_error(result, "snapshot_failed")}
 
 
 @mcp.tool()
@@ -114,9 +140,19 @@ def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: st
     if rebaseline:
         res = subprocess.run([str(SANDBOX_ROOT / "sb"), "--instance", inst, "reset", "--rebaseline"],
                              capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
-        return {"ok": res.returncode == 0, "output": ((res.stdout or "") + (res.stderr or "")).strip()}
+        if res.returncode == 0:
+            return {"ok": True, "instance": inst, "operation": "reset",
+                    "rebaseline": True, "confirmed": False}
+        return {"ok": False,
+                "error": _safe_cli_error({"stdout": res.stdout, "stderr": res.stderr},
+                                          "reset_failed")}
     if not confirm:
         return {"ok": False, "error": "wp_reset drops the DB — pass confirm=true"}
     res = subprocess.run([str(SANDBOX_ROOT / "sb"), "--instance", inst, "reset", "--yes"],
                          capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
-    return {"ok": res.returncode == 0, "output": ((res.stdout or "") + (res.stderr or "")).strip()}
+    if res.returncode == 0:
+        return {"ok": True, "instance": inst, "operation": "reset",
+                "rebaseline": False, "confirmed": True}
+    return {"ok": False,
+            "error": _safe_cli_error({"stdout": res.stdout, "stderr": res.stderr},
+                                      "reset_failed")}

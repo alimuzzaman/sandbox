@@ -90,6 +90,15 @@ class TestBridgeHandle(unittest.TestCase):
         self.assertEqual(code, 202)
         self.assertEqual(data["job_id"], "job-1")
 
+    def test_take_reserved_baseline_labels_refuse_before_job_acceptance(self):
+        with mock.patch.object(bridge, "_start_job") as start:
+            for name in ("@install", "__install__"):
+                with self.subTest(name=name):
+                    code, data = self.call("POST", "/snapshot", {"name": name})
+                    self.assertEqual(code, 400)
+                    self.assertEqual(data["error"], "reserved_snapshot")
+        start.assert_not_called()
+
     def test_take_invalid_name_400(self):
         # Non-empty input that slugifies to nothing is rejected. (Blank/whitespace
         # is treated as "no name" → a timestamped default, covered separately.)
@@ -174,6 +183,18 @@ class TestBridgeHandle(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertEqual(payload["error"], "confirmation_required")
 
+    def test_restore_reserved_baseline_labels_refuse_before_job_acceptance(self):
+        self._mksnap("keep")
+        with mock.patch.object(bridge, "_start_job") as start:
+            for name in ("@install", "__install__"):
+                with self.subTest(name=name):
+                    code, payload = self.call("POST", "/restore", {
+                        "name": name, "confirm": True,
+                    })
+                    self.assertEqual(code, 400)
+                    self.assertEqual(payload["error"], "reserved_snapshot")
+        start.assert_not_called()
+
     def test_restore_confirmed_202_propagates_confirmation_to_command(self):
         self._mksnap("keep")
         captured = []
@@ -202,6 +223,17 @@ class TestBridgeHandle(unittest.TestCase):
 
     def test_delete_missing_404(self):
         self.assertEqual(self.call("DELETE", "/snapshot/ghost")[0], 404)
+
+    def test_delete_reserved_baseline_labels_refuse_without_removing_baseline(self):
+        baseline = self._mksnap("__install__")
+        with mock.patch.object(bridge, "_start_job") as start:
+            for name in ("@install", "__install__"):
+                with self.subTest(name=name):
+                    code, payload = self.call("DELETE", "/snapshot/" + name)
+                    self.assertEqual(code, 400)
+                    self.assertEqual(payload["error"], "reserved_snapshot")
+        start.assert_not_called()
+        self.assertTrue(baseline.exists())
 
     def test_delete_ok_removes_dir(self):
         d = self._mksnap("gone")

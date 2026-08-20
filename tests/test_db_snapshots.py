@@ -94,6 +94,36 @@ class TestSnapshotCapture(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE((target / "db.sql").stat().st_mode), 0o600)
 
+    def test_cmd_snapshot_db_only_force_replaces_full_snapshot(self):
+        """The public CLI path must pass both overwrite flags to the shared capture."""
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "fixture"
+            target.mkdir()
+            (target / "db.sql").write_text("old db")
+            (target / "uploads.tgz").write_text("stale uploads")
+
+            def export_db(*_args, **kwargs):
+                kwargs["stdout"].write(b"new db")
+
+            args = SimpleNamespace(
+                resolved_instance="inst", name="fixture", force=True, db_only=True,
+            )
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "compose", side_effect=export_db), \
+                    mock.patch.object(data, "_active_project_name", return_value="project"), \
+                    mock.patch.object(data, "run") as archive:
+                data.cmd_snapshot({}, args)
+
+            self.assertEqual((target / "db.sql").read_text(), "new db")
+            self.assertFalse((target / "uploads.tgz").exists())
+            self.assertIn("mode=db-only", (target / "META").read_text())
+            archive.assert_not_called()
+
     def test_large_export_streams_to_sink_without_capture_buffer(self):
         from sandbox.commands import data
 
@@ -424,6 +454,31 @@ class TestRestoreConfirmation(unittest.TestCase):
             self.assertTrue(compose.called)
 
 
+class TestBaselineProtection(unittest.TestCase):
+    def test_cli_snapshot_and_restore_reject_reserved_baseline_labels(self):
+        from sandbox.commands import data
+
+        for operation, name in ((data.cmd_snapshot, "@install"),
+                                (data.cmd_snapshot, "__install__"),
+                                (data.cmd_restore, "@install"),
+                                (data.cmd_restore, "__install__")):
+            with self.subTest(operation=operation.__name__, name=name), \
+                    mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "_capture_snapshot") as capture, \
+                    mock.patch.object(data, "_restore_snapshot") as restore, \
+                    mock.patch.object(data, "die", side_effect=RuntimeError) as die:
+                args = SimpleNamespace(resolved_instance="inst", name=name,
+                                       force=True, db_only=True, yes=True,
+                                       confirm=True)
+                with self.assertRaises(RuntimeError):
+                    operation({}, args)
+                capture.assert_not_called()
+                restore.assert_not_called()
+                self.assertIn("baseline", str(die.call_args).lower() +
+                              str(die.call_args_list).lower())
+
+
 class TestDashboardResetDispatch(unittest.TestCase):
     def test_wp_admin_template_routes_reset_with_explicit_confirmation(self):
         from sandbox.core import _paths
@@ -433,6 +488,14 @@ class TestDashboardResetDispatch(unittest.TestCase):
         self.assertIn("'1' === sanitize_text_field", template)
         self.assertIn("'POST', '/reset', array( 'confirm' => $confirm )", template)
         self.assertIn("call('reset',{confirm:1})", template)
+
+    def test_wp_admin_template_routes_restore_with_explicit_confirmation(self):
+        from sandbox.core import _paths
+
+        template = _paths._SNAPSHOT_MU_TEMPLATE
+        self.assertIn("} elseif ( 'restore' === $op ) {", template)
+        self.assertIn("'POST', '/restore', array( 'name' => $name, 'confirm' => $confirm )", template)
+        self.assertIn("call('restore',{name:r,confirm:1})", template)
 
     def test_reset_dispatches_confirmed_reset_command(self):
         import sandbox.core._dash as dashboard
@@ -473,3 +536,38 @@ class TestDashboardResetDispatch(unittest.TestCase):
 
         self.assertEqual(outcome, [False])
         reset.assert_not_called()
+
+    def test_dashboard_snapshot_rejects_reserved_baseline_labels(self):
+        import sandbox.core._dash as dashboard
+
+        with mock.patch.object(dashboard, "_start_job") as start, \
+                mock.patch("sandbox.commands.data.cmd_snapshot") as snapshot:
+            for name in ("@install", " __install__ ", " @INSTALL "):
+                with self.subTest(name=name):
+                    result = dashboard._web_do_action({
+                        "action": "snapshot", "instance": "demo", "name": name,
+                    })
+                    self.assertEqual(result["ok"], False)
+                    self.assertNotIn("job_id", result)
+                    self.assertIn("protected", result["output"])
+
+        start.assert_not_called()
+        snapshot.assert_not_called()
+
+    def test_dashboard_restore_rejects_reserved_baseline_before_job(self):
+        import sandbox.core._dash as dashboard
+
+        with mock.patch.object(dashboard, "_start_job") as start, \
+                mock.patch("sandbox.commands.data.cmd_restore") as restore:
+            for name in ("@install", " __install__ ", " @INSTALL "):
+                with self.subTest(name=name):
+                    result = dashboard._web_do_action({
+                        "action": "restore", "instance": "demo",
+                        "name": name, "confirm": True,
+                    })
+                    self.assertEqual(result["ok"], False)
+                    self.assertNotIn("job_id", result)
+                    self.assertIn("protected", result["output"])
+
+        start.assert_not_called()
+        restore.assert_not_called()

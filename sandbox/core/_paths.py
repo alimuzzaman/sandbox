@@ -319,7 +319,9 @@ add_action( 'wp_ajax_sandbox_snap', function () {
 	} elseif ( 'take' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'POST', '/snapshot', array( 'name' => $name, 'force' => ! empty( $_POST['force'] ), 'db_only' => ! empty( $_POST['db_only'] ) ) ) );
 	} elseif ( 'restore' === $op ) {
-		wp_send_json( sandbox_snapshots_bridge( 'POST', '/restore', array( 'name' => $name ) ) );
+		$confirm = isset( $_POST['confirm'] )
+			&& '1' === sanitize_text_field( wp_unslash( $_POST['confirm'] ) );
+		wp_send_json( sandbox_snapshots_bridge( 'POST', '/restore', array( 'name' => $name, 'confirm' => $confirm ) ) );
 	} elseif ( 'reset' === $op ) {
 		$confirm = isset( $_POST['confirm'] )
 			&& '1' === sanitize_text_field( wp_unslash( $_POST['confirm'] ) );
@@ -378,7 +380,7 @@ function sandbox_snapshots_render() {
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
     if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');
-      call('restore',{name:r}).then(function(x){ if(x.job_id){return poll(x.job_id);} say(x.error||'error',true); }); }
+      call('restore',{name:r,confirm:1}).then(function(x){ if(x.job_id){return poll(x.job_id);} say(x.error||'error',true); }); }
     if(d&&confirm('Delete snapshot '+d+'?')){ call('delete',{name:d}).then(function(){refresh();}); } });
   refresh();
 })();

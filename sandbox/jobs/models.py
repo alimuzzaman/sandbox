@@ -16,6 +16,8 @@ from typing import Any, Mapping, Sequence
 MAX_DEADLINE_SECONDS = 604_800
 MAX_OUTPUT_PAGE_BYTES = 262_144
 MAX_ARTIFACT_PAGE_BYTES = 1_048_576
+MIN_OUTPUT_WAIT_SECONDS = 0
+MAX_OUTPUT_WAIT_SECONDS = 20
 _JOB_ID = re.compile(r"^(?:[a-f0-9]{16}|[a-f0-9]{32})$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -40,6 +42,23 @@ def _positive_seconds(value: object, label: str, *, maximum: int = MAX_DEADLINE_
             not math.isfinite(value) or value <= 0 or value > maximum or int(value) != value):
         raise ValueError(f"{label} must be a finite positive whole number no greater than {maximum}")
     return int(value)
+
+
+def normalize_output_wait_seconds(value: object) -> int:
+    """Validate the bounded retained-output long-poll interval.
+
+    This is intentionally stricter than the generic positive-duration helper:
+    output waits are whole seconds, may be disabled with zero, and must remain
+    short enough that a single observation cannot pin a control-plane request.
+    Keeping the check here gives local services, MCP, and remote transports one
+    exact contract before any target lookup or I/O occurs.
+    """
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not MIN_OUTPUT_WAIT_SECONDS <= value <= MAX_OUTPUT_WAIT_SECONDS):
+        raise ValueError(
+            f"output wait must be between 0 and {MAX_OUTPUT_WAIT_SECONDS} seconds"
+        )
+    return value
 
 
 class Lifecycle(str, Enum):
@@ -371,9 +390,7 @@ class OutputQuery:
         _positive_seconds(self.max_events, "output page events", maximum=500)
         if self.encoding not in {"utf8", "base64"}:
             raise ValueError("output encoding is invalid")
-        if isinstance(self.wait_seconds, bool) or not isinstance(self.wait_seconds, int) \
-                or not 0 <= self.wait_seconds <= 20:
-            raise ValueError("output wait must be between 0 and 20 seconds")
+        object.__setattr__(self, "wait_seconds", normalize_output_wait_seconds(self.wait_seconds))
         positions = [self.cursor, self.offset, self.tail_bytes, self.lines, self.since]
         if sum(value is not None for value in positions) > 1:
             raise ValueError("output query accepts only one position selector")

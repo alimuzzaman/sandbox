@@ -387,8 +387,10 @@ persists process output and callers resume it by cursor rather than streaming
 child pipes over SSH.
 
 `job-output` transfers only bounded pages from those retained logs. Select a
-stream, tail, cursor, or bounded long-poll interval to suit the agent's output
-verbosity; the complete sealed log remains available for later retrieval.
+stream, tail, cursor, or bounded long-poll interval (0-20 whole seconds; zero
+disables a one-shot wait) to suit the agent's output verbosity; `--follow`
+converts a validated zero into its one-second polling wait. The complete sealed
+log remains available for later retrieval.
 
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test

@@ -214,6 +214,20 @@ class JobMcpTests(unittest.TestCase):
             "encoding": "utf8", "profile": "full",
         }))
 
+    def test_mcp_output_rejects_invalid_wait_before_locality_or_transport(self):
+        from tools import jobs
+
+        for value in (True, "1", -1, 21):
+            with self.subTest(value=value), patch.object(jobs, "_remote_transport") as transport, \
+                    patch.object(jobs, "_job_service") as service:
+                result = jobs.job_output("a" * 32, remote="missing", wait_seconds=value)
+            self.assertEqual(result, {
+                "ok": False, "code": "invalid_output_query",
+                "error": "output wait must be between 0 and 20 seconds",
+            })
+            transport.assert_not_called()
+            service.read_output.assert_not_called()
+
     def test_mcp_start_uses_the_same_workspace_execution_policy_as_cli(self):
         from tools import jobs
 

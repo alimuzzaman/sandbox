@@ -6,7 +6,7 @@ import base64
 import json
 from pathlib import Path
 
-from sandbox.jobs.models import OutputQuery
+from sandbox.jobs.models import OutputQuery, normalize_output_wait_seconds
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.output import JobOutputStore, OutputCursorError, _cursor, _parse_cursor
 from sandbox.jobs.registry import JobRepository
@@ -73,6 +73,16 @@ class OutputCursorModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             OutputQuery(cursor="abc", offset=0)
         self.assertEqual(OutputQuery(wait_seconds=20).wait_seconds, 20)
+
+    def test_output_wait_normalizer_accepts_zero_and_rejects_non_whole_bounds(self):
+        self.assertEqual(normalize_output_wait_seconds(0), 0)
+        self.assertEqual(normalize_output_wait_seconds(20), 20)
+        for value in (True, False, None, "1", 1.0, -1, 21):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "output wait must be between 0 and 20 seconds"):
+                    normalize_output_wait_seconds(value)
+                with self.assertRaisesRegex(ValueError, "output wait must be between 0 and 20 seconds"):
+                    OutputQuery(wait_seconds=value)
 
     def test_line_tail_and_cursor_long_poll_read_retained_output(self):
         with tempfile.TemporaryDirectory() as temp:

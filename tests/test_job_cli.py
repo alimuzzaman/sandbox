@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
                                           cmd_job_start, cmd_job_status, _emit_json_line,
-                                          configure_list_parser, configure_start_parser)
+                                          configure_list_parser, configure_output_parser,
+                                          configure_start_parser)
 from sandbox.jobs.registry import JobNotFound
 
 
@@ -34,6 +35,80 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_output_parser_retains_invalid_wait_for_stable_json_error(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_output_parser(parser)
+        valid = parser.parse_args(["a" * 32, "--wait-seconds", "20"])
+        self.assertEqual(valid.wait_seconds, 20)
+        invalid = parser.parse_args(["a" * 32, "--wait-seconds", "not-a-number"])
+        self.assertEqual(invalid.wait_seconds, "not-a-number")
+        self.assertIn("0-20 whole seconds", " ".join(parser.format_help().split()))
+
+    def test_cli_output_rejects_invalid_wait_before_remote_lookup_with_json_failure(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        parser = __import__("argparse").ArgumentParser()
+        configure_output_parser(parser)
+        args = parser.parse_args(["a" * 32, "--remote", "vps", "--wait-seconds", "21", "--json"])
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies, \
+                patch("sandbox.core._remote.get_remote") as remote_lookup, \
+                redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                cmd_job_output(None, args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": False, "code": "invalid_output_query",
+            "error": "output wait must be between 0 and 20 seconds",
+        })
+        dependencies.assert_not_called()
+        remote_lookup.assert_not_called()
+
+    def test_cli_output_rejects_invalid_local_wait_before_service_with_same_json_failure(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        args = SimpleNamespace(remote=None, job_id="a" * 32, stream="combined", cursor=None,
+                               offset=None, tail_bytes=None, lines=None, since=None,
+                               max_bytes=1024, wait_seconds=-1, follow=False,
+                               encoding="utf8", json=True, profile="full")
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies, \
+                redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                cmd_job_output(None, args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": False, "code": "invalid_output_query",
+            "error": "output wait must be between 0 and 20 seconds",
+        })
+        dependencies.assert_not_called()
+
+    def test_cli_follow_rejects_negative_wait_before_promoting_to_one(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        args = SimpleNamespace(remote=None, job_id="a" * 32, stream="combined", cursor=None,
+                               offset=None, tail_bytes=None, lines=None, since=None,
+                               max_bytes=1024, wait_seconds=-1, follow=True,
+                               encoding="utf8", json=True, profile="full")
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies, \
+                redirect_stdout(StringIO()):
+            with self.assertRaises(SystemExit):
+                cmd_job_output(None, args)
+        dependencies.assert_not_called()
+
+    def test_cli_follow_promotes_valid_zero_wait_after_validation(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        calls = []
+        service = SimpleNamespace(
+            read_output=lambda _job_id, query: calls.append(query) or {"ok": True, "data": "", "cursor": "c"},
+            get=lambda _job_id: {"lifecycle": "succeeded"},
+        )
+        args = SimpleNamespace(remote=None, job_id="a" * 32, stream="combined", cursor=None,
+                               offset=None, tail_bytes=None, lines=None, since=None,
+                               max_bytes=1024, wait_seconds=0, follow=True,
+                               encoding="utf8", json=True, profile="full")
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies",
+                   return_value={"job_service": service}), redirect_stdout(StringIO()):
+            cmd_job_output(None, args)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].wait_seconds, 1)
     def test_job_acceptance_json_is_flushed_as_one_complete_line(self):
         class Output(io.StringIO):
             def __init__(self):

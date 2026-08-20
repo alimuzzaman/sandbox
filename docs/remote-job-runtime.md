@@ -26,7 +26,10 @@ traceback, and never resubmits the job.
 
 `job-output` accepts exactly one retained-output position selector: an opaque
 cursor, a byte offset across the rendered stream, a trailing byte count, a line
-count, or an RFC 3339/Unix-seconds `since` timestamp. `job-output --follow` is a client polling loop over retained files. `full`,
+count, or an RFC 3339/Unix-seconds `since` timestamp. Its bounded long-poll
+interval is 0-20 whole seconds; zero disables a one-shot wait. `job-output
+--follow` is a client polling loop over retained files and converts a validated
+zero into its one-second polling wait. `full`,
 `smart`, `errors`, `sampled`, `quiet`, and declarative custom profiles affect
 presentation only; complete output remains retained until cleanup/retention
 policy removes it. Output pages preserve the existing `bytes_read` page-accounting

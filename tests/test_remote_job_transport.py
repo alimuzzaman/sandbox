@@ -587,6 +587,19 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("--wait-seconds 2", command)
         self.assertIn("--encoding base64", command)
 
+    def test_output_wait_rejects_invalid_value_before_remote_lookup(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_args: self.fail("deploy must not run"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
+            remote_lookup=lambda _name: calls.append("lookup") or {"provisioned": True},
+        )
+        for value in (True, "1", 1.5, -1, 21):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "output wait must be between 0 and 20 seconds"):
+                    transport.read_output("r", "a" * 32, wait_seconds=value)
+        self.assertEqual(calls, [])
+
     def test_matrix_rejection_reports_structured_remote_reason(self):
         transport = RemoteJobTransport(
             deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,

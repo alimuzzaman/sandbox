@@ -12,7 +12,8 @@ import time
 from pathlib import Path
 
 from dependencies import ToolDependencies
-from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, TargetRequest
+from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputQuery, TargetRequest,
+                                 normalize_output_wait_seconds)
 from sandbox.application.target_service import TargetResolutionError
 from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 from sandbox.transports.remote_jobs import RemoteJobAdmissionError
@@ -272,6 +273,7 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
                remote: str | None = None) -> dict:
     """Read a bounded retained output page. Returned cursors are exclusive."""
     try:
+        wait_seconds = normalize_output_wait_seconds(wait_seconds)
         if remote:
             return _remote_transport().read_output(remote, job_id, stream=stream, cursor=cursor,
                 offset=offset, tail_bytes=tail_bytes, lines=lines, since=since,

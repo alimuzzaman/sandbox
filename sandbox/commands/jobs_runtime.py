@@ -15,7 +15,8 @@ from pathlib import Path
 
 from sandbox.application.context import durable_job_dependencies
 from sandbox.application.target_service import TargetResolutionError
-from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity,
+                                 TargetRequest, normalize_output_wait_seconds)
 from sandbox.jobs.registry import JobNotFound
 from sandbox.registry import CommandSpec, register_specs
 
@@ -210,10 +211,25 @@ def configure_output_parser(parser) -> None:
     parser.add_argument("--encoding", choices=("utf8", "base64"), default="utf8")
     parser.add_argument("--profile", default="full", help="declarative retained-output presentation profile")
     parser.add_argument("--follow", action="store_true")
-    parser.add_argument("--wait-seconds", type=int, default=0,
-                        help="bounded retained-log long poll (0 disables waiting)")
+    parser.add_argument("--wait-seconds", type=_parse_output_wait_argument, default=0,
+                        help="bounded retained-log long poll, 0-20 whole seconds (default 0; 0 disables waiting)")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
+
+
+def _parse_output_wait_argument(value: str) -> object:
+    """Keep malformed CLI input available for the command's JSON error path.
+
+    ``argparse(type=int)`` exits before ``cmd_job_output`` can emit the stable
+    ``invalid_output_query`` envelope. Valid decimal whole seconds are decoded
+    here; everything else is passed through to the shared normalizer.
+    """
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    return value
 
 
 def configure_list_parser(parser) -> None:
@@ -407,6 +423,14 @@ def cmd_job_status(_cfg, args) -> None:
 
 
 def cmd_job_output(_cfg, args) -> None:
+    try:
+        wait_seconds = normalize_output_wait_seconds(getattr(args, "wait_seconds", 0))
+    except ValueError as exc:
+        if getattr(args, "json", False):
+            _emit_json_line({"ok": False, "code": "invalid_output_query", "error": str(exc)})
+            raise SystemExit(1)
+        _die(str(exc))
+    effective_wait_seconds = max(wait_seconds, 1) if getattr(args, "follow", False) else wait_seconds
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -418,7 +442,7 @@ def cmd_job_output(_cfg, args) -> None:
                 offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
                 lines=getattr(args, "lines", None), since=getattr(args, "since", None),
                 max_bytes=args.max_bytes,
-                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
+                wait_seconds=effective_wait_seconds,
                 encoding=args.encoding, profile=getattr(args, "profile", "full"))
             if args.json: print(json.dumps(result, sort_keys=True))
             elif result.get("data"): print(result["data"], end="")
@@ -434,7 +458,7 @@ def cmd_job_output(_cfg, args) -> None:
                 offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
                 lines=getattr(args, "lines", None), since=getattr(args, "since", None),
                 max_bytes=args.max_bytes,
-                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
+                wait_seconds=effective_wait_seconds,
                 encoding=args.encoding, profile=getattr(args, "profile", "full")))
         except RuntimeError as exc:
             if args.json:

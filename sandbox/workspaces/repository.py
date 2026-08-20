@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -28,6 +29,7 @@ from .migration import (
     plan_digest,
     scan_legacy,
 )
+from .maintenance import BaseMaintenanceBusy, base_maintenance_lock as _base_maintenance_lock
 from .models import (
     LegacyWorkspace,
     MigrationItem,
@@ -59,6 +61,21 @@ _LIFECYCLE_TRANSITIONS = {
     "destroyed": frozenset(),
     "indeterminate": frozenset({"ready", "destroying", "destroyed"}),
 }
+
+
+class _MaintenanceConnection(sqlite3.Connection):
+    """Release the repository's shared home lock when SQLite closes."""
+
+    _maintenance_exit: Callable[[], None] | None = None
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            release = self._maintenance_exit
+            self._maintenance_exit = None
+            if release is not None:
+                release()
 
 
 class WorkspaceIndexError(RuntimeError):
@@ -297,6 +314,21 @@ class WorkspaceRepository:
         self.initialize()
 
     # ---- SQLite lifecycle -------------------------------------------------
+    def _maintenance_base(self) -> Path:
+        # index: <base>/runtime/workspaces/index.sqlite3
+        return self.index_path.parent.parent.parent
+
+    @contextmanager
+    def _shared_maintenance_lock(self):
+        try:
+            with _base_maintenance_lock(self._maintenance_base(), exclusive=False):
+                yield
+        except BaseMaintenanceBusy as exc:
+            raise WorkspaceIndexError(
+                "workspace_busy",
+                "workspace repository is unavailable while home maintenance is active",
+            ) from exc
+
     def _prepare_parent(self) -> None:
         self.index_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -307,10 +339,17 @@ class WorkspaceRepository:
             raise WorkspaceIndexError("index_symlink", "workspace index must not be a symlink")
 
     def _connect(self) -> sqlite3.Connection:
-        self._prepare_parent()
-        connection = sqlite3.connect(self.index_path, timeout=5.0, isolation_level=None)
-        connection.row_factory = sqlite3.Row
+        guard = self._shared_maintenance_lock()
+        guard.__enter__()
+        connection: _MaintenanceConnection | None = None
         try:
+            self._prepare_parent()
+            connection = sqlite3.connect(
+                self.index_path, timeout=5.0, isolation_level=None,
+                factory=_MaintenanceConnection,
+            )
+            connection._maintenance_exit = lambda: guard.__exit__(None, None, None)
+            connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA journal_mode=WAL")
@@ -321,29 +360,46 @@ class WorkspaceRepository:
             except OSError:
                 pass
         except Exception:
-            connection.close()
+            if connection is not None:
+                connection.close()
+            else:
+                guard.__exit__(*sys.exc_info())
             raise
         return connection
 
     def _connect_read_only(self) -> sqlite3.Connection | None:
         """Open an existing index in SQLite read-only mode without creating it."""
+        guard = self._shared_maintenance_lock()
+        guard.__enter__()
+        connection: _MaintenanceConnection | None = None
         try:
             if not self.index_path.is_file() or self.index_path.is_symlink():
+                guard.__exit__(None, None, None)
                 return None
             connection = sqlite3.connect(
                 f"{self.index_path.as_uri()}?mode=ro",
                 uri=True,
                 timeout=5.0,
                 isolation_level=None,
+                factory=_MaintenanceConnection,
             )
+            connection._maintenance_exit = lambda: guard.__exit__(None, None, None)
         except (OSError, sqlite3.Error) as exc:
+            if connection is not None:
+                connection.close()
+            else:
+                guard.__exit__(*sys.exc_info())
             raise WorkspaceIndexError(
                 "projection_unavailable",
                 "workspace ownership index could not be opened read-only",
             ) from exc
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            connection.close()
+            raise
         return connection
 
     @contextmanager
@@ -423,6 +479,31 @@ class WorkspaceRepository:
 
     @classmethod
     def rebase_home_locators(
+        cls,
+        index_path: str | Path,
+        source_base: str | Path,
+        destination_base: str | Path,
+    ) -> dict[str, Any]:
+        """Serialize an existing-index rebase with repository users."""
+        index = Path(index_path).expanduser().absolute()
+        # Preserve the no-state behavior for a clean clone: no lock file or
+        # index parent is created when there is nothing to rebase.
+        if not index.exists() and not index.is_symlink():
+            return cls._rebase_home_locators_locked(
+                index, source_base, destination_base)
+        destination = _base_path(destination_base, "destination base")
+        try:
+            with _base_maintenance_lock(destination, exclusive=False):
+                return cls._rebase_home_locators_locked(
+                    index, source_base, destination)
+        except BaseMaintenanceBusy as exc:
+            raise WorkspaceIndexError(
+                "workspace_busy",
+                "workspace repository is unavailable while home maintenance is active",
+            ) from exc
+
+    @classmethod
+    def _rebase_home_locators_locked(
         cls,
         index_path: str | Path,
         source_base: str | Path,
@@ -640,6 +721,53 @@ class WorkspaceRepository:
             ) from exc
         finally:
             connection.close()
+
+    @classmethod
+    def checkpoint_for_relocation(cls, index_path: str | Path) -> None:
+        """Flush a real WAL index before its containing runtime tree is copied.
+
+        Non-SQLite bytes remain ordinary runtime data for backwards-compatible
+        relocation tests. A file bearing SQLite's header, however, must be
+        checkpointed under the same shared base lock used by all repository
+        connections; a busy or malformed index stops before its source moves.
+        """
+        index = Path(index_path).expanduser().absolute()
+        if not index.exists():
+            return
+        if index.is_symlink() or not index.is_file():
+            raise WorkspaceIndexError(
+                "workspace_index_invalid", "workspace index is not a regular file")
+        try:
+            with index.open("rb") as handle:
+                is_sqlite = handle.read(16) == b"SQLite format 3\x00"
+        except OSError as exc:
+            raise WorkspaceIndexError(
+                "workspace_index_unavailable", "workspace index could not be read") from exc
+        if not is_sqlite:
+            return
+        base = index.parent.parent.parent
+        try:
+            with _base_maintenance_lock(base, exclusive=False):
+                connection = sqlite3.connect(
+                    f"{index.as_uri()}?mode=rw", uri=True,
+                    timeout=0.0, isolation_level=None,
+                )
+                try:
+                    row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if row is None or int(row[0]) != 0:
+                        raise WorkspaceIndexError(
+                            "workspace_index_unavailable",
+                            "workspace index WAL checkpoint is busy",
+                        )
+                finally:
+                    connection.close()
+        except WorkspaceIndexError:
+            raise
+        except (BaseMaintenanceBusy, OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            raise WorkspaceIndexError(
+                "workspace_index_unavailable",
+                "workspace index could not be checkpointed",
+            ) from exc
 
     def initialize(self) -> int:
         with _WRITE_LOCK:

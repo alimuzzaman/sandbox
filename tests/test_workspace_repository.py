@@ -6,6 +6,7 @@ import hashlib
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from sandbox.workspaces.repository import (
     WorkspaceRepository,
     read_only_projection,
 )
+from sandbox.workspaces.maintenance import base_maintenance_lock
 
 
 class WorkspaceRepositoryTests(unittest.TestCase):
@@ -724,6 +726,24 @@ class WorkspaceRepositoryTests(unittest.TestCase):
                 with self.repo.operation_lock("busy", timeout_seconds=0):
                     pass
         self.assertEqual(busy.exception.code, "workspace_busy")
+
+    def test_repository_writer_refuses_while_base_maintenance_is_exclusive(self):
+        entered = threading.Event()
+
+        def writer():
+            entered.set()
+            try:
+                self.repo.register("project:blocked", "default")
+            except WorkspaceIndexError as exc:
+                return exc.code
+            return "unexpected-success"
+
+        with base_maintenance_lock(self.root, exclusive=True):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(writer)
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(future.result(timeout=5), "workspace_busy")
+        self.assertIsNone(self.repo.find("project:blocked", "default"))
 
     def test_migration_apply_acquires_candidate_workspace_lock(self):
         self._legacy()

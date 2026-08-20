@@ -16,12 +16,14 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
+from sandbox.workspaces.maintenance import BaseMaintenanceBusy, base_maintenance_lock
 
 
 _REGENERATED = {"compose", "herd-shims", ".venv-tools"}
@@ -32,6 +34,7 @@ _JOURNAL = ".migration-state.json"
 _LOCK = ".migration.lock"
 _AUTO_FINALIZE_ENV = "SANDBOX_AUTO_MIGRATION_FINALIZE"
 _PERSIST_PENDING_ENV = "SANDBOX_HOME_SELECTION_PENDING"
+_MIGRATION_LOCK_STATE = threading.local()
 
 
 class MigrationConflict(RuntimeError):
@@ -149,30 +152,19 @@ def _stage_copy(source: Path, destination: Path) -> None:
 @contextmanager
 def _migration_lock(*bases: Path):
     """Fail closed when another Sandbox process is already relocating state."""
+    if getattr(_MIGRATION_LOCK_STATE, "held", False):
+        raise MigrationConflict("Migration is already running; wait for it to finish and retry.")
     try:
-        import fcntl
-    except ImportError as exc:  # Spec 009 supports macOS/Linux only.
-        raise MigrationConflict("Migration locking requires a POSIX filesystem.") from exc
-    handles = []
-    try:
-        for base in sorted({path.resolve() for path in bases}, key=str):
-            base.mkdir(parents=True, exist_ok=True)
-            handle = (base / _LOCK).open("a+")
+        with base_maintenance_lock(*bases, exclusive=True):
+            _MIGRATION_LOCK_STATE.held = True
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                handle.close()
-                raise MigrationConflict(
-                    f"Migration is already running for {base}; wait for it to finish and retry."
-                ) from exc
-            handles.append(handle)
-        yield
-    finally:
-        for handle in reversed(handles):
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                yield
             finally:
-                handle.close()
+                _MIGRATION_LOCK_STATE.held = False
+    except (BaseMaintenanceBusy, OSError) as exc:
+        raise MigrationConflict(
+            "Migration is already running or workspace state is in use; wait for it to finish and retry."
+        ) from exc
 
 
 def _journal_path(base: Path) -> Path:
@@ -331,6 +323,17 @@ def _transfer(source_runtime: Path, destination_runtime: Path, source_base: Path
     moves = _plan(source_runtime, destination_runtime, config_pairs)
     if not moves:
         return 0
+    # The source base is exclusively locked by every home/automatic migration
+    # caller. Checkpoint a real WAL index while that guard is held, before the
+    # journal authorizes a byte-for-byte copy of its containing directory.
+    from sandbox.workspaces.repository import WorkspaceIndexError, WorkspaceRepository
+    try:
+        WorkspaceRepository.checkpoint_for_relocation(
+            source_runtime / "workspaces" / "index.sqlite3")
+    except WorkspaceIndexError as exc:
+        raise MigrationConflict(
+            "Workspace index could not be checkpointed consistently; source retained."
+        ) from exc
     _legacy_registry_conflict(source_runtime, destination_runtime, destination_base, source_base)
     _write_journal(destination_base, source_base, moves)
     # First promote/verify every destination. An interruption here leaves all
@@ -548,7 +551,7 @@ def cmd_migrate(cfg, args) -> None:
         print("  regenerate compose, Herd shims, proxy routing, and .venv-tools")
         return
     try:
-        with _migration_lock(destination_base):
+        with _migration_lock(ROOT, destination_base):
             moved = _transfer(source_runtime, destination_runtime, ROOT, destination_base, pairs)
     except MigrationConflict as exc:
         die(str(exc))
@@ -578,7 +581,7 @@ def maybe_auto_migrate() -> bool:
         _legacy_registry_conflict(source_runtime, destination_base / "runtime", destination_base, ROOT)
         return False
     try:
-        with _migration_lock(destination_base):
+        with _migration_lock(ROOT, destination_base):
             moved = _transfer(source_runtime, destination_base / "runtime", ROOT,
                               destination_base, _legacy_config_secrets())
     except MigrationConflict as exc:

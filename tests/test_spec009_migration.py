@@ -8,13 +8,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.commands import migrate
+from sandbox.workspaces.models import WorkspaceRecord
+from sandbox.workspaces.repository import WorkspaceRepository
+from sandbox.workspaces.maintenance import base_maintenance_lock
 
 
 class TestSpec009MigrationSafety(unittest.TestCase):
@@ -70,6 +75,146 @@ class TestSpec009MigrationSafety(unittest.TestCase):
             with self.assertRaises(migrate.MigrationConflict):
                 with migrate._migration_lock(self.destination_base):
                     pass
+
+    def test_transfer_journal_rebases_a_real_checkpointed_workspace_index(self):
+        old_base = self.root / "old-home"
+        new_base = self.root / "new-home"
+        old_runtime = old_base / "runtime"
+        legacy = old_runtime / "jobs" / "workspaces" / "local-abc" / "default" / "workspace.json"
+        legacy.parent.mkdir(parents=True)
+        legacy_bytes = b'{"label":"default","namespace":"local:abc"}\n'
+        legacy.write_bytes(legacy_bytes)
+        checkout = old_runtime / "deploy" / "checkout"
+        checkout.mkdir(parents=True)
+        digest = lambda value: "sha256:" + __import__("hashlib").sha256(
+            str(value).encode()).hexdigest()
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        )
+        record = repository.register(
+            "project:move", "default", namespace="local-abc", path=str(legacy),
+            aliases=("stable-alias",),
+            metadata={
+                "checkout_locator": str(checkout),
+                "checkout_locator_digest": digest(checkout),
+                "external_locator": str(self.root / "outside"),
+            },
+        )
+        repository.bind_resource(record.workspace_id, "compose_project", "sandbox-move")
+        generation = repository.schema_generation()
+
+        with migrate._migration_lock(old_base, new_base):
+            self.assertGreater(migrate._transfer(
+                old_runtime, new_base / "runtime", old_base, new_base, []), 0)
+
+        self.assertIsNotNone(migrate._load_journal(new_base))
+        self.assertFalse((new_base / "runtime" / "workspaces" / "index.sqlite3-wal").exists())
+        with patch.object(migrate, "RUNTIME_DIR", new_base / "runtime"):
+            result = migrate._rebase_workspace_index_from_journal(new_base)
+        self.assertEqual(result["rows_rebased"], 1)
+        moved = WorkspaceRepository(
+            new_base / "runtime" / "workspaces" / "index.sqlite3",
+            new_base / "runtime" / "jobs" / "workspaces",
+        ).get(record.workspace_id)
+        self.assertIsInstance(moved, WorkspaceRecord)
+        self.assertEqual(moved.workspace_id, record.workspace_id)
+        self.assertEqual(moved.aliases, ("stable-alias",))
+        self.assertEqual(moved.bindings[0]["resource_id"], "sandbox-move")
+        self.assertEqual(moved.path, str(new_base / legacy.relative_to(old_base)))
+        self.assertEqual(moved.metadata["checkout_locator"], str(new_base / checkout.relative_to(old_base)))
+        self.assertEqual(moved.metadata["external_locator"], str(self.root / "outside"))
+        self.assertEqual(
+            WorkspaceRepository(
+                new_base / "runtime" / "workspaces" / "index.sqlite3",
+                new_base / "runtime" / "jobs" / "workspaces",
+            ).schema_generation(), generation,
+        )
+        self.assertEqual(
+            (new_base / legacy.relative_to(old_base)).read_bytes(), legacy_bytes)
+
+    def test_competing_repository_writer_blocks_transfer_without_lost_update(self):
+        old_base = self.root / "old-home"
+        new_base = self.root / "new-home"
+        old_runtime = old_base / "runtime"
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        )
+        first = repository.register("project:one", "first")
+        entered = threading.Event()
+        release = threading.Event()
+
+        def writer():
+            with base_maintenance_lock(old_base, exclusive=False):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return repository.register("project:two", "second")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(writer)
+            self.assertTrue(entered.wait(5))
+            with self.assertRaises(migrate.MigrationConflict):
+                with migrate._migration_lock(old_base, new_base):
+                    migrate._transfer(
+                        old_runtime, new_base / "runtime", old_base, new_base, [])
+            self.assertTrue((old_runtime / "workspaces" / "index.sqlite3").exists())
+            self.assertFalse((new_base / "runtime" / "workspaces" / "index.sqlite3").exists())
+            release.set()
+            second = future.result(timeout=5)
+
+        self.assertEqual(
+            {item.workspace_id for item in repository.list(include_legacy=False)},
+            {first.workspace_id, second.workspace_id},
+        )
+
+    def test_legacy_and_automatic_entrypoints_refuse_a_busy_source_base(self):
+        old_base = self.root / "legacy-home"
+        new_base = self.root / "new-home"
+        old_runtime = old_base / "runtime"
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        )
+        first = repository.register("project:one", "first")
+        entered = threading.Event()
+        release = threading.Event()
+
+        def writer():
+            with base_maintenance_lock(old_base, exclusive=False):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return repository.register("project:two", "second")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(writer)
+            self.assertTrue(entered.wait(5))
+            for automatic in (False, True):
+                with self.subTest(automatic=automatic), \
+                        patch.object(migrate, "ROOT", old_base), \
+                        patch.object(migrate, "BASE", new_base), \
+                        patch.object(migrate, "_legacy_config_secrets", return_value=[]), \
+                        patch.object(migrate, "die", side_effect=migrate.MigrationConflict):
+                    if automatic:
+                        with self.assertRaises(migrate.MigrationConflict):
+                            migrate.maybe_auto_migrate()
+                    else:
+                        with self.assertRaises(migrate.MigrationConflict):
+                            migrate.cmd_migrate(
+                                {}, SimpleNamespace(
+                                    finalize=False, force=False, apply=True, dry_run=False,
+                                ),
+                            )
+                self.assertTrue((old_runtime / "workspaces" / "index.sqlite3").exists())
+                self.assertFalse((new_base / migrate._JOURNAL).exists())
+                self.assertFalse((new_base / "runtime" / "workspaces" / "index.sqlite3").exists())
+            release.set()
+            second = future.result(timeout=5)
+
+        self.assertEqual(
+            {item.workspace_id for item in repository.list(include_legacy=False)},
+            {first.workspace_id, second.workspace_id},
+        )
 
     def test_finalize_regenerates_proxy_compose_and_tools(self):
         herd = self.destination / "herd-shims"

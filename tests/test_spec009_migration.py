@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.commands import migrate
@@ -109,6 +113,185 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         self.assertEqual(source.read_text(), '{"old": true}')
         self.assertEqual(target.read_text(), '{"new": true}')
 
+    def test_automatic_migration_drops_old_extension_context_after_verified_move(self):
+        legacy_root = self.root / "repo"
+        source = self._write(legacy_root / "runtime" / "registry.json", "{}")
+        legacy_config = self._write(
+            legacy_root / "sandbox.local.yml",
+            "instances: {fixture: {php_extension_digest: sha256:aaaa}}\n",
+        )
+        old_context = self._write(
+            legacy_root / "runtime" / "build" / "php-extensions"
+            / ("sha256:" + "a" * 64) / "Dockerfile.web",
+            "FROM old-base\n",
+        )
+        new_base = self.root / "new-base"
+        with patch.object(migrate, "ROOT", legacy_root), \
+             patch.object(migrate, "BASE", new_base), \
+             patch.object(migrate, "_legacy_config_secrets", return_value=[
+                 (legacy_config, new_base / "sandbox.local.yml"),
+             ]), \
+             patch.dict(os.environ, {migrate._AUTO_FINALIZE_ENV: ""}, clear=False), \
+             patch.object(migrate, "_reexec_finalize") as reexec:
+            self.assertTrue(migrate.maybe_auto_migrate())
+
+        self.assertFalse(source.exists())
+        self.assertFalse(legacy_config.exists())
+        self.assertEqual(
+            (new_base / "sandbox.local.yml").read_text(),
+            "instances: {fixture: {php_extension_digest: sha256:aaaa}}\n",
+        )
+        self.assertFalse(old_context.exists())
+        self.assertFalse((new_base / "runtime" / "build" / "php-extensions").exists())
+        reexec.assert_called_once_with(original_command=True)
+
+    def test_extension_finalizer_omission_is_zero_work(self):
+        import sandbox.php_extensions.compose_builder as builder
+
+        with patch.object(migrate, "resolve_instances", return_value={
+            "legacy": {"server": "nginx"},
+        }), patch.object(builder, "materialize_compose_extension_context") as materialize:
+            self.assertEqual(migrate._regenerate_extension_contexts({}), 0)
+        materialize.assert_not_called()
+
+    def test_extension_finalizer_rejects_inconsistent_persisted_identity(self):
+        import sandbox.php_extensions.compose_builder as builder
+
+        instance = {
+            "server": "nginx",
+            "php_extensions": {"extensions": {"gd": True}},
+            "php_extension_digest": "not-a-digest",
+            "php_extension_parent_digests": {
+                "web": "sha256:" + "a" * 64,
+                "wpcli": "sha256:" + "b" * 64,
+            },
+        }
+        with patch.object(migrate, "resolve_instances", return_value={"legacy": instance}), \
+             patch.object(builder, "materialize_compose_extension_context") as materialize:
+            with self.assertRaises(migrate.MigrationConflict):
+                migrate._regenerate_extension_contexts({})
+        materialize.assert_not_called()
+
+    def test_extension_finalizer_plans_all_instances_before_materializing(self):
+        """A stale later plan cannot leave an earlier context on disk."""
+        import sandbox.php_extensions.compose_builder as builder
+        from sandbox.core._docker import _extension_plan_requirements
+        from sandbox.php_extensions.compose_builder import plan_compose_extension_images
+
+        digest_a = "sha256:" + "a" * 64
+        digest_b = "sha256:" + "b" * 64
+        requirements = _extension_plan_requirements(
+            {"profile": "wordpress@1", "extensions": {"gd": True}},
+        )
+        plan = plan_compose_extension_images(
+            requirements,
+            parent_image="wordpress:php8.3-fpm",
+            wpcli_image="wordpress:cli-php8.3",
+            parent_digest=digest_a,
+            wpcli_parent_digest=digest_b,
+            server="nginx", php_version="8.3", platform="linux", architecture="amd64",
+        )
+        valid = {
+            "server": "nginx",
+            "php_version": "8.3",
+            "php_extensions": requirements,
+            "php_extension_parent_digests": {"web": digest_a, "wpcli": digest_b},
+            "php_extension_digest": plan.digest,
+            "platform": "linux",
+            "architecture": "amd64",
+        }
+        stale = dict(valid)
+        stale["php_extension_digest"] = "sha256:" + "c" * 64
+        with patch.dict(os.environ, {"SANDBOX_HOME": str(self.destination_base)}, clear=False), \
+             patch.object(migrate, "resolve_instances", return_value={
+                 "a-valid": valid, "z-stale": stale,
+             }), \
+             patch.object(builder, "materialize_compose_extension_context") as materialize:
+            with self.assertRaises(migrate.MigrationConflict):
+                migrate._regenerate_extension_contexts({})
+
+        materialize.assert_not_called()
+        self.assertFalse(
+            self.destination_base.joinpath("runtime", "build", "php-extensions").exists()
+        )
+
+    def test_cli_auto_reexec_rejects_stale_extension_identity_before_compose_write(self):
+        """The real re-exec boundary validates identity before normal CLI writes."""
+        from sandbox import cli
+
+        stale = {
+            "server": "nginx",
+            "php_extensions": {"extensions": {"gd": True}},
+            "php_extension_digest": "not-a-digest",
+            "php_extension_parent_digests": {
+                "web": "sha256:" + "a" * 64,
+                "wpcli": "sha256:" + "b" * 64,
+            },
+        }
+        compose_writes: list[str] = []
+        argv = ["sb", "resources", "plan", "--scope", "cache", "--json"]
+        with patch.object(sys, "argv", argv), \
+             patch.object(cli, "load_config", return_value={}), \
+             patch.object(migrate, "BASE", self.destination_base), \
+             patch.object(migrate, "RUNTIME_DIR", self.destination), \
+             patch.object(migrate, "resolve_instances", return_value={"fixture": stale}), \
+             patch.object(cli, "write_compose_files",
+                          side_effect=lambda *_a, **_k: compose_writes.append("cli")), \
+             patch.object(cli, "write_env_for_compose",
+                          side_effect=lambda *_a, **_k: compose_writes.append("env")), \
+             patch.object(migrate, "write_compose_files",
+                          side_effect=lambda *_a, **_k: compose_writes.append("migration")), \
+             patch.dict(os.environ, {migrate._AUTO_FINALIZE_ENV: "1"}, clear=False), \
+             self.assertRaises(SystemExit):
+            with redirect_stderr(io.StringIO()):
+                cli.main(invocation_started_monotonic=100.0)
+
+        self.assertEqual(compose_writes, [])
+
+    def test_cli_auto_reexec_finalizes_once_and_preserves_valid_dispatch(self):
+        """A valid automatic re-exec regenerates Compose once, then dispatches."""
+        from sandbox import cli
+        from sandbox.commands import resources
+
+        payload = {
+            "ok": True,
+            "action": "plan",
+            "status": "planned",
+            "data": {
+                "plan_id": "p" * 32,
+                "expires_at": "2099-01-01T00:00:00Z",
+                "candidates": [],
+                "estimated_reclaimable_bytes": 0,
+            },
+        }
+        compose_writes: list[str] = []
+        plan_calls = []
+        service = SimpleNamespace(
+            plan=lambda *args, **kwargs: plan_calls.append((args, kwargs)) or payload,
+        )
+        argv = ["sb", "resources", "plan", "--scope", "cache", "--json"]
+        with patch.object(sys, "argv", argv), \
+             patch.object(cli, "load_config", return_value={}), \
+             patch.object(migrate, "BASE", self.destination_base), \
+             patch.object(migrate, "RUNTIME_DIR", self.destination), \
+             patch.object(migrate, "resolve_instances", return_value={}), \
+             patch.object(migrate, "write_compose_files",
+                          side_effect=lambda *_a, **_k: compose_writes.append("migration")), \
+             patch.object(migrate, "regen_caddyfile"), \
+             patch.object(migrate, "ensure_tools_venv"), \
+             patch.object(cli, "write_compose_files",
+                          side_effect=lambda *_a, **_k: compose_writes.append("cli")), \
+             patch.object(cli, "write_env_for_compose",
+                          side_effect=lambda *_a, **_k: compose_writes.append("env")), \
+             patch.object(resources, "resource_service", return_value=service), \
+             patch.dict(os.environ, {migrate._AUTO_FINALIZE_ENV: "1"}, clear=False), \
+             redirect_stdout(io.StringIO()):
+            cli.main(invocation_started_monotonic=100.0)
+
+        self.assertEqual(compose_writes, ["migration", "env"])
+        self.assertEqual(len(plan_calls), 1)
+        self.assertEqual(plan_calls[0][0], ("cache",))
+
     def test_home_selection_hint_is_owner_only_and_contains_no_state(self):
         home = self.root / "home"
         selected = self.root / "selected-base"
@@ -140,6 +323,7 @@ class TestSpec009MigrationSafety(unittest.TestCase):
             materialize_compose_extension_context,
             plan_compose_extension_images,
         )
+        from sandbox.core._docker import _extension_plan_requirements
 
         old_base = self.root / "old-base"
         new_base = self.root / "new-base"
@@ -150,12 +334,14 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         try:
             os.environ["SANDBOX_HOME"] = str(old_base)
             plan = plan_compose_extension_images(
-                {"profile": "wordpress@1", "extensions": {"gd": True}},
+                _extension_plan_requirements(
+                    {"profile": "wordpress@1", "extensions": {"gd": True}},
+                ),
                 parent_image="wordpress:php8.3-fpm",
                 wpcli_image="wordpress:cli-php8.3",
                 parent_digest=digest_a,
                 wpcli_parent_digest=digest_b,
-                server="nginx", platform="linux", architecture="amd64",
+                server="nginx", php_version="8.3", platform="linux", architecture="amd64",
             )
             materialize_compose_extension_context(plan)
 
@@ -169,6 +355,10 @@ class TestSpec009MigrationSafety(unittest.TestCase):
                 ),
                 "index": self._write(old_runtime / "workspaces" / "index.sqlite3", "index-bytes"),
             }
+            unrelated_build = self._write(
+                old_runtime / "build" / "other-cache" / "metadata.json", "pure-build-data",
+            )
+            extension_context = old_runtime / "build" / "php-extensions" / plan.digest
             before = {name: path.read_bytes() for name, path in protected.items()}
             with patch.object(migrate, "compose") as compose, \
                  patch.object(migrate, "write_compose_files") as write_compose_files, \
@@ -178,17 +368,41 @@ class TestSpec009MigrationSafety(unittest.TestCase):
                     old_runtime, new_base / "runtime", old_base, new_base, [],
                 )
             # The transfer is counted by top-level runtime artifact (the
-            # protected WP tree and workspace tree each move as one entry).
-            self.assertGreaterEqual(moved, 5)
+            # protected WP tree and workspace tree each move as one entry),
+            # plus the unrelated build child. The generated extension context
+            # is excluded until finalization.
+            self.assertEqual(moved, 5)
             for name, source in protected.items():
                 destination = new_base / "runtime" / source.relative_to(old_runtime)
                 self.assertEqual(destination.read_bytes(), before[name])
                 self.assertFalse(source.exists())
+            self.assertEqual(
+                (new_base / "runtime" / "build" / "other-cache" / "metadata.json").read_text(),
+                "pure-build-data",
+            )
+            self.assertFalse(unrelated_build.exists())
+            self.assertFalse(extension_context.exists())
+            self.assertFalse((new_base / "runtime" / "build" / "php-extensions").exists())
             for operation in (compose, write_compose_files, regen_caddyfile,
                               ensure_tools_venv):
                 operation.assert_not_called()
 
             os.environ["SANDBOX_HOME"] = str(new_base)
+            instance = {
+                "server": "nginx",
+                "php_version": "8.3",
+                "php_extensions": {
+                    "profile": "wordpress@1", "extensions": {"gd": True},
+                },
+                "php_extension_parent_digests": {
+                    "web": digest_a, "wpcli": digest_b,
+                },
+                "php_extension_digest": plan.digest,
+                "platform": "linux",
+                "architecture": "amd64",
+            }
+            with patch.object(migrate, "resolve_instances", return_value={"fixture": instance}):
+                self.assertEqual(migrate._regenerate_extension_contexts({}), 1)
             status = extension_cache_status(plan.digest)
             self.assertEqual(status["state"], "ready")
             rendered = json.dumps(status, sort_keys=True)

@@ -458,6 +458,16 @@ parents by registry digest, builds content-addressed child images below
 `$SANDBOX_HOME/runtime/build/php-extensions/`, and verifies the requirement in
 web, WP-CLI, bounded-exec, and PHPUnit planes.
 
+During `sb migrate --apply`, automatic first-run migration, or `sb home <dir>`,
+the persisted extension requirement and digest metadata move with the other
+pure state. The generated `runtime/build/php-extensions/` contexts are excluded
+from that copy, removed from the old base only after the pure-data verification
+passes, and recreated at the destination with the side-effect-free planner and
+materializer for Apache/nginx instances. Migration never pulls parent images,
+builds child images, or probes a runtime. Database volumes remain outside the
+base, and existing uploads, snapshots, and project files are preserved
+byte-for-byte.
+
 Compose auto-provisioning is deliberately narrow in v1. GD, Intl, Zip, and the
 other checked-in core recipes are supported for official Apache/nginx parents.
 Imagick and Xdebug are observation-only for Compose: if requested but absent,

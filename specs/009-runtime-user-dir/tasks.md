@@ -204,9 +204,9 @@ PHP extension feature; they do not claim that the feature is implemented.
   `$SANDBOX_HOME/runtime/build/php-extensions/<digest>/`, while a changed profile,
   catalog, parent image digest, PHP version, server flavor, platform, or architecture
   yields a new digest and never writes into the checkout.
-- [ ] T036 Verify relocation and automatic migration move extension metadata without
-  moving database volumes, uploads, snapshots, or project files, then regenerate every
-  path-bearing build context under the destination base.
+- [x] T036 Verify relocation and automatic migration move extension metadata while
+  preserving database volumes, uploads, snapshots, and project files, then regenerate
+  every path-bearing build context under the destination base.
 - [x] T037 Add CLI/MCP parity and redaction tests for extension cache/provenance status;
   output MUST contain no secrets or private source contents and MUST remain safe when
   an entry is missing, stale, or discarded.

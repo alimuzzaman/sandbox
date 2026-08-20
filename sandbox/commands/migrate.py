@@ -2,18 +2,21 @@
 
 Pure data is copied to a same-filesystem staging path, verified, promoted, and
 only then removed from its source.  Generated artifacts are deliberately never
-moved: Compose, Herd shims, proxy routing files, and the tooling venv are
-rebuilt after the transfer.  The small journal makes an interrupted transfer
-resumable without ever treating a different destination as disposable.
+moved: Compose, PHP-extension build contexts, Herd shims, proxy routing files,
+and the tooling venv are rebuilt after the transfer.  The small journal makes
+an interrupted transfer resumable without ever treating a different
+destination as disposable.
 """
 from __future__ import annotations
 
 import filecmp
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -23,6 +26,8 @@ from sandbox.registry import register
 
 _REGENERATED = {"compose", "herd-shims", ".venv-tools"}
 _PROXY_REGENERATED = {"Caddyfile", "proxy.yml"}
+_PHP_EXTENSION_BUILD = "php-extensions"
+_PHP_EXTENSION_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 _JOURNAL = ".migration-state.json"
 _LOCK = ".migration.lock"
 _AUTO_FINALIZE_ENV = "SANDBOX_AUTO_MIGRATION_FINALIZE"
@@ -66,6 +71,17 @@ def _runtime_moves(source_runtime: Path, destination_runtime: Path) -> list[tupl
             for child in sorted(item.iterdir()):
                 if child.name not in _PROXY_REGENERATED:
                     moves.append((child, destination_runtime / "proxy" / child.name))
+            continue
+        # PHP-extension contexts are generated from persisted instance
+        # metadata.  Their Dockerfiles/provenance are path-bearing generated
+        # artifacts, not source data: leave them behind for the post-transfer
+        # finalizer to recreate below the destination base.  Other build
+        # children remain ordinary pure data and must move unchanged.
+        if item.name == "build" and item.is_dir() and not item.is_symlink():
+            for child in sorted(item.iterdir()):
+                if child.name == _PHP_EXTENSION_BUILD:
+                    continue
+                moves.append((child, destination_runtime / "build" / child.name))
             continue
         moves.append((item, destination_runtime / item.name))
     return moves
@@ -218,9 +234,20 @@ def _drop_baked_artifacts(source_runtime: Path) -> None:
         path = proxy / name
         if path.exists() or path.is_symlink():
             _remove_source(path)
+    # A generated PHP-extension context is deliberately excluded from the
+    # pure-data transfer above.  Remove it only now, after every planned
+    # source/target pair has been copied and verified.  If the transfer had no
+    # pure-data work, _transfer returns before this function and the old
+    # context remains recoverable for a later explicit retry.
+    extension_context = source_runtime / "build" / _PHP_EXTENSION_BUILD
+    if extension_context.exists() or extension_context.is_symlink():
+        _remove_source(extension_context)
     try:
         if proxy.exists() and not any(proxy.iterdir()):
             proxy.rmdir()
+        build = source_runtime / "build"
+        if build.exists() and not any(build.iterdir()):
+            build.rmdir()
         if source_runtime.exists() and not any(source_runtime.iterdir()):
             source_runtime.rmdir()
     except OSError:
@@ -266,12 +293,111 @@ def _reexec_finalize(*, original_command: bool = False, persist_home: Path | Non
 
 def _regenerate_baked_artifacts(cfg) -> None:
     """Rebuild every artifact whose contents can bake the old base path."""
+    _regenerate_extension_contexts(cfg)
     write_compose_files(cfg)
     regen_caddyfile(cfg)
     # Herd shims are recreated by regular reconcile.  Remove stale paths first
     # so a later ensure cannot accidentally reuse a moved shim.
     shutil.rmtree(RUNTIME_DIR / "herd-shims", ignore_errors=True)
     ensure_tools_venv()
+
+
+def _regenerate_extension_contexts(cfg) -> int:
+    """Recreate persisted Compose extension contexts under the active base.
+
+    The migration path is intentionally limited to the pure planner and
+    materializer.  It never resolves parent images, probes a runtime, pulls an
+    image, or builds a child image.  A configured Apache/nginx instance must
+    carry the adapter-produced plan digest and parent digests from its
+    persisted state; malformed or stale identity inputs fail closed before any
+    context is written.  Instances without ``phpExtensions`` and non-Compose
+    servers require no work.
+    """
+    from sandbox.php_extensions.compose_builder import (
+        CATALOG_VERSION,
+        materialize_compose_extension_context,
+    )
+
+    # Planning is pure, but materialization creates files.  Validate every
+    # eligible instance first so a later stale identity cannot leave an
+    # earlier instance's context partially regenerated.
+    plans = []
+    for name, inst_cfg in sorted(resolve_instances(cfg).items()):
+        requirements = inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions"))
+        if requirements is None:
+            continue
+        server = str(inst_cfg.get("server") or "nginx").strip().lower()
+        if server not in {"apache", "nginx"}:
+            continue
+        if not isinstance(requirements, Mapping):
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "persisted phpExtensions is not a mapping."
+            )
+        catalog = requirements.get("catalog_version", requirements.get("catalogVersion"))
+        if catalog is not None and catalog != CATALOG_VERSION:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                f"persisted catalog {catalog!r} is not {CATALOG_VERSION!r}."
+            )
+
+        digest = inst_cfg.get("php_extension_digest", inst_cfg.get("phpExtensionDigest"))
+        if not isinstance(digest, str) or not _PHP_EXTENSION_DIGEST.fullmatch(digest.lower()):
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "persisted plan digest is missing or invalid."
+            )
+        parent_digests = inst_cfg.get("php_extension_parent_digests")
+        if not isinstance(parent_digests, Mapping):
+            parent_digests = inst_cfg.get("phpExtensionParentDigests")
+        if not isinstance(parent_digests, Mapping) or set(parent_digests) != {"web", "wpcli"}:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "persisted parent digests are missing or incomplete."
+            )
+        if any(not isinstance(value, str) or not _PHP_EXTENSION_DIGEST.fullmatch(value.lower())
+               for value in parent_digests.values()):
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "persisted parent digest is invalid."
+            )
+
+        # _instance_extension_plan is a pure planner.  Passing the persisted
+        # digest through the instance mapping makes a changed requirement,
+        # image, PHP version, server, platform, architecture, or catalog fail
+        # with a digest mismatch instead of silently selecting a new context.
+        plan_cfg = dict(inst_cfg)
+        plan_cfg["php_extension_parent_digests"] = dict(parent_digests)
+        try:
+            plan = _instance_extension_plan(plan_cfg, server)
+        except Exception as exc:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': {exc}"
+            ) from exc
+        if plan is None:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "persisted requirements resolved to no plan."
+            )
+
+        # Retain the persisted digest alongside the pure plan so the final
+        # phase has an explicit identity check as well as the planner's
+        # expected-digest validation.
+        plans.append((name, plan, digest.lower()))
+
+    for name, plan, expected_digest in plans:
+        if plan.digest.lower() != expected_digest:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': "
+                "planned digest differs from persisted identity."
+            )
+        try:
+            materialize_compose_extension_context(plan)
+        except Exception as exc:
+            raise MigrationConflict(
+                f"Cannot regenerate PHP-extension context for '{name}': {exc}"
+            ) from exc
+    return len(plans)
 
 
 def _finalize(cfg) -> None:
@@ -388,11 +514,19 @@ def maybe_auto_migrate() -> bool:
     return True  # pragma: no cover - os.execv never returns
 
 
-def finalize_auto_migration(cfg) -> None:
+def finalize_auto_migration(cfg) -> bool:
+    """Finalize an automatic relocation before ordinary CLI setup writes.
+
+    The boolean lets the CLI suppress its routine Compose rewrite after this
+    path has already regenerated all baked artifacts.  More importantly, the
+    caller can place this gate before any normal dispatch-side file writes:
+    extension identity validation must fail closed before Compose is touched.
+    """
     if not os.environ.pop(_AUTO_FINALIZE_ENV, None):
-        return
+        return False
     with _migration_lock(BASE):
         _finalize(cfg)
+    return True
 
 
 def cmd_home(cfg, args) -> None:

@@ -1000,6 +1000,18 @@ Per-project (each plugin carries its own sandbox.config.json):
         if capability_error is not None:
             die(capability_error.message)
 
+    # An automatic relocation re-execs the original command with a marker.
+    # Finalize it immediately before the ordinary dispatch path can write
+    # Compose or its environment.  In particular, stale PHP-extension
+    # identity must raise a bounded migration error while no generated file
+    # has been touched.  A successful finalizer already regenerated Compose,
+    # so only that routine write is skipped for this invocation; the legacy
+    # environment file is still refreshed below.  Keeping this after target
+    # resolution and capability preflight preserves the historical ordering
+    # for commands that must refuse an invalid target first.
+    from sandbox.commands.migrate import finalize_auto_migration
+    auto_migration_finalized = finalize_auto_migration(cfg)
+
     # (Re)generate per-instance compose files so they're always in sync with the
     # registered instances. Cheap + idempotent.
     # Global resource observation neither consumes nor updates per-instance
@@ -1009,16 +1021,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
     if not bounded_resource_status and args.cmd != "secrets":
-        write_compose_files(cfg)
+        if not auto_migration_finalized:
+            write_compose_files(cfg)
         # Keep the legacy `.env` populated so anyone still invoking the
         # checked-in docker-compose.yml directly (out-of-tree scripts, older
         # skills) doesn't break. New flow ignores this file.
         write_env_for_compose(cfg)
-
-    # The re-exec above must regenerate baked absolute-path artifacts before
-    # dispatching the ordinary command that triggered the upgrade.
-    from sandbox.commands.migrate import finalize_auto_migration
-    finalize_auto_migration(cfg)
 
     # Dispatch via the command registry (populated by sandbox.commands.* imports).
     # `apply --project-dir` → in-place reconcile; bare `apply` → setup alias.

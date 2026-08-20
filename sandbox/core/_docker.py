@@ -40,13 +40,14 @@ def compose_file(instance: str) -> Path:
     return COMPOSE_DIR / f"{instance}.yml"
 
 
-def _extra_vol_lines(inst_cfg: dict, indent: int = 6, ro: bool = False) -> str:
+def _extra_vol_lines(inst_cfg: dict, indent: int = 6, ro: bool = True) -> str:
     """Extra bind-mount lines for paths in inst_cfg["extra_mounts"].
 
     Injected into every service tier so symlinks to sources outside
     plugins_home (e.g. a plugin repo at ~/Sites/git/templately) resolve
     inside the container. Without these mounts the symlinks are dangling
-    and WP silently skips the plugins."""
+    and WP silently skips the plugins. Local source mounts are guest-read-only
+    so WordPress cannot write back into a host checkout."""
     mounts = inst_cfg.get("extra_mounts") or []
     if not mounts:
         return ""
@@ -198,7 +199,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # Bind-mount plugin sources at the same absolute host path so the
       # symlinks ensure_instance creates under wp-content/plugins/ resolve
       # inside the container.
-      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
       - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
       # Built-in wp-cli: shared host phar → exec `wp` in this container (no per-call container).
       - {RUNTIME_DIR}/bin/wp-cli.phar:/usr/local/bin/wp:ro
@@ -242,7 +243,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html
       - {RUNTIME_DIR}/seeds:/seeds
-      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
       - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
       - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
       # Built-in wp-cli: shared host phar → exec `wp` in the fpm container.
@@ -296,7 +297,7 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:{docroot}
       - {RUNTIME_DIR}/seeds:/seeds
-      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
       - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
 """
 
@@ -324,7 +325,7 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:{docroot}
       - {RUNTIME_DIR}/seeds:/seeds
-      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
       # Persistent, shared wp-cli download cache (WP_CLI_CACHE_DIR points here):
       # `wp plugin/theme/core install` reuse downloads across instances + runs
       # instead of re-fetching into ephemeral /tmp every time.

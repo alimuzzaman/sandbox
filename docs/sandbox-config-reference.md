@@ -355,6 +355,16 @@ The generated Apache and Nginx/FPM stacks also reconcile ownership of
 create a new plugin directory for ordinary wp.org and wp-admin installs on the
 bind-mounted development tree.
 
+Generated local source binds are read-only inside every WordPress execution
+service. This includes `defaults.plugins_home` and local plugin, theme, and
+legacy mapping sources emitted as `extra_mounts`; the Nginx static sidecar uses
+the same read-only source view. WordPress updater/editor writes to a local
+source therefore fail by design, while edits made in the host checkout remain
+visible immediately. WP.org and ZIP installs still write to the writable
+runtime WordPress tree (`runtime/wp-<instance>`), including its `wp-content`
+state, uploads, and cache directories; the shared download caches remain
+writable as well.
+
 The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
 parent `wp-content` directory during bootstrap. This prevents wp-admin and
 Templately dependency installs from falling back to unavailable FTP/SSH

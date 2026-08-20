@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -38,8 +39,15 @@ class TestRenderCompose(unittest.TestCase):
                                   db_port=3500, mailpit_port=8300, server=server)
         return core.resolve_instances({})["ti"]
 
-    def _render(self, server):
-        return core.render_compose("ti", self._cfg(server), Path("/tmp/plugins-host"))
+    def _render(self, server, extra_mount=None):
+        cfg = self._cfg(server)
+        if extra_mount:
+            cfg["extra_mounts"] = [extra_mount]
+        return core.render_compose("ti", cfg, Path("/tmp/plugins-host"))
+
+    def _document_with_source(self, server):
+        source = f"/tmp/local-source-{server}"
+        return yaml.safe_load(self._render(server, source)), source
 
     def test_apache_compose(self):
         out = self._render("apache")
@@ -68,6 +76,45 @@ class TestRenderCompose(unittest.TestCase):
         out = self._render("litespeed")
         self.assertIn("openlitespeed", out)
         self.assertIn("host.docker.internal:host-gateway", out)
+
+    def test_local_source_mounts_are_read_only_for_all_wordpress_services(self):
+        """Every generated local source bind is RO in each execution plane."""
+        plugins_host = "/tmp/plugins-host"
+        for server in ("apache", "nginx", "litespeed"):
+            document, extra_source = self._document_with_source(server)
+            services = document["services"]
+            applicable = ["wp", "wpcli"]
+            if server == "nginx":
+                applicable.append("nginx")
+            for service in applicable:
+                volumes = services[service]["volumes"]
+                for source in (plugins_host, extra_source):
+                    self.assertIn(f"{source}:{source}:ro", volumes,
+                                  f"{server}/{service} missing RO source")
+                    self.assertNotIn(f"{source}:{source}", volumes,
+                                     f"{server}/{service} has RW source")
+
+    def test_runtime_state_and_cache_mount_modes_are_unchanged(self):
+        """Source hardening does not make WordPress state or caches RO."""
+        runtime = str(core.RUNTIME_DIR)
+        for server in ("apache", "nginx", "litespeed"):
+            document, _ = self._document_with_source(server)
+            services = document["services"]
+            wp = services["wp"]["volumes"]
+            wpcli = services["wpcli"]["volumes"]
+            docroot = core._server_runtime(server)["docroot"]
+            self.assertIn(f"{runtime}/wp-ti:{docroot}", wp)
+            self.assertNotIn(f"{runtime}/wp-ti:{docroot}:ro", wp)
+            self.assertIn(f"{runtime}/seeds:/seeds", wp)
+            self.assertIn(f"{runtime}/dl-cache/wp-http:/sandbox-dl-cache", wp)
+            self.assertIn(f"{runtime}/wp-ti:{docroot}", wpcli)
+            self.assertNotIn(f"{runtime}/wp-ti:{docroot}:ro", wpcli)
+            self.assertIn(f"{runtime}/seeds:/seeds", wpcli)
+            self.assertIn(f"{runtime}/dl-cache/wp-cli:/tmp/.wp-cli/cache", wpcli)
+            self.assertEqual(services["db"]["volumes"], ["db_data:/var/lib/mysql"])
+            if server == "nginx":
+                self.assertIn(f"{runtime}/wp-ti:/var/www/html:ro",
+                              services["nginx"]["volumes"])
 
 
 if __name__ == "__main__":

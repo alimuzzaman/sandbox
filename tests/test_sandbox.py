@@ -556,8 +556,10 @@ class TestSmallHelpers(unittest.TestCase):
     def test_extra_vol_lines(self):
         self.assertEqual(core._extra_vol_lines({}), "")
         self.assertEqual(core._extra_vol_lines({"extra_mounts": []}), "")
-        self.assertIn("/host/path",
-                      core._extra_vol_lines({"extra_mounts": ["/host/path"]}))
+        self.assertEqual(
+            core._extra_vol_lines({"extra_mounts": ["/host/path"]}),
+            "\n      - /host/path:/host/path:ro",
+        )
 
 
 class TestDownloadCache(unittest.TestCase):

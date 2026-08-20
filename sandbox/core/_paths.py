@@ -48,9 +48,12 @@ def _sandbox_base() -> Path:
     if not raw:
         hint = Path.home() / ".config" / "sandbox" / "home"
         try:
-            raw = hint.read_text().strip() or None
+            candidate = hint.read_text().strip()
         except OSError:
-            raw = None
+            candidate = ""
+        # Only the absolute path written by `sb home` is a valid selector;
+        # relative text must never be interpreted against a process CWD.
+        raw = candidate if candidate and Path(candidate).is_absolute() else None
     return Path(raw or "~/sandbox").expanduser().resolve()
 
 

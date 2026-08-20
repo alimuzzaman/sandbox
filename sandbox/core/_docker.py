@@ -56,6 +56,97 @@ def _extra_vol_lines(inst_cfg: dict, indent: int = 6, ro: bool = True) -> str:
     return "\n" + "\n".join(f"{pad}- {m}:{m}{suffix}" for m in mounts)
 
 
+def _canonical_bind_path(value: object) -> str | None:
+    """Return one absolute host path without creating or modifying it."""
+    if not isinstance(value, str) or not value or not os.path.isabs(value):
+        return None
+    try:
+        return str(Path(value).expanduser().resolve())
+    except (OSError, RuntimeError):
+        return None
+
+
+def _source_mount_services(server: str) -> tuple[str, ...]:
+    """Return every Docker web plane expected to see project source binds."""
+    if server == "nginx":
+        return ("wp", "nginx")
+    return ("wp",)
+
+
+def attest_source_mounts(instance: str, server: str,
+                         desired_sources: object) -> dict[str, object]:
+    """Compare the live read-only source self-binds with the desired set.
+
+    This is deliberately a Docker-inspect-only observation.  It must run before
+    the ready ``ensure`` path refreshes any state, so incomplete observation is
+    a typed refusal rather than a reason to regenerate Compose or retry a boot.
+    Paths and container details stay internal: callers receive only a stable
+    code plus an explicit, non-destructive ``sb apply`` remedy.
+    """
+    if server == "herd":
+        return {"ok": True}
+    if not isinstance(desired_sources, (list, tuple, set, frozenset)):
+        return {"ok": False, "code": "instance_mount_state_unavailable"}
+    expected: set[str] = set()
+    for source in desired_sources:
+        canonical = _canonical_bind_path(source)
+        if canonical is None:
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        expected.add(canonical)
+
+    project = project_name(instance)
+    for service in _source_mount_services(server):
+        try:
+            listed = run(
+                ["docker", "ps", "-q",
+                 "--filter", f"label=com.docker.compose.project={project}",
+                 "--filter", f"label=com.docker.compose.service={service}"],
+                check=False, capture=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        if getattr(listed, "returncode", 1) != 0:
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        identifiers = [item.strip() for item in (getattr(listed, "stdout", "") or "").splitlines()
+                       if item.strip()]
+        if len(identifiers) != 1:
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        try:
+            inspected = run(["docker", "inspect", identifiers[0]], check=False,
+                            capture=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        if getattr(inspected, "returncode", 1) != 0:
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        try:
+            rows = json.loads(getattr(inspected, "stdout", "") or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        mounts = rows[0].get("Mounts")
+        if not isinstance(mounts, list):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        observed: dict[str, bool] = {}
+        for mount in mounts:
+            if not isinstance(mount, Mapping) or not isinstance(mount.get("Type"), str):
+                return {"ok": False, "code": "instance_mount_state_unavailable"}
+            if mount["Type"] != "bind":
+                continue
+            source = _canonical_bind_path(mount.get("Source"))
+            destination = _canonical_bind_path(mount.get("Destination"))
+            writable = mount.get("RW")
+            if source is None or destination is None or not isinstance(writable, bool):
+                return {"ok": False, "code": "instance_mount_state_unavailable"}
+            if source == destination:
+                if source in observed:
+                    return {"ok": False, "code": "instance_mount_drift"}
+                observed[source] = writable
+        if set(observed) != expected or any(observed[source] for source in expected):
+            return {"ok": False, "code": "instance_mount_drift"}
+    return {"ok": True}
+
+
 def _config_extra_php(inst_cfg: dict, docroot: str = "/var/www/html") -> str:
     """The WORDPRESS_CONFIG_EXTRA PHP block: typed define()s for the merged
     sandbox + project constants, plus (when multisite is configured) the

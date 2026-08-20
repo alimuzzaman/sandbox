@@ -227,6 +227,41 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertEqual([submission.workspace_label for submission in captured], ["unit", "integration"])
         self.assertTrue(all(submission.workspace_mode == "isolated" for submission in captured))
 
+    def test_mcp_matrix_resolves_each_workspace_policy_independently(self):
+        from tools import jobs
+
+        runtime = {
+            "executionProfiles": {
+                "fast": {"timeoutSeconds": 30, "stallSeconds": 3,
+                         "cancelGraceSeconds": 4, "cleanup": "retain"},
+                "slow": {"timeoutSeconds": 90, "stallSeconds": 9,
+                         "cancelGraceSeconds": 10, "cleanup": "ephemeral"},
+            },
+            "workspaces": {
+                "unit": {"executionProfile": "fast"},
+                "integration": {"executionProfile": "slow"},
+            },
+        }
+        captured = []
+
+        def resolve(request):
+            return SimpleNamespace(
+                kind="local", project_root="/project", remote_name=None,
+                workspace_label=request.workspace, namespace="local:project",
+                runtime_policy=runtime, sources={"identity": "project:test"},
+            )
+
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=resolve)), \
+                patch.object(jobs, "_job_service", SimpleNamespace(
+                    submit_matrix=lambda submissions: captured.extend(submissions) or {"ok": True})):
+            result = jobs.job_matrix(["echo", "ok"], ["unit", "integration"], "/project", local=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([(item.workspace_label, item.execution_profile, item.deadline_seconds,
+                           item.cancel_grace_seconds, item.cleanup_policy) for item in captured],
+                         [("unit", "fast", 30, 4, "retain"),
+                          ("integration", "slow", 90, 10, "ephemeral")])
+
     def test_shared_project_identity_is_kind_neutral_and_stable(self):
         from sandbox.config.facade import project_identity
 

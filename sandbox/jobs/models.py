@@ -16,6 +16,8 @@ from typing import Any, Mapping, Sequence
 MAX_DEADLINE_SECONDS = 604_800
 MAX_OUTPUT_PAGE_BYTES = 262_144
 MAX_ARTIFACT_PAGE_BYTES = 1_048_576
+MIN_OUTPUT_WAIT_SECONDS = 0
+MAX_OUTPUT_WAIT_SECONDS = 20
 _JOB_ID = re.compile(r"^(?:[a-f0-9]{16}|[a-f0-9]{32})$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -40,6 +42,23 @@ def _positive_seconds(value: object, label: str, *, maximum: int = MAX_DEADLINE_
             not math.isfinite(value) or value <= 0 or value > maximum or int(value) != value):
         raise ValueError(f"{label} must be a finite positive whole number no greater than {maximum}")
     return int(value)
+
+
+def normalize_output_wait_seconds(value: object) -> int:
+    """Validate the bounded retained-output long-poll interval.
+
+    This is intentionally stricter than the generic positive-duration helper:
+    output waits are whole seconds, may be disabled with zero, and must remain
+    short enough that a single observation cannot pin a control-plane request.
+    Keeping the check here gives local services, MCP, and remote transports one
+    exact contract before any target lookup or I/O occurs.
+    """
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not MIN_OUTPUT_WAIT_SECONDS <= value <= MAX_OUTPUT_WAIT_SECONDS):
+        raise ValueError(
+            f"output wait must be between 0 and {MAX_OUTPUT_WAIT_SECONDS} seconds"
+        )
+    return value
 
 
 class Lifecycle(str, Enum):
@@ -371,9 +390,7 @@ class OutputQuery:
         _positive_seconds(self.max_events, "output page events", maximum=500)
         if self.encoding not in {"utf8", "base64"}:
             raise ValueError("output encoding is invalid")
-        if isinstance(self.wait_seconds, bool) or not isinstance(self.wait_seconds, int) \
-                or not 0 <= self.wait_seconds <= 20:
-            raise ValueError("output wait must be between 0 and 20 seconds")
+        object.__setattr__(self, "wait_seconds", normalize_output_wait_seconds(self.wait_seconds))
         positions = [self.cursor, self.offset, self.tail_bytes, self.lines, self.since]
         if sum(value is not None for value in positions) > 1:
             raise ValueError("output query accepts only one position selector")
@@ -430,9 +447,12 @@ class JobSubmission:
     output_profile: str = "smart"
     output_profile_definition: Mapping[str, Any] | None = None
     deadline_source: str = "explicit"
+    deadline_reminder: str | None = None
     stall_seconds: int = 300
+    cancel_grace_seconds: int = 20
     cancel_on_stall: bool = False
     cleanup_policy: str = "retain"
+    execution_policy_provenance: Mapping[str, str] | None = None
     environment_keys: tuple[str, ...] = ()
     artifact_paths: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
@@ -471,10 +491,19 @@ class JobSubmission:
             output_profile_from_definition(self.output_profile, self.output_profile_definition)
             object.__setattr__(self, "output_profile_definition", dict(self.output_profile_definition))
         _positive_seconds(self.stall_seconds, "stall timeout")
+        _positive_seconds(self.cancel_grace_seconds, "cancellation grace", maximum=600)
         if not isinstance(self.cancel_on_stall, bool):
             raise ValueError("cancel_on_stall must be boolean")
         if self.cleanup_policy not in {"retain", "always", "on-success", "ephemeral"}:
             raise ValueError("cleanup policy is invalid")
+        if self.deadline_reminder is not None:
+            _safe_text(self.deadline_reminder, "deadline reminder")
+        provenance = self.execution_policy_provenance or {}
+        if not isinstance(provenance, Mapping) or any(
+                not isinstance(key, str) or not isinstance(value, str) or not key or not value
+                for key, value in provenance.items()):
+            raise ValueError("execution policy provenance is invalid")
+        object.__setattr__(self, "execution_policy_provenance", dict(provenance))
         for key in self.environment_keys:
             _safe_name(key, "environment key")
         for value in self.artifact_paths:
@@ -511,9 +540,12 @@ class JobSubmission:
             "output_profile_definition": dict(self.output_profile_definition or {}),
             "deadline_seconds": self.deadline_seconds,
             "deadline_source": self.deadline_source,
+            "deadline_reminder": self.deadline_reminder,
             "stall_seconds": self.stall_seconds,
+            "cancel_grace_seconds": self.cancel_grace_seconds,
             "cancel_on_stall": self.cancel_on_stall,
             "cleanup_policy": self.cleanup_policy,
+            "execution_policy_provenance": dict(self.execution_policy_provenance or {}),
             "request_id": self.request_id,
             "parent_job_id": self.parent_job_id,
             "retry_of_job_id": self.retry_of_job_id,

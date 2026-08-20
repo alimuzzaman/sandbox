@@ -62,6 +62,9 @@ class DeclaredTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(captured[0].deadline_seconds, 120)
         self.assertEqual(captured[0].deadline_source, "plan:verify")
+        self.assertEqual(captured[0].cancel_grace_seconds, 20)
+        self.assertEqual(captured[0].cleanup_policy, "retain")
+        self.assertEqual(captured[0].execution_policy_provenance["deadline"], "plan")
         self.assertIn('"plan": "verify"', output.getvalue())
 
     def test_declared_plan_explicit_timeout_overrides_its_profile(self):
@@ -91,6 +94,41 @@ class DeclaredTestPlanTests(unittest.TestCase):
         self.assertTrue(declared.call_args.args[1].local)
         self.assertTrue(declared.call_args.args[1].json)
         self.assertIsNone(declared.call_args.args[1].output_profile)
+
+    def test_cli_matrix_preserves_zero_timeout_for_the_shared_resolver(self):
+        import sandbox.commands.debug as debug
+
+        args = SimpleNamespace(mode="matrix", passthrough=["--local", "--timeout", "0", "--", "echo", "ok"],
+                               project_dir="/project", local=False, remote=None, workspace=["qa"], timeout=None,
+                               output_profile=None, json=False)
+        with patch("sandbox.commands.jobs_runtime.cmd_job_matrix") as matrix:
+            debug.cmd_test(None, args)
+        self.assertEqual(matrix.call_args.args[1].timeout, 0)
+        self.assertIsNone(matrix.call_args.args[1].output_profile)
+
+    def test_remote_wordpress_test_matrix_resolves_each_workspace_policy(self):
+        import sandbox.commands.debug as debug
+
+        target = SimpleNamespace(
+            project_root="/project", remote_name="vps", workspace_label="one",
+            runtime_policy={
+                "executionProfiles": {"verify": {
+                    "timeoutSeconds": 123, "stallSeconds": 12, "cancelGraceSeconds": 13,
+                    "cancelOnStall": True, "cleanup": "ephemeral",
+                }},
+                "workspaces": {"one": {"executionProfile": "verify"}},
+            }, sources={"identity": "project:test"},
+        )
+        submissions = debug._remote_test_matrix_submissions(
+            target, "unit", [], ["one"], None, "smart")
+
+        submission = submissions[0]
+        self.assertEqual((submission.deadline_seconds, submission.stall_seconds,
+                          submission.cancel_grace_seconds, submission.cancel_on_stall,
+                          submission.cleanup_policy), (123, 12, 13, True, "ephemeral"))
+        self.assertEqual(submission.execution_policy_provenance["execution_profile"], "workspace")
+        with self.assertRaises(SystemExit):
+            debug._remote_test_matrix_submissions(target, "unit", [], ["one"], 0, "smart")
 
 
 if __name__ == "__main__":  # pragma: no cover

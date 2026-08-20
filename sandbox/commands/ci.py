@@ -578,7 +578,14 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     """
     from sandbox.jobs.models import JobSubmission
     from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
-    timeout = int(getattr(args, "timeout", 900) or 900)
+    from sandbox.commands.jobs_runtime import _resolved_execution_policy, _resolved_output_profile
+    policy = _resolved_execution_policy(target, type("PolicyArgs", (), {
+        "execution_policy_json": None, "profile": None,
+        "timeout": getattr(args, "timeout", None), "stall_seconds": None,
+        "cancel_grace_seconds": None, "cancel_on_stall": None, "cleanup_policy": None,
+    })())
+    output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
+    timeout = policy.deadline_seconds
     label_prefix = (getattr(args, "label_prefix", None) or
                     getattr(target, "workspace_label", None) or "ci")
     # Keep enough room for a caller-visible workspace prefix plus the
@@ -641,8 +648,12 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 target_kind="remote", remote_name=target.remote_name,
                 workspace_label=label, workspace_mode="isolated", argv=tuple(command),
                 deadline_seconds=timeout, source=_source_identity(target.project_root),
-                output_profile=getattr(args, "output_profile", "smart"),
-                deadline_source="explicit", artifact_paths=tuple(_remote_ci_artifacts(
+                output_profile=output_profile, execution_profile=policy.execution_profile,
+                deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
+                stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+                cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+                execution_policy_provenance=policy.provenance,
+                artifact_paths=tuple(_remote_ci_artifacts(
                     workflow_data.get("jobs", {}).get(job["id"], {}))),
                 depends_on=dependencies,
                 failure_policy="continue" if (job.get("continue_on_error") or not job.get("fail_fast", True))

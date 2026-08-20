@@ -114,12 +114,17 @@ all other machine-state. `config.yml` / `.yaml` also work. Backward-compat: unti
 `./sb migrate --apply` runs, the legacy `~/.config/sandbox/config.json`
 (honoring `$XDG_CONFIG_HOME`) is still read as a fallback.
 
-`SANDBOX_HOME` is the explicit, highest-priority location selector. `./sb home <dir>`
-relocates the base and, after verification, records the selected path in the non-secret
-owner-only bootstrap hint `~/.config/sandbox/home`, so subsequent CLI and MCP launches
-continue to agree without exporting the variable in every shell. A normal first command
-automatically migrates old repo/config-only state only when that selected base is empty;
-if both sides hold state, Sandbox stops without merging or deleting either source.
+`SANDBOX_HOME` is the explicit, highest-priority location selector when it is non-empty.
+Without it, both the CLI and MCP read the last verified **absolute** path from the
+non-secret, owner-only bootstrap hint `~/.config/sandbox/home` written by
+`./sb home <dir>`; a relative, blank, missing, or unreadable hint falls back to
+`~/sandbox`. This selector is only a path hint: it never triggers registry migration,
+merging, or target discovery. The `./sb home <dir>` command relocates the base and
+records the selected path only after
+verification, so subsequent CLI and MCP launches continue to agree without exporting
+the variable in every shell. A normal first command automatically migrates old
+repo/config-only state only when that selected base is empty; if both sides hold state,
+Sandbox stops without merging or deleting either source.
 
 It sits **under** the project in priority:
 
@@ -697,6 +702,15 @@ database or uploads**. Use it after editing config — toggling a constant
 (`TEMPLATELY_DEV_API`, `WP_DEBUG`), adding a plugin/theme, or enabling
 multisite. It:
 
+For a ready Docker instance, `sb ensure` first attests that every required web
+plane has exactly the read-only self-bind source set generated from
+`defaults.plugins_home` plus that instance's `extra_mounts`. Drift returns
+`instance_mount_drift`; unavailable or malformed Docker inspection returns
+`instance_mount_state_unavailable`. Both refuse before writing registry,
+Compose, environment, snapshots, or project wiring. Run the explicit
+`sb apply --project-dir <DIR>` / `apply_config` reconciliation after the state
+is available; Herd has no Docker source-bind attestation.
+
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra
    bind-mounts).
@@ -914,11 +928,31 @@ provisioned remote, it can make remote execution the project default:
 For example, `./sb job-start --profile unit -- <argv>` selects the built-in
 `unit` execution deadline profile for an explicit job.
 
+Execution policy resolves in this order: explicit job fields, selected workspace
+policy, project runtime policy, then the operation fallback (`exec`). `None` is
+the only absence sentinel, so `--no-cancel-on-stall` is an explicit false
+override rather than an instruction to inherit a profile's true value. A
+workspace may choose an execution/output profile:
+
+```jsonc
+"workspaces": {
+  "qa": {"executionProfile": "e2e-long", "outputProfile": "sample-20"}
+}
+```
+
 Every profile has a finite timeout (at most seven days). Built-ins are `exec`,
 `unit`, `integration`, `e2e`, `ci`, `overall`, and `overnight`; output built-ins
 are `full`, `smart`, `errors`, `sampled`, and `quiet`. Explicit `--timeout`
 overrides a profile. `--local` overrides a configured remote; `--remote NAME`
 selects a named provisioned remote.
+
+Accepted jobs retain the resolved profile, deadline source/reminder, stall
+threshold, cancellation grace, cancel-on-stall value, cleanup policy, and field
+provenance. Remote submission sends that frozen policy and requires
+`job.execution-policy.v1` before staging; an older or unadvertised controller is
+refused with reprovision/update guidance instead of applying its own config.
+This source release adds the client check and advertised capability only; it is
+not proof that any existing remote controller has been updated or reprovisioned.
 
 Use `sb exec … --detach -- <argv>` for long work, then read `sb job-status` and
 `sb job-output`. Output is durably retained on the execution host, not held in

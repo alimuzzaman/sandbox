@@ -770,6 +770,67 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
+def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | None:
+    """Derive the current project-config source policy without creating paths."""
+    defaults = cfg.get("defaults", {}) or {}
+    raw_plugins_home = defaults.get("plugins_home", "") or "./plugins"
+    try:
+        plugins_home = Path(str(raw_plugins_home)).expanduser()
+        if not plugins_home.is_absolute():
+            plugins_home = ROOT / plugins_home
+        plugins_home = plugins_home.resolve()
+        if not plugins_home.is_dir() or not os.access(plugins_home, os.R_OK | os.X_OK):
+            raise OSError("plugins home is unavailable")
+        root_path = Path(root)
+        sources = [str(plugins_home)]
+
+        def add_if_external(value: object) -> None:
+            source = Path(str(value)).expanduser()
+            if not source.is_absolute():
+                source = (root_path / source).resolve()
+            source = source.resolve()
+            # A declared local path is part of the policy even when it is not
+            # an extra bind (for example, it lives below plugins_home).  Do not
+            # silently drop a missing or unreadable declaration and let a ready
+            # instance look safe against a weakened desired set.
+            if not source.exists() or not os.access(source, os.R_OK):
+                raise OSError("declared local source is unavailable")
+            if not source.is_relative_to(plugins_home):
+                sources.append(str(source))
+
+        for entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
+            if entry == ".":
+                add_if_external(root_path)
+            elif isinstance(entry, str) and ("/" in entry or entry.startswith((".", "~"))):
+                add_if_external(entry)
+        for value in (pconf.get("mappings") or {}).values():
+            add_if_external(value)
+        for value in (pconf.get("mappings_inactive") or {}).values():
+            add_if_external(value)
+        for entry in (pconf.get("plugins_resolved") or {}).values():
+            source = entry.get("source") or {}
+            if source.get("kind") == "path" and source.get("value"):
+                add_if_external(source["value"])
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return list(dict.fromkeys(sources))
+
+
+def _mount_attestation_refusal(code: object) -> dict:
+    """Return a bounded ready-path refusal with an explicit safe remedy."""
+    if code not in {"instance_mount_drift", "instance_mount_state_unavailable"}:
+        code = "instance_mount_state_unavailable"
+    message = (
+        "live Sandbox source mounts do not match the declared policy; "
+        "run `sb apply --project-dir <project-dir>` to reconcile"
+        if code == "instance_mount_drift" else
+        "live Sandbox source mount state is unavailable; "
+        "run `sb apply --project-dir <project-dir>` after Docker state is available"
+    )
+    return {"ok": False, "mutated": False,
+            "error": {"code": code, "message": message}}
+
+
 def _auto_heal_wp_url(name: str) -> bool:
     """Restore a registered HTTPS instance URL if WP drifted to localhost."""
     cfg = load_config()
@@ -874,6 +935,27 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     # runtime config are host-scoped. Matrix cells use distinct workspace roots
     # and would otherwise pass their per-project locks concurrently, selecting
     # the same free Mailpit/WordPress port before either registry write lands.
+    # Docker observation is bounded but may still take several seconds.  Keep
+    # it under this project's lock only: unrelated projects must not queue on
+    # the global port-allocation lock before any port allocation is needed.
+    with sc.project_lock(root):
+        existing = sc.registry_get(root, label=label)
+        # The ready fast path must prove the live containers still expose the
+        # exact source self-binds generated for this instance.  Do this before
+        # port conflict reconciliation: that helper can write local config and
+        # Compose, which a drift/unavailable refusal must never do.
+        if existing and existing.get("status") == "ready":
+            server = _valid_server(existing.get("server") or pconf.get("server") or "nginx")
+            if server != "herd":
+                desired_sources = _desired_source_mounts(cfg, root, pconf)
+                attestation = (
+                    attest_source_mounts(existing["instance"], str(server), desired_sources)
+                    if desired_sources is not None else
+                    {"ok": False, "code": "instance_mount_state_unavailable"}
+                )
+                if not attestation.get("ok"):
+                    return _mount_attestation_refusal(attestation.get("code"))
+
     with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
         existing = sc.registry_get(root, label=label)
         # A remote or local host may retain a listener that is not represented

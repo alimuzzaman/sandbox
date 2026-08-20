@@ -88,6 +88,115 @@ class TestFeedbackService(unittest.TestCase):
         self.assertFalse(limit["ok"])
         self.assertEqual(limit["error"]["code"], "invalid_feedback")
 
+    def _write_feedback_record(self, feedback_id: str, *, stamp: str, summary: str = "safe") -> Path:
+        path = self.root / "feedback"
+        path.mkdir(exist_ok=True)
+        target = path / f"{stamp}-{feedback_id}.json"
+        target.write_text(json.dumps({
+            "schema_version": 1,
+            "feedback_id": feedback_id,
+            "created_at": "2026-08-12T08:30:00Z",
+            "category": "bug",
+            "severity": "high",
+            "source": "agent",
+            "summary": summary,
+            "details": "details",
+            "reference": "",
+            "remote": None,
+            "project": None,
+            "redacted": False,
+            "trust": "untrusted_data",
+        }), encoding="utf-8")
+        return target
+
+    def test_show_and_detail_resolve_unique_lower_hex_prefix(self):
+        feedback_id = "0123abcd" + "e" * 24
+        self._write_feedback_record(feedback_id, stamp="20260812T083000Z", summary="prefix target")
+
+        shown = self.service.show("0123abcd")
+        detailed = self.service.detail("0123abcd")
+
+        self.assertTrue(shown["ok"])
+        self.assertEqual(shown["data"]["feedback"]["feedback_id"], feedback_id)
+        self.assertTrue(detailed["ok"])
+        self.assertEqual(detailed["action"], "detail")
+        self.assertEqual(detailed["data"]["feedback"]["summary"], "prefix target")
+
+    def test_prefix_references_fail_closed_for_invalid_missing_and_ambiguous(self):
+        store = self.service.store
+        with patch.object(store, "_paths", side_effect=AssertionError("must not scan")):
+            invalid = self.service.show("not-a-feedback-ref")
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid["error"]["code"], "invalid_feedback")
+
+        missing = self.service.show("0123abcd")
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["error"]["code"], "feedback_not_found")
+
+        first = "abcd1234" + "a" * 24
+        second = "abcd1234" + "b" * 24
+        self._write_feedback_record(first, stamp="20260812T083000Z", summary="candidate one")
+        self._write_feedback_record(second, stamp="20260812T083001Z", summary="candidate two")
+        ambiguous = self.service.show("abcd1234")
+        self.assertFalse(ambiguous["ok"])
+        self.assertEqual(ambiguous["error"]["code"], "feedback_id_ambiguous")
+        self.assertEqual(ambiguous["data"], {})
+        self.assertNotIn(first, json.dumps(ambiguous))
+        self.assertNotIn(second, json.dumps(ambiguous))
+
+    def test_prefix_duplicate_canonical_id_uses_newest_and_skips_invalid_records(self):
+        feedback_id = "deadbeef" + "1" * 24
+        self._write_feedback_record(feedback_id, stamp="20260812T083000Z", summary="old")
+        self._write_feedback_record(feedback_id, stamp="20260812T083001Z", summary="new")
+        feedback_dir = self.root / "feedback"
+        (feedback_dir / "20260812T083002Z-deadbeef-invalid.json").write_text("not-json", encoding="utf-8")
+        symlink_target = feedback_dir / "20260812T082900Z-deadbeef-symlink-target.json"
+        symlink_target.write_text(json.dumps({"schema_version": 1, "feedback_id": feedback_id}), encoding="utf-8")
+        (feedback_dir / "20260812T083003Z-deadbeef-symlink.json").symlink_to(symlink_target)
+
+        resolved = self.service.show("deadbeef")
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(resolved["data"]["feedback"]["summary"], "new")
+
+    def test_cli_and_mcp_show_detail_forward_the_same_prefix_reference(self):
+        from sandbox.commands import feedback as cli_feedback
+
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            def show(self, reference):
+                self.calls.append(("show", reference))
+                return {"ok": True, "action": "show", "data": {"feedback": {}}}
+
+            def detail(self, reference):
+                self.calls.append(("detail", reference))
+                return {"ok": True, "action": "detail", "data": {"feedback": {}}}
+
+        service = Service()
+        for action in ("show", "detail"):
+            args = SimpleNamespace(
+                action=action, feedback_id="0123abcd", feedback_id_option=None,
+                json=True,
+            )
+            with patch.object(cli_feedback, "feedback_service", return_value=service), \
+                    patch("sys.stdout", new_callable=io.StringIO):
+                cli_feedback.cmd_feedback(None, args)
+
+        path = ROOT / "mcp" / "wp-server" / "tools" / "feedback.py"
+        spec = importlib.util.spec_from_file_location("feedback_prefix_parity", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        module._service_factory = lambda: service
+        module.feedback_list(action="show", feedback_id="0123abcd")
+        module.feedback_list(action="detail", feedback_id="0123abcd")
+
+        self.assertEqual(service.calls, [
+            ("show", "0123abcd"), ("detail", "0123abcd"),
+            ("show", "0123abcd"), ("detail", "0123abcd"),
+        ])
+
     def test_invalid_limit_reports_the_supported_range(self):
         payload = self.service.list(101)
 

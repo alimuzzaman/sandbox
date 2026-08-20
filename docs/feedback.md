@@ -28,6 +28,20 @@ Inspect the newest records:
 sb feedback list --limit 20 --json
 ```
 
+Inspect one record by its exact 32-character ID or a unique lowercase hexadecimal
+prefix of 8-32 characters:
+
+```bash
+sb feedback show 0123abcd --json
+sb feedback detail 0123abcd --json
+```
+
+An invalid reference fails as `invalid_feedback`; a prefix matching no valid record
+returns `feedback_not_found`; a prefix matching more than one distinct canonical ID
+returns `feedback_id_ambiguous` without exposing candidate IDs, counts, paths, or
+record content. Duplicate files for one canonical ID are not ambiguous: the newest
+valid record wins. CLI and MCP show/detail use the same resolver.
+
 The `--limit` / `limit` option controls the maximum records to return (1-100;
 default: 20).
 

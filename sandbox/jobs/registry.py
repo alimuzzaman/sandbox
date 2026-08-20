@@ -139,9 +139,17 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "output_profile_definition": raw.get("output_profile_definition", {}),
         "deadline_seconds": int(raw["deadline_seconds"]),
         "deadline_source": _bounded_text(raw["deadline_source"], "deadline source", maximum=128),
+        "deadline_reminder": _bounded_text(raw.get("deadline_reminder"), "deadline reminder",
+                                             maximum=1_024, allow_none=True),
         "stall_seconds": int(raw["stall_seconds"]),
+        "cancel_grace_seconds": int(raw["cancel_grace_seconds"]),
         "cancel_on_stall": bool(raw["cancel_on_stall"]),
         "cleanup_policy": raw["cleanup_policy"],
+        "execution_policy_provenance": {
+            _bounded_text(key, "execution policy provenance key", maximum=64):
+            _bounded_text(value, "execution policy provenance value", maximum=128)
+            for key, value in dict(raw.get("execution_policy_provenance") or {}).items()
+        },
         "request_id": _bounded_text(raw.get("request_id"), "request id", maximum=64, allow_none=True),
         "parent_job_id": raw.get("parent_job_id"),
         "retry_of_job_id": raw.get("retry_of_job_id"),
@@ -232,9 +240,12 @@ class JobRepository:
             output_profile TEXT NOT NULL,
             deadline_seconds INTEGER NOT NULL CHECK(deadline_seconds > 0),
             deadline_source TEXT NOT NULL,
+            deadline_reminder TEXT,
             stall_seconds INTEGER NOT NULL CHECK(stall_seconds > 0),
+            cancel_grace_seconds INTEGER NOT NULL DEFAULT 20 CHECK(cancel_grace_seconds > 0),
             cancel_on_stall INTEGER NOT NULL,
             cleanup_policy TEXT NOT NULL,
+            execution_policy_provenance_json TEXT NOT NULL DEFAULT '{}',
             source_identity TEXT NOT NULL,
             source_commit TEXT,
             source_dirty_digest TEXT,
@@ -367,6 +378,9 @@ class JobRepository:
             for name, declaration in (
                 ("depends_on_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("failure_policy", "TEXT NOT NULL DEFAULT 'fail-fast'"),
+                ("deadline_reminder", "TEXT"),
+                ("cancel_grace_seconds", "INTEGER NOT NULL DEFAULT 20"),
+                ("execution_policy_provenance_json", "TEXT NOT NULL DEFAULT '{}'") ,
                 ("queue_reason", "TEXT"),
                 ("queue_position", "INTEGER"),
                 ("submission_json", "TEXT"),
@@ -426,8 +440,10 @@ class JobRepository:
                 submission.cwd_relative, json.dumps(list(submission.environment_keys)),
                 submission.execution_profile, submission.output_profile,
                 submission.deadline_seconds, submission.deadline_source,
-                submission.stall_seconds, int(submission.cancel_on_stall),
-                submission.cleanup_policy, submission.source.identity, submission.source.commit,
+                submission.deadline_reminder, submission.stall_seconds, submission.cancel_grace_seconds,
+                int(submission.cancel_on_stall), submission.cleanup_policy,
+                json.dumps(dict(submission.execution_policy_provenance or {}), sort_keys=True),
+                submission.source.identity, submission.source.commit,
                 submission.source.dirty_digest, now, now, submission_json,
             )
             connection.execute(
@@ -438,9 +454,10 @@ class JobRepository:
                     health, depends_on_json, failure_policy, queue_reason, queue_position,
                     command_json, cwd_relative, environment_keys_json,
                     execution_profile, output_profile, deadline_seconds, deadline_source,
-                    stall_seconds, cancel_on_stall, cleanup_policy, source_identity,
+                    deadline_reminder, stall_seconds, cancel_grace_seconds, cancel_on_stall, cleanup_policy,
+                    execution_policy_provenance_json, source_identity,
                     source_commit, source_dirty_digest, accepted_at, updated_at, submission_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id

@@ -52,9 +52,12 @@ def _sandbox_base() -> Path:
     if not raw:
         hint = Path.home() / ".config" / "sandbox" / "home"
         try:
-            raw = hint.read_text().strip() or None
+            candidate = hint.read_text().strip()
         except OSError:
-            raw = None
+            candidate = ""
+        # The persisted selector is an absolute, owner-written path.  Reject
+        # relative values so MCP launched from another CWD cannot split state.
+        raw = candidate if candidate and Path(candidate).is_absolute() else None
     return Path(raw or "~/sandbox").expanduser().resolve()
 
 

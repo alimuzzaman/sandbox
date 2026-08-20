@@ -27,6 +27,30 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_project_routed_ensure_skips_compose_and_env_predispatch_writes(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(sys, "argv", ["sb", "ensure", "--local", "--project-dir", "/tmp/project"]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "ensure": lambda cfg, args: observed.append((cfg, args.project_dir)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+            cli.main()
+
+        self.assertEqual(observed, [({}, "/tmp/project")])
+        compose.assert_not_called()
+        env.assert_not_called()
+        auto_migrate.assert_not_called()
+        finalize.assert_not_called()
+
     def test_wordpress_only_legacy_commands_have_capability_gates(self):
         import sandbox.cli as cli
         self.assertEqual(cli.CLI_CAPABILITIES["wp"], "wordpress.cli")
@@ -438,6 +462,74 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
         self.assertEqual(seen, [(False, ["--", "--json"])])
         self.assertEqual(output, "")
         self.assertIn("remote job submission blocked by Docker network capacity admission", errors)
+
+    def test_cwd_project_instance_survives_env_removal_via_persisted_selector(self):
+        """A separately launched CLI still finds the project-owned instance."""
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="sb-cli-home-") as td:
+            base = Path(td)
+            home = base / "home"
+            selected = base / "selected"
+            project = home / "project"
+            (project / ".git").mkdir(parents=True)
+            (project / "sandbox.config.json").write_text("{}\n")
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text(str(selected) + "\n")
+
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            env["PYTHONPATH"] = str(root)
+            register = (
+                "import sandbox_core; sandbox_core.registry_put(%r, instance=%r)"
+                % (str(project), "cli-instance")
+            )
+            created = subprocess.run(
+                [sys.executable, "-c", register], cwd=str(root), env=env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+            probe = "from sandbox.cli import _cwd_instance; print(_cwd_instance())"
+            resolved = subprocess.run(
+                [sys.executable, "-c", probe], cwd=str(project), env=env,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            self.assertEqual(resolved.stdout.strip(), "cli-instance")
+
+    def test_cli_relative_selector_falls_back_to_cwd_independent_default(self):
+        """CLI path resolution never interprets a relative bootstrap hint."""
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="sb-cli-relative-") as td:
+            base = Path(td)
+            home = base / "home"
+            cwd_a = base / "cwd-a"
+            cwd_b = base / "cwd-b"
+            cwd_a.mkdir(parents=True)
+            cwd_b.mkdir(parents=True)
+            hint = home / ".config" / "sandbox" / "home"
+            hint.parent.mkdir(parents=True)
+            hint.write_text("relative-state\n")
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env.pop("SANDBOX_HOME", None)
+            env.pop("SANDBOX_RUNTIME", None)
+            env["PYTHONPATH"] = str(root)
+            probe = (
+                "import sandbox.cli; from sandbox.core._paths import _sandbox_base; "
+                "print(_sandbox_base())"
+            )
+            for cwd in (cwd_a, cwd_b):
+                with self.subTest(cwd=cwd.name):
+                    resolved = subprocess.run(
+                        [sys.executable, "-c", probe], cwd=str(cwd), env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(resolved.returncode, 0, resolved.stderr)
+                    self.assertEqual(resolved.stdout.strip(), str((home / "sandbox").resolve()))
 
 
 if __name__ == "__main__":

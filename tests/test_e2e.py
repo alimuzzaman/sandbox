@@ -129,6 +129,31 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
             self.assertIn("--shard-total", submission.argv)
             self.assertIn("--headed", submission.argv)
 
+    def test_remote_shards_resolve_workspace_execution_policy_before_submission(self):
+        self.target.runtime_policy = {
+            "executionProfiles": {"verify": {
+                "timeoutSeconds": 123, "stallSeconds": 12, "cancelGraceSeconds": 13,
+                "cancelOnStall": True, "cleanup": "ephemeral",
+            }},
+            "workspaces": {"e2e-dev": {"executionProfile": "verify"}},
+        }
+        submissions = e2e._remote_shard_submissions(
+            target=self.target, config_path=self.config, root_path=self.root,
+            workers=2, timeout=None, args=self.args,
+        )
+
+        self.assertEqual({(item.deadline_seconds, item.stall_seconds, item.cancel_grace_seconds,
+                          item.cancel_on_stall, item.cleanup_policy) for item in submissions},
+                         {(123, 12, 13, True, "ephemeral")})
+        self.assertEqual({item.execution_policy_provenance["execution_profile"] for item in submissions},
+                         {"workspace"})
+        self.assertTrue(all("123" in item.argv for item in submissions))
+        with self.assertRaises(SystemExit):
+            e2e._remote_shard_submissions(
+                target=self.target, config_path=self.config, root_path=self.root,
+                workers=2, timeout=0, args=self.args,
+            )
+
     def test_single_shard_specs_keep_original_playwright_partition(self):
         self.assertEqual(e2e._shard_specs(4, 2, 4),
                          [{"label": "e2e-w2", "index": 2, "total": 4}])

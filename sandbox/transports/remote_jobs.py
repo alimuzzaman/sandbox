@@ -9,7 +9,7 @@ import re
 import shlex
 from typing import Any, Callable
 
-from sandbox.jobs.models import validate_ack_job_id
+from sandbox.jobs.models import normalize_output_wait_seconds, validate_ack_job_id
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
 
@@ -247,7 +247,8 @@ def _error_detail(payload: dict | None, result: object) -> str:
     return f"remote exit code {getattr(result, 'returncode', 1)}"
 
 
-def _require_submission_ack(payload: object, *, aggregate: bool = False) -> dict:
+def _require_submission_ack(payload: object, *, aggregate: bool = False,
+                            expected_policy: dict | list[dict] | None = None) -> dict:
     """Require an explicit accepted acknowledgement with a durable identity."""
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise ValueError("remote acceptance acknowledgement is not successful")
@@ -265,6 +266,16 @@ def _require_submission_ack(payload: object, *, aggregate: bool = False) -> dict
     status = payload.get("status")
     if status != "accepted":
         raise ValueError("remote acceptance acknowledgement is missing status=accepted")
+    if expected_policy is not None:
+        if aggregate:
+            children = payload.get("children", ())
+            expected = expected_policy if isinstance(expected_policy, list) else [expected_policy] * len(children)
+            if len(expected) != len(children) or any(
+                    child.get("execution_policy") != policy
+                    for child, policy in zip(children, expected)):
+                raise ValueError("remote acceptance acknowledgement is missing exact execution policy")
+        elif payload.get("execution_policy") != expected_policy:
+            raise ValueError("remote acceptance acknowledgement is missing exact execution policy")
     return payload
 
 
@@ -356,12 +367,11 @@ class RemoteJobTransport:
         remote = self.remote_lookup(name)
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("remote is not provisioned")
-        # Older hand-written remote records may predate capability metadata;
-        # preserve that compatibility while refusing an explicitly constrained
-        # remote before staging source or starting a job.
         capabilities = remote.get("capabilities")
-        if capabilities is not None and "job.exec" not in capabilities:
-            raise RemoteJobTransportError("remote does not support job.exec")
+        required = {"job.exec", "job.execution-policy.v1"}
+        if not isinstance(capabilities, (list, tuple, set)) or not required.issubset(capabilities):
+            raise RemoteJobTransportError(
+                "remote does not support job.execution-policy.v1; reprovision or update the remote before submitting jobs")
         return remote
 
     def _deploy(self, remote: dict, project_root: str) -> dict:
@@ -438,9 +448,20 @@ class RemoteJobTransport:
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
                  "cwd_relative": item.cwd_relative, "execution_profile": item.execution_profile,
                  "output_profile": item.output_profile, "deadline_source": item.deadline_source,
-                 "stall_seconds": item.stall_seconds, "cancel_on_stall": item.cancel_on_stall,
+                 "execution_policy": {
+                     "execution_profile": item.execution_profile,
+                     "deadline_seconds": item.deadline_seconds,
+                     "deadline_source": item.deadline_source,
+                     "deadline_reminder": item.deadline_reminder,
+                     "stall_seconds": item.stall_seconds,
+                     "cancel_grace_seconds": item.cancel_grace_seconds,
+                     "cancel_on_stall": item.cancel_on_stall,
+                     "cleanup_policy": item.cleanup_policy,
+                     "provenance": dict(item.execution_policy_provenance or {}),
+                 },
                  "environment_keys": list(item.environment_keys),
                  "request_id": item.request_id, "cleanup_policy": item.cleanup_policy,
+                 "execution_policy_provenance": dict(item.execution_policy_provenance or {}),
                  "depends_on": list(item.depends_on), "failure_policy": item.failure_policy,
                  "compatibility_differences": list(item.compatibility_differences),
                  "artifact_paths": list(item.artifact_paths),
@@ -462,7 +483,18 @@ class RemoteJobTransport:
         try:
             if payload.get("status") is not None and payload.get("status") != "accepted":
                 raise ValueError("remote acceptance acknowledgement is missing status=accepted")
-            _require_submission_ack({**payload, "status": "accepted"}, aggregate=True)
+            _require_submission_ack({**payload, "status": "accepted"}, aggregate=True,
+                                    expected_policy=[{
+                                        "profile": item.execution_profile,
+                                        "deadline_seconds": item.deadline_seconds,
+                                        "deadline_source": item.deadline_source,
+                                        "deadline_reminder": item.deadline_reminder,
+                                        "stall_seconds": item.stall_seconds,
+                                        "cancel_grace_seconds": item.cancel_grace_seconds,
+                                        "cancel_on_stall": item.cancel_on_stall,
+                                        "cleanup_policy": item.cleanup_policy,
+                                        "provenance": dict(item.execution_policy_provenance or {}),
+                                    } for item in submissions])
         except ValueError as exc:
             raise RemoteJobTransportError(f"remote matrix acceptance failed: {exc}") from exc
         return {**payload, "target": {"kind": "remote", "remote": first.remote_name,
@@ -508,10 +540,19 @@ class RemoteJobTransport:
                 "--cwd-relative", submission.cwd_relative,
                 "--output-profile", submission.output_profile, "--profile", submission.execution_profile,
                 "--source-identity", deployed["identity"]]
-        if submission.stall_seconds != 300:
-            args += ["--stall-seconds", str(submission.stall_seconds)]
-        if submission.cancel_on_stall:
-            args.append("--cancel-on-stall")
+        policy = {
+            "execution_profile": submission.execution_profile,
+            "deadline_seconds": submission.deadline_seconds,
+            "deadline_source": submission.deadline_source,
+            "deadline_reminder": submission.deadline_reminder,
+            "stall_seconds": submission.stall_seconds,
+            "cancel_grace_seconds": submission.cancel_grace_seconds,
+            "cancel_on_stall": submission.cancel_on_stall,
+            "cleanup_policy": submission.cleanup_policy,
+            "provenance": dict(submission.execution_policy_provenance or {}),
+        }
+        encoded_policy = base64.b64encode(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).decode()
+        args += ["--execution-policy-json", encoded_policy]
         # The deployed checkout is the source of truth for detached execution.
         # Never let a caller's pre-deploy metadata overwrite the exact tree
         # identity that was just staged on the controller.
@@ -565,7 +606,17 @@ class RemoteJobTransport:
             raise RemoteJobTransportError(
                 f"remote job acceptance failed: {_error_detail(payload, result)}")
         try:
-            _require_submission_ack(payload)
+            _require_submission_ack(payload, expected_policy={
+                "profile": submission.execution_profile,
+                "deadline_seconds": submission.deadline_seconds,
+                "deadline_source": submission.deadline_source,
+                "deadline_reminder": submission.deadline_reminder,
+                "stall_seconds": submission.stall_seconds,
+                "cancel_grace_seconds": submission.cancel_grace_seconds,
+                "cancel_on_stall": submission.cancel_on_stall,
+                "cleanup_policy": submission.cleanup_policy,
+                "provenance": dict(submission.execution_policy_provenance or {}),
+            })
         except ValueError as exc:
             raise RemoteJobTransportError(f"remote job acceptance failed: {exc}") from exc
         return {**payload, "target": {"kind": "remote", "remote": submission.remote_name,
@@ -582,6 +633,7 @@ class RemoteJobTransport:
                     since: str | None = None,
                     max_bytes: int = 65536, wait_seconds: int = 0,
                     encoding: str = "utf8", profile: str = "full") -> dict:
+        wait_seconds = normalize_output_wait_seconds(wait_seconds)
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict):
             raise RemoteJobTransportError("unknown remote")

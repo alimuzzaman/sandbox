@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,28 @@ sys.path.insert(0, str(MCP_ROOT))
 
 
 class TestMcpComposition(unittest.TestCase):
+    def test_ensure_returns_the_cli_typed_mount_refusal_envelope(self):
+        from tools import instances
+
+        result = type("Result", (), {
+            "returncode": 1,
+            "stdout": ('{"ok":false,"mutated":false,"error":{'
+                       '"code":"instance_mount_state_unavailable",'
+                       '"message":"source mounts unavailable"}}\n'),
+            "stderr": "",
+        })()
+        with patch.object(instances, "SANDBOX_ROOT", MCP_ROOT.parent.parent, create=True), \
+                patch.object(instances, "_safe_json", side_effect=json.loads, create=True), \
+                patch.object(instances.subprocess, "run", return_value=result):
+            payload = instances.ensure_instance("/tmp/project")
+        self.assertEqual(payload, {
+            "ok": False, "mutated": False,
+            "error": {
+                "code": "instance_mount_state_unavailable",
+                "message": "source mounts unavailable",
+            },
+        })
+
     def test_group_specs_are_deterministic_and_duplicates_fail(self):
         from composition import ToolGroupRegistry, ToolGroupSpec
 

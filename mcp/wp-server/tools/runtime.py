@@ -355,7 +355,12 @@ def instance_exec(command: list[str], project_dir: str,
                  label: str | None = None, local: bool = False,
                  remote: str | None = None, workspace: str | None = None,
                  timeout_seconds: int | None = None,
-                 output_profile: str = "smart") -> dict:
+                 output_profile: str | None = None,
+                 execution_profile: str | None = None,
+                 stall_seconds: int | None = None,
+                 cancel_grace_seconds: int | None = None,
+                 cancel_on_stall: bool | None = None,
+                 cleanup_policy: str | None = None) -> dict:
     """Execute an argv list in the declared public service.
 
     Shell text is intentionally not accepted; callers that need a shell must
@@ -365,7 +370,10 @@ def instance_exec(command: list[str], project_dir: str,
     if not command or any(not isinstance(item, str) or not item for item in command):
         return {"ok": False, "code": "invalid_command",
                 "error": "command must be a non-empty argv list"}
-    durable = bool(local or remote or workspace or timeout_seconds is not None)
+    durable = bool(local or remote or workspace or timeout_seconds is not None
+                   or execution_profile is not None or stall_seconds is not None
+                   or cancel_grace_seconds is not None or cancel_on_stall is not None
+                   or cleanup_policy is not None)
     if not durable:
         # A project-level remote-first policy must route instance execution to
         # the durable remote controller even when the MCP caller omits target
@@ -381,8 +389,11 @@ def instance_exec(command: list[str], project_dir: str,
     if durable:
         from tools.jobs import _submit_explicit_job
         job = _submit_explicit_job(command, project_dir, local=local, remote=remote, workspace=workspace,
-                                   timeout_seconds=timeout_seconds or 900,
-                                   output_profile=output_profile, kind="runtime-exec")
+                                   timeout_seconds=timeout_seconds, output_profile=output_profile,
+                                   execution_profile=execution_profile, stall_seconds=stall_seconds,
+                                   cancel_grace_seconds=cancel_grace_seconds,
+                                   cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
+                                   kind="runtime-exec")
         return {"ok": bool(job.get("ok")), "operation": "exec", **job}
     return _typed_invoke(project_dir, label, "exec", {"argv": command})
 

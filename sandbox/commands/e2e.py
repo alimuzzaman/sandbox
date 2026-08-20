@@ -168,10 +168,11 @@ def _aggregate_result(result: dict, workers: int) -> dict:
 
 
 def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
-                              workers: int, timeout: int, args) -> list:
+                              workers: int, timeout: int | None, args) -> list:
     """Build one isolated durable job per requested Playwright shard."""
     from sandbox.jobs.models import JobSubmission
-    from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+    from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
+                                               _resolved_project_identity, _source_identity)
 
     relative_config = os.path.relpath(config_path.resolve(), root_path.resolve())
     identity = _resolved_project_identity(target)
@@ -180,11 +181,16 @@ def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
     # concurrent E2E submissions from sharing a staged checkout.
     run_key = uuid.uuid4().hex[:10]
     namespace_key = hashlib.sha256(str(target.workspace_label).encode()).hexdigest()[:4]
+    policy = _resolved_execution_policy(target, type("PolicyArgs", (), {
+        "execution_policy_json": None, "profile": None, "timeout": timeout,
+        "stall_seconds": None, "cancel_grace_seconds": None,
+        "cancel_on_stall": None, "cleanup_policy": None,
+    })())
     submissions = []
     for shard in _shard_specs(workers):
         command = ["sb", "e2e", "--local", "--project-dir", ".", "--workers", "1",
                    "--shard-index", str(shard["index"]), "--shard-total", str(shard["total"]),
-                   "--timeout", str(timeout), "--json"]
+                   "--timeout", str(policy.deadline_seconds), "--json"]
         if relative_config != ".":
             command += ["--playwright-config", relative_config]
         if getattr(args, "concurrency", None):
@@ -200,9 +206,14 @@ def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
             command += ["--", *passthrough]
         submissions.append(JobSubmission(
             "e2e", target.project_root, identity, "remote",
-            f"e2e-{namespace_key}-{run_key}-w{shard['index']}", tuple(command), timeout,
+            f"e2e-{namespace_key}-{run_key}-w{shard['index']}", tuple(command), policy.deadline_seconds,
             source, remote_name=target.remote_name,
-            workspace_mode="isolated", output_profile="smart", deadline_source="explicit",
+            workspace_mode="isolated", output_profile="smart",
+            execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
+            deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+            cancel_grace_seconds=policy.cancel_grace_seconds,
+            cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+            execution_policy_provenance=policy.provenance,
         ))
     return submissions
 
@@ -259,9 +270,7 @@ def cmd_e2e(cfg, args) -> None:
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
     if target.kind == "remote":
-        timeout = int(getattr(args, "timeout", None) or 900)
-        if timeout <= 0:
-            die("E2E timeout must be a positive finite number of seconds")
+        timeout = getattr(args, "timeout", None)
         workers = max(1, int(getattr(args, "workers", None) or 2))
         submissions = _remote_shard_submissions(
             target=target, config_path=config_path, root_path=root_path,

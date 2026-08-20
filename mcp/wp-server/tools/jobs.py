@@ -14,6 +14,7 @@ from pathlib import Path
 from dependencies import ToolDependencies
 from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, TargetRequest
 from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+from sandbox.transports.remote_jobs import RemoteJobAdmissionError
 
 
 _job_service = None
@@ -73,6 +74,8 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).submit(submission)
         return _job_service.submit(submission)
+    except RemoteJobAdmissionError as exc:
+        return exc.to_payload()
     except Exception:
         return {"ok": False, "code": "supervisor_launch_failed", "error": "job submission failed"}
 
@@ -115,6 +118,8 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
         return _job_service.submit_matrix(submissions)
+    except RemoteJobAdmissionError as exc:
+        return exc.to_payload()
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"),
                 "error": "job matrix submission failed"}

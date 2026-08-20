@@ -268,11 +268,13 @@ def cmd_e2e(cfg, args) -> None:
             workers=workers, timeout=timeout, args=args,
         )
         from sandbox.core import _remote
-        from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError, RemoteJobTransport
         try:
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+        except RemoteJobAdmissionError:
+            raise
         except Exception as exc:
             die(f"remote E2E acceptance failed: {exc}")
         accepted["workers"] = workers

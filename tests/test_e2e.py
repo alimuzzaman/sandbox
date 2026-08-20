@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import sandbox.commands.e2e as e2e  # noqa: E402
+from sandbox.resources.network_capacity import evaluate_network_capacity  # noqa: E402
+from sandbox.transports.remote_jobs import RemoteJobAdmissionError  # noqa: E402
 
 
 class TestFindPlaywrightConfig(unittest.TestCase):
@@ -167,6 +169,34 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
         self.assertEqual(payload["parent_job_id"], "parent-1")
         self.assertEqual(payload["workers"], 2)
         self.assertEqual(len(captured), 2)
+
+    def test_remote_capacity_admission_is_rethrown_for_the_cli_boundary(self):
+        decision = evaluate_network_capacity({"status": "partial"}, remote_name="vps")
+        admission = RemoteJobAdmissionError(decision)
+
+        class Transport:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit_many(self, _submissions):
+                raise admission
+
+        args = SimpleNamespace(project_dir=str(self.root), playwright_config=None,
+                               local=False, remote="vps", workspace=None, timeout=120,
+                               workers=2, concurrency=None, grep=None, keep_on_fail=False,
+                               strict_provision=False, passthrough=[], json=True,
+                               shard_index=None, shard_total=None)
+        with patch.object(e2e, "_core", return_value=SimpleNamespace(
+                load_project_config=lambda _path: {"root": str(self.root)})), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=lambda _request: SimpleNamespace(
+                        kind="remote", project_root=str(self.root), remote_name="vps",
+                        workspace_label="e2e-dev", sources={"identity": "project:e2e"})),
+                }), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport):
+            with self.assertRaises(RemoteJobAdmissionError) as raised:
+                e2e.cmd_e2e({}, args)
+        self.assertIs(raised.exception, admission)
 
 
 class TestAggregateResult(unittest.TestCase):

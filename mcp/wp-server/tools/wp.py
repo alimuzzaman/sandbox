@@ -218,6 +218,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import JobSubmission, TargetRequest
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
@@ -236,6 +237,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         except (TargetResolutionError, ValueError) as exc:
             return {"ok": False, "passed": False, "summary": None, "output": "", "mode": resolved_mode,
                     "error": str(exc)}
+        except RemoteJobAdmissionError as exc:
+            return {**exc.to_payload(), "passed": False, "summary": None,
+                    "output": "", "mode": resolved_mode}
         except Exception as exc:
             return {"ok": False, "passed": False, "summary": None, "output": "", "mode": resolved_mode,
                     "error": f"remote durable test acceptance failed: {exc}"}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import re
 import shlex
 from typing import Any, Callable
 
@@ -14,6 +15,192 @@ from sandbox.services.redaction import redact_structure, redact_text, require_sa
 
 class RemoteJobTransportError(RuntimeError):
     pass
+
+
+_NETWORK_CAPACITY_CODES = frozenset({
+    "docker_network_capacity_unavailable",
+    "docker_network_subnet_exhausted",
+    "network_allocation_conflict",
+})
+_SAFE_REMOTE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SAFE_ADMISSION_REASONS = frozenset({
+    "ambiguous_pool_evidence",
+    "inconsistent_capacity_totals",
+    "inconsistent_pool_totals",
+    "invalid_capacity_totals",
+    "invalid_collision_evidence",
+    "invalid_ownership_evidence",
+    "invalid_pool_capacity",
+    "invalid_pool_evidence",
+    "missing_pool_evidence",
+    "network_allocation_conflict",
+    "network_ipam_unavailable",
+    "ownership_does_not_cover_allocations",
+    "probe_failed",
+    "probe_incomplete",
+    "probe_not_successful",
+    "probe_output_ambiguous",
+    "probe_output_unavailable",
+})
+_SAFE_ADMISSION_ID = re.compile(r"^pool-[0-9a-f]{16,64}$")
+_MAX_ADMISSION_INTEGER = 10**18
+_MAX_ADMISSION_POOLS = 32
+
+
+def _admission_int(value: object) -> int | None:
+    """Keep bounded non-negative counters from an untrusted decision."""
+    if (isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= _MAX_ADMISSION_INTEGER):
+        return value
+    return None
+
+
+def _admission_reason(value: object, fallback: str | None = None) -> str | None:
+    if isinstance(value, str) and value in _SAFE_ADMISSION_REASONS:
+        return value
+    return fallback
+
+
+def _admission_opaque_id(value: object) -> str | None:
+    """Retain evaluator IDs, replacing malformed values with no identifier."""
+    if isinstance(value, str) and _SAFE_ADMISSION_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _admission_capacity(value: object) -> dict:
+    """Whitelist the bounded capacity fields exposed by the policy evaluator."""
+    if not isinstance(value, dict):
+        return {"status": "unavailable", "usable_subnets": None}
+    status = value.get("status")
+    result = {
+        "status": status if isinstance(status, str) and status in {
+            "complete", "partial", "unavailable",
+        }
+        else "unavailable",
+    }
+    for field in ("total_subnets", "allocated_subnets", "usable_subnets",
+                  "required_subnets"):
+        if field in value:
+            result[field] = _admission_int(value.get(field))
+    # Every blocked decision produced by the evaluator carries this field;
+    # retaining a null fallback makes malformed decisions fail closed without
+    # exposing their original shape.
+    result.setdefault("usable_subnets", None)
+    pools = value.get("pools")
+    if isinstance(pools, list):
+        safe_pools = []
+        for item in pools[:_MAX_ADMISSION_POOLS]:
+            if not isinstance(item, dict):
+                continue
+            pool_id = _admission_opaque_id(item.get("pool_id"))
+            if pool_id is None:
+                continue
+            safe_pool = {"pool_id": pool_id}
+            for field in ("capacity_subnets", "allocated_subnets", "usable_subnets"):
+                if field in item:
+                    safe_pool[field] = _admission_int(item.get(field))
+            safe_pools.append(safe_pool)
+        if safe_pools:
+            result["pools"] = safe_pools
+    return result
+
+
+def _admission_evidence(value: object) -> dict:
+    """Whitelist evidence summaries; never forward probe output or paths."""
+    if not isinstance(value, dict):
+        return {"status": "unavailable"}
+    status = value.get("status")
+    result = {
+        "status": status if isinstance(status, str) and status in {
+            "complete", "partial", "unavailable",
+        }
+        else "unavailable",
+    }
+    if value.get("inventory") == "address_pools_and_network_ipam":
+        result["inventory"] = "address_pools_and_network_ipam"
+    reason = _admission_reason(value.get("reason"))
+    if reason is not None:
+        result["reason"] = reason
+    collision_count = _admission_int(value.get("collision_count"))
+    if collision_count is not None:
+        result["collision_count"] = collision_count
+    ownership = value.get("ownership")
+    if isinstance(ownership, dict):
+        safe_ownership = {}
+        for owner in ("sandbox", "foreign", "unattributed"):
+            field = f"{owner}_allocated_subnets"
+            if field in ownership:
+                safe_ownership[field] = _admission_int(ownership.get(field))
+        if safe_ownership:
+            result["ownership"] = safe_ownership
+    return result
+
+
+def _admission_target(value: object) -> dict:
+    """Expose only an opaque remote name; no SSH, path, or host metadata."""
+    remote = (
+        value.get("remote")
+        if isinstance(value, dict) and value.get("kind") == "remote"
+        else None
+    )
+    if not (isinstance(remote, str) and _SAFE_REMOTE_NAME.fullmatch(remote)):
+        remote = None
+    return {"kind": "remote", "remote": remote}
+
+
+class RemoteJobAdmissionError(RemoteJobTransportError):
+    """A bounded public refusal raised before remote staging can begin."""
+
+    _ERROR = "remote job submission blocked by Docker network capacity admission"
+    _GUIDANCE = (
+        "Review the bounded Docker address-pool plan and scoped Sandbox "
+        "ownership evidence before retrying."
+    )
+
+    def __init__(self, decision: object) -> None:
+        # Keep the source decision private.  Callers must use to_payload(),
+        # whose closed whitelist prevents exception data from crossing an API
+        # boundary by way of str(), repr(), or an accidental dict merge.
+        if not isinstance(decision, dict):
+            decision = getattr(decision, "decision", None)
+        self._decision = decision if isinstance(decision, dict) else {}
+        super().__init__(self._ERROR)
+
+    def to_payload(self) -> dict:
+        """Return the stable, redacted admission envelope."""
+        decision = self._decision
+        code = decision.get("code")
+        if not isinstance(code, str) or code not in _NETWORK_CAPACITY_CODES:
+            code = "docker_network_capacity_unavailable"
+        target = _admission_target(decision.get("target"))
+        recovery = {
+            "automatic_cleanup": False,
+            "automatic_retry": False,
+            "plan": "reviewed_docker_network_capacity",
+        }
+        # Human guidance is only emitted for a validated opaque target. Never
+        # interpolate or forward an arbitrary remote/command value.
+        if target["remote"] is not None:
+            recovery["guidance"] = self._GUIDANCE
+        return {
+            "ok": False,
+            "status": "blocked",
+            "code": code,
+            "error": self._ERROR,
+            "resource_class": "docker_user_defined_network_subnet",
+            "resource_kind": "network",
+            "owner_classes": ["sandbox", "foreign", "unattributed"],
+            "target": target,
+            "capacity": _admission_capacity(decision.get("capacity")),
+            "evidence": _admission_evidence(decision.get("evidence")),
+            "recovery": recovery,
+            "retryable": False,
+            "side_effects": {
+                "staging_started": False,
+                "network_allocation_started": False,
+            },
+        }
 
 
 _MAX_REMOTE_JSON_BYTES = 1_048_576
@@ -177,6 +364,26 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote does not support job.exec")
         return remote
 
+    def _deploy(self, remote: dict, project_root: str) -> dict:
+        """Deploy once, translating only the policy admission refusal."""
+        # Keep this import lazy: the core remote adapter imports this transport
+        # for workspace helpers, so importing it at module load would create a
+        # cycle in callers that only need the local transport contract.
+        from sandbox.core._remote import NetworkCapacityAdmissionError
+
+        caught = False
+        decision = None
+        try:
+            deployed = self.deploy(remote, project_root)
+        except NetworkCapacityAdmissionError as exc:
+            caught = True
+            decision = getattr(exc, "decision", None)
+        if caught:
+            # Raising outside the except block keeps both __cause__ and
+            # __context__ empty while still making the translation explicit.
+            raise RemoteJobAdmissionError(decision) from None
+        return deployed
+
     def submit(self, submission) -> dict:
         if submission.target_kind != "remote" or not submission.remote_name:
             raise RemoteJobTransportError("remote transport requires a remote submission")
@@ -187,7 +394,7 @@ class RemoteJobTransport:
                 "remote job command contains credential-like material"
             ) from None
         remote = self._execution_remote(submission.remote_name)
-        deployed = self.deploy(remote, submission.project_root)
+        deployed = self._deploy(remote, submission.project_root)
         self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
@@ -214,7 +421,7 @@ class RemoteJobTransport:
                     item.project_root != first.project_root for item in submissions)):
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
         remote = self._execution_remote(first.remote_name)
-        deployed = self.deploy(remote, first.project_root)
+        deployed = self._deploy(remote, first.project_root)
         self._validate_deployment(deployed)
         plan = []
         for item in submissions:

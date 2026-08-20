@@ -21,6 +21,7 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
 from sandbox.commands.manifest import load_builtin_commands
+from sandbox.transports.remote_jobs import RemoteJobAdmissionError
 
 
 
@@ -104,6 +105,27 @@ def _global_label_before_subcommand(argv: list[str]) -> str | None:
             break
         index += 1
     return None
+
+
+def _dispatch_remote_admission_error(exc: RemoteJobAdmissionError, args) -> None:
+    """Render the transport's bounded admission envelope at the CLI edge."""
+    payload = exc.to_payload()
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    else:
+        recovery = payload.get("recovery") or {}
+        guidance = recovery.get("guidance")
+        suffix = f" {guidance}" if isinstance(guidance, str) and guidance else ""
+        target = payload.get("target")
+        remote = target.get("remote") if isinstance(target, dict) else None
+        if isinstance(remote, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote):
+            suffix += f" Recovery: run ./sb remote docker-pool {remote} --json."
+        print(
+            f"error: {payload['error']} ({payload['code']})."
+            f"{suffix}",
+            file=sys.stderr,
+        )
+    raise SystemExit(1)
 
 
 def _explicit_global_label(argv: list[str]) -> str | None:
@@ -1033,7 +1055,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     handler = (COMMANDS["setup"] if (args.cmd == "apply"
                                      and not getattr(args, "project_dir", None))
                else COMMANDS[args.cmd])
-    handler(cfg, args)
+    try:
+        handler(cfg, args)
+    except RemoteJobAdmissionError as exc:
+        _dispatch_remote_admission_error(exc, args)
 
 
 

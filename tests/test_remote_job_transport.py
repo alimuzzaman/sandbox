@@ -1,13 +1,214 @@
 import hashlib
+import json
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
+from sandbox.core import _remote
 from sandbox.jobs.models import JobSubmission, SourceIdentity
-from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
+from sandbox.resources.network_capacity import evaluate_network_capacity
+from sandbox.transports.remote_jobs import (
+    RemoteJobAdmissionError,
+    RemoteJobTransport,
+    RemoteJobTransportError,
+)
 
 
 class RemoteJobTransportTests(unittest.TestCase):
+    @staticmethod
+    def _blocked_admission(remote_name="vps"):
+        decision = evaluate_network_capacity({"status": "partial"}, remote_name=remote_name)
+        # Exercise the evaluator's real exception source while ensuring the
+        # transport boundary is tested against untrusted, noisy decision data.
+        secret = "admission-fixture-private-value"
+        decision["capacity"]["subnet"] = secret
+        decision["evidence"]["ssh_output"] = secret
+        decision["recovery"]["next_command"] = secret
+        decision["target"]["path"] = secret
+        return _remote.NetworkCapacityAdmissionError(decision), decision, secret
+
+    def test_network_capacity_admission_blocks_submit_before_downstream_calls(self):
+        admission, _decision, secret = self._blocked_admission()
+        calls = []
+
+        def deploy(*_args):
+            calls.append("deploy")
+            raise admission
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+        )
+
+        with self.assertRaises(RemoteJobAdmissionError) as raised:
+            transport.submit(submission)
+
+        error = raised.exception
+        payload = error.to_payload()
+        self.assertEqual(calls, ["deploy"])
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["code"], "docker_network_capacity_unavailable")
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["side_effects"], {
+            "staging_started": False,
+            "network_allocation_started": False,
+        })
+        self.assertEqual(payload["target"], {"kind": "remote", "remote": "vps"})
+        self.assertNotIn("next_command", payload["recovery"])
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, repr(error))
+        self.assertNotIn(secret, serialized)
+
+    def test_network_capacity_admission_blocks_submit_many_before_matrix_calls(self):
+        admission, _decision, secret = self._blocked_admission()
+        calls = []
+
+        def deploy(*_args):
+            calls.append("deploy")
+            raise admission
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        source = SourceIdentity("caller")
+        submissions = [
+            JobSubmission("test", "/project", "project:remote", "remote", label,
+                          ("echo", label), 60, source, remote_name="vps",
+                          workspace_mode="isolated")
+            for label in ("one", "two")
+        ]
+
+        with self.assertRaises(RemoteJobAdmissionError) as raised:
+            transport.submit_many(submissions)
+
+        error = raised.exception
+        payload = error.to_payload()
+        self.assertEqual(calls, ["deploy"])
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["code"], "docker_network_capacity_unavailable")
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["side_effects"]["staging_started"], False)
+        self.assertEqual(payload["side_effects"]["network_allocation_started"], False)
+        self.assertNotIn("next_command", payload["recovery"])
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, repr(error))
+        self.assertNotIn(secret, json.dumps(payload, sort_keys=True))
+
+    def test_unrelated_deploy_value_error_propagates_unchanged(self):
+        marker = ValueError("deploy-private-value")
+
+        def deploy(*_args):
+            raise marker
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+        )
+        with self.assertRaises(ValueError) as raised:
+            transport.submit(submission)
+        self.assertIs(raised.exception, marker)
+
+    def test_unrelated_deploy_value_error_propagates_unchanged_for_submit_many(self):
+        marker = ValueError("matrix-deploy-private-value")
+
+        def deploy(*_args):
+            raise marker
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        source = SourceIdentity("caller")
+        submissions = [
+            JobSubmission("test", "/project", "project:remote", "remote", label,
+                          ("echo", label), 60, source, remote_name="vps",
+                          workspace_mode="isolated")
+            for label in ("one", "two")
+        ]
+        with self.assertRaises(ValueError) as raised:
+            transport.submit_many(submissions)
+        self.assertIs(raised.exception, marker)
+
+    def test_admission_payload_whitelists_codes_and_fails_closed_for_unknown_codes(self):
+        exhausted = evaluate_network_capacity({
+            "status": "complete",
+            "pools": [{
+                "pool_id": "pool-" + "a" * 16,
+                "capacity_subnets": 1,
+                "allocated_subnets": 1,
+                "usable_subnets": 0,
+            }],
+            "totals": {"total_subnets": 1, "allocated_subnets": 1, "usable_subnets": 0},
+            "ownership": {
+                "sandbox_allocated_subnets": 1,
+                "foreign_allocated_subnets": 0,
+                "unattributed_allocated_subnets": 0,
+            },
+        }, remote_name="vps")
+        conflict = evaluate_network_capacity({
+            "status": "partial",
+            "collisions": [{"pool_id": "pool-" + "b" * 16}],
+        }, remote_name="vps")
+        secret = "payload-fixture-private-value"
+
+        def noisy(decision, code):
+            return {
+                **decision,
+                "code": code,
+                "capacity": {**decision["capacity"], "subnet": secret},
+                "evidence": {**decision["evidence"], "ssh_output": secret},
+                "recovery": {**decision["recovery"], "next_command": secret},
+                "target": {**decision["target"], "path": secret},
+            }
+
+        expected_keys = {
+            "ok", "status", "code", "error", "resource_class", "resource_kind",
+            "owner_classes", "target", "capacity", "evidence", "recovery",
+            "retryable", "side_effects",
+        }
+        for expected_code, decision in (
+            ("docker_network_subnet_exhausted", exhausted),
+            ("network_allocation_conflict", conflict),
+        ):
+            with self.subTest(code=expected_code):
+                error = RemoteJobAdmissionError(noisy(decision, expected_code))
+                payload = error.to_payload()
+                self.assertEqual(payload["code"], expected_code)
+                self.assertEqual(set(payload), expected_keys)
+                self.assertEqual(set(payload["target"]), {"kind", "remote"})
+                self.assertNotIn("subnet", payload["capacity"])
+                self.assertNotIn("ssh_output", payload["evidence"])
+                self.assertNotIn("next_command", payload["recovery"])
+                self.assertNotIn("path", payload["target"])
+                self.assertNotIn(secret, str(error))
+                self.assertNotIn(secret, repr(error))
+                self.assertNotIn(secret, json.dumps(payload, sort_keys=True))
+
+        for malformed_code in (None, {"raw": secret}, "unknown-capacity-code"):
+            with self.subTest(code=malformed_code):
+                error = RemoteJobAdmissionError(noisy(exhausted, malformed_code))
+                payload = error.to_payload()
+                self.assertEqual(payload["code"], "docker_network_capacity_unavailable")
+                self.assertNotIn(secret, json.dumps(payload, sort_keys=True))
+
     def test_missing_execution_capability_rejects_before_deployment(self):
         calls = []
         transport = RemoteJobTransport(

@@ -40,6 +40,21 @@ to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
 operators must not remove Docker networks directly or treat disk capacity as a
 network-capacity fix.
 
+At the transport boundary, a blocked admission is normalized to one bounded
+error envelope. It always reports `ok: false`, `status: blocked`, one of the
+stable capacity codes (`docker_network_capacity_unavailable`,
+`docker_network_subnet_exhausted`, or `network_allocation_conflict`), and
+`staging_started: false` / `network_allocation_started: false`; an unknown or
+malformed code fails closed to `docker_network_capacity_unavailable`. Only the
+validated remote name is exposed as target metadata. Capacity, evidence, and
+recovery are reduced to their documented safe summaries; probe output, paths,
+subnets, commands, SSH diagnostics, and exception details are not forwarded.
+The CLI emits that envelope once with `--json` and exits 1, or prints the fixed
+safe recovery line for human use and exits 1. Remote job and E2E submission
+adapters preserve the same envelope, while `run_tests` additionally keeps its
+`passed: false`, `summary: null`, `output: ""`, and resolved `mode` fields; no
+job is accepted and no job ID is returned.
+
 For command examples and operational boundaries, see
 [`docs/remote-hosting-implementation.md`](remote-hosting-implementation.md). Durable
 job recovery and retention are documented separately in

@@ -7,6 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from sandbox.resources.network_capacity import evaluate_network_capacity
+from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
 sys.path.insert(0, str(MCP_ROOT))
@@ -37,6 +40,14 @@ def _load_wp_tool():
 
 
 class JobMcpTests(unittest.TestCase):
+    @staticmethod
+    def _admission_error():
+        decision = evaluate_network_capacity({"status": "partial"}, remote_name="vps")
+        secret = "mcp-admission-fixture-private-value"
+        decision["evidence"]["ssh_output"] = secret
+        decision["recovery"]["next_command"] = secret
+        return RemoteJobAdmissionError(decision), secret
+
     def test_remote_runner_exception_is_not_serialized_by_job_start(self):
         from tools import jobs
 
@@ -54,6 +65,42 @@ class JobMcpTests(unittest.TestCase):
             "ok": False, "code": "supervisor_launch_failed", "error": "job submission failed",
         })
         self.assertFalse(fixture in str(result))
+
+    def test_network_capacity_admission_preserves_public_job_start_envelope(self):
+        from tools import jobs
+
+        admission, secret = self._admission_error()
+        target = SimpleNamespace(
+            kind="remote", project_root="/project", remote_name="vps",
+            workspace_label="unit", runtime_policy={}, sources={"identity": "project:remote"},
+        )
+        transport = SimpleNamespace(submit=Mock(side_effect=admission))
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=lambda _request: target)), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport):
+            result = jobs.job_start(["tool", "safe"], "/project", remote="vps")
+
+        self.assertEqual(result, admission.to_payload())
+        self.assertFalse("job_id" in result)
+        self.assertNotEqual(result.get("status"), "accepted")
+        self.assertNotIn(secret, str(result))
+
+    def test_network_capacity_admission_preserves_public_job_matrix_envelope(self):
+        from tools import jobs
+
+        admission, secret = self._admission_error()
+        target = SimpleNamespace(
+            kind="remote", project_root="/project", remote_name="vps",
+            workspace_label="unit", runtime_policy={}, sources={"identity": "project:remote"},
+        )
+        transport = SimpleNamespace(submit_many=Mock(side_effect=admission))
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=lambda _request: target)), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport):
+            result = jobs.job_matrix(["tool", "safe"], ["one", "two"], "/project", remote="vps")
+
+        self.assertEqual(result, admission.to_payload())
+        self.assertFalse("job_id" in result)
+        self.assertNotEqual(result.get("status"), "accepted")
+        self.assertNotIn(secret, str(result))
 
     def test_job_list_forwards_project_workspace_and_pages_filtered_results(self):
         from tools import jobs
@@ -176,6 +223,27 @@ class JobMcpTests(unittest.TestCase):
             submissions[0].source.identity,
             "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
         )
+
+    def test_network_capacity_admission_preserves_public_run_tests_envelope(self):
+        wp = _load_wp_tool()
+        admission, secret = self._admission_error()
+
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 workspace_label="php", runtime_policy={},
+                                 sources={"identity": "project:remote"})
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        transport = SimpleNamespace(submit=Mock(side_effect=admission))
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+                patch.object(wp, "_remote_job_transport", return_value=transport):
+            result = wp.run_tests("/project", mode="unit", remote="vps", workspace="php",
+                                  timeout_seconds=120)
+
+        expected = {**admission.to_payload(), "passed": False, "summary": None,
+                    "output": "", "mode": "unit"}
+        self.assertEqual(result, expected)
+        self.assertNotIn("job_id", result)
+        self.assertNotEqual(result.get("status"), "accepted")
+        self.assertNotIn(secret, str(result))
 
     def test_remote_run_tests_reports_config_resolved_mode_not_auto(self):
         wp = _load_wp_tool()

@@ -345,6 +345,101 @@ class TestResolutionGate(unittest.TestCase):
         self.assertNotIn(" main ", (r.stdout + r.stderr))
 
 
+class TestRemoteAdmissionCLI(unittest.TestCase):
+    @staticmethod
+    def _admission_error():
+        from sandbox.resources.network_capacity import evaluate_network_capacity
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+
+        decision = evaluate_network_capacity({"status": "partial"}, remote_name="vps")
+        secret = "cli-admission-fixture-private-value"
+        decision["evidence"]["ssh_output"] = secret
+        decision["recovery"]["next_command"] = secret
+        return RemoteJobAdmissionError(decision), secret
+
+    def test_json_admission_output_is_one_bounded_parseable_payload(self):
+        import sandbox.cli as cli
+
+        admission, secret = self._admission_error()
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli._dispatch_remote_admission_error(
+                    admission, SimpleNamespace(json=True),
+                )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(output.getvalue().count("\n"), 1)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["code"], "docker_network_capacity_unavailable")
+        self.assertFalse(payload["retryable"])
+        self.assertNotIn(secret, output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
+    def test_human_admission_output_is_fixed_and_secret_free(self):
+        import sandbox.cli as cli
+
+        admission, secret = self._admission_error()
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli._dispatch_remote_admission_error(
+                    admission, SimpleNamespace(json=False),
+                )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(output.getvalue(), "")
+        line = errors.getvalue()
+        self.assertIn("remote job submission blocked by Docker network capacity admission", line)
+        self.assertIn("docker_network_capacity_unavailable", line)
+        self.assertIn("./sb remote docker-pool vps --json", line)
+        self.assertNotIn(secret, line)
+        self.assertNotIn("Traceback", line)
+
+    def test_json_flag_before_passthrough_delimiter_does_not_consume_child_json(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        admission, _secret = self._admission_error()
+        captured = []
+
+        def handler(_cfg, args):
+            captured.append((args.json, args.passthrough))
+            raise admission
+
+        def run(argv):
+            captured.clear()
+            output, errors = StringIO(), StringIO()
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "COMMANDS", {"e2e": handler}), \
+                    mock.patch.object(cli, "load_config", return_value={}), \
+                    mock.patch.object(cli, "resolve_instances", return_value={}), \
+                    mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                    mock.patch.object(migrate, "maybe_auto_migrate"), \
+                    mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                    mock.patch.object(cli, "write_compose_files"), \
+                    mock.patch.object(cli, "write_env_for_compose"), \
+                    redirect_stdout(output), redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main()
+            return raised.exception.code, captured[:], output.getvalue(), errors.getvalue()
+
+        code, seen, output, errors = run(["sb", "e2e", "--json", "--", "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, [(True, ["--", "--json"])])
+        self.assertEqual(errors, "")
+        self.assertFalse(json.loads(output)["ok"])
+
+        code, seen, output, errors = run(["sb", "e2e", "--", "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, [(False, ["--", "--json"])])
+        self.assertEqual(output, "")
+        self.assertIn("remote job submission blocked by Docker network capacity admission", errors)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

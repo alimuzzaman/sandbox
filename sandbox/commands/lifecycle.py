@@ -754,6 +754,46 @@ def _project_declares_plugin_check(project_root: str | Path) -> bool:
     plugins = project.get("plugins_resolved") or project.get("plugins") or {}
     return isinstance(plugins, dict) and "plugin-check" in plugins
 
+
+def _storage_pressure_doctor_checks() -> list[tuple[str, bool, str]]:
+    """Read normalized offline storage-pressure evidence for ``sb doctor``.
+
+    The storage monitor owns record/configuration parsing and deliberately does
+    no network, subprocess, or host-probe work for this surface.  This adapter
+    keeps the lifecycle command fail-closed if that evidence is unavailable or
+    violates the small public ``{label, ok, hint}`` contract.
+    """
+    try:
+        from sandbox.resources.monitor import storage_doctor_checks
+        rows = storage_doctor_checks()
+    except Exception:
+        return [(
+            "storage monitor evidence available",
+            False,
+            "storage monitor evidence could not be read; refresh it with sb resources monitor --json",
+        )]
+
+    if not isinstance(rows, list):
+        return [(
+            "storage monitor evidence available",
+            False,
+            "storage monitor evidence is invalid; refresh it with sb resources monitor --json",
+        )]
+
+    checks: list[tuple[str, bool, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(row.get("label"), str) \
+                or not isinstance(row.get("ok"), bool) \
+                or not isinstance(row.get("hint"), str):
+            return [(
+                "storage monitor evidence available",
+                False,
+                "storage monitor evidence is invalid; refresh it with sb resources monitor --json",
+            )]
+        checks.append((row["label"], row["ok"], row["hint"]))
+    return checks
+
+
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
@@ -959,6 +999,10 @@ def cmd_doctor(cfg, args) -> None:
         for remote_check in remote_doctor_checks(remote):
             check(f"{name}: {remote_check['label']}", remote_check["ok"],
                   hint=remote_check["hint"])
+
+    section("Storage pressure")
+    for label, pressure_ok, pressure_hint in _storage_pressure_doctor_checks():
+        check(label, pressure_ok, hint=pressure_hint)
 
     section("Linked plugins")
     plug_dir = plugins_dir(inst)

@@ -390,6 +390,72 @@ class TestCapacityPressure(unittest.TestCase):
         return {"total_bytes": total, "available_bytes": free,
                 "used_bytes": total - free, "reserved_bytes": 0}
 
+    def test_warning_threshold_is_inclusive(self):
+        pressure = reclaim.disk_capacity_pressure(self.capacity(15, total=100))
+        self.assertEqual(pressure["level"], "warning")
+        self.assertEqual(pressure["free_ratio"], 0.15)
+        self.assertEqual(pressure["threshold_crossed"], "warn_ratio")
+
+    def test_free_space_just_above_warning_threshold_is_normal(self):
+        pressure = reclaim.disk_capacity_pressure(self.capacity(16, total=100))
+        self.assertEqual(pressure["level"], "normal")
+        self.assertIsNone(pressure["threshold_crossed"])
+
+    def test_critical_threshold_is_inclusive(self):
+        pressure = reclaim.disk_capacity_pressure(self.capacity(5, total=100))
+        self.assertEqual(pressure["level"], "critical")
+        self.assertEqual(pressure["free_ratio"], 0.05)
+        self.assertEqual(pressure["threshold_crossed"], "critical_ratio")
+
+    def test_zero_free_space_remains_measured_critical_capacity(self):
+        pressure = reclaim.disk_capacity_pressure(self.capacity(0, total=100))
+        self.assertEqual(pressure["level"], "critical")
+        self.assertEqual(pressure["free_ratio"], 0.0)
+        self.assertEqual(pressure["free_bytes"], 0)
+        self.assertEqual(pressure["threshold_crossed"], "critical_ratio")
+
+    def test_custom_thresholds_drive_both_classification_boundaries(self):
+        at_warning = reclaim.disk_capacity_pressure(
+            self.capacity(30, total=100), warn_ratio=0.30, critical_ratio=0.10,
+        )
+        self.assertEqual(at_warning["level"], "warning")
+        self.assertEqual(at_warning["threshold_crossed"], "warn_ratio")
+        self.assertEqual(at_warning["warn_ratio"], 0.30)
+        self.assertEqual(at_warning["critical_ratio"], 0.10)
+
+        above_warning = reclaim.disk_capacity_pressure(
+            self.capacity(31, total=100), warn_ratio=0.30, critical_ratio=0.10,
+        )
+        self.assertEqual(above_warning["level"], "normal")
+
+        at_critical = reclaim.disk_capacity_pressure(
+            self.capacity(10, total=100), warn_ratio=0.30, critical_ratio=0.10,
+        )
+        self.assertEqual(at_critical["level"], "critical")
+        self.assertEqual(at_critical["threshold_crossed"], "critical_ratio")
+
+    def test_scheduled_auto_gate_is_disabled_without_safe_tier(self):
+        pressure = reclaim.disk_capacity_pressure(
+            self.capacity(5, total=100), auto_ratio=0.10,
+        )
+        self.assertFalse(pressure["auto_eligible"])
+        self.assertIsNone(pressure["auto_tier"])
+        self.assertEqual(pressure["auto_ratio"], 0.10)
+
+    def test_scheduled_auto_gate_is_safe_and_threshold_bounded(self):
+        eligible = reclaim.disk_capacity_pressure(
+            self.capacity(10, total=100), auto_tier="safe", auto_ratio=0.10,
+        )
+        self.assertEqual(eligible["level"], "warning")
+        self.assertTrue(eligible["auto_eligible"])
+        self.assertEqual(eligible["auto_tier"], "safe")
+
+        above_auto_threshold = reclaim.disk_capacity_pressure(
+            self.capacity(11, total=100), auto_tier="safe", auto_ratio=0.10,
+        )
+        self.assertFalse(above_auto_threshold["auto_eligible"])
+        self.assertIsNone(above_auto_threshold["auto_tier"])
+
     def test_warning_below_fifteen_percent_free(self):
         pressure = reclaim.disk_capacity_pressure(self.capacity(
             int(193 * 1024 ** 3 * 0.11)))

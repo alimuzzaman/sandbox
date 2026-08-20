@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import hashlib
+import base64
 from unittest.mock import patch
 from pathlib import Path
 
@@ -101,6 +102,32 @@ class JobOutputTests(unittest.TestCase):
         self.assertEqual(second["events_read"], 0)
         self.assertIn("�", first["data"])
 
+    def test_rendered_bytes_counts_utf8_after_control_filter_without_changing_bytes_read(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        control_values = [*range(9), 11, 12, *range(14, 32), 127]
+        controls = bytes(control_values + control_values[:23])
+        raw = b"prefix" + controls + "é\n".encode("utf-8")
+        output.append("stdout", raw); output.finish("stdout")
+
+        page = output.read(OutputQuery(stream="stdout"))
+
+        retained = b"prefix" + "é\n".encode("utf-8")
+        self.assertEqual(page["bytes_read"], len(retained))
+        self.assertEqual(page["data"], "prefixé\n")
+        self.assertEqual(page["rendered_bytes"], len(page["data"].encode("utf-8")))
+
+    def test_rendered_bytes_counts_invalid_utf8_replacement(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        raw = b"bad\xff\xfe\n"
+        output.append("stdout", raw); output.finish("stdout")
+
+        page = output.read(OutputQuery(stream="stdout"))
+
+        retained = b"bad\xef\xbf\xbd\xef\xbf\xbd\n"
+        self.assertEqual(page["bytes_read"], len(retained))
+        self.assertEqual(page["data"], "bad��\n")
+        self.assertEqual(page["rendered_bytes"], len("bad��\n".encode("utf-8")))
+
     def test_service_applies_builtin_profile_only_at_read_time(self):
         output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
         output.append("stdout", b"one\ntwo\nthree\nerror four\nfive\nsix\nseven\neight\nnine\nten\n"); output.finish("stdout")
@@ -108,8 +135,39 @@ class JobOutputTests(unittest.TestCase):
         presented = service.read_output(self.job["job_id"], OutputQuery(profile="errors"))
         full = service.read_output(self.job["job_id"], OutputQuery(profile="full"))
         self.assertEqual(presented["data"], "two\nthree\nerror four\nfive\nsix\nseven\neight\nnine\n")
+        self.assertEqual(presented["rendered_bytes"], len(presented["data"].encode("utf-8")))
+        self.assertEqual(full["rendered_bytes"], len(full["data"].encode("utf-8")))
         self.assertIn("ten\n", full["data"])
         self.assertNotIn("ten\n", presented["data"])
+
+    def test_base64_rendered_bytes_counts_returned_text_exactly(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        raw = b"binary\x00\xff\n"
+        output.append("stdout", raw); output.finish("stdout")
+
+        page = output.read(OutputQuery(stream="stdout", encoding="base64"))
+
+        retained = b"binary\xef\xbf\xbd\n"
+        self.assertEqual(page["bytes_read"], len(retained))
+        self.assertEqual(base64.b64decode(page["data"], validate=True), retained)
+        self.assertEqual(page["rendered_bytes"], len(page["data"].encode("utf-8")))
+        self.assertEqual(page["rendered_bytes"], len(page["data"]))
+
+    def test_combined_terminal_page_reports_rendered_byte_count(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        stdout = b"done\n"
+        stderr = b"error\x00\n"
+        output.append("stdout", stdout); output.append("stderr", stderr)
+        output.finish("stdout"); output.finish("stderr"); output.complete()
+
+        page = output.read(OutputQuery(stream="combined"))
+
+        self.assertEqual(page["data"], "done\nerror\n")
+        self.assertEqual(page["bytes_read"], len(stdout) + len(b"error\n"))
+        self.assertEqual(page["rendered_bytes"], len(page["data"].encode("utf-8")))
+        self.assertEqual(page["events_read"], 2)
+        streams = {item["stream"]: item for item in self.repository.snapshot(self.job["job_id"])["output"]}
+        self.assertEqual(streams["combined"]["bytes_stored"], page["bytes_read"])
 
     def test_service_uses_the_custom_profile_definition_retained_with_submission(self):
         custom, _ = self.repository.accept(JobSubmission(

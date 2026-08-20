@@ -149,6 +149,7 @@ Result:
   "data": "...",
   "events": [],
   "bytes_read": 4096,
+  "rendered_bytes": 4096,
   "events_read": 22,
   "cursor": "opaque-next-cursor",
   "has_more": true,
@@ -173,6 +174,12 @@ expired retained range fails explicitly.
 Presentation profile byte/event caps are applied before retained bytes are read;
 profile filtering remains display-only and never changes the persisted redacted
 source.
+`bytes_read` retains its existing page-accounting semantics. `rendered_bytes` is
+additive metadata containing the exact UTF-8 byte count of the final returned `data`
+string after invalid-UTF-8 replacement,
+control-code filtering, encoding, profile filtering, and profile byte caps. For
+`encoding:base64`, it is the byte count of the returned base64 text, not the decoded
+payload size.
 
 ## Metrics
 

@@ -205,6 +205,11 @@ Expired leases are reclaimed only after process-identity reconciliation.
 | `available` | INTEGER | false after explicit cleanup removes retained bytes |
 | `updated_at` | TEXT | UTC RFC3339 |
 
+`bytes_stored` is the size of the redacted retained payload and is independent of
+response presentation. Output responses retain the legacy `bytes_read` meaning and
+may additionally report `rendered_bytes`, the UTF-8 size of the final returned data
+string (including base64 text when that encoding is requested).
+
 The payload itself lives in `stdout/00000000.log`, `stderr/00000000.log`, etc. Combined
 order lives in `events.ndjson`; entries reference payload stream/segment/offset/length.
 After 24 hours, closed terminal segments may become `.log.gz`; the index records

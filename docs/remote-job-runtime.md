@@ -29,7 +29,10 @@ cursor, a byte offset across the rendered stream, a trailing byte count, a line
 count, or an RFC 3339/Unix-seconds `since` timestamp. `job-output --follow` is a client polling loop over retained files. `full`,
 `smart`, `errors`, `sampled`, `quiet`, and declarative custom profiles affect
 presentation only; complete output remains retained until cleanup/retention
-policy removes it.
+policy removes it. Output pages preserve the existing `bytes_read` page-accounting
+semantics and add `rendered_bytes` as the exact UTF-8 size of the final returned
+`data` string. This includes replacement characters and profile filtering; for
+base64 pages it counts the returned base64 text bytes.
 
 Remote E2E submits a durable matrix parent with one isolated workspace leaf per
 Playwright shard. Each leaf runs exactly one `--shard=i/N` coordinator, so its

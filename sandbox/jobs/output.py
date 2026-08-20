@@ -43,6 +43,17 @@ _CURSOR_MAX = (1 << 63) - 1
 _OUTPUT_STREAMS = frozenset({"combined", "stdout", "stderr"})
 
 
+def _rendered_bytes(data: str) -> int:
+    """Return the UTF-8 size of the exact response data string.
+
+    ``bytes_read`` intentionally keeps its legacy page-accounting meaning. This
+    separate count is measured
+    after decoding, control-code filtering, base64 encoding, and any profile
+    rendering so callers can account for the bytes they actually received.
+    """
+    return len(data.encode("utf-8"))
+
+
 def _cursor(job_id: str, stream: str, sequence: int, offset: int = 0) -> str:
     """Encode the v2 opaque output position.
 
@@ -445,6 +456,7 @@ class JobOutputStore:
         return {"ok": True, "job_id": self.job_id, "stream": stream, "profile": query.profile,
                 "encoding": query.encoding, "data": rendered,
                 "events": [event.as_dict() for event in metadata], "bytes_read": len(data),
+                "rendered_bytes": _rendered_bytes(rendered),
                 "events_read": len(metadata), "cursor": _cursor(self.job_id, stream, next_sequence, next_offset),
                 "has_more": self._has_unread(events, next_sequence, next_offset), "bounded": True,
                 "retained": {"first_sequence": all_events[0].sequence if all_events else 0,
@@ -461,7 +473,9 @@ class JobOutputStore:
 def present_output(page: dict[str, Any], profile: OutputProfile) -> dict[str, Any]:
     """Apply a display-only profile to a bounded retained-output page."""
     if profile.mode == "full" or page["encoding"] == "base64":
-        return page
+        result = dict(page)
+        result["rendered_bytes"] = _rendered_bytes(result["data"])
+        return result
     source_lines = page["data"].splitlines(keepends=True)
     lines = source_lines
     events = list(page.get("events") or ())
@@ -523,6 +537,7 @@ def present_output(page: dict[str, Any], profile: OutputProfile) -> dict[str, An
     rendered = "".join(lines)
     bounded = rendered.encode("utf-8")[:profile.max_bytes].decode("utf-8", errors="ignore")
     result["data"] = bounded
+    result["rendered_bytes"] = _rendered_bytes(bounded)
     if events_align_to_lines:
         result["events"] = [events[index] for index in selected[:profile.max_events]]
         result["events_read"] = len(result["events"])

@@ -78,6 +78,11 @@ def ensure_instance(project_dir: str, label: str = "default", create: bool = Fal
     if isinstance(entry, dict) and "instance" in entry:
         entry.setdefault("ok", True)
         return entry
+    # ``sb ensure --json`` publishes typed fail-closed operation envelopes.
+    # Preserve those verbatim rather than flattening a local mount-attestation
+    # refusal into subprocess diagnostics for MCP callers.
+    if isinstance(entry, dict) and entry.get("ok") is False:
+        return entry
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "ensure failed").strip()[:1000]}
 

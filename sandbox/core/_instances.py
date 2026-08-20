@@ -770,6 +770,45 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
+def _desired_source_mounts(cfg: dict, inst_cfg: dict) -> list[str] | None:
+    """Resolve source-bind policy without the creating ``_plugins_home`` helper."""
+    defaults = cfg.get("defaults", {}) or {}
+    raw_plugins_home = defaults.get("plugins_home", "") or "./plugins"
+    try:
+        plugins_home = Path(str(raw_plugins_home)).expanduser()
+        if not plugins_home.is_absolute():
+            plugins_home = ROOT / plugins_home
+        sources = [str(plugins_home.resolve())]
+        extras = inst_cfg.get("extra_mounts") or []
+        if not isinstance(extras, (list, tuple)):
+            return None
+        for extra in extras:
+            if not isinstance(extra, str):
+                return None
+            source = Path(extra).expanduser()
+            if not source.is_absolute():
+                return None
+            sources.append(str(source.resolve()))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return list(dict.fromkeys(sources))
+
+
+def _mount_attestation_refusal(code: object) -> dict:
+    """Return a bounded ready-path refusal with an explicit safe remedy."""
+    if code not in {"instance_mount_drift", "instance_mount_state_unavailable"}:
+        code = "instance_mount_state_unavailable"
+    message = (
+        "live Sandbox source mounts do not match the declared policy; "
+        "run `sb apply --project-dir <project-dir>` to reconcile"
+        if code == "instance_mount_drift" else
+        "live Sandbox source mount state is unavailable; "
+        "run `sb apply --project-dir <project-dir>` after Docker state is available"
+    )
+    return {"ok": False, "mutated": False,
+            "error": {"code": code, "message": message}}
+
+
 def _auto_heal_wp_url(name: str) -> bool:
     """Restore a registered HTTPS instance URL if WP drifted to localhost."""
     cfg = load_config()
@@ -876,6 +915,22 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     # the same free Mailpit/WordPress port before either registry write lands.
     with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
         existing = sc.registry_get(root, label=label)
+        # The ready fast path must prove the live containers still expose the
+        # exact source self-binds generated for this instance.  Do this before
+        # port conflict reconciliation: that helper can write local config and
+        # Compose, which a drift/unavailable refusal must never do.
+        if existing and existing.get("status") == "ready":
+            live_cfg = resolve_instances(cfg).get(existing.get("instance"))
+            server = (live_cfg or {}).get("server", existing.get("server"))
+            if server != "herd":
+                desired_sources = _desired_source_mounts(cfg, live_cfg or {})
+                attestation = (
+                    attest_source_mounts(existing["instance"], str(server), desired_sources)
+                    if desired_sources is not None else
+                    {"ok": False, "code": "instance_mount_state_unavailable"}
+                )
+                if not attestation.get("ok"):
+                    return _mount_attestation_refusal(attestation.get("code"))
         # A remote or local host may retain a listener that is not represented
         # in the registry (for example a stale Mailpit container). Reconcile
         # ports before the ready fast path; otherwise ensure can report a

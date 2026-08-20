@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 from sandbox.isolation.models import canonical_digest
 from sandbox.runtimes.base import OperationResult
 
 
 LOWER_ISOLATION = "trusted_shared_host"
+PHP_EXTENSION_PLANES = ("web", "cli", "exec", "phpunit")
 _VERSION = re.compile(r"\b(\d+(?:\.\d+){1,3})\b")
 
 
@@ -55,6 +57,54 @@ def result(request, ok, state, **data):
                     "route_mutations": False, "route_owner": "ingress"},
         "state": state, "mutated": False, **data,
     })
+
+
+def declared_php_extensions(request, configured=None):
+    """Return an explicitly declared extension requirement, or ``None``.
+
+    Incumbent adapters never inspect project files or host state themselves.
+    Composition may inject a descriptor value; focused callers can pass the
+    same value through operation arguments.  Both spellings are accepted for
+    compatibility with persisted WordPress instance records.
+    """
+    value = configured
+    if callable(value):
+        try:
+            value = value(request)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            value = None
+    if value is not None:
+        return value
+    arguments = request.arguments if hasattr(request, "arguments") else {}
+    if isinstance(arguments, Mapping):
+        for key in ("phpExtensions", "php_extensions"):
+            if key in arguments:
+                return arguments[key]
+    return None
+
+
+def extension_status(request, *, configured=None, plane_runners=None, validate_only=True):
+    """Produce the shared canonical report only for a declared requirement."""
+    requirements = declared_php_extensions(request, configured)
+    if requirements is None:
+        return None
+    from sandbox.application.runtime_service import php_extension_status
+
+    runners = plane_runners
+    if callable(runners):
+        try:
+            runners = runners(request)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            runners = None
+    return php_extension_status(requirements, plane_runners=runners,
+                                validate_only=validate_only)
+
+
+def status_facts(facts: Mapping[str, object]) -> dict:
+    """Keep incumbent status bounded to non-sensitive runtime observations."""
+    return {
+        key: facts[key] for key in ("version", "php") if key in facts
+    }
 
 
 def cleanup_owned(request, cleanup):

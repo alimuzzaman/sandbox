@@ -510,8 +510,13 @@ module._core = lambda: SimpleNamespace(
         "instance": "fixture", "root": "/project", "kind": "wordpress",
         "label": "default",
     })
+# Exercise the MCP transport with the adapter-supplied status payload.  The
+# shared projector must close the report before returning it to the caller;
+# this is intentionally not a direct adapter invocation.
 module._runtime_service = lambda: SimpleNamespace(invoke=lambda _request: SimpleNamespace(
-    ok=True, operation="status", project_kind="wordpress", data={"state": "ready"}))
+    ok=report["ok"], operation="status", project_kind="wordpress",
+    data={"state": "ready" if report["ok"] else "blocked",
+          "php_extensions": report}))
 
 digest = "sha256:" + "a" * 64
 states = {}
@@ -590,7 +595,10 @@ print(json.dumps(states, sort_keys=True))
         }
         for state, result in states.items():
             with self.subTest(state=state):
-                self.assertEqual(set(result), {"ok", "operation", "state", "php_extensions", "exit_code"})
+                self.assertEqual(set(result), {
+                    "ok", "operation", "state", "php_extensions", "exit_code", "mutated",
+                })
+                self.assertFalse(result["mutated"])
                 extension = result["php_extensions"]
                 self.assertEqual(set(extension), allowed_extension_top_level)
                 self.assertEqual(extension["provenance"]["state"], state)

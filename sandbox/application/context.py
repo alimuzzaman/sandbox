@@ -615,6 +615,8 @@ def runtime_service(cfg):
     """Compose WordPress compatibility and the framework-neutral Compose adapter."""
     import sandbox.core as core
     import os
+    import platform as host_platform
+    import shutil
     import sandbox_core as sc
     from pathlib import Path
 
@@ -627,6 +629,9 @@ def runtime_service(cfg):
     )
     from sandbox.runtimes.manifest import RUNTIME_DECLARATIONS
     from sandbox.runtimes.managed.repository import NativeRepository
+    from sandbox.runtimes.incumbent import version_from
+    from sandbox.runtimes.incumbent.herd import HerdAdapter
+    from sandbox.runtimes.incumbent.valet import ValetAdapter
 
     def resolve_descriptor(root, label=None):
         return sc.load_project_config(root, label=label)
@@ -727,6 +732,41 @@ def runtime_service(cfg):
     backends.register(
         "ubuntu-nspawn", managed, project_kinds=("wordpress",),
         modes=("managed_native",), owner="sandbox.runtimes.managed.adapter", order=20,
+    )
+
+    # Incumbent adapters are explicit, validate-only backends.  They are
+    # registered in the existing runtime backend registry so a descriptor that
+    # explicitly selects ``herd`` or ``valet`` resolves to that adapter; the
+    # default selection remains Compose and no incumbent declaration is
+    # promoted to adoptable status by this composition root.
+    platform = "darwin" if host_platform.system() == "Darwin" else "linux"
+
+    def host_php_version():
+        try:
+            observed = dependencies.process.run(("php", "-v"), timeout=10)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        return version_from(observed)
+
+    herd = HerdAdapter(
+        process=dependencies.process,
+        executable=shutil.which("herd") or "herd",
+        platform=platform,
+        php_version=host_php_version,
+    )
+    valet = ValetAdapter(
+        process=dependencies.process,
+        executable=shutil.which("valet") or "valet",
+        platform=platform,
+        php_version=host_php_version,
+    )
+    backends.register(
+        "herd", herd, project_kinds=("wordpress",),
+        modes=("incumbent_native",), owner="sandbox.runtimes.incumbent.herd", order=30,
+    )
+    backends.register(
+        "valet", valet, project_kinds=("wordpress",),
+        modes=("incumbent_native",), owner="sandbox.runtimes.incumbent.valet", order=40,
     )
     def persisted_selection(root, label):
         owner = f"{Path(root).expanduser().resolve()}::{label}"

@@ -271,5 +271,47 @@ class TestNativeRecovery(unittest.TestCase):
             native.cmd_native({}, args)
         self.assertEqual([call.args[0].operation for call in service.invoke.call_args_list], ["status", "destroy"])
 
+    def test_native_status_blocked_php_report_returns_exit_code_one(self):
+        """The CLI transport must propagate a fail-closed PHP status."""
+        import sandbox.commands.native as native
+        from sandbox.runtimes.base import OperationResult
+
+        digest = "sha256:" + "a" * 64
+        report = {
+            "ok": False, "exit_code": 1,
+            "desired": {
+                "profile": None,
+                "catalog": {"revision": 1, "digest": digest},
+                "requirements": [{"name": "gd", "state": "enabled", "version": None}],
+                "resolution_digest": digest,
+            },
+            "provenance": {"state": "unavailable"},
+            "observed": {
+                plane: {"state": "unavailable", "php_version": None,
+                        "sapi": None, "extensions": {}, "issues": []}
+                for plane in ("web", "cli", "exec", "phpunit")
+            },
+            "readiness": {"state": "unavailable"},
+            "staleness": {"state": "stale", "reason": "one_or_more_planes_unavailable"},
+            "drift": {"state": "unknown"},
+            "issues": [{"code": "unsupported_provisioning",
+                        "message": "PHP extension provisioning is unsupported"}],
+        }
+        service = mock.Mock()
+        service.invoke.return_value = OperationResult(
+            False, "status", "/project", "wordpress",
+            {"state": "blocked", "mutated": False, "php_extensions": report,
+             "runtime": {"mode": "incumbent_native", "adapter": "herd"}},
+        )
+        args = SimpleNamespace(action="status", project_dir="/project", label="default",
+                               web_server="nginx", json=True)
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.runtime_service", return_value=service), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            native.cmd_native({}, args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn('"exit_code": 1', output.getvalue())
+        self.assertIn('"state": "blocked"', output.getvalue())
+
 
 if __name__ == "__main__": unittest.main()

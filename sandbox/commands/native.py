@@ -35,6 +35,7 @@ def _runtime_result(cfg, args, operation):
     shared prerequisites and have a separate reviewed lifecycle.
     """
     from sandbox.application.context import runtime_service
+    from sandbox.application.runtime_service import project_php_extension_status
     from sandbox.runtimes.base import OperationError, OperationRequest
 
     result = runtime_service(cfg).invoke(OperationRequest(
@@ -44,7 +45,17 @@ def _runtime_result(cfg, args, operation):
         return {"ok": False, "operation": f"native_{operation}", "state": "blocked",
                 "mutated": False, "reason": {"code": result.code,
                                                 "message": result.message}}
-    return {"ok": result.ok, "operation": f"native_{operation}", **dict(result.data)}
+    data = dict(result.data)
+    if operation == "status" and isinstance(data.get("php_extensions"), dict):
+        report = project_php_extension_status(data["php_extensions"])
+        if isinstance(report, dict):
+            data["php_extensions"] = report
+            if not report.get("ok", False):
+                data.update({"ok": False, "state": "blocked", "exit_code": 1,
+                             "mutated": False})
+            else:
+                data.setdefault("exit_code", 0)
+    return {"ok": result.ok, "operation": f"native_{operation}", **data}
 
 
 def support():
@@ -110,9 +121,15 @@ def cmd_native(cfg, args):
                   "reason": {"code": "native_action_not_implemented",
                              "message": "This mutation remains disabled until its isolation proof is complete."}}
     _emit(result, bool(args.json))
-    if not result.get("ok") and result.get("state") not in {"blocked", "unsupported",
-                                                            "pending_confirmation"}:
-        raise SystemExit(1)
+    if not result.get("ok"):
+        # A bounded status report can carry a concrete exit code.  Preserve it
+        # for shell/CI callers even when the operation is deliberately
+        # fail-closed (for example, an incumbent PHP-extension probe).
+        exit_code = result.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            raise SystemExit(exit_code)
+        if result.get("state") not in {"blocked", "unsupported", "pending_confirmation"}:
+            raise SystemExit(1)
 
 
 register_specs((CommandSpec(

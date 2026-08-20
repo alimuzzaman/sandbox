@@ -302,9 +302,10 @@ boundaries explicitly; a checked regression task is not remote release evidence.
 - [x] T085 [US2] Extend managed-native signed-APT plan fixtures for extension package
   closure, exact provenance, source/package/image drift, TTY confirmation, host-service
   preservation, and rejection of arbitrary PECL/packages/URLs/shell/INI inputs.
-- [ ] T086 [US3/US4] Add incumbent Herd/Valet zero-mutation validation tests and CLI/MCP
+- [x] T086 [US3/US4] Add incumbent Herd/Valet zero-mutation validation tests and CLI/MCP
   structured status coverage for profile, digest, provenance, plane observations, and
-  all unsupported/failure classes with secret-safe output.
+  all unsupported/failure classes with secret-safe output. Source-only acceptance is
+  covered by focused tests; no live Herd/Valet/native proof is claimed.
 - [ ] T087 [US1/US2/US4] Add apply/cache regression coverage proving content-addressed
   cache invalidation and preservation of database volumes, uploads, snapshots, project
   files, instance identity, and rollback metadata; capture remote GD proof in web,

@@ -84,16 +84,27 @@ def _typed_invoke(project_dir: str, label: str | None, operation: str, arguments
     # specific: generic Compose remains runtime-neutral, while the canonical
     # core producer owns active-base resolution, probing, and redaction.
     if operation == "status":
-        # The runtime service is the source of the generic status envelope;
-        # never let an adapter smuggle an unprojected extension report through
-        # that envelope.  WordPress status is enriched only from the canonical
-        # core producer below; Compose remains runtime-neutral.
-        payload.pop("php_extensions", None)
-        if getattr(result, "project_kind", None) == "wordpress":
+        # Preserve an adapter-supplied canonical report (incumbent Herd/Valet)
+        # and project it through the shared closed boundary. Only when no
+        # adapter report exists do we use the legacy core producer below.
+        adapter_report = payload.get("php_extensions")
+        if isinstance(adapter_report, Mapping):
+            projected = _public_php_extension_status(adapter_report)
+            if isinstance(projected, dict):
+                payload["php_extensions"] = projected
+                payload["ok"] = bool(payload["ok"] and projected.get("ok", False))
+                payload["state"] = "ready" if projected.get("ok", False) else "blocked"
+                payload["mutated"] = False
+                payload["exit_code"] = 0 if payload["ok"] else 1
+        elif (getattr(result, "project_kind", None) == "wordpress"
+              and not (isinstance(payload.get("runtime"), Mapping)
+                       and payload["runtime"].get("mode") == "incumbent_native")):
             extension_status = _wordpress_extension_status(owner)
             if isinstance(extension_status, dict):
                 payload["php_extensions"] = extension_status
                 payload["ok"] = bool(payload["ok"] and extension_status.get("ok", True))
+                if not payload["ok"]:
+                    payload["state"] = "blocked"
                 payload["exit_code"] = 0 if payload["ok"] else 1
     return payload
 
@@ -324,25 +335,9 @@ def _public_php_staleness(value: object) -> dict:
 
 def _public_php_extension_status(report: object) -> dict | None:
     """Project the documented, safe PHP-extension status contract for MCP."""
-    from sandbox.services.redaction import redact_structure
+    from sandbox.application.runtime_service import project_php_extension_status
 
-    value = redact_structure(report)
-    if not isinstance(value, Mapping):
-        return None
-    public = {}
-    if isinstance(value.get("ok"), bool):
-        public["ok"] = value["ok"]
-    exit_code = value.get("exit_code")
-    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code in {0, 1}:
-        public["exit_code"] = exit_code
-    public["desired"] = _public_php_desired(value.get("desired"))
-    public["provenance"] = _public_php_provenance(value.get("provenance"))
-    public["observed"] = _public_php_observed(value.get("observed"))
-    public["readiness"] = _public_php_status_map(value.get("readiness"), ("state",))
-    public["staleness"] = _public_php_staleness(value.get("staleness"))
-    public["drift"] = _public_php_status_map(value.get("drift"), ("state",))
-    public["issues"] = _public_php_issues(value.get("issues"))
-    return public
+    return project_php_extension_status(report)
 
 
 def instance_status(project_dir: str, label: str | None = None,

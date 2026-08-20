@@ -26,7 +26,7 @@ class TestNativeRuntimeService(unittest.TestCase):
                           modes=("incumbent_native",), owner="test", order=30)
         return registry, adapters
 
-    def service(self, runtime, persisted=None):
+    def service(self, runtime, persisted=None, php_extensions=None):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes.base import AdapterRegistry
         backends, adapters = self.registry()
@@ -34,8 +34,11 @@ class TestNativeRuntimeService(unittest.TestCase):
         common_adapter = Adapter("common")
         common_adapter.capabilities = frozenset({"ensure", "status", "wordpress.cli"})
         common.register("wordpress", common_adapter, kinds=("wordpress",), owner="test")
+        descriptor = {"kind": "wordpress", "wordpressRuntime": runtime}
+        if php_extensions is not None:
+            descriptor["phpExtensions"] = php_extensions
         service = RuntimeService(resolve_descriptor=lambda *_args, **_kwargs: {
-            "kind": "wordpress", "wordpressRuntime": runtime,
+            **descriptor,
         }, adapters=common, backends=backends,
             resolve_persisted=lambda _root, _label: persisted)
         return service, adapters
@@ -96,6 +99,61 @@ class TestNativeRuntimeService(unittest.TestCase):
         result = service.invoke(OperationRequest("/tmp/project", "ensure"))
         self.assertEqual(result.code, "runtime_mode_change")
         self.assertTrue(all(not adapter.calls for adapter in adapters.values()))
+
+    def test_status_adapter_php_report_is_closed_and_promotes_failure(self):
+        from sandbox.application.runtime_service import RuntimeService
+        from sandbox.runtimes.base import AdapterRegistry, OperationRequest, OperationResult
+
+        digest = "sha256:" + "a" * 64
+        report = {
+            "ok": False, "exit_code": 1,
+            "desired": {"profile": "wordpress@1",
+                         "catalog": {"revision": 1, "digest": digest,
+                                      "private_path": "/private/catalog"},
+                         "requirements": [{"name": "gd", "state": "enabled", "version": None}],
+                         "resolution_digest": digest},
+            "provenance": {"state": "unavailable", "password": "secret"},
+            "observed": {plane: {"state": "unavailable", "php_version": None,
+                                  "sapi": None, "extensions": {}, "issues": []}
+                         for plane in ("web", "cli", "exec", "phpunit")},
+            "readiness": {"state": "unavailable"},
+            "staleness": {"state": "stale", "reason": "one_or_more_planes_unavailable"},
+            "drift": {"state": "unknown"},
+            "issues": [{"code": "plane_drift",
+                        "message": "PHP extension observations differ between execution planes"}],
+            "private": "/private/receipt",
+        }
+        class Adapter:
+            capabilities = frozenset({"status"})
+            def invoke(self, request):
+                return OperationResult(True, "status", request.project_root, "test",
+                                       {"state": "ready", "mutated": True,
+                                        "php_extensions": report})
+        registry = AdapterRegistry()
+        registry.register("test", Adapter(), kinds=("test",), owner="test")
+        service = RuntimeService(resolve_descriptor=lambda *_args, **_kwargs: {"kind": "test"},
+                                 adapters=registry)
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.data["state"], "blocked")
+        self.assertFalse(result.data["mutated"])
+        serialized = repr(dict(result.data))
+        self.assertNotIn("/private/", serialized)
+        self.assertNotIn("secret", serialized)
+
+    def test_selected_incumbent_receives_only_descriptor_php_requirements(self):
+        from sandbox.runtimes.base import OperationRequest
+
+        service, adapters = self.service(
+            {"mode": "incumbent_native", "adapter": "herd", "explicit": True},
+            php_extensions={"extensions": {"gd": True}},
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertTrue(result.ok)
+        self.assertEqual(len(adapters["herd"].calls), 1)
+        forwarded = adapters["herd"].calls[0]
+        self.assertEqual(forwarded.arguments["phpExtensions"], {"extensions": {"gd": True}})
+        self.assertNotIn("wordpressRuntime", forwarded.arguments)
 
 
 if __name__ == "__main__": unittest.main()

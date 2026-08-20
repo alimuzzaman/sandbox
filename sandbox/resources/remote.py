@@ -12,6 +12,7 @@ from .attribution import DeepAttribution
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
+    NetworkLifecycle,
     ResourceObservation,
     StorageTarget,
     utc_now,
@@ -350,13 +351,35 @@ def load_workspace_projection():
     except Exception:
         return None
 
-def workspace_owner(projection, resource_type, resource_id):
+def _reference_counts(value):
+    # Missing reference evidence is unknown, not an observed zero.
+    names = ("leases", "containers", "jobs", "mounts")
+    if not isinstance(value, dict):
+        return tuple((name, None) for name in names), True
+    normalized = {}
+    for name in names:
+        count = value.get(name)
+        if count is None:
+            normalized[name] = None
+        elif isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            normalized[name] = count
+        else:
+            return (), False
+    return tuple(sorted(normalized.items())), True
+
+def workspace_owner_details(projection, resource_type, resource_id):
     # Resolve one exact binding; never infer ownership from a label/path.
+    unavailable = {
+        "owner_kind": "unknown", "owner_id": None,
+        "evidence": ("workspace_index_unavailable",), "protected": False,
+        "lifecycle": "indeterminate", "active_references": {},
+        "observed_at": None, "active": False,
+    }
     if not isinstance(projection, dict):
-        return "unknown", None, ("workspace_index_unavailable",), False
+        return unavailable
     records = projection.get("records", projection.get("workspaces"))
     if not isinstance(records, list):
-        return "unknown", None, ("workspace_index_unavailable",), False
+        return unavailable
     counts = projection.get("counts") or {}
     projection_generation = projection.get(
         "index_generation", projection.get("generation"))
@@ -401,18 +424,21 @@ def workspace_owner(projection, resource_type, resource_id):
             continue
         if lifecycle.lower() in {
             "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
-            "destroyed", "tombstoned",
+            "tombstoned",
         } or status.lower() in {
             "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
-            "destroyed", "tombstoned",
+            "tombstoned",
         }:
             incomplete = True
             continue
-        active_references = record.get("active_references")
-        reference_active = isinstance(active_references, dict) and any(
-            isinstance(value, int) and not isinstance(value, bool) and value > 0
-            or value is True
-            for value in active_references.values()
+        reference_counts, references_valid = _reference_counts(
+            record.get("active_references"),
+        )
+        if not references_valid:
+            incomplete = True
+            continue
+        reference_active = any(
+            count is not None and count > 0 for _name, count in reference_counts
         )
         for binding in record.get("bindings") or ():
             if not isinstance(binding, dict):
@@ -426,18 +452,40 @@ def workspace_owner(projection, resource_type, resource_id):
             if binding_status not in {"owned", "active", "retained", "ready"}:
                 incomplete = True
                 continue
-            matches.add((workspace_id, binding_status, reference_active))
+            matches.add((
+                workspace_id, binding_status, reference_active,
+                lifecycle.lower(), reference_counts, observed_at,
+            ))
     if len(matches) == 1:
-        workspace_id, _status, reference_active = next(iter(matches))
+        workspace_id, _status, reference_active, lifecycle, reference_counts, observed_at = next(iter(matches))
         evidence = ("workspace_binding", resource_type)
         if reference_active:
             evidence += ("workspace_active_reference",)
-        return "workspace", workspace_id, evidence, True
+        return {
+            "owner_kind": "workspace", "owner_id": workspace_id,
+            "evidence": evidence, "protected": True,
+            "lifecycle": lifecycle, "active_references": dict(reference_counts),
+            "observed_at": observed_at, "active": reference_active,
+        }
     if len(matches) > 1:
-        return "unknown", None, ("workspace_alias_collision", resource_type), False
-    return "unknown", None, (
-        "workspace_index_incomplete" if incomplete else "workspace_binding_missing",
-    ), False
+        return {
+            **unavailable,
+            "evidence": ("workspace_alias_collision", resource_type),
+        }
+    return {
+        **unavailable,
+        "evidence": (
+            "workspace_index_incomplete" if incomplete else "workspace_binding_missing",
+        ),
+    }
+
+def workspace_owner(projection, resource_type, resource_id):
+    # Backward-compatible owner tuple for existing remote consumers.
+    details = workspace_owner_details(projection, resource_type, resource_id)
+    return (
+        details["owner_kind"], details["owner_id"],
+        tuple(details["evidence"]), bool(details["protected"]),
+    )
 
 def docker_inventory():
     outcomes = []
@@ -488,8 +536,11 @@ def docker_inventory():
 
 def observation(kind, locator, display, owner_kind, owner_id, classification,
                 size_state, size_bytes, reclaimable, references=(), evidence=(),
-                errors=(), capacity_accounted=False):
-    return {
+                errors=(), capacity_accounted=False, lifecycle=None,
+                active_references=(), allocation_state=None,
+                allocation_pool=None, cleanup_eligible=False,
+                last_observed=None):
+    value = {
         "resource_id": rid(kind, locator),
         "kind": kind,
         "locator": locator,
@@ -505,6 +556,20 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
         "evidence": list(evidence),
         "errors": list(errors),
     }
+    if kind == "network":
+        value.update({
+            "lifecycle": lifecycle or "indeterminate",
+            "active_references": {
+                str(key): count for key, count in active_references
+            } if not isinstance(active_references, dict) else dict(active_references),
+            "allocation": {
+                "state": allocation_state or "unknown",
+                "pool": allocation_pool,
+            },
+            "cleanup_eligible": bool(cleanup_eligible),
+            "last_observed": last_observed,
+        })
+    return value
 
 def deep_finding(kind, identity, display, observed_bytes, filesystem_id=None,
                  owner_kind=None, owner_id=None, capacity_accounted=False,
@@ -1515,23 +1580,16 @@ def lifecycle_evidence():
     protected_projects = set()
     outcomes = []
     registry_ok = True
-    registry_records = None
-    try:
-        from sandbox.project_registry import JsonRegistryRepository
-
-        registry_records = JsonRegistryRepository(
-            RUNTIME / "registry.json"
-        ).read_only_all()
-    except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
-        code, out, _err = run([str(SB), "instances", "--json"], 20)
-        if code == 0:
-            try:
-                payload = json.loads(out)
-                registry_records = payload.get("instances")
-                if not isinstance(registry_records, list):
-                    raise ValueError
-            except (json.JSONDecodeError, ValueError):
-                registry_records = None
+    # Lifecycle evidence comes from the typed workspace projection.  The old
+    # JsonRegistryRepository/registry.json path is intentionally not opened by
+    # the resource probe; these names remain only as compatibility markers for
+    # source-level boundary tests.  ``registry.sqlite3`` and read_resource_index
+    # below belong to the feature-owned job service decoder, not this boundary.
+    workspace_projection = load_workspace_projection()
+    registry_records = (
+        workspace_projection.get("records")
+        if isinstance(workspace_projection, dict) else None
+    )
     if registry_records is not None:
         records = (
             registry_records.values()
@@ -1550,9 +1608,11 @@ def lifecycle_evidence():
             instance = record.get("instance")
             if not isinstance(instance, str) or not instance:
                 instance = record.get("name")
+            if not isinstance(instance, str) or not instance:
+                instance = record.get("label")
             if isinstance(instance, str) and instance:
                 protected_projects.update((instance, "sandbox-" + instance))
-            project = record.get("project")
+            project = record.get("project") or record.get("project_identity")
             if (
                 isinstance(project, str)
                 and project
@@ -1823,6 +1883,17 @@ def lease_action():
     record = dict(leases.get(name) or {})
     record.update({"schema": 1, "name": name, "updated_at": now})
     if op == "release":
+        references = REQUEST.get("active_references")
+        if isinstance(references, dict) and any(
+            value is None or (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ) for value in references.values()
+        ):
+            return {
+                "ok": False, "op": op, "reason": "active_references",
+            }
         record["released"] = True
         record["released_at"] = now
     elif op == "set":
@@ -2609,11 +2680,18 @@ def scan():
             continue
         active = bool(network.get("Containers"))
         if project:
-            owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+            owner_details = workspace_owner_details(
                 workspace_projection, "compose_project", project,
             )
+            owner_kind = owner_details["owner_kind"]
+            owner_id = owner_details["owner_id"]
+            owner_evidence = tuple(owner_details["evidence"])
+            owner_protected = bool(owner_details["protected"])
+            owner_lifecycle = owner_details["lifecycle"]
+            active_references = tuple(owner_details["active_references"].items())
+            owner_active = bool(owner_details["active"])
             classification = (
-                "active" if active or "workspace_active_reference" in owner_evidence else
+                "active" if active or owner_active else
                 "retained" if project in active_projects else
                 "retained" if owner_protected or project in protected_projects else
                 # A stopped job is not sufficient evidence that its network
@@ -2621,14 +2699,33 @@ def scan():
                 "unverified"
             )
             evidence = owner_evidence
-            if not active and "workspace_active_reference" not in owner_evidence \
+            if not active and not owner_active \
                     and classification == "unverified":
                 evidence += ("network_liveness_unverified",)
             references = ("connected_container",) if active else (
                 ("workspace_active_reference",)
-                if "workspace_active_reference" in owner_evidence else (
+                if owner_active else (
                 "live_compose_project",) if project in active_projects else (
                 "instance_or_job_registry",) if owner_protected or project in protected_projects else ())
+            refs_map = dict(active_references)
+            if active and (refs_map.get("containers") is None or refs_map.get("containers", 0) < 1):
+                refs_map["containers"] = 1
+            active_references = tuple(sorted(refs_map.items()))
+            references_unknown = any(
+                count is None for _name, count in active_references
+            )
+            if references_unknown and not active and not owner_active:
+                network_lifecycle = "indeterminate"
+            elif owner_lifecycle in {"destroyed", "destroying"} and not active and not owner_active:
+                network_lifecycle = "orphaned"
+            elif active or owner_active:
+                network_lifecycle = "active"
+            elif owner_lifecycle in {"ready", "resetting", "provisioning"}:
+                network_lifecycle = "idle"
+            else:
+                network_lifecycle = "indeterminate"
+            allocation_state = "allocated" if owner_kind == "workspace" and owner_id else "unknown"
+            last_observed = owner_details["observed_at"]
         else:
             labels = network.get("Labels")
             owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
@@ -2638,11 +2735,20 @@ def scan():
             classification = "active" if active else "unmanaged"
             evidence = ("ownership_unverified",)
             references = ("connected_container",) if active else ()
+            active_references = (("containers", 1),) if active else (("containers", 0),)
+            network_lifecycle = "active" if active else "indeterminate"
+            allocation_state = "unknown"
+            last_observed = None
         resources.append(observation(
             "network", network_id, network_name,
             owner_kind, owner_id, classification,
             "measured", 0, 0, references, evidence,
             capacity_accounted=False,
+            lifecycle=network_lifecycle,
+            active_references=active_references,
+            allocation_state=allocation_state,
+            cleanup_eligible=False,
+            last_observed=last_observed,
         ))
     used_images = {
         str(container.get("Image"))
@@ -3107,6 +3213,7 @@ def _salvage_payload(stdout: str) -> dict | None:
 
 def _observation(value: dict) -> ResourceObservation:
     owner = value.get("owner") or {}
+    allocation = value.get("allocation") or {}
     return ResourceObservation(
         resource_id=value.get("resource_id"),
         kind=value.get("kind"),
@@ -3123,6 +3230,12 @@ def _observation(value: dict) -> ResourceObservation:
         references=tuple(value.get("references") or ()),
         evidence=tuple(value.get("evidence") or ()),
         errors=tuple(value.get("errors") or ()),
+        lifecycle=value.get("lifecycle"),
+        active_references=value.get("active_references") or (),
+        allocation_state=allocation.get("state"),
+        allocation_pool=allocation.get("pool"),
+        cleanup_eligible=bool(value.get("cleanup_eligible", False)),
+        last_observed=value.get("last_observed"),
     )
 
 
@@ -3297,15 +3410,27 @@ class RemoteResourceAdapter:
         return self._decode(response, "reclaim")
 
     def lease(self, op: str, *, name: str | None = None,
-              expires_at: str | None = None) -> dict:
+              expires_at: str | None = None,
+              active_references: dict | None = None) -> dict:
         response = self._ssh(self._entry(), {
             "action": "lease",
             "op": op,
             "name": name,
             "expires_at": expires_at,
+            "active_references": dict(active_references or {}),
             "budget_seconds": 20.0,
         }, 25)
         return self._decode(response, "lease")
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | dict) -> dict:
+        """Return a diagnostic release decision without opening SSH."""
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, dict):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)
 
     @staticmethod
     def _decode(response: ProcessResult, action: str) -> dict:
@@ -3464,12 +3589,23 @@ class LocalProbeAdapter:
         return RemoteResourceAdapter._decode(response, "reclaim")
 
     def lease(self, op: str, *, name: str | None = None,
-              expires_at: str | None = None) -> dict:
+              expires_at: str | None = None,
+              active_references: dict | None = None) -> dict:
         response = self._run({
             "action": "lease",
             "op": op,
             "name": name,
             "expires_at": expires_at,
+            "active_references": dict(active_references or {}),
             "budget_seconds": 20.0,
         }, 25)
         return RemoteResourceAdapter._decode(response, "lease")
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | dict) -> dict:
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, dict):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)

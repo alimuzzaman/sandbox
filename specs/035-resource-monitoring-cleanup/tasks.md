@@ -304,10 +304,10 @@ T037: Update exact MCP manifest tests in tests/test_mcp_composition.py and tests
 These tasks are intentionally open and do not change the completion state of
 T001-T044.
 
-- [ ] T045 [US1/US5] Add the canonical network lifecycle model regression for
+- [X] T045 [US1/US5] Add the canonical network lifecycle model regression for
   `a813480b`, covering owner identity, active references, allocation/release,
   reconciliation, and one authoritative state across status, plan, and apply.
-- [ ] T046 [US3/US5] Add repeated create/stop/destroy/recreate fixture coverage
+- [X] T046 [US3/US5] Add repeated create/stop/destroy/recreate fixture coverage
   for `bf05eeb9` proving idempotence, no orphan/duplicate growth, and release
   only after leases, containers, and jobs are inactive.
 - [x] T047 [US3/US5] Add active/foreign/unattributed network protection cases for

@@ -15,7 +15,7 @@ from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
 from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
-from sandbox.resources.models import CleanupCandidate
+from sandbox.resources.models import CleanupCandidate, NetworkLifecycle
 
 
 class TestRemoteResourceAdapter(unittest.TestCase):
@@ -615,6 +615,50 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertIn('"kind":"build_cache"', calls[0])
         self.assertIn('"locator":"bbbbbbbbbbbbbbbbbbbbbbbb"', calls[0])
         self.assertIn('"--filter", "id=" + locator', calls[0])
+
+    def test_remote_workspace_lifecycle_keeps_one_owner_identity_and_refs(self):
+        namespace = self._probe_namespace()
+        details = namespace["workspace_owner_details"](
+            {
+                "records": [{
+                    "workspace_id": "ws_remote", "owner_kind": "workspace",
+                    "lifecycle": "destroyed", "status": "destroyed",
+                    "observed_at": "2026-07-28T12:00:00Z", "index_generation": 1,
+                    "active_references": {"leases": 0, "containers": 0, "jobs": 0},
+                    "bindings": [{
+                        "resource_type": "compose_project",
+                        "resource_id": "sandbox-unit", "status": "owned",
+                    }],
+                }],
+                "index_generation": 1,
+                "counts": {"total": 1, "unresolved": 0, "conflict": 0, "incomplete": 0},
+            },
+            "compose_project", "sandbox-unit",
+        )
+        self.assertEqual(
+            (details["owner_kind"], details["owner_id"]),
+            ("workspace", "ws_remote"),
+        )
+        self.assertEqual(details["lifecycle"], "destroyed")
+        self.assertEqual(details["active_references"]["leases"], 0)
+
+    def test_remote_network_release_refuses_active_references_without_transport(self):
+        calls = []
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+            clock=lambda: NOW,
+        )
+        decision = adapter.release_network(NetworkLifecycle(
+            network_id="network-1", owner_kind="workspace", owner_id="ws_remote",
+            lifecycle="orphaned",
+            active_references={"leases": 1, "containers": 0, "jobs": 0},
+            allocation_state="allocated",
+        ))
+        self.assertEqual(decision["status"], "refused")
+        self.assertEqual(decision["reason"], "active_references")
+        self.assertEqual(calls, [])
 
 
 class TestRemoteProbeResilience(unittest.TestCase):

@@ -569,6 +569,27 @@ class TestResourceService(unittest.TestCase):
         self.assertEqual(result["data"]["drift"]["reason"],
                          "concurrent_or_shared_storage_change")
 
+    def test_owner_identity_is_stable_across_status_plan_and_apply(self):
+        item = observation(
+            "workspace-container", kind="container", owner_kind="workspace",
+            owner_id="ws_unit", locator="container-id", size_bytes=500,
+        )
+        adapter = FakeAdapter((item,))
+        service = self.service(adapter)
+
+        status = service.status()
+        plan = service.plan("cache", thorough=True, budget_seconds=15)
+        self.assertEqual(
+            status["data"]["resources"][0]["owner"]["id"], "ws_unit",
+        )
+        self.assertEqual(
+            plan["data"]["candidates"][0]["expected_owner"]["id"], "ws_unit",
+        )
+
+        applied = service.cleanup(plan["data"]["plan_id"], confirm=True)
+        self.assertTrue(applied["ok"])
+        self.assertEqual(adapter.removed, ["workspace-container"])
+
     def test_remote_or_local_measurement_without_capacity_fails_safely(self):
         adapter = FakeAdapter()
         adapter.observe = lambda **_kwargs: ProviderSnapshot(

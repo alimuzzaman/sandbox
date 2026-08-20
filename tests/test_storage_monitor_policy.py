@@ -460,6 +460,169 @@ class TestStorageMonitorRecords(TestCase):
         self.assertEqual(fchmod.call_args.args[1], 0o600)
 
 
+class TestStorageDoctorChecks(TestCase):
+    """Offline, record-only checks for Spec 043 T007."""
+
+    def setUp(self):
+        self.base_config = {
+            "resources": {"monitor": {"record_max_age_seconds": 100}},
+        }
+        self.records = {}
+        self.remotes = {}
+
+    @staticmethod
+    def _key(target):
+        return (target.get("kind"), target.get("name"))
+
+    def _record(self, target, *, level="normal", free=80, total=100, **extra):
+        record = {
+            "schema": 1,
+            "target": {"kind": target[0], "name": target[1]},
+            "at": "2026-08-20T00:00:00Z",
+            "level": level,
+            "free_bytes": free,
+            "total_bytes": total,
+        }
+        record.update(extra)
+        return record
+
+    def _read(self, target):
+        return self.records.get(self._key(target))
+
+    def _run(self, *, age=10, remotes=None, records=None, config=None):
+        self.remotes = self.remotes if remotes is None else remotes
+        self.records = self.records if records is None else records
+        with mock.patch.object(monitor, "list_remotes", return_value=self.remotes), \
+             mock.patch.object(monitor, "load_config",
+                               return_value=config or self.base_config), \
+             mock.patch.object(monitor, "read_record", side_effect=self._read), \
+             mock.patch.object(monitor, "record_age_seconds", return_value=age):
+            return monitor.storage_doctor_checks()
+
+    def test_local_normal_fresh_is_healthy(self):
+        rows = self._run(
+            records={("local", "local"): self._record(("local", "local"))},
+        )
+        self.assertEqual(rows, [{"label": "local", "ok": True, "hint": ""}])
+
+    def test_warning_critical_and_unknown_are_failed_with_safe_public_hints(self):
+        for level, free, expected in (
+            ("warning", 10, "WARNING"),
+            ("critical", 2, "CRITICAL"),
+            ("unknown", None, "UNKNOWN"),
+        ):
+            with self.subTest(level=level):
+                records = {
+                    ("local", "local"): self._record(
+                        ("local", "local"), level=level, free=free,
+                        total=None if level == "unknown" else 100,
+                        guidance="record-guidance-without-secrets",
+                    ),
+                }
+                row = self._run(records=records)[0]
+                self.assertFalse(row["ok"])
+                self.assertIn(expected, row["hint"])
+                self.assertIn("sb resources monitor --json", row["hint"])
+                if level != "unknown":
+                    self.assertIn("free of", row["hint"])
+                    self.assertIn("review the safe-tier plan", row["hint"])
+                self.assertNotIn("record-guidance-without-secrets", row["hint"])
+
+    def test_missing_and_stale_records_fail_with_exact_refresh_commands(self):
+        missing = self._run(records={})[0]
+        self.assertFalse(missing["ok"])
+        self.assertIn("no valid monitor run recorded", missing["hint"])
+        self.assertIn("sb resources monitor --json", missing["hint"])
+
+        remote_records = {
+            ("remote", "alpha"): self._record(("remote", "alpha")),
+        }
+        rows = self._run(
+            age=101,
+            remotes={"alpha": {}},
+            records=remote_records,
+        )
+        self.assertFalse(rows[0]["ok"])
+        self.assertFalse(rows[1]["ok"])
+        self.assertIn("age", rows[1]["hint"])
+        self.assertIn(
+            "sb resources monitor --remote alpha --json", rows[1]["hint"],
+        )
+
+    def test_remote_rows_are_sorted_and_sparse_age_override_is_target_specific(self):
+        remotes = {
+            "zeta": {"storage_monitor": {"record_max_age_seconds": 100}},
+            "alpha": {"storage_monitor": {"record_max_age_seconds": 5}},
+        }
+        records = {
+            ("local", "local"): self._record(("local", "local")),
+            ("remote", "alpha"): self._record(("remote", "alpha")),
+            ("remote", "zeta"): self._record(("remote", "zeta")),
+        }
+        rows = self._run(age=10, remotes=remotes, records=records)
+        self.assertEqual([row["label"] for row in rows], ["local", "alpha", "zeta"])
+        self.assertTrue(rows[0]["ok"])
+        self.assertFalse(rows[1]["ok"])
+        self.assertTrue(rows[2]["ok"])
+        self.assertIn("sb resources monitor --remote alpha --json", rows[1]["hint"])
+
+    def test_doctor_never_resolves_remote_or_runs_processes(self):
+        records = {
+            ("local", "local"): self._record(("local", "local")),
+        }
+        with mock.patch.object(monitor, "resolve_policy",
+                               side_effect=AssertionError("must stay offline")), \
+             mock.patch.object(monitor, "get_remote",
+                               side_effect=AssertionError("must stay offline")), \
+             mock.patch.object(subprocess, "run",
+                               side_effect=AssertionError("must stay offline")):
+            rows = self._run(records=records)
+        self.assertTrue(rows[0]["ok"])
+
+    def test_malformed_configured_name_is_not_healthy_and_hints_never_leak(self):
+        secret = "/private/remote-token"
+        rows = self._run(
+            remotes={
+                "../remote": {"ssh": secret, "storage_monitor": {}},
+                "valid": {},
+            },
+            records={
+                ("local", "local"): self._record(("local", "local")),
+                ("remote", "valid"): self._record(("remote", "valid")),
+            },
+        )
+        malformed = [row for row in rows if "invalid name" in row["label"]]
+        self.assertEqual(len(malformed), 1)
+        self.assertFalse(malformed[0]["ok"])
+        rendered = " ".join(str(row) for row in rows)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("../remote", rendered)
+        self.assertNotIn(str(monitor.record_path("local")), rendered)
+
+    def test_remote_registry_failure_is_one_bounded_failed_row(self):
+        local = self._record(("local", "local"))
+        with mock.patch.object(
+            monitor, "list_remotes", side_effect=RuntimeError("secret/path")
+        ), mock.patch.object(monitor, "load_config", return_value=self.base_config), \
+             mock.patch.object(monitor, "read_record", return_value=local), \
+             mock.patch.object(monitor, "record_age_seconds", return_value=10):
+            rows = monitor.storage_doctor_checks()
+        self.assertEqual([row["label"] for row in rows], ["local", "remote configuration"])
+        self.assertFalse(rows[1]["ok"])
+        self.assertIn("configured remotes could not be read", rows[1]["hint"])
+        self.assertNotIn("secret/path", str(rows))
+
+    def test_non_mapping_remote_registry_is_one_bounded_failed_row(self):
+        local = self._record(("local", "local"))
+        with mock.patch.object(monitor, "list_remotes", return_value=["not-a-map"]), \
+             mock.patch.object(monitor, "load_config", return_value=self.base_config), \
+             mock.patch.object(monitor, "read_record", return_value=local), \
+             mock.patch.object(monitor, "record_age_seconds", return_value=10):
+            rows = monitor.storage_doctor_checks()
+        self.assertEqual([row["label"] for row in rows], ["local", "remote configuration"])
+        self.assertFalse(rows[1]["ok"])
+
+
 if __name__ == "__main__":
     import unittest
 

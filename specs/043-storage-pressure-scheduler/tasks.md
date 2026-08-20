@@ -28,7 +28,7 @@ parallel.
   `record_age_seconds(record, now)`.
 - [ ] **T006** In the same module, add `monitor_lock(target)` — an O_EXCL lock with stale
   detection by age and PID, returning `lock_held` rather than blocking.
-- [ ] **T007** [P] Add `storage_doctor_checks()` returning `{label, ok, hint}` rows for the
+- [X] **T007** [P] Add `storage_doctor_checks()` returning `{label, ok, hint}` rows for the
   local target and every configured remote, from records only, treating a missing or stale
   record as a failed check with its age and the refresh command.
 

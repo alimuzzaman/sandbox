@@ -18,6 +18,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any
 
@@ -49,6 +50,18 @@ _ERROR_FIELDS = frozenset({"code", "message"})
 _LEVELS = frozenset({"normal", "warning", "critical", "unknown"})
 _TRIGGERS = frozenset({"manual", "scheduled"})
 _THRESHOLDS = frozenset({"warn_ratio", "critical_ratio"})
+_REMOTE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+# These are the bounded guidance strings produced by the capacity classifier.
+# Doctor deliberately does not echo arbitrary text from a persisted record:
+# records are local evidence, not an authority to print paths, connection
+# details, or secret-like values.
+_SAFE_GUIDANCE = frozenset({
+    "no action required",
+    "capacity is unmeasured; rerun with --refresh",
+    "free space is below the warning threshold; run `sb resources plan --tier safe` and review the candidates",
+    "free space is critically low; run `sb resources cleanup --tier safe --confirm` after reviewing the plan",
+})
 
 
 def _unknown_target(name: str) -> StorageMonitorConfigError:
@@ -495,10 +508,396 @@ def record_age_seconds(record: Mapping[str, Any] | None, now: Any = None) -> flo
     return max(0.0, (current - stamped).total_seconds())
 
 
+# ---------------------------------------------------------------------------
+# Offline doctor evidence
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def _doctor_refresh_command(kind: str, name: str) -> str:
+    """Return the fixed, replayable monitor command for one target."""
+    if kind == "local":
+        return "sb resources monitor --json"
+    # Remote names have already passed the strict local registry grammar.
+    return f"sb resources monitor --remote {name} --json"
+
+
+def _doctor_age_text(seconds: float | int) -> str:
+    """Render a bounded age without exposing timestamps or filesystem data."""
+    try:
+        value = max(0.0, float(seconds))
+    except (TypeError, ValueError, OverflowError):
+        return "unknown age"
+    if value < 60:
+        return f"{value:.0f}s"
+    if value < 3600:
+        return f"{value / 60:.1f}m"
+    if value < 86400:
+        return f"{value / 3600:.1f}h"
+    return f"{value / 86400:.1f}d"
+
+
+def _doctor_human_bytes(value: int | None) -> str:
+    """Format only validated public byte counts for a doctor hint."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return "unknown"
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return "unknown"
+
+
+def _doctor_valid_remote_name(value: Any) -> bool:
+    """Validate a configured key without consulting the remote registry."""
+    return (
+        isinstance(value, str)
+        and value != "local"
+        and _REMOTE_NAME_RE.fullmatch(value) is not None
+    )
+
+
+def _doctor_record(record: Any, target: Mapping[str, str]) -> dict[str, Any] | None:
+    """Validate the evidence fields doctor needs, without exposing payloads."""
+    if not isinstance(record, Mapping):
+        return None
+    try:
+        candidate = dict(record)
+        _validate_record_shape(candidate)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+    # ``read_record`` checks this too, but retaining the identity check here is
+    # important for injected/read-only test seams and for future stores.
+    if candidate.get("target") != dict(target):
+        return None
+    if "at" not in candidate or "level" not in candidate:
+        return None
+    if candidate.get("level") not in _LEVELS:
+        return None
+
+    level = candidate["level"]
+    if level == "unknown":
+        # Unknown capacity may legitimately carry null measurements.  If a
+        # value is present, however, it must have the same safe integer shape
+        # as a measured record.
+        for field in ("free_bytes", "total_bytes"):
+            if field in candidate:
+                try:
+                    _record_integer(candidate[field], nullable=True)
+                except ValueError:
+                    return None
+        return candidate
+
+    # A normal/warning/critical result must carry measured, internally sane
+    # capacity numbers.  ``free_ratio`` is optional for backwards-compatible
+    # records; doctor derives it from these two public counters.
+    free = candidate.get("free_bytes")
+    total = candidate.get("total_bytes")
+    if (
+        isinstance(free, bool)
+        or not isinstance(free, int)
+        or free < 0
+        or isinstance(total, bool)
+        or not isinstance(total, int)
+        or total <= 0
+        or free > total
+    ):
+        return None
+    return candidate
+
+
+def _doctor_capacity(record: Mapping[str, Any]) -> tuple[int, int, float] | None:
+    """Return validated public capacity values, or ``None`` if unmeasured."""
+    free = record.get("free_bytes")
+    total = record.get("total_bytes")
+    if (
+        isinstance(free, bool)
+        or not isinstance(free, int)
+        or free < 0
+        or isinstance(total, bool)
+        or not isinstance(total, int)
+        or total <= 0
+        or free > total
+    ):
+        return None
+    return free, total, free / total
+
+
+def _doctor_guidance(record: Mapping[str, Any], level: str) -> str:
+    """Use classifier-owned guidance only; otherwise use a safe generic line."""
+    guidance = record.get("guidance")
+    if isinstance(guidance, str) and guidance in _SAFE_GUIDANCE:
+        return guidance
+    if level == "warning":
+        return "review the safe-tier plan before reclaiming"
+    if level == "critical":
+        return "review the safe-tier plan before reclaiming"
+    if level == "unknown":
+        return "capacity is unmeasured; refresh the monitor"
+    return "no action required"
+
+
+def _doctor_pressure_hint(
+    record: Mapping[str, Any], *, refresh: str,
+) -> str:
+    """Build a secret/path-free warning from validated public fields."""
+    level = record.get("level")
+    capacity = _doctor_capacity(record)
+    if capacity is None:
+        summary = f"{str(level).upper()}: capacity is unmeasured"
+    else:
+        free, total, ratio = capacity
+        summary = (
+            f"{str(level).upper()}: {_doctor_human_bytes(free)} free of "
+            f"{_doctor_human_bytes(total)} ({ratio * 100:.1f}%)"
+        )
+        threshold = record.get("threshold_crossed")
+        if threshold in _THRESHOLDS:
+            summary += f"; threshold {threshold}"
+    guidance = _doctor_guidance(record, str(level))
+    return f"{summary}; {guidance}; refresh with {refresh}"
+
+
+def _doctor_policy(base_config: Any, remote_entry: Any = None) -> dict[str, Any]:
+    """Resolve one policy from already-loaded local config and registry data.
+
+    This intentionally does not call :func:`resolve_policy` or ``get_remote``:
+    doctor must remain an offline check.  Only the ``resources.monitor`` block
+    is copied into the manifest provider, so unrelated remote fields (including
+    credentials) never become diagnostic output or error context.
+    """
+    if not isinstance(base_config, Mapping):
+        raise StorageMonitorConfigError(
+            "machine configuration must be an object", "invalid_schedule_field",
+        )
+
+    resources = base_config.get("resources", _MISSING)
+    if resources is _MISSING:
+        raw_resources: Any = {}
+        base_monitor: Any = _MISSING
+    elif isinstance(resources, Mapping):
+        raw_resources = {}
+        base_monitor = resources.get("monitor", _MISSING)
+        if base_monitor is not _MISSING:
+            raw_resources["monitor"] = copy.deepcopy(base_monitor)
+    else:
+        # Preserve the provider's normal refusal for a malformed resources
+        # layer, but do not pass unrelated config fields through.
+        raw_resources = resources
+        base_monitor = _MISSING
+
+    if remote_entry is not None:
+        if not isinstance(remote_entry, Mapping):
+            raise StorageMonitorConfigError(
+                "remote storage monitor configuration is invalid",
+                "invalid_schedule_field",
+            )
+        override = remote_entry.get("storage_monitor", _MISSING)
+        if override is not _MISSING and override is not None:
+            if isinstance(raw_resources, Mapping):
+                if isinstance(base_monitor, Mapping) and isinstance(override, Mapping):
+                    merged = dict(base_monitor)
+                    merged.update(dict(override))
+                    raw_resources["monitor"] = merged
+                else:
+                    raw_resources["monitor"] = copy.deepcopy(override)
+            else:
+                # Let apply_machine_config report malformed machine resources;
+                # no target is considered healthy on this path.
+                raw_resources = resources
+
+    if isinstance(raw_resources, Mapping):
+        config = {"resources": raw_resources}
+    elif raw_resources is not _MISSING:
+        config = {"resources": raw_resources}
+    else:
+        config = {}
+    resolved = apply_machine_config(config)
+    try:
+        policy = resolved["resources"]["monitor"]
+    except (KeyError, TypeError):
+        raise StorageMonitorConfigError(
+            "resolved storage monitor policy is missing", "invalid_schedule_field",
+        ) from None
+    if not isinstance(policy, Mapping):
+        raise StorageMonitorConfigError(
+            "resolved storage monitor policy is invalid", "invalid_schedule_field",
+        )
+    return dict(policy)
+
+
+def _doctor_target_row(
+    *, label: str, kind: str, name: str, base_config: Any,
+    remote_entry: Any = None, malformed: bool = False,
+) -> dict[str, Any]:
+    """Build one deterministic doctor row while fail-closing all evidence errors."""
+    refresh = _doctor_refresh_command(kind, name)
+    target = _LOCAL_TARGET if kind == "local" else {
+        "kind": "remote", "name": name,
+    }
+    if malformed:
+        return {
+            "label": label,
+            "ok": False,
+            "hint": "invalid configured remote name; repair local configuration before refreshing",
+        }
+    try:
+        policy = _doctor_policy(base_config, remote_entry)
+    except Exception:
+        # Configuration errors are intentionally bounded and secret-free.  A
+        # bad policy is never converted into healthy evidence.
+        return {
+            "label": label,
+            "ok": False,
+            "hint": f"storage-monitor policy is invalid; refresh with {refresh} after fixing local configuration",
+        }
+
+    try:
+        record = read_record(target)
+    except Exception:
+        record = None
+    record = _doctor_record(record, target)
+    if record is None:
+        return {
+            "label": label,
+            "ok": False,
+            "hint": f"no valid monitor run recorded; refresh with {refresh}",
+        }
+
+    try:
+        age = record_age_seconds(record)
+    except Exception:
+        age = None
+    if (
+        isinstance(age, bool)
+        or not isinstance(age, (int, float))
+        or not math.isfinite(float(age))
+        or age < 0
+    ):
+        age = None
+    max_age = policy.get("record_max_age_seconds")
+    if age is None or isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
+        return {
+            "label": label,
+            "ok": False,
+            "hint": f"monitor record age is unknown; refresh with {refresh}",
+        }
+    if age > max_age:
+        stale_hint = (
+            f"monitor record is stale (age {_doctor_age_text(age)}; "
+            f"maximum {_doctor_age_text(max_age)});"
+        )
+        if record.get("level") in {"warning", "critical", "unknown"}:
+            stale_hint += f" {_doctor_pressure_hint(record, refresh=refresh)}"
+        else:
+            stale_hint += f" refresh with {refresh}"
+        return {
+            "label": label,
+            "ok": False,
+            "hint": stale_hint,
+        }
+
+    level = record.get("level")
+    if level in {"warning", "critical", "unknown"}:
+        return {
+            "label": label,
+            "ok": False,
+            "hint": _doctor_pressure_hint(record, refresh=refresh),
+        }
+    if level != "normal":
+        return {
+            "label": label,
+            "ok": False,
+            "hint": f"monitor record has an unknown level; refresh with {refresh}",
+        }
+    return {"label": label, "ok": True, "hint": ""}
+
+
+def storage_doctor_checks() -> list[dict[str, Any]]:
+    """Return offline storage-pressure checks for local and configured targets.
+
+    ``list_remotes`` and ``load_config`` read only the operator's local
+    configuration.  Every health decision then comes from the matching local
+    record; no remote lookup, SSH, subprocess, or host probe is performed.
+    """
+    remote_config_error = False
+    try:
+        configured = list_remotes()
+    except Exception:
+        configured = {}
+        remote_config_error = True
+    if not isinstance(configured, Mapping):
+        configured = {}
+        remote_config_error = True
+    try:
+        base_config = load_config()
+    except Exception:
+        base_config = None
+
+    rows = [
+        _doctor_target_row(
+            label="local", kind="local", name="local", base_config=base_config,
+        )
+    ]
+    if remote_config_error:
+        rows.append({
+            "label": "remote configuration",
+            "ok": False,
+            "hint": "configured remotes could not be read; repair local configuration before refreshing",
+        })
+
+    valid: list[tuple[str, Any]] = []
+    invalid: list[tuple[Any, Any]] = []
+    try:
+        items = list(configured.items())
+    except Exception:
+        items = []
+        if not remote_config_error:
+            rows.append({
+                "label": "remote configuration",
+                "ok": False,
+                "hint": "configured remotes could not be read; repair local configuration before refreshing",
+            })
+    for name, entry in items:
+        if _doctor_valid_remote_name(name):
+            valid.append((name, entry))
+        else:
+            invalid.append((name, entry))
+    valid.sort(key=lambda item: item[0])
+    # Sorting malformed keys by a bounded type/name token keeps output stable
+    # without ever echoing an invalid key (which could contain a path/secret).
+    invalid.sort(key=lambda item: (
+        type(item[0]).__name__,
+        item[0] if isinstance(item[0], str) else type(item[0]).__name__,
+    ))
+
+    for name, entry in valid:
+        rows.append(
+            _doctor_target_row(
+                label=name, kind="remote", name=name, base_config=base_config,
+                remote_entry=entry,
+            )
+        )
+    for index, (_name, _entry) in enumerate(invalid, start=1):
+        suffix = f" #{index}" if len(invalid) > 1 else ""
+        rows.append(
+            _doctor_target_row(
+                label=f"remote (invalid name){suffix}",
+                kind="remote", name="invalid", base_config=base_config,
+                malformed=True,
+            )
+        )
+    return rows
+
+
 __all__ = [
     "read_record",
     "record_age_seconds",
     "record_path",
     "resolve_policy",
+    "storage_doctor_checks",
     "write_record",
 ]

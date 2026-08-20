@@ -413,7 +413,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     e2_target.add_argument("--remote", help="run the detached E2E coordinator on a named remote")
     e2.add_argument("--workspace", default=None,
         help="logical remote workspace label; each E2E worker gets an isolated leaf")
-    e2.add_argument("--timeout", type=int, default=900,
+    e2.add_argument("--timeout", type=int, default=None,
         help="per-worker playwright timeout in seconds (default: 900)")
     e2.add_argument("--shard-index", type=int, default=None, help=argparse.SUPPRESS)
     e2.add_argument("--shard-total", type=int, default=None, help=argparse.SUPPRESS)
@@ -458,9 +458,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="abort the whole run if any cell's instance fails to boot")
     ci_p.add_argument("--dry-run", dest="dry_run", action="store_true",
         help="same as `ci plan` even when action=run — parse + classify only")
-    ci_p.add_argument("--timeout", type=int, default=900,
+    ci_p.add_argument("--timeout", type=int, default=None,
         help="per-step timeout in seconds (default: 900)")
-    ci_p.add_argument("--output-profile", default="smart",
+    ci_p.add_argument("--output-profile", default=None,
         help="durable retained-output presentation profile for remote jobs")
     ci_p.add_argument("--json", action="store_true",
         help="print the plan/result as JSON (for the MCP server)")

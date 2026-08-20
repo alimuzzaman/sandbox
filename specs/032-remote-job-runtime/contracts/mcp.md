@@ -33,6 +33,11 @@ explicit timeout and execution profile may both be supplied only when the timeou
 the effective override and the profile supplies other policy. Every result identifies
 resolution sources and emits `deadline_reminder` when fallback supplied the deadline.
 
+MCP uses the same pure resolution as CLI: explicit > workspace > project > operation
+fallback. A supplied `false` is explicit, never absence. Remote starts carry the complete
+resolved policy and require `job.execution-policy.v1`; a missing or stale controller is
+rejected before/at acceptance rather than re-resolving a local profile.
+
 ## Job tools
 
 ### `job_start`

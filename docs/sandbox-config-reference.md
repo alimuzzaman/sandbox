@@ -914,11 +914,31 @@ provisioned remote, it can make remote execution the project default:
 For example, `./sb job-start --profile unit -- <argv>` selects the built-in
 `unit` execution deadline profile for an explicit job.
 
+Execution policy resolves in this order: explicit job fields, selected workspace
+policy, project runtime policy, then the operation fallback (`exec`). `None` is
+the only absence sentinel, so `--no-cancel-on-stall` is an explicit false
+override rather than an instruction to inherit a profile's true value. A
+workspace may choose an execution/output profile:
+
+```jsonc
+"workspaces": {
+  "qa": {"executionProfile": "e2e-long", "outputProfile": "sample-20"}
+}
+```
+
 Every profile has a finite timeout (at most seven days). Built-ins are `exec`,
 `unit`, `integration`, `e2e`, `ci`, `overall`, and `overnight`; output built-ins
 are `full`, `smart`, `errors`, `sampled`, and `quiet`. Explicit `--timeout`
 overrides a profile. `--local` overrides a configured remote; `--remote NAME`
 selects a named provisioned remote.
+
+Accepted jobs retain the resolved profile, deadline source/reminder, stall
+threshold, cancellation grace, cancel-on-stall value, cleanup policy, and field
+provenance. Remote submission sends that frozen policy and requires
+`job.execution-policy.v1` before staging; an older or unadvertised controller is
+refused with reprovision/update guidance instead of applying its own config.
+This source release adds the client check and advertised capability only; it is
+not proof that any existing remote controller has been updated or reprovisioned.
 
 Use `sb exec … --detach -- <argv>` for long work, then read `sb job-status` and
 `sb job-output`. Output is durably retained on the execution host, not held in

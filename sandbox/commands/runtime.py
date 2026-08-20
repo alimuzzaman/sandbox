@@ -104,8 +104,15 @@ def configure_exec_parser(parser) -> None:
     target.add_argument("--remote", help="use a provisioned remote durable job runtime")
     parser.add_argument("--workspace", help="persistent or isolated workspace label")
     parser.add_argument("--timeout", type=int, help="finite maximum execution time in seconds")
+    parser.add_argument("--execution-profile", dest="profile",
+                        help="named execution policy profile")
+    parser.add_argument("--stall-seconds", type=int)
+    parser.add_argument("--cancel-grace-seconds", type=int)
+    parser.add_argument("--cancel-on-stall", action="store_true", default=None)
+    parser.add_argument("--no-cancel-on-stall", action="store_false", dest="cancel_on_stall")
+    parser.add_argument("--cleanup-policy", choices=("retain", "always", "on-success", "ephemeral"))
     parser.add_argument("--detach", action="store_true", help="return a durable job ID without waiting")
-    parser.add_argument("--output-profile", default="smart", help="retained-output presentation profile")
+    parser.add_argument("--output-profile", help="retained-output presentation profile")
     # Internal controller escape hatch.  A remote durable job has already
     # selected its VPS and owns the process/output lifecycle; it needs to
     # invoke the project Compose service directly without recursively creating
@@ -157,7 +164,8 @@ def cmd_exec(cfg, args) -> None:
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import JobSubmission, TargetRequest
-        from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+        from sandbox.commands.jobs_runtime import (_resolved_execution_policy, _resolved_output_profile,
+                                                   _resolved_project_identity, _source_identity)
         if target is None:
             try:
                 target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
@@ -167,15 +175,19 @@ def cmd_exec(cfg, args) -> None:
                 ))
             except TargetResolutionError as exc:
                 die(f"{exc.code}: {exc}")
-        timeout = args.timeout or 900
+        policy = _resolved_execution_policy(target, args)
+        output_profile = _resolved_output_profile(target, args.output_profile)
         source = _source_identity(target.project_root)
         submission = JobSubmission("runtime-exec" if target.kind == "remote" else "exec", target.project_root,
             _resolved_project_identity(target), target.kind,
-            target.workspace_label, tuple(command), timeout, source,
-            remote_name=target.remote_name, output_profile=args.output_profile,
+            target.workspace_label, tuple(command), policy.deadline_seconds, source,
+            remote_name=target.remote_name, output_profile=output_profile,
             output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
-                                       .get(args.output_profile)),
-            deadline_source="explicit" if args.timeout else "profile:exec")
+                                       .get(output_profile)),
+            execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
+            deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+            cancel_grace_seconds=policy.cancel_grace_seconds, cancel_on_stall=policy.cancel_on_stall,
+            cleanup_policy=policy.cleanup_policy, execution_policy_provenance=policy.provenance)
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -194,7 +206,7 @@ def cmd_exec(cfg, args) -> None:
                 deadline = accepted.get("deadline", {})
                 print(f"{accepted['job_id']} target={target_name} "
                       f"workspace={accepted.get('workspace', target.workspace_label)} "
-                      f"deadline={deadline.get('seconds', timeout)}s "
+                      f"deadline={deadline.get('seconds', policy.deadline_seconds)}s "
                       f"source={deadline.get('source', submission.deadline_source)}")
             return
         service = durable_job_dependencies()["job_service"]
@@ -230,7 +242,7 @@ def cmd_exec(cfg, args) -> None:
     if managed:
         execution_request = ExecutionRequest(
             owner["root"], owner.get("label", "default"), "exec", tuple(command),
-            args.timeout or 900,
+            args.timeout if args.timeout is not None else 900,
         )
     capability_error = preflight_instance_capability(
         cfg, args.resolved_instance, "exec" if managed else "compose.exec",

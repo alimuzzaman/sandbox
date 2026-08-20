@@ -13,6 +13,7 @@ from pathlib import Path
 
 from dependencies import ToolDependencies
 from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, TargetRequest
+from sandbox.application.target_service import TargetResolutionError
 from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 from sandbox.transports.remote_jobs import RemoteJobAdmissionError
 
@@ -20,6 +21,31 @@ from sandbox.transports.remote_jobs import RemoteJobAdmissionError
 _job_service = None
 _target_service = None
 _workspace_service = None
+
+
+def _mcp_execution_policy(target, *, execution_profile: str | None, timeout_seconds: int | None,
+                          output_profile: str | None, stall_seconds: int | None = None,
+                          cancel_grace_seconds: int | None = None,
+                          cancel_on_stall: bool | None = None,
+                          cleanup_policy: str | None = None):
+    """Use the shared pure resolver without routing MCP validation through CLI exit handling."""
+    from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
+
+    runtime = normalize_runtime_policy(getattr(target, "runtime_policy", None))
+    workspace = getattr(target, "workspace_label", runtime["workspace"])
+    policy = resolve_execution_policy(
+        runtime, workspace=workspace, execution_profile=execution_profile,
+        timeout_seconds=timeout_seconds, stall_seconds=stall_seconds,
+        cancel_grace_seconds=cancel_grace_seconds, cancel_on_stall=cancel_on_stall,
+        cleanup_policy=cleanup_policy,
+    )
+    output_workspace = runtime["workspaces"].get(workspace, {})
+    output = (output_profile if output_profile is not None else
+              output_workspace.get("outputProfile") if output_workspace.get("outputProfile") is not None
+              else runtime["outputProfile"])
+    if output not in runtime["outputProfiles"]:
+        raise ValueError("output profile is invalid")
+    return policy, output
 
 
 def _remote_transport():
@@ -44,8 +70,12 @@ def register(server, dependencies: ToolDependencies) -> None:
 
 def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = False,
                          remote: str | None = None, workspace: str | None = None,
-                         timeout_seconds: int = 900, output_profile: str = "smart",
-                         request_id: str | None = None, kind: str = "exec") -> dict:
+                         timeout_seconds: int | None = None, output_profile: str | None = None,
+                         execution_profile: str | None = None, stall_seconds: int | None = None,
+                         cancel_grace_seconds: int | None = None,
+                         cancel_on_stall: bool | None = None,
+                         cleanup_policy: str | None = None, request_id: str | None = None,
+                         kind: str = "exec") -> dict:
     """Shared implementation for MCP tools that submit an explicit argv job.
 
     ``job_start`` is a general host-job primitive. Runtime-neutral
@@ -61,12 +91,23 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_target"), "error": str(exc)}
     try:
+        policy, default_output = _mcp_execution_policy(
+            target, execution_profile=execution_profile, timeout_seconds=timeout_seconds,
+            output_profile=output_profile, stall_seconds=stall_seconds,
+            cancel_grace_seconds=cancel_grace_seconds, cancel_on_stall=cancel_on_stall,
+            cleanup_policy=cleanup_policy)
+        resolved_output = default_output
         submission = JobSubmission(kind, target.project_root,
             _resolved_project_identity(target), target.kind, target.workspace_label,
-            tuple(command), timeout_seconds, _source_identity(target.project_root),
-            remote_name=target.remote_name, request_id=request_id, output_profile=output_profile,
+            tuple(command), policy.deadline_seconds, _source_identity(target.project_root),
+            remote_name=target.remote_name, request_id=request_id, execution_profile=policy.execution_profile,
+            output_profile=resolved_output,
             output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
-                                       .get(output_profile)))
+                                       .get(resolved_output)),
+            deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
+            stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+            cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+            execution_policy_provenance=policy.provenance)
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -76,13 +117,18 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
         return _job_service.submit(submission)
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()
+    except ValueError:
+        return {"ok": False, "code": "invalid_execution_policy", "error": "execution policy is invalid"}
     except Exception:
         return {"ok": False, "code": "supervisor_launch_failed", "error": "job submission failed"}
 
 
 def job_start(command: list[str], project_dir: str, *, local: bool = False,
               remote: str | None = None, workspace: str | None = None,
-              timeout_seconds: int = 900, output_profile: str = "smart",
+              timeout_seconds: int | None = None, output_profile: str | None = None,
+              execution_profile: str | None = None, stall_seconds: int | None = None,
+              cancel_grace_seconds: int | None = None,
+              cancel_on_stall: bool | None = None, cleanup_policy: str | None = None,
               request_id: str | None = None) -> dict:
     """Durably accept a detached explicit-argv host job; output is read separately.
 
@@ -92,26 +138,49 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
     """
     return _submit_explicit_job(command, project_dir, local=local, remote=remote,
                                 workspace=workspace, timeout_seconds=timeout_seconds,
-                                output_profile=output_profile, request_id=request_id)
+                                output_profile=output_profile, execution_profile=execution_profile,
+                                stall_seconds=stall_seconds, cancel_grace_seconds=cancel_grace_seconds,
+                                cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
+                                request_id=request_id)
 
 
 def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                local: bool = False, remote: str | None = None,
-               timeout_seconds: int = 900, output_profile: str = "smart") -> dict:
+               timeout_seconds: int | None = None, output_profile: str | None = None,
+               execution_profile: str | None = None, stall_seconds: int | None = None,
+               cancel_grace_seconds: int | None = None,
+               cancel_on_stall: bool | None = None, cleanup_policy: str | None = None) -> dict:
     """Submit one explicit command per isolated workspace under an aggregate job."""
     if not workspaces or not command:
         return {"ok": False, "code": "invalid_matrix", "error": "command and workspaces are required"}
     if len(set(workspaces)) != len(workspaces):
         return {"ok": False, "code": "invalid_matrix", "error": "workspace labels must be unique"}
     try:
-        target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
-            workspace=workspaces[0], required_capability="job.exec" if remote else None))
-        identity = _resolved_project_identity(target)
-        submissions = [JobSubmission("test", target.project_root, identity, target.kind, workspace,
-            tuple(command), timeout_seconds, _source_identity(target.project_root),
-            remote_name=target.remote_name, workspace_mode="isolated", output_profile=output_profile)
-            for workspace in workspaces]
-        if target.kind == "remote":
+        targets = [_target_service.resolve(TargetRequest(
+            project_dir=project_dir, local=local, remote=remote, workspace=workspace,
+            required_capability="job.exec" if remote else None)) for workspace in workspaces]
+        first = targets[0]
+        if any((target.kind, target.remote_name, target.project_root) !=
+               (first.kind, first.remote_name, first.project_root) for target in targets):
+            raise ValueError("matrix workspaces must resolve to one target")
+        submissions = []
+        for workspace, target in zip(workspaces, targets):
+            policy, resolved_output = _mcp_execution_policy(
+                target, execution_profile=execution_profile, timeout_seconds=timeout_seconds,
+                output_profile=output_profile, stall_seconds=stall_seconds,
+                cancel_grace_seconds=cancel_grace_seconds, cancel_on_stall=cancel_on_stall,
+                cleanup_policy=cleanup_policy)
+            submissions.append(JobSubmission(
+                "test", target.project_root, _resolved_project_identity(target), target.kind, workspace,
+                tuple(command), policy.deadline_seconds, _source_identity(target.project_root),
+                remote_name=target.remote_name, workspace_mode="isolated",
+                execution_profile=policy.execution_profile, output_profile=resolved_output,
+                output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
+                                           .get(resolved_output)), deadline_source=policy.deadline_source,
+                deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+                cancel_grace_seconds=policy.cancel_grace_seconds, cancel_on_stall=policy.cancel_on_stall,
+                cleanup_policy=policy.cleanup_policy, execution_policy_provenance=policy.provenance))
+        if first.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
@@ -120,6 +189,10 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
         return _job_service.submit_matrix(submissions)
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()
+    except TargetResolutionError as exc:
+        return {"ok": False, "code": exc.code, "error": str(exc)}
+    except ValueError:
+        return {"ok": False, "code": "invalid_execution_policy", "error": "execution policy is invalid"}
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"),
                 "error": "job matrix submission failed"}

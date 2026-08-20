@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import unittest
@@ -38,7 +39,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=deploy,
             ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         submission = JobSubmission(
             "test", "/project", "project:remote", "remote", "unit",
@@ -78,7 +79,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=deploy,
             ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("caller")
         submissions = [
@@ -115,7 +116,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=deploy,
             ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         submission = JobSubmission(
             "test", "/project", "project:remote", "remote", "unit",
@@ -134,7 +135,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=deploy,
             ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("caller")
         submissions = [
@@ -218,16 +219,42 @@ class RemoteJobTransportTests(unittest.TestCase):
         )
         submission = JobSubmission("test", "/p", "p", "remote", "w", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r")
-        with self.assertRaisesRegex(Exception, "does not support job.exec"):
+        with self.assertRaisesRegex(Exception, "job.execution-policy.v1; reprovision"):
             transport.submit(submission)
         self.assertEqual(calls, [])
+
+    def test_stale_controller_acknowledgement_cannot_drop_resolved_policy(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_args: calls.append("deploy") or {
+                "target_path": "/srv/p", "identity": "sha256:deployed"},
+            ssh_run=lambda *_args, **_kwargs: calls.append("ssh") or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"custom","deadline_seconds":61,"deadline_source":"profile:custom","deadline_reminder":"profile reminder","stall_seconds":12,"cancel_grace_seconds":13,"cancel_on_stall":false,"cleanup_policy":"ephemeral","provenance":{"execution_profile":"workspace","deadline":"profile:workspace","stall":"profile:workspace","cancel_grace":"profile:workspace","cancel_on_stall":"profile:workspace","cleanup":"profile:workspace"}}}\n'),
+            remote_lookup=lambda _name: {"provisioned": True,
+                "capabilities": ["job.exec", "job.execution-policy.v1"]},
+        )
+        submission = JobSubmission(
+            "test", "/p", "p", "remote", "w", ("npm", "test"), 60,
+            SourceIdentity("caller"), remote_name="r", execution_profile="custom",
+            deadline_source="profile:custom", deadline_reminder="profile reminder",
+            stall_seconds=12, cancel_grace_seconds=13, cancel_on_stall=False,
+            cleanup_policy="ephemeral", execution_policy_provenance={
+                "execution_profile": "workspace", "deadline": "profile:workspace",
+                "stall": "profile:workspace", "cancel_grace": "profile:workspace",
+                "cancel_on_stall": "profile:workspace", "cleanup": "profile:workspace",
+            },
+        )
+
+        with self.assertRaisesRegex(RemoteJobTransportError, "exact execution policy"):
+            transport.submit(submission)
+        self.assertEqual(calls, ["deploy", "ssh", "ssh"])
 
     def test_deployment_precedes_bounded_json_acceptance(self):
         calls = []
         transport = RemoteJobTransport(
             deploy=lambda remote, root: calls.append(("deploy", root)) or {"target_path": "/srv/p", "commit": "abc", "dirty": True, "dirty_digest": "d", "identity": "sha256:id"},
-            ssh_run=lambda remote, command, timeout: calls.append(("ssh", command, timeout)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            ssh_run=lambda remote, command, timeout: calls.append(("ssh", command, timeout)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         result = transport.submit(JobSubmission("test", "/p", "p", "remote", "w", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r", request_id="retry"))
@@ -244,7 +271,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {"target_path": "/srv/p", "identity": "sha256:deployed"},
             ssh_run=lambda _remote, command, timeout: SimpleNamespace(
                 returncode=0, stdout='{"ok":true}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         submission = JobSubmission("test", "/p", "p", "remote", "w", ("echo", "ok"), 60,
             SourceIdentity("caller"), remote_name="r")
@@ -256,7 +283,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {"target_path": "/srv/p", "identity": "sha256:deployed"},
             ssh_run=lambda _remote, command, timeout: SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"status":"accepted","job_id":""}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         submission = JobSubmission("test", "/p", "p", "remote", "w", ("echo", "ok"), 60,
             SourceIdentity("caller"), remote_name="r")
@@ -271,7 +298,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             if "job-start" in command:
                 return SimpleNamespace(
                     returncode=0,
-                    stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n',
+                    stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"ci","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":45,"cancel_grace_seconds":20,"cancel_on_stall":true,"cleanup_policy":"retain","provenance":{}}}\n',
                 )
             return SimpleNamespace(returncode=0, stdout="")
 
@@ -284,7 +311,7 @@ class RemoteJobTransportTests(unittest.TestCase):
                 "dirty_digest": "deployed-dirty",
             },
             ssh_run=run,
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         submission = JobSubmission(
             "test", "/caller-checkout", "project:canonical", "remote", "proof",
@@ -302,8 +329,11 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("--source-commit deployed-commit", command)
         self.assertIn("--source-dirty-digest deployed-dirty", command)
         self.assertIn("--profile ci", command)
-        self.assertIn("--stall-seconds 45", command)
-        self.assertIn("--cancel-on-stall", command)
+        self.assertIn("--execution-policy-json", command)
+        encoded = command.split("--execution-policy-json ", 1)[1].split(" ", 1)[0]
+        policy = json.loads(__import__("base64").b64decode(encoded))
+        self.assertEqual(policy["stall_seconds"], 45)
+        self.assertTrue(policy["cancel_on_stall"])
         self.assertNotIn("caller-commit", command)
         self.assertEqual(result["source"]["identity"], "sha256:deployed")
 
@@ -312,7 +342,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append((command, timeout)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         self.assertEqual(transport.status("r", "abc")["ok"], True)
         self.assertEqual(transport.list("r")["jobs"], [])
@@ -327,7 +357,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         identity = "a" * 64
@@ -346,7 +376,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         transport.list("r")
@@ -358,7 +388,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda _remote, command, timeout: commands.append(command) or SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         transport.list("r", project_dir="/tmp/project", workspace="proof")
         expected = hashlib.sha256(
@@ -371,7 +401,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda _remote, _command, **_kwargs: SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"data":{"jobs":[]}}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         with self.assertRaisesRegex(RemoteJobTransportError, "top-level jobs"):
             transport.list("r")
@@ -382,7 +412,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append((command, timeout)) or SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"interrupted":[]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         result = transport.control("r", ["job-reconcile", "--limit", "200"])
@@ -395,7 +425,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
                 returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         transport.cancel("r", "abc", force=True)
@@ -415,8 +445,8 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda remote, root: {"target_path": "/srv/sandbox/project", "commit": "abc", "dirty": False,
                                          "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
-                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r"))
@@ -429,8 +459,8 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
                                          "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
-                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r"))
@@ -448,7 +478,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
                 returncode=0, stdout=""),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         transport._prepare_workspace({}, "/srv/project", "workspace")
         prepare = commands[0]
@@ -461,7 +491,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda *_: {},
             ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
                 returncode=1, stdout="copy failed\n", stderr="permission denied\n"),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         with self.assertRaisesRegex(Exception, "(?s)permission denied.*copy failed"):
             transport._prepare_workspace({}, "/srv/project", "workspace")
@@ -472,8 +502,8 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
                                          "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda remote, command, timeout: calls.append(command) or SimpleNamespace(
-                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         transport.submit(JobSubmission("runtime-exec", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
@@ -488,8 +518,8 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
                                          "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda remote, command, timeout: calls.append(command) or SimpleNamespace(
-                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc"}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+                returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace",
@@ -502,7 +532,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},
             ssh_run=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
-            remote_lookup=lambda name: {"provisioned": True},
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         result = transport.status("r", "a" * 32)
         self.assertFalse(result["ok"])
@@ -511,15 +541,27 @@ class RemoteJobTransportTests(unittest.TestCase):
 
     def test_output_controls_and_matrix_deploy_once(self):
         calls = []
+        policy = {"profile": "custom", "deadline_seconds": 60,
+                  "deadline_source": "profile:custom", "deadline_reminder": "profile reminder",
+                  "stall_seconds": 12, "cancel_grace_seconds": 13,
+                  "cancel_on_stall": False, "cleanup_policy": "ephemeral",
+                  "provenance": {"execution_profile": "workspace", "deadline": "profile:workspace",
+                                 "stall": "profile:workspace", "cancel_grace": "profile:workspace",
+                                 "cancel_on_stall": "profile:workspace", "cleanup": "profile:workspace"}}
         transport = RemoteJobTransport(
             deploy=lambda remote, root: calls.append(("deploy", root)) or {"target_path": "/srv/p", "commit": "abc", "dirty": False, "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda remote, command, timeout: calls.append(("ssh", command)) or SimpleNamespace(
-                returncode=0, stdout='{"ok":true,"kind":"matrix","parent_job_id":"parent","children":[{"job_id":"a"},{"job_id":"b"}]}\n'),
-            remote_lookup=lambda name: {"provisioned": True},
+                returncode=0, stdout=json.dumps({"ok": True, "kind": "matrix", "parent_job_id": "parent",
+                    "children": [{"job_id": "a", "execution_policy": policy},
+                                 {"job_id": "b", "execution_policy": policy}]})),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("ignored")
         children = [JobSubmission("test", "/p", "p", "remote", label, ("npm", "test"), 60, source,
-            remote_name="r", workspace_mode="isolated") for label in ("a", "b")]
+            remote_name="r", workspace_mode="isolated", execution_profile="custom",
+            deadline_source="profile:custom", deadline_reminder="profile reminder", stall_seconds=12,
+            cancel_grace_seconds=13, cancel_on_stall=False, cleanup_policy="ephemeral",
+            execution_policy_provenance=policy["provenance"]) for label in ("a", "b")]
         result = transport.submit_many(children)
         self.assertEqual(result["parent_job_id"], "parent")
         self.assertEqual(len(result["children"]), 2)
@@ -528,6 +570,14 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertEqual(len(workspace_commands), 2)
         self.assertNotEqual(workspace_commands[0].split("workspace-")[1].split()[0],
                             workspace_commands[1].split("workspace-")[1].split()[0])
+        matrix_command = next(item[1] for item in calls if item[0] == "ssh" and "job-matrix" in item[1])
+        encoded = matrix_command.split("--spec-json ", 1)[1].split(" ", 1)[0]
+        self.assertEqual(json.loads(base64.b64decode(encoded))[0]["execution_policy"], {
+            "execution_profile": "custom", "deadline_seconds": 60,
+            "deadline_source": "profile:custom", "deadline_reminder": "profile reminder",
+            "stall_seconds": 12, "cancel_grace_seconds": 13, "cancel_on_stall": False,
+            "cleanup_policy": "ephemeral", "provenance": policy["provenance"],
+        })
         calls.clear()
         transport.read_output("r", "abc", stream="stderr", cursor="cursor", tail_bytes=10,
                               offset=None, lines=None, since=None, max_bytes=12, wait_seconds=2, encoding="base64")
@@ -543,7 +593,7 @@ class RemoteJobTransportTests(unittest.TestCase):
                                            "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
                 returncode=2, stdout='{"ok":false,"error":{"message":"matrix plan rejected"}}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("ignored")
         child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
@@ -556,7 +606,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,
                                            "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda *_args, **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="matrix parser failed"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("ignored")
         child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
@@ -570,7 +620,7 @@ class RemoteJobTransportTests(unittest.TestCase):
                                            "dirty_digest": "", "identity": "sha256:id"},
             ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
                 returncode=2, stdout="", stderr="Bearer controller-token token=second-secret"),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         source = SourceIdentity("ignored")
         child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
@@ -590,7 +640,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},
             ssh_run=fail,
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         with self.assertRaises(RemoteJobTransportError) as raised:
             transport.control("r", ["job-status", "a" * 32])

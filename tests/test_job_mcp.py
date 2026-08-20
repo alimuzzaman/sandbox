@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from sandbox.resources.network_capacity import evaluate_network_capacity
+from sandbox.application.target_service import TargetResolutionError
 from sandbox.transports.remote_jobs import RemoteJobAdmissionError
 
 
@@ -101,6 +102,19 @@ class JobMcpTests(unittest.TestCase):
         self.assertFalse("job_id" in result)
         self.assertNotEqual(result.get("status"), "accepted")
         self.assertNotIn(secret, str(result))
+
+    def test_job_matrix_preserves_target_resolution_codes_before_policy_validation(self):
+        from tools import jobs
+
+        for code in ("unknown_remote", "remote_not_provisioned"):
+            with self.subTest(code=code), patch.object(
+                    jobs, "_target_service", SimpleNamespace(resolve=Mock(side_effect=TargetResolutionError(
+                        code, "target is unavailable")))):
+                result = jobs.job_matrix(["tool", "safe"], ["one"], "/project", remote="vps")
+
+            self.assertEqual(result, {
+                "ok": False, "code": code, "error": "target is unavailable",
+            })
 
     def test_job_list_forwards_project_workspace_and_pages_filtered_results(self):
         from tools import jobs
@@ -200,6 +214,39 @@ class JobMcpTests(unittest.TestCase):
             "encoding": "utf8", "profile": "full",
         }))
 
+    def test_mcp_start_uses_the_same_workspace_execution_policy_as_cli(self):
+        from tools import jobs
+
+        target = SimpleNamespace(
+            kind="local", project_root="/project", remote_name=None, workspace_label="qa",
+            runtime_policy={
+                "executionProfile": "exec",
+                "executionProfiles": {
+                    "exec": {"timeoutSeconds": 90, "stallSeconds": 9,
+                             "cancelGraceSeconds": 10, "cancelOnStall": True,
+                             "cleanup": "always"},
+                    "custom": {"timeoutSeconds": 120, "stallSeconds": 12,
+                               "cancelGraceSeconds": 13, "cancelOnStall": False,
+                               "cleanup": "ephemeral"},
+                },
+                "workspaces": {"qa": {"executionProfile": "custom"}},
+            }, sources={"identity": "project:local"},
+        )
+        captured = []
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=lambda _request: target)), \
+                patch.object(jobs, "_job_service", SimpleNamespace(
+                    submit=lambda submission: captured.append(submission) or {"ok": True})):
+            result = jobs.job_start(["npm", "test"], "/project", workspace="qa")
+            invalid = jobs.job_start(["npm", "test"], "/project", workspace="qa", timeout_seconds=0)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual((captured[0].deadline_seconds, captured[0].stall_seconds,
+                          captured[0].cancel_grace_seconds, captured[0].cleanup_policy),
+                         (120, 12, 13, "ephemeral"))
+        self.assertEqual(invalid, {"ok": False, "code": "invalid_execution_policy",
+                                   "error": "execution policy is invalid"})
+        self.assertEqual(len(captured), 1)
+
     def test_remote_run_tests_preserves_result_keys_and_defers_completion(self):
         wp = _load_wp_tool()
 
@@ -223,6 +270,35 @@ class JobMcpTests(unittest.TestCase):
             submissions[0].source.identity,
             "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
         )
+
+    def test_remote_run_tests_resolves_full_workspace_execution_policy_before_submit(self):
+        wp = _load_wp_tool()
+        target = SimpleNamespace(
+            kind="remote", project_root="/project", remote_name="vps", workspace_label="php",
+            runtime_policy={
+                "executionProfiles": {"verify": {
+                    "timeoutSeconds": 123, "stallSeconds": 12, "cancelGraceSeconds": 13,
+                    "cancelOnStall": True, "cleanup": "ephemeral",
+                }},
+                "workspaces": {"php": {"executionProfile": "verify"}},
+            }, sources={"identity": "project:remote"},
+        )
+        submissions = []
+        with patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=lambda _request: target)}), \
+                patch.object(wp, "_remote_job_transport", return_value=SimpleNamespace(
+                    submit=lambda submission: submissions.append(submission) or {"ok": True, "job_id": "b" * 32})):
+            result = wp.run_tests("/project", mode="unit", remote="vps", workspace="php")
+            rejected = wp.run_tests("/project", mode="unit", remote="vps", workspace="php",
+                                    timeout_seconds=0)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual((submissions[0].deadline_seconds, submissions[0].stall_seconds,
+                          submissions[0].cancel_grace_seconds, submissions[0].cancel_on_stall,
+                          submissions[0].cleanup_policy), (123, 12, 13, True, "ephemeral"))
+        self.assertEqual(submissions[0].execution_policy_provenance["execution_profile"], "workspace")
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(len(submissions), 1)
 
     def test_network_capacity_admission_preserves_public_run_tests_envelope(self):
         wp = _load_wp_tool()
@@ -288,3 +364,19 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(submit.call_args.kwargs["kind"], "runtime-exec")
         self.assertEqual(submit.call_args.kwargs["remote"], "vps")
         self.assertEqual(submit.call_args.kwargs["timeout_seconds"], 120)
+
+    def test_instance_exec_propagates_tri_state_policy_without_defaulting_zero(self):
+        from tools import jobs, runtime
+
+        accepted = {"ok": True, "job_id": "d" * 32}
+        with patch.object(jobs, "_submit_explicit_job", return_value=accepted) as submit:
+            result = runtime.instance_exec(
+                ["node", "--version"], "/project", local=True, timeout_seconds=0,
+                execution_profile="custom", stall_seconds=12, cancel_grace_seconds=13,
+                cancel_on_stall=False, cleanup_policy="ephemeral",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(submit.call_args.kwargs["timeout_seconds"], 0)
+        self.assertEqual(submit.call_args.kwargs["cancel_on_stall"], False)
+        self.assertEqual(submit.call_args.kwargs["cleanup_policy"], "ephemeral")

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,7 @@ class JobServiceTests(unittest.TestCase):
             first = service.submit(submission); second = service.submit(submission)
             self.assertFalse(first["idempotent_replay"]); self.assertTrue(second["idempotent_replay"])
             self.assertTrue(launched[0].exists())
-            self.assertEqual(first["deadline"], {"seconds": 60, "source": "explicit"})
+            self.assertEqual(first["deadline"], {"seconds": 60, "source": "explicit", "reminder": None})
             repository.close()
 
     def test_workspace_registration_precedes_durable_job_acceptance(self):
@@ -54,6 +55,39 @@ class JobServiceTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(observed, [("project-identity", [])])
             self.assertEqual(len(repository.list()), 1)
+            repository.close()
+
+    def test_resolved_policy_persists_to_descriptor_acceptance_and_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            launched = []
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=launched.append)
+            submission = JobSubmission(
+                "test", temp, "p", "local", "qa", ("echo", "ok"), 120,
+                SourceIdentity("source"), execution_profile="custom", deadline_source="profile:custom",
+                deadline_reminder="deadline supplied by profile:custom; pass an explicit timeout to override it",
+                stall_seconds=12, cancel_grace_seconds=13, cancel_on_stall=False,
+                cleanup_policy="ephemeral", execution_policy_provenance={
+                    "execution_profile": "workspace", "deadline": "profile:workspace",
+                    "stall": "profile:workspace", "cancel_grace": "profile:workspace",
+                    "cancel_on_stall": "profile:workspace", "cleanup": "profile:workspace",
+                },
+            )
+            accepted = service.submit(submission)
+            descriptor = json.loads(launched[0].read_text())
+            self.assertEqual(descriptor["cancel_grace_seconds"], 13)
+            self.assertEqual(accepted["deadline"]["reminder"], submission.deadline_reminder)
+            self.assertEqual(accepted["execution_policy"]["provenance"],
+                             dict(submission.execution_policy_provenance))
+            repository.transition(accepted["job_id"], "running")
+            repository.transition(accepted["job_id"], "succeeded")
+            retry = service.retry(accepted["job_id"], request_id="policy-retry")
+            retried = repository.get(retry["job_id"])
+            self.assertEqual((retried["cancel_grace_seconds"], retried["deadline_reminder"]),
+                             (13, submission.deadline_reminder))
+            self.assertEqual(json.loads(retried["execution_policy_provenance_json"]),
+                             dict(submission.execution_policy_provenance))
             repository.close()
 
     def test_workspace_registration_failure_cannot_accept_a_job(self):

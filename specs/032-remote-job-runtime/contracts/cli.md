@@ -17,6 +17,13 @@ configuration. When no explicit target exists, `runtime.default` is used. A remo
 never inferred merely because one remote is registered. Every result reports resolved
 target/workspace and each deadline's source.
 
+Execution policy resolves as explicit fields > selected workspace policy > project
+policy > operation fallback. The acceptance receipt persists the deadline reminder,
+stall threshold, cancellation grace, cancel-on-stall setting, cleanup policy, and
+provenance. Remote submission requires `job.execution-policy.v1` before deployment and
+refuses a controller that cannot echo the exact policy; source support is not proof an
+already provisioned remote has that revision.
+
 ## Generic execution
 
 ```text

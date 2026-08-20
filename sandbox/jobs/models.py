@@ -430,9 +430,12 @@ class JobSubmission:
     output_profile: str = "smart"
     output_profile_definition: Mapping[str, Any] | None = None
     deadline_source: str = "explicit"
+    deadline_reminder: str | None = None
     stall_seconds: int = 300
+    cancel_grace_seconds: int = 20
     cancel_on_stall: bool = False
     cleanup_policy: str = "retain"
+    execution_policy_provenance: Mapping[str, str] | None = None
     environment_keys: tuple[str, ...] = ()
     artifact_paths: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
@@ -471,10 +474,19 @@ class JobSubmission:
             output_profile_from_definition(self.output_profile, self.output_profile_definition)
             object.__setattr__(self, "output_profile_definition", dict(self.output_profile_definition))
         _positive_seconds(self.stall_seconds, "stall timeout")
+        _positive_seconds(self.cancel_grace_seconds, "cancellation grace", maximum=600)
         if not isinstance(self.cancel_on_stall, bool):
             raise ValueError("cancel_on_stall must be boolean")
         if self.cleanup_policy not in {"retain", "always", "on-success", "ephemeral"}:
             raise ValueError("cleanup policy is invalid")
+        if self.deadline_reminder is not None:
+            _safe_text(self.deadline_reminder, "deadline reminder")
+        provenance = self.execution_policy_provenance or {}
+        if not isinstance(provenance, Mapping) or any(
+                not isinstance(key, str) or not isinstance(value, str) or not key or not value
+                for key, value in provenance.items()):
+            raise ValueError("execution policy provenance is invalid")
+        object.__setattr__(self, "execution_policy_provenance", dict(provenance))
         for key in self.environment_keys:
             _safe_name(key, "environment key")
         for value in self.artifact_paths:
@@ -511,9 +523,12 @@ class JobSubmission:
             "output_profile_definition": dict(self.output_profile_definition or {}),
             "deadline_seconds": self.deadline_seconds,
             "deadline_source": self.deadline_source,
+            "deadline_reminder": self.deadline_reminder,
             "stall_seconds": self.stall_seconds,
+            "cancel_grace_seconds": self.cancel_grace_seconds,
             "cancel_on_stall": self.cancel_on_stall,
             "cleanup_policy": self.cleanup_policy,
+            "execution_policy_provenance": dict(self.execution_policy_provenance or {}),
             "request_id": self.request_id,
             "parent_job_id": self.parent_job_id,
             "retry_of_job_id": self.retry_of_job_id,

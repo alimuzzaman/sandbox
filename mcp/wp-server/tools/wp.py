@@ -168,7 +168,10 @@ def run_tests(project_dir: str, phpunit_args: str = "",
              label: str | None = None, mode: str | None = None,
              local: bool = False,
              remote: str | None = None, workspace: str | None = None,
-             timeout_seconds: int = 900, output_profile: str = "smart") -> dict:
+             timeout_seconds: int | None = None, output_profile: str | None = None,
+             execution_profile: str | None = None, stall_seconds: int | None = None,
+             cancel_grace_seconds: int | None = None,
+             cancel_on_stall: bool | None = None, cleanup_policy: str | None = None) -> dict:
     """Run the plugin's PHPUnit tests in unit or integration mode.
 
     Integration mode uses the externally-provisioned WP test suite, polyfills,
@@ -219,6 +222,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import JobSubmission, TargetRequest
         from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+        from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
@@ -226,14 +230,31 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                 required_capability="job.exec"))
             if target.kind != "remote":
                 raise ValueError("remote test target did not resolve to a remote")
+            runtime = normalize_runtime_policy(getattr(target, "runtime_policy", None))
+            policy = resolve_execution_policy(
+                runtime, workspace=target.workspace_label,
+                execution_profile=execution_profile, timeout_seconds=timeout_seconds,
+                stall_seconds=stall_seconds, cancel_grace_seconds=cancel_grace_seconds,
+                cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
+            )
+            workspace_policy = runtime["workspaces"].get(target.workspace_label, {})
+            resolved_output = (output_profile if output_profile is not None else
+                               workspace_policy.get("outputProfile") if workspace_policy.get("outputProfile") is not None
+                               else runtime["outputProfile"])
+            if resolved_output not in runtime["outputProfiles"]:
+                raise ValueError("output profile is invalid")
             command = ["sb", "test", resolved_mode, "--local", "--project-dir", "."]
             if phpunit_args.strip():
                 command += ["--", *shlex.split(phpunit_args)]
             accepted = _remote_job_transport().submit(JobSubmission(
                     "test", target.project_root, _resolved_project_identity(target), "remote",
-                    target.workspace_label, tuple(command), timeout_seconds, _source_identity(target.project_root),
-                    remote_name=target.remote_name, output_profile=output_profile,
-                    deadline_source="explicit"))
+                    target.workspace_label, tuple(command), policy.deadline_seconds, _source_identity(target.project_root),
+                    remote_name=target.remote_name, execution_profile=policy.execution_profile,
+                    output_profile=resolved_output, deadline_source=policy.deadline_source,
+                    deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+                    cancel_grace_seconds=policy.cancel_grace_seconds,
+                    cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+                    execution_policy_provenance=policy.provenance))
         except (TargetResolutionError, ValueError) as exc:
             return {"ok": False, "passed": False, "summary": None, "output": "", "mode": resolved_mode,
                     "error": str(exc)}
@@ -250,7 +271,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "phpunit",
-                                             ("sb", "test", mode or "auto"), timeout_seconds)
+                                             ("sb", "test", mode or "auto"),
+                                             timeout_seconds if timeout_seconds is not None else 900)
     if blocked: return {**blocked, "passed": False, "summary": None, "output": "", "mode": mode}
     inst, err = _project_instance(project_dir, label)
     if err:

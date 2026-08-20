@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from sandbox.application.context import durable_job_dependencies
@@ -121,13 +122,40 @@ def _download_artifact_file(destination: str | Path, metadata: dict, fetch) -> d
             os.unlink(temporary)
 
 
-def _profile_timeout(target, name: str, explicit: int | None) -> tuple[int, str]:
-    from sandbox.config.runtime import BUILTIN_EXECUTION_PROFILES
-    chosen = name or "exec"
-    profile = BUILTIN_EXECUTION_PROFILES.get(chosen)
-    if profile is None:
-        _die(f"unknown execution profile {chosen!r}")
-    return (explicit or profile["timeoutSeconds"], chosen)
+def _resolved_execution_policy(target, args):
+    """Resolve once at the caller boundary, or validate a remote wire value."""
+    from sandbox.config.runtime import execution_policy_from_wire, resolve_execution_policy
+
+    encoded = getattr(args, "execution_policy_json", None)
+    if encoded is not None:
+        try:
+            raw = base64.b64decode(encoded.encode(), validate=True).decode()
+            return execution_policy_from_wire(json.loads(raw))
+        except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _die(f"invalid resolved execution policy: {exc}")
+    try:
+        return resolve_execution_policy(
+            getattr(target, "runtime_policy", None), workspace=getattr(target, "workspace_label", None),
+            execution_profile=getattr(args, "profile", None), timeout_seconds=getattr(args, "timeout", None),
+            stall_seconds=getattr(args, "stall_seconds", None),
+            cancel_grace_seconds=getattr(args, "cancel_grace_seconds", None),
+            cancel_on_stall=getattr(args, "cancel_on_stall", None),
+            cleanup_policy=getattr(args, "cleanup_policy", None),
+        )
+    except ValueError as exc:
+        _die(str(exc))
+
+
+def _resolved_output_profile(target, explicit: str | None) -> str:
+    from sandbox.config.runtime import normalize_runtime_policy
+
+    runtime = normalize_runtime_policy(getattr(target, "runtime_policy", None))
+    workspace = runtime["workspaces"].get(getattr(target, "workspace_label", runtime["workspace"]), {})
+    name = (explicit if explicit is not None else workspace.get("outputProfile")
+            if workspace.get("outputProfile") is not None else runtime["outputProfile"])
+    if name not in runtime["outputProfiles"]:
+        _die(f"unknown output profile {name!r}")
+    return name
 
 
 def configure_start_parser(parser) -> None:
@@ -142,14 +170,18 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--cwd-relative", default=".",
                         help="working directory relative to the resolved project checkout")
     parser.add_argument("--timeout", type=int)
-    parser.add_argument("--stall-seconds", type=int, default=300)
-    parser.add_argument("--cancel-on-stall", action="store_true")
+    parser.add_argument("--stall-seconds", type=int)
+    parser.add_argument("--cancel-grace-seconds", type=int)
+    parser.add_argument("--cancel-on-stall", action="store_true", default=None)
+    parser.add_argument("--no-cancel-on-stall", action="store_false", dest="cancel_on_stall")
+    parser.add_argument("--cleanup-policy", choices=("retain", "always", "on-success", "ephemeral"))
     parser.add_argument(
-        "--profile", default="exec",
+        "--profile", "--execution-profile", default=None,
         help=("execution deadline profile (built-ins: exec, unit, integration, e2e, ci, "
                "overall, overnight; default: exec)"),
     )
-    parser.add_argument("--output-profile", default="smart")
+    parser.add_argument("--output-profile")
+    parser.add_argument("--execution-policy-json", help=argparse.SUPPRESS)
     parser.add_argument("--request-id")
     parser.add_argument("--source-identity")
     parser.add_argument("--source-commit")
@@ -271,8 +303,14 @@ def configure_matrix_parser(parser) -> None:
     target.add_argument("--remote")
     parser.add_argument("--workspace", action="append",
                         help="isolated workspace label; repeat for each matrix cell")
-    parser.add_argument("--timeout", type=int, default=900)
-    parser.add_argument("--output-profile", default="smart")
+    parser.add_argument("--timeout", type=int)
+    parser.add_argument("--profile", "--execution-profile", default=None)
+    parser.add_argument("--stall-seconds", type=int)
+    parser.add_argument("--cancel-grace-seconds", type=int)
+    parser.add_argument("--cancel-on-stall", action="store_true", default=None)
+    parser.add_argument("--no-cancel-on-stall", action="store_false", dest="cancel_on_stall")
+    parser.add_argument("--cleanup-policy", choices=("retain", "always", "on-success", "ephemeral"))
+    parser.add_argument("--output-profile")
     parser.add_argument("--spec-json", help="internal encoded matrix child submission plan")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("command", nargs="...")
@@ -294,8 +332,7 @@ def cmd_job_start(_cfg, args) -> None:
         ))
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
-    timeout, profile = _profile_timeout(target, getattr(args, "profile", "exec"),
-                                        getattr(args, "timeout", None))
+    policy = _resolved_execution_policy(target, args)
     source = SourceIdentity(
         getattr(args, "source_identity", None)
         or _source_identity(target.project_root).identity,
@@ -303,18 +340,19 @@ def cmd_job_start(_cfg, args) -> None:
         getattr(args, "source_dirty_digest", None),
     )
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
-    output_profile = getattr(args, "output_profile", "smart")
+    output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
     submission = JobSubmission(
         kind="exec", project_root=target.project_root, project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
-        argv=tuple(command), deadline_seconds=timeout, source=source,
-        request_id=getattr(args, "request_id", None), execution_profile=profile, output_profile=output_profile,
+        argv=tuple(command), deadline_seconds=policy.deadline_seconds, source=source,
+        request_id=getattr(args, "request_id", None), execution_profile=policy.execution_profile, output_profile=output_profile,
         output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
                                    .get(output_profile)),
-        deadline_source="explicit" if getattr(args, "timeout", None) else f"profile:{profile}",
+        deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
         cwd_relative=getattr(args, "cwd_relative", "."),
-        stall_seconds=getattr(args, "stall_seconds", 300),
-        cancel_on_stall=getattr(args, "cancel_on_stall", False),
+        stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+        cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+        execution_policy_provenance=policy.provenance,
     )
     if target.kind == "remote":
         from sandbox.core import _remote
@@ -338,7 +376,7 @@ def cmd_job_start(_cfg, args) -> None:
         target_name = target_info.get("remote") or target_info.get("kind", target.kind)
         deadline = accepted.get("deadline", {})
         print(f"{accepted['job_id']} target={target_name} workspace={accepted.get('workspace', target.workspace_label)} "
-              f"deadline={deadline.get('seconds', timeout)}s source={deadline.get('source', submission.deadline_source)}")
+              f"deadline={deadline.get('seconds', policy.deadline_seconds)}s source={deadline.get('source', submission.deadline_source)}")
 
 
 def cmd_job_status(_cfg, args) -> None:
@@ -642,17 +680,23 @@ def cmd_declared_test_plan(_cfg, args) -> None:
     plan = plans.get(args.plan)
     if not isinstance(plan, dict):
         _die(f"unknown declared test plan {args.plan!r}")
-    profiles = runtime.get("executionProfiles", {})
     profile_name = plan.get("executionProfile", runtime.get("executionProfile", "exec"))
-    profile = profiles.get(profile_name)
-    if not isinstance(profile, dict):
-        _die(f"declared test plan {args.plan!r} references unknown execution profile {profile_name!r}")
     output_profile = getattr(args, "output_profile", None) or plan.get(
         "outputProfile", runtime.get("outputProfile", "smart"))
     if output_profile not in runtime.get("outputProfiles", {}):
         _die(f"declared test plan {args.plan!r} references unknown output profile {output_profile!r}")
-    timeout = getattr(args, "timeout", None) or profile["timeoutSeconds"]
-    deadline_source = "explicit" if getattr(args, "timeout", None) else f"plan:{args.plan}"
+    policy = _resolved_execution_policy(target, type("PolicyArgs", (), {
+        "execution_policy_json": None, "profile": profile_name,
+        "timeout": getattr(args, "timeout", None), "stall_seconds": None,
+        "cancel_grace_seconds": None, "cancel_on_stall": None, "cleanup_policy": None,
+    })())
+    if getattr(args, "timeout", None) is None:
+        policy = replace(
+            policy, deadline_source=f"plan:{args.plan}",
+            deadline_reminder=(f"deadline supplied by plan:{args.plan}; "
+                               "pass an explicit timeout to override it"),
+            provenance={**policy.provenance, "deadline": "plan"},
+        )
     raw_steps = plan.get("steps", [])
     if not isinstance(raw_steps, list) or not raw_steps:
         _die(f"declared test plan {args.plan!r} has no steps")
@@ -692,10 +736,14 @@ def cmd_declared_test_plan(_cfg, args) -> None:
         if not isinstance(artifacts, list) or any(not isinstance(item, str) or not item for item in artifacts):
             _die(f"declared test plan {args.plan!r} step {step['id']!r} has invalid artifacts")
         submissions.append(JobSubmission(
-            "test", target.project_root, project_identity, target.kind, labels[step["id"]], tuple(argv), timeout,
+            "test", target.project_root, project_identity, target.kind, labels[step["id"]], tuple(argv), policy.deadline_seconds,
             source, remote_name=target.remote_name, workspace_mode="isolated",
-            output_profile=output_profile, execution_profile=profile_name,
-            deadline_source=deadline_source, depends_on=tuple(dict.fromkeys(dependencies_by_label)),
+            output_profile=output_profile, execution_profile=policy.execution_profile,
+            deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
+            stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+            cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+            execution_policy_provenance=policy.provenance,
+            depends_on=tuple(dict.fromkeys(dependencies_by_label)),
             artifact_paths=tuple(artifacts),
         ))
     if target.kind == "remote":
@@ -707,7 +755,8 @@ def cmd_declared_test_plan(_cfg, args) -> None:
         result = dependencies["job_service"].submit_matrix(submissions)
     result = {**result, "plan": args.plan,
               "target": {"kind": target.kind, "remote": target.remote_name},
-              "deadline": {"seconds": timeout, "source": deadline_source}}
+              "deadline": {"seconds": policy.deadline_seconds, "source": policy.deadline_source,
+                           "reminder": policy.deadline_reminder}}
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
@@ -771,21 +820,39 @@ def cmd_job_matrix(_cfg, args) -> None:
                     )
                     if deployed_root not in candidate_root.parents and not isolated_sibling:
                         raise ValueError("matrix project directory must remain under the deployed project")
+                if "execution_policy" in item:
+                    from sandbox.config.runtime import execution_policy_from_wire
+                    policy = execution_policy_from_wire(item["execution_policy"])
+                else:
+                    policy_target = type("PolicyTarget", (), {
+                        "runtime_policy": getattr(target, "runtime_policy", None),
+                        "workspace_label": item.get("workspace"),
+                    })()
+                    policy = _resolved_execution_policy(policy_target, type("PolicyArgs", (), {
+                        "execution_policy_json": None,
+                        "profile": item.get("execution_profile"),
+                        "timeout": item.get("timeout", args.timeout),
+                        "stall_seconds": item.get("stall_seconds"),
+                        "cancel_grace_seconds": item.get("cancel_grace_seconds"),
+                        "cancel_on_stall": item.get("cancel_on_stall"),
+                        "cleanup_policy": item.get("cleanup_policy"),
+                    })())
                 submissions.append(JobSubmission(
                     kind=item.get("kind", "test"), project_root=project_root,
                     project_identity=item.get("project_identity", project_identity), target_kind=target.kind,
                     remote_name=target.remote_name, workspace_label=item["workspace"],
-                    argv=tuple(item["argv"]), deadline_seconds=item.get("timeout", args.timeout),
+                    argv=tuple(item["argv"]), deadline_seconds=policy.deadline_seconds,
                     source=SourceIdentity(**item.get("source", {"identity": source.identity})),
                     workspace_mode=item.get("workspace_mode", "isolated"),
                     cwd_relative=item.get("cwd_relative", "."),
-                    execution_profile=item.get("execution_profile", "exec"),
+                    execution_profile=policy.execution_profile,
                     output_profile=item.get("output_profile", args.output_profile),
-                    deadline_source=item.get("deadline_source", "explicit"),
-                    stall_seconds=item.get("stall_seconds", 300),
-                    cancel_on_stall=bool(item.get("cancel_on_stall", False)),
+                    deadline_source=policy.deadline_source, deadline_reminder=policy.deadline_reminder,
+                    stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
+                    cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+                    execution_policy_provenance=policy.provenance,
                     environment_keys=tuple(item.get("environment_keys", ())),
-                    request_id=item.get("request_id"), cleanup_policy=item.get("cleanup_policy", "retain"),
+                    request_id=item.get("request_id"),
                     depends_on=tuple(item.get("depends_on", ())),
                     failure_policy=item.get("failure_policy", "fail-fast"),
                     artifact_paths=tuple(item.get("artifact_paths", ())),
@@ -795,10 +862,23 @@ def cmd_job_matrix(_cfg, args) -> None:
             except (KeyError, TypeError, ValueError) as exc:
                 _die(f"invalid matrix submission plan entry: {exc}")
     else:
-        submissions = [JobSubmission("test", target.project_root, project_identity,
-            target.kind, workspace, tuple(command), args.timeout, source, remote_name=target.remote_name,
-            workspace_mode="isolated", output_profile=args.output_profile, deadline_source="explicit")
-            for workspace in args.workspace]
+        submissions = []
+        for workspace in args.workspace:
+            policy_target = type("PolicyTarget", (), {
+                "runtime_policy": getattr(target, "runtime_policy", None), "workspace_label": workspace,
+            })()
+            policy = _resolved_execution_policy(policy_target, args)
+            output_profile = _resolved_output_profile(policy_target, getattr(args, "output_profile", None))
+            submissions.append(JobSubmission(
+                "test", target.project_root, project_identity, target.kind, workspace, tuple(command),
+                policy.deadline_seconds, source, remote_name=target.remote_name, workspace_mode="isolated",
+                execution_profile=policy.execution_profile, output_profile=output_profile,
+                output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
+                                           .get(output_profile)), deadline_source=policy.deadline_source,
+                deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+                cancel_grace_seconds=policy.cancel_grace_seconds,
+                cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+                execution_policy_provenance=policy.provenance))
         difference_by_workspace = {}
     if target.kind == "remote":
         from sandbox.core import _remote

@@ -67,6 +67,36 @@ class RemoteCIJobTests(unittest.TestCase):
                 {"sha256:" + hashlib.sha256(str(root.resolve()).encode()).hexdigest()},
             )
 
+    def test_remote_ci_cells_resolve_workspace_execution_policy_once_before_submission(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workflow = root / "ci.yml"
+            workflow.write_text("jobs:\n  unit:\n    steps:\n      - run: echo unit\n")
+            target = ResolvedTarget(
+                str(root), "remote", "r", "ci", "remote:r:p", {"identity": "project:ci"},
+                runtime_policy={
+                    "executionProfiles": {"verify": {
+                        "timeoutSeconds": 123, "stallSeconds": 12, "cancelGraceSeconds": 13,
+                        "cancelOnStall": True, "cleanup": "ephemeral",
+                    }},
+                    "workspaces": {"ci": {"executionProfile": "verify"}},
+                },
+            )
+            args = SimpleNamespace(timeout=None, label_prefix="ci", matrix_filter={}, jobs=None,
+                                   allow_deploy=False, keep_on_fail=False, strict_provision=False,
+                                   accepted_differences=None, output_profile=None)
+            submission = _remote_ci_submissions(target, str(root), workflow,
+                                                _plan_workflow(workflow), args)[0]
+            args.timeout = 0
+            with self.assertRaises(SystemExit):
+                _remote_ci_submissions(target, str(root), workflow, _plan_workflow(workflow), args)
+
+        self.assertEqual((submission.deadline_seconds, submission.stall_seconds,
+                          submission.cancel_grace_seconds, submission.cancel_on_stall,
+                          submission.cleanup_policy), (123, 12, 13, True, "ephemeral"))
+        self.assertEqual(submission.execution_policy_provenance["execution_profile"], "workspace")
+        self.assertIn("123", submission.argv)
+
     def test_remote_matrix_control_contains_explicit_child_plan(self):
         calls = []
         transport = RemoteJobTransport(
@@ -74,8 +104,15 @@ class RemoteCIJobTests(unittest.TestCase):
                                "dirty_digest": "d", "identity": "sha256:i"},
             ssh_run=lambda _remote, command, timeout: calls.append(command) or SimpleNamespace(
                 returncode=0,
-                stdout='{"ok":true,"kind":"matrix","parent_job_id":"p","children":[]}\n'),
-            remote_lookup=lambda _name: {"provisioned": True},
+                stdout=('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
+                        '{"job_id":"a","execution_policy":{"profile":"exec","deadline_seconds":60,'
+                        '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
+                        '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}},'
+                        '{"job_id":"b","execution_policy":{"profile":"exec","deadline_seconds":60,'
+                        '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
+                        '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}]}\n')),
+            remote_lookup=lambda _name: {"provisioned": True,
+                                         "capabilities": ["job.exec", "job.execution-policy.v1"]},
             remote_sb_path=lambda _remote: "/srv/sandbox/sb-src/sb",
         )
         from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -149,9 +186,16 @@ class RemoteCIJobTests(unittest.TestCase):
                                "dirty_digest": "d", "identity": "sha256:i"},
             ssh_run=lambda _remote, command, timeout: calls.append(command) or SimpleNamespace(
                 returncode=0,
-                stdout='{"ok":true,"kind":"matrix","parent_job_id":"p","children":[]}',
+                stdout=('{"ok":true,"kind":"matrix","parent_job_id":"p","children":['
+                        '{"job_id":"build","execution_policy":{"profile":"exec","deadline_seconds":60,'
+                        '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,'
+                        '"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}},'
+                        '{"job_id":"unit","execution_policy":{"profile":"ci","deadline_seconds":60,'
+                        '"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":45,'
+                        '"cancel_grace_seconds":20,"cancel_on_stall":true,"cleanup_policy":"on-success","provenance":{}}}]}'),
             ),
-            remote_lookup=lambda _name: {"provisioned": True},
+            remote_lookup=lambda _name: {"provisioned": True,
+                                         "capabilities": ["job.exec", "job.execution-policy.v1"]},
         )
         from sandbox.jobs.models import JobSubmission, SourceIdentity
         submissions = [
@@ -174,8 +218,11 @@ class RemoteCIJobTests(unittest.TestCase):
         self.assertEqual(unit["cwd_relative"], "work")
         self.assertEqual(unit["execution_profile"], "ci")
         self.assertEqual(unit["output_profile"], "errors")
-        self.assertEqual(unit["stall_seconds"], 45)
-        self.assertTrue(unit["cancel_on_stall"])
+        self.assertEqual(unit["execution_policy"]["stall_seconds"], 45)
+        self.assertTrue(unit["execution_policy"]["cancel_on_stall"])
+        self.assertEqual(unit["execution_policy"]["cancel_grace_seconds"], 20)
+        self.assertEqual(unit["execution_policy"]["deadline_seconds"], 60)
+        self.assertEqual(unit["execution_policy"]["deadline_source"], "explicit")
         self.assertEqual(unit["environment_keys"], ["CI"])
         self.assertEqual(unit["cleanup_policy"], "on-success")
         self.assertEqual(unit["artifact_paths"], ["reports"])

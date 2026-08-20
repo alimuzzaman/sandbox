@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import dataclass
 from collections.abc import Mapping
 
 from sandbox.jobs.models import ExecutionProfile, OutputProfile
@@ -15,6 +16,11 @@ _RUNTIME_KEYS = {
     "maxParallel", "retentionDays", "executionProfiles", "outputProfiles",
     "testPlans", "workspaces",
 }
+_EXECUTION_PROFILE_DECLARED = "_executionProfileDeclared"
+
+
+class _NormalizedRuntimePolicy(dict):
+    """Private carrier for normalization provenance, never an input schema."""
 
 BUILTIN_EXECUTION_PROFILES = {
     "exec": {"timeoutSeconds": 900, "stallSeconds": 300, "cancelGraceSeconds": 20,
@@ -156,14 +162,173 @@ def _validate_workspaces(value: object) -> dict:
     return result
 
 
+@dataclass(frozen=True)
+class ResolvedExecutionPolicy:
+    """Fully resolved, serializable execution policy for one durable job.
+
+    Resolution happens at the caller's target boundary.  Remote controllers
+    receive this immutable value rather than re-reading their own project
+    policy, which may be at a different revision from the staged checkout.
+    """
+
+    execution_profile: str
+    deadline_seconds: int
+    deadline_source: str
+    deadline_reminder: str | None
+    stall_seconds: int
+    cancel_grace_seconds: int
+    cancel_on_stall: bool
+    cleanup_policy: str
+    provenance: dict[str, str]
+
+    def as_dict(self) -> dict:
+        return {
+            "execution_profile": self.execution_profile,
+            "deadline_seconds": self.deadline_seconds,
+            "deadline_source": self.deadline_source,
+            "deadline_reminder": self.deadline_reminder,
+            "stall_seconds": self.stall_seconds,
+            "cancel_grace_seconds": self.cancel_grace_seconds,
+            "cancel_on_stall": self.cancel_on_stall,
+            "cleanup_policy": self.cleanup_policy,
+            "provenance": dict(self.provenance),
+        }
+
+
+def resolve_execution_policy(runtime_policy: object = None, *, workspace: str | None = None,
+                             execution_profile: object = None, timeout_seconds: object = None,
+                             stall_seconds: object = None, cancel_grace_seconds: object = None,
+                             cancel_on_stall: object = None, cleanup_policy: object = None,
+                             fallback_profile: str = "exec") -> ResolvedExecutionPolicy:
+    """Resolve one policy with explicit > workspace > project > operation precedence.
+
+    ``None`` is the only absence sentinel.  In particular, an explicit false
+    ``cancel_on_stall`` is a real caller choice and must not be replaced by a
+    profile's true value.
+    """
+    # Normalization keeps the public default (``exec``) for compatibility,
+    # but callers that already normalized a project policy must retain whether
+    # that value was actually declared.  Otherwise the injected default would
+    # incorrectly outrank an operation-specific fallback profile.
+    if isinstance(runtime_policy, _NormalizedRuntimePolicy):
+        runtime = runtime_policy
+    else:
+        runtime = normalize_runtime_policy(runtime_policy)
+    selected_workspace = workspace if workspace is not None else runtime["workspace"]
+    if not isinstance(selected_workspace, str):
+        raise ValueError("runtime workspace is invalid")
+    workspace_policy = runtime["workspaces"].get(selected_workspace, {})
+    if not isinstance(workspace_policy, Mapping):
+        raise ValueError("runtime workspace policy is invalid")
+
+    if execution_profile is not None:
+        profile_name, profile_source = _name(execution_profile, "execution profile"), "explicit"
+    elif workspace_policy.get("executionProfile") is not None:
+        profile_name, profile_source = _name(workspace_policy["executionProfile"], "workspace execution profile"), "workspace"
+    elif runtime[_EXECUTION_PROFILE_DECLARED]:
+        profile_name, profile_source = runtime["executionProfile"], "project"
+    else:
+        profile_name, profile_source = fallback_profile, "operation"
+    profile = runtime["executionProfiles"].get(profile_name)
+    if not isinstance(profile, Mapping):
+        raise ValueError(f"unknown execution profile {profile_name!r}")
+
+    def choose(name: str, explicit: object, profile_key: str, validator):
+        if explicit is not None:
+            return validator(explicit), "explicit"
+        return validator(profile[profile_key]), f"profile:{profile_source}"
+
+    deadline, deadline_value_source = choose(
+        "timeout", timeout_seconds, "timeoutSeconds",
+        lambda value: _whole(value, "execution timeout", 1, 604800),
+    )
+    stall, stall_source = choose(
+        "stall", stall_seconds, "stallSeconds",
+        lambda value: _whole(value, "stall timeout", 1, 604800),
+    )
+    grace, grace_source = choose(
+        "cancel grace", cancel_grace_seconds, "cancelGraceSeconds",
+        lambda value: _whole(value, "cancellation grace", 1, 600),
+    )
+    if cancel_on_stall is not None:
+        if not isinstance(cancel_on_stall, bool):
+            raise ValueError("cancel on stall must be boolean")
+        cancel, cancel_source = cancel_on_stall, "explicit"
+    else:
+        cancel, cancel_source = profile["cancelOnStall"], f"profile:{profile_source}"
+    if cleanup_policy is not None:
+        if cleanup_policy not in {"retain", "always", "on-success", "ephemeral"}:
+            raise ValueError("cleanup policy is invalid")
+        cleanup, cleanup_source = cleanup_policy, "explicit"
+    else:
+        cleanup, cleanup_source = profile["cleanup"], f"profile:{profile_source}"
+    deadline_source = "explicit" if timeout_seconds is not None else f"profile:{profile_name}"
+    return ResolvedExecutionPolicy(
+        execution_profile=profile_name, deadline_seconds=deadline,
+        deadline_source=deadline_source,
+        deadline_reminder=None if timeout_seconds is not None else (
+            f"deadline supplied by {deadline_source}; pass an explicit timeout to override it"),
+        stall_seconds=stall, cancel_grace_seconds=grace, cancel_on_stall=cancel,
+        cleanup_policy=cleanup,
+        provenance={
+            "execution_profile": profile_source,
+            "deadline": deadline_value_source,
+            "stall": stall_source,
+            "cancel_grace": grace_source,
+            "cancel_on_stall": cancel_source,
+            "cleanup": cleanup_source,
+        },
+    )
+
+
+def execution_policy_from_wire(value: object) -> ResolvedExecutionPolicy:
+    """Validate a previously resolved policy without consulting local config."""
+    if not isinstance(value, Mapping) or set(value) != {
+            "execution_profile", "deadline_seconds", "deadline_source", "deadline_reminder",
+            "stall_seconds", "cancel_grace_seconds", "cancel_on_stall", "cleanup_policy", "provenance"}:
+        raise ValueError("execution policy wire value is invalid")
+    profile = _name(value["execution_profile"], "execution profile")
+    source = value["deadline_source"]
+    reminder = value["deadline_reminder"]
+    provenance = value["provenance"]
+    if (not isinstance(source, str) or not source or
+            (reminder is not None and not isinstance(reminder, str)) or
+            not isinstance(provenance, Mapping) or
+            set(provenance) != {"execution_profile", "deadline", "stall", "cancel_grace", "cancel_on_stall", "cleanup"} or
+            any(not isinstance(item, str) or not item for item in provenance.values())):
+        raise ValueError("execution policy wire value is invalid")
+    cancel_on_stall = value["cancel_on_stall"]
+    cleanup_policy = value["cleanup_policy"]
+    if not isinstance(cancel_on_stall, bool):
+        raise ValueError("cancel on stall must be boolean")
+    if cleanup_policy not in {"retain", "always", "on-success", "ephemeral"}:
+        raise ValueError("cleanup policy is invalid")
+    return ResolvedExecutionPolicy(
+        execution_profile=profile,
+        deadline_seconds=_whole(value["deadline_seconds"], "execution timeout", 1, 604800),
+        deadline_source=source, deadline_reminder=reminder,
+        stall_seconds=_whole(value["stall_seconds"], "stall timeout", 1, 604800),
+        cancel_grace_seconds=_whole(value["cancel_grace_seconds"], "cancellation grace", 1, 600),
+        cancel_on_stall=cancel_on_stall,
+        cleanup_policy=cleanup_policy,
+        provenance=dict(provenance),
+    )
+
+
 def normalize_runtime_policy(value: object = None) -> dict:
     if value is None:
         value = {}
     if not isinstance(value, Mapping):
         raise ValueError("runtime configuration must be an object")
-    unknown = set(value) - _RUNTIME_KEYS
+    is_normalized = isinstance(value, _NormalizedRuntimePolicy)
+    if _EXECUTION_PROFILE_DECLARED in value and not is_normalized:
+        raise ValueError("runtime configuration has an internal execution profile marker")
+    unknown = set(value) - _RUNTIME_KEYS - ({_EXECUTION_PROFILE_DECLARED} if is_normalized else set())
     if unknown:
         raise ValueError(f"runtime configuration has unknown keys: {sorted(unknown)}")
+    execution_profile_declared = value.get(_EXECUTION_PROFILE_DECLARED, "executionProfile" in value)
+    if not isinstance(execution_profile_declared, bool):
+        raise ValueError("runtime execution profile declaration is invalid")
     default = value.get("default", "local")
     if default not in {"local", "remote"}:
         raise ValueError("runtime default must be local or remote")
@@ -196,12 +361,21 @@ def normalize_runtime_policy(value: object = None) -> dict:
             raise ValueError(f"test plan {name!r} references an unknown execution profile")
         if plan.get("outputProfile", output_name) not in outputs:
             raise ValueError(f"test plan {name!r} references an unknown output profile")
-    return {
+    workspaces = _validate_workspaces(value.get("workspaces"))
+    for name, policy in workspaces.items():
+        if (policy.get("executionProfile") is not None
+                and _name(policy["executionProfile"], "workspace execution profile") not in executions):
+            raise ValueError(f"workspace {name!r} references an unknown execution profile")
+        if (policy.get("outputProfile") is not None
+                and _name(policy["outputProfile"], "workspace output profile") not in outputs):
+            raise ValueError(f"workspace {name!r} references an unknown output profile")
+    return _NormalizedRuntimePolicy({
         "default": default, "remote": remote, "workspace": workspace,
+        _EXECUTION_PROFILE_DECLARED: execution_profile_declared,
         "executionProfile": execution_name, "outputProfile": output_name,
         "maxParallel": _whole(value.get("maxParallel", 4), "maxParallel", 1, 64),
         "retentionDays": _whole(value.get("retentionDays", 7), "retentionDays", 1, 365),
         "executionProfiles": executions, "outputProfiles": outputs,
         "testPlans": plans,
-        "workspaces": _validate_workspaces(value.get("workspaces")),
-    }
+        "workspaces": workspaces,
+    })

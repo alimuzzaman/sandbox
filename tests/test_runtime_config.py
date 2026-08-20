@@ -89,6 +89,76 @@ class RuntimeConfigTests(unittest.TestCase):
             result = resolve_project_config(root, legacy_loader=mock.Mock())
             self.assertEqual(result["runtime"]["default"], "remote")
 
+    def test_execution_policy_precedence_preserves_explicit_false_and_builtin_override(self):
+        from sandbox.config.runtime import resolve_execution_policy
+
+        runtime = {
+            "executionProfile": "exec",
+            "executionProfiles": {
+                "exec": {"timeoutSeconds": 111, "stallSeconds": 11,
+                         "cancelGraceSeconds": 12, "cancelOnStall": True,
+                         "cleanup": "always"},
+                "custom": {"timeoutSeconds": 222, "stallSeconds": 22,
+                           "cancelGraceSeconds": 23, "cancelOnStall": True,
+                           "cleanup": "ephemeral"},
+            },
+            "workspaces": {"qa": {"executionProfile": "custom"}},
+        }
+        workspace = resolve_execution_policy(runtime, workspace="qa")
+        explicit = resolve_execution_policy(
+            runtime, workspace="qa", execution_profile="exec", timeout_seconds=45,
+            cancel_on_stall=False,
+        )
+
+        self.assertEqual(workspace.deadline_seconds, 222)
+        self.assertEqual(workspace.cancel_grace_seconds, 23)
+        self.assertEqual(workspace.cleanup_policy, "ephemeral")
+        self.assertEqual(workspace.provenance["execution_profile"], "workspace")
+        self.assertEqual((explicit.deadline_seconds, explicit.cancel_on_stall), (45, False))
+        self.assertEqual(explicit.provenance["execution_profile"], "explicit")
+        self.assertEqual(explicit.provenance["cancel_on_stall"], "explicit")
+
+    def test_execution_policy_rejects_zero_before_submission(self):
+        from sandbox.config.runtime import resolve_execution_policy
+
+        for key in ("timeout_seconds", "stall_seconds", "cancel_grace_seconds"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                resolve_execution_policy(**{key: 0})
+
+    def test_operation_fallback_wins_when_project_profile_is_omitted(self):
+        from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
+
+        omitted = resolve_execution_policy(
+            normalize_runtime_policy({}), fallback_profile="unit")
+        declared = resolve_execution_policy(
+            normalize_runtime_policy({"executionProfile": "exec"}), fallback_profile="unit")
+
+        self.assertEqual((omitted.execution_profile, omitted.provenance["execution_profile"]),
+                         ("unit", "operation"))
+        self.assertEqual((declared.execution_profile, declared.provenance["execution_profile"]),
+                         ("exec", "project"))
+
+    def test_execution_profile_declaration_marker_is_not_raw_configuration(self):
+        from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
+
+        with self.assertRaises(ValueError):
+            normalize_runtime_policy({"_executionProfileDeclared": False})
+        with self.assertRaises(ValueError):
+            resolve_execution_policy(
+                {"executionProfile": "exec", "_executionProfileDeclared": False},
+                fallback_profile="unit")
+
+    def test_normalized_execution_profile_declaration_survives_reentry(self):
+        from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
+
+        omitted = normalize_runtime_policy(normalize_runtime_policy({}))
+        declared = normalize_runtime_policy(normalize_runtime_policy({"executionProfile": "exec"}))
+
+        self.assertEqual(resolve_execution_policy(omitted, fallback_profile="unit").provenance[
+                         "execution_profile"], "operation")
+        self.assertEqual(resolve_execution_policy(declared, fallback_profile="unit").provenance[
+                         "execution_profile"], "project")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,23 +26,37 @@ from sandbox.registry import register
 
 
 def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
-                                    workspaces: list[str], timeout: int,
+                                    workspaces: list[str], timeout: int | None,
                                     output_profile: str) -> list:
     """Turn selected WordPress test workspaces into isolated remote leaves."""
     from sandbox.jobs.models import JobSubmission
-    from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+    from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
+                                               _resolved_project_identity, _source_identity)
 
     identity = _resolved_project_identity(target)
     source = _source_identity(target.project_root)
     command = ["sb", "test", "--local", "--project-dir", ".", mode]
     if extra:
         command += ["--", *extra]
-    return [JobSubmission(
-        "test", target.project_root, identity, "remote", workspace, tuple(command), timeout,
-        source, remote_name=target.remote_name,
-        workspace_mode="isolated", output_profile=output_profile,
-        deadline_source="explicit" if timeout else "profile:test",
-    ) for workspace in workspaces]
+    submissions = []
+    for workspace in workspaces:
+        policy_target = _types.SimpleNamespace(
+            runtime_policy=getattr(target, "runtime_policy", None), workspace_label=workspace)
+        policy = _resolved_execution_policy(policy_target, _types.SimpleNamespace(
+            execution_policy_json=None, profile=None, timeout=timeout, stall_seconds=None,
+            cancel_grace_seconds=None, cancel_on_stall=None, cleanup_policy=None,
+        ))
+        submissions.append(JobSubmission(
+            "test", target.project_root, identity, "remote", workspace, tuple(command),
+            policy.deadline_seconds, source, remote_name=target.remote_name,
+            workspace_mode="isolated", output_profile=output_profile,
+            execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
+            deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+            cancel_grace_seconds=policy.cancel_grace_seconds,
+            cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+            execution_policy_provenance=policy.provenance,
+        ))
+    return submissions
 
 
 def cmd_xdebug(cfg, args) -> None:
@@ -187,8 +201,8 @@ def cmd_test(cfg, args) -> None:
             return
         cmd_job_matrix(cfg, _types.SimpleNamespace(
             command=command, project_dir=getattr(args, "project_dir", None) or os.getcwd(),
-            local=local, remote=remote, workspace=workspaces, timeout=timeout or 900,
-            output_profile=output_profile or "smart", json=as_json,
+            local=local, remote=remote, workspace=workspaces, timeout=timeout,
+            output_profile=output_profile, json=as_json,
             spec_json=None,
         ))
         return
@@ -239,13 +253,23 @@ def cmd_test(cfg, args) -> None:
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
         if target.kind == "remote":
-            from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+            from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
+                                                       _resolved_project_identity, _source_identity)
+            policy = _resolved_execution_policy(target, _types.SimpleNamespace(
+                execution_policy_json=None, profile=None, timeout=getattr(args, "timeout", None),
+                stall_seconds=None, cancel_grace_seconds=None, cancel_on_stall=None,
+                cleanup_policy=None,
+            ))
             submission = JobSubmission("runtime-exec", target.project_root,
                 _resolved_project_identity(target), "remote", target.workspace_label,
-                tuple(argv), int(getattr(args, "timeout", 900) or 900),
+                tuple(argv), policy.deadline_seconds,
                 _source_identity(target.project_root),
                 remote_name=target.remote_name, output_profile=getattr(args, "output_profile", None) or "smart",
-                deadline_source="explicit")
+                execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
+                deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+                cancel_grace_seconds=policy.cancel_grace_seconds,
+                cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+                execution_policy_provenance=policy.provenance)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
@@ -293,7 +317,8 @@ def cmd_test(cfg, args) -> None:
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
     if selected_target.kind == "remote":
-        from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
+        from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
+                                                   _resolved_project_identity, _source_identity)
         mode = initial_mode
         if getattr(args, "provision_only", False):
             die("--provision-only is only available for local integration harness setup")
@@ -305,7 +330,7 @@ def cmd_test(cfg, args) -> None:
         command = ["sb", "test", "--local", "--project-dir", ".", mode]
         if extra:
             command += ["--", *extra]
-        timeout = int(getattr(args, "timeout", 900) or 900)
+        timeout = getattr(args, "timeout", None)
         output_profile = getattr(args, "output_profile", None) or "smart"
         if len(requested_workspaces) > 1:
             submissions = _remote_test_matrix_submissions(
@@ -320,13 +345,21 @@ def cmd_test(cfg, args) -> None:
             else:
                 print(accepted["parent_job_id"])
             return
+        policy = _resolved_execution_policy(selected_target, _types.SimpleNamespace(
+            execution_policy_json=None, profile=None, timeout=timeout, stall_seconds=None,
+            cancel_grace_seconds=None, cancel_on_stall=None, cleanup_policy=None,
+        ))
         submission = JobSubmission(
             "test", selected_target.project_root,
             _resolved_project_identity(selected_target), "remote",
-            selected_target.workspace_label, tuple(command), timeout,
+            selected_target.workspace_label, tuple(command), policy.deadline_seconds,
             _source_identity(selected_target.project_root),
             remote_name=selected_target.remote_name, output_profile=output_profile,
-            deadline_source="explicit" if getattr(args, "timeout", None) else "profile:test",
+            execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
+            deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
+            cancel_grace_seconds=policy.cancel_grace_seconds,
+            cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
+            execution_policy_provenance=policy.provenance,
         )
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport

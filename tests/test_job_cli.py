@@ -158,7 +158,7 @@ class JobCliTests(unittest.TestCase):
         )
 
         profile = next(action for action in parser._actions if action.dest == "profile")
-        self.assertEqual(profile.default, "exec")
+        self.assertIsNone(profile.default)
         self.assertIsNone(profile.choices)
         self.assertEqual(profile.help, expected)
         self.assertIn(expected, " ".join(parser.format_help().split()))
@@ -185,6 +185,20 @@ class JobCliTests(unittest.TestCase):
         args = parser.parse_args(["--local"])
         with patch("sandbox.commands.jobs_runtime._die", side_effect=RuntimeError("invalid usage")):
             with self.assertRaisesRegex(RuntimeError, "invalid usage"):
+                cmd_job_start(None, args)
+
+    def test_start_rejects_zero_timeout_before_submission(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args(["--local", "--timeout", "0", "--", "echo", "ok"])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project:cli"})
+        service = SimpleNamespace(submit=lambda _submission: self.fail("must not submit"))
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target), "job_service": service,
+            }), patch("sandbox.commands.jobs_runtime._die", side_effect=RuntimeError("invalid timeout")):
+            with self.assertRaisesRegex(RuntimeError, "invalid timeout"):
                 cmd_job_start(None, args)
 
     def test_test_matrix_accepts_flags_after_mode_and_returns_isolated_children(self):

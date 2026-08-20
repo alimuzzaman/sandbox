@@ -30,7 +30,6 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 - [ ] `sandbox/core/_cloudflare.py` upserts address records only — no TXT/CNAME. Blocks every DNS-automating feature, mail first. `[dns → prd 01 §4.4]`
 - [ ] Instance mail is a dead end by construction: `_write_mail_muplugin` rewrites From to an invalid no-TLD address so `wp_mail()` fails loudly. Right for a laptop, wrong for a public preview. `[mail → prd 01]`
 - [ ] One IP, one reputation, shared by every preview and every permanent site. Needs per-instance rate limiting before sending is switched on widely. `[mail → prd 01 §10]`
-- [ ] Review the T3 Code app repository and identify any relevant patterns or lessons that could be applied to Sandbox. Research only; propose changes separately before implementation.
 
 ## 3. Environment lifecycle primitives `[vercel]`
 

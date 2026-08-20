@@ -787,7 +787,13 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             if not source.is_absolute():
                 source = (root_path / source).resolve()
             source = source.resolve()
-            if source.exists() and not source.is_relative_to(plugins_home):
+            # A declared local path is part of the policy even when it is not
+            # an extra bind (for example, it lives below plugins_home).  Do not
+            # silently drop a missing or unreadable declaration and let a ready
+            # instance look safe against a weakened desired set.
+            if not source.exists() or not os.access(source, os.R_OK):
+                raise OSError("declared local source is unavailable")
+            if not source.is_relative_to(plugins_home):
                 sources.append(str(source))
 
         for entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
@@ -803,7 +809,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             source = entry.get("source") or {}
             if source.get("kind") == "path" and source.get("value"):
                 add_if_external(source["value"])
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return list(dict.fromkeys(sources))
 
@@ -927,7 +933,10 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     # runtime config are host-scoped. Matrix cells use distinct workspace roots
     # and would otherwise pass their per-project locks concurrently, selecting
     # the same free Mailpit/WordPress port before either registry write lands.
-    with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
+    # Docker observation is bounded but may still take several seconds.  Keep
+    # it under this project's lock only: unrelated projects must not queue on
+    # the global port-allocation lock before any port allocation is needed.
+    with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
         # The ready fast path must prove the live containers still expose the
         # exact source self-binds generated for this instance.  Do this before
@@ -944,6 +953,9 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 )
                 if not attestation.get("ok"):
                     return _mount_attestation_refusal(attestation.get("code"))
+
+    with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
+        existing = sc.registry_get(root, label=label)
         # A remote or local host may retain a listener that is not represented
         # in the registry (for example a stale Mailpit container). Reconcile
         # ports before the ready fast path; otherwise ensure can report a

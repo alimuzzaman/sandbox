@@ -90,13 +90,15 @@ class TestSourceMountAttestation(unittest.TestCase):
 
     def test_ready_refusal_precedes_every_write_capable_ensure_step(self):
         missing_plugins_home = Path(tempfile.mkdtemp()) / "not-created"
+        locks = []
 
         class State:
             ConfigError = RuntimeError
 
             @staticmethod
             @contextlib.contextmanager
-            def project_lock(_value):
+            def project_lock(value):
+                locks.append(value)
                 yield
 
             @staticmethod
@@ -129,6 +131,7 @@ class TestSourceMountAttestation(unittest.TestCase):
         self.assertFalse(result["mutated"])
         state.registry_put.assert_not_called()
         self.assertEqual(attest.call_args.args[2], [str(missing_plugins_home.resolve())])
+        self.assertEqual(locks, ["/project"])
 
     def test_ready_attestation_uses_current_project_sources_not_persisted_mounts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -175,6 +178,73 @@ class TestSourceMountAttestation(unittest.TestCase):
                 {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
                 {"plugins": []},
             ), [str(plugins_home.resolve())])
+
+    def test_missing_or_unreadable_declared_local_sources_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugins_home = root / "plugins-home"
+            missing = root / "missing-source"
+            readable = root / "readable-source"
+            readable.mkdir()
+            cfg = {"defaults": {"plugins_home": str(plugins_home)}}
+            declarations = (
+                {"plugins": [str(missing)]},
+                {"themes": [str(missing)]},
+                {"mappings": {"legacy": str(missing)}},
+                {"mappings_inactive": {"legacy": str(missing)}},
+                {"plugins_resolved": {
+                    "plugin": {"source": {"kind": "path", "value": str(missing)}},
+                }},
+            )
+            for declaration in declarations:
+                with self.subTest(declaration=declaration):
+                    self.assertIsNone(_instances._desired_source_mounts(cfg, str(root), declaration))
+            with mock.patch.object(_instances.os, "access", return_value=False):
+                self.assertIsNone(_instances._desired_source_mounts(
+                    cfg, str(root), {"plugins": [str(readable)]},
+                ))
+
+    def test_missing_declared_source_refuses_before_any_ensure_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "missing-source"
+
+            class State:
+                ConfigError = RuntimeError
+
+                @staticmethod
+                @contextlib.contextmanager
+                def project_lock(_value):
+                    yield
+
+                @staticmethod
+                def load_project_config(_project, label=None):
+                    return {"root": str(root), "server": "apache",
+                            "plugins": [str(missing)]}
+
+                @staticmethod
+                def registry_get(_root, label=None):
+                    return {"instance": "fixture", "status": "ready", "server": "apache"}
+
+                registry_put = mock.Mock()
+
+            writes = ["_resolve_port_conflicts", "_write_local_yaml", "write_compose_files",
+                      "prepare_php_extension_runtime", "_wire_project_plugins", "_wire_project_themes"]
+            with mock.patch.object(_instances, "_core", return_value=State()), \
+                    mock.patch.object(_instances, "attest_source_mounts") as attest, \
+                    contextlib.ExitStack() as stack:
+                for name in writes:
+                    stack.enter_context(mock.patch.object(
+                        _instances, name, side_effect=AssertionError(name),
+                    ))
+                result = _instances.ensure_instance(
+                    {"defaults": {"plugins_home": str(root / "plugins-home")}}, str(root),
+                )
+
+            self.assertEqual(result["error"]["code"], "instance_mount_state_unavailable")
+            self.assertFalse(result["mutated"])
+            attest.assert_not_called()
+            State.registry_put.assert_not_called()
 
     def test_herd_bypasses_docker_observation(self):
         self.assertEqual(_docker.attest_source_mounts("fixture", "herd", []), {"ok": True})

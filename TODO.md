@@ -32,7 +32,6 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 - [ ] One IP, one reputation, shared by every preview and every permanent site. Needs per-instance rate limiting before sending is switched on widely. `[mail → prd 01 §10]`
 - [ ] Research Caddy's official [PHP serving patterns](https://caddyserver.com/docs/caddyfile/patterns#php): compare `php_fastcgi` with PHP-FPM and FrankenPHP's `php_server` against the current Caddy-ingress plus nginx/Apache/PHP-FPM design. Evaluate per-instance isolation, PHP-version and socket ownership, WordPress/static-file routing, operability, rollback, and whether any runtime change is warranted before proposing one.
 - [ ] Review the T3 Code app repository and identify any relevant patterns or lessons that could be applied to Sandbox. Research only; propose changes separately before implementation.
-- [ ] Make remote deployment and workspace staging ignore macOS AppleDouble sidecars (`._*`) without ignoring ordinary dotfiles. Cover uncommitted-diff archive upload and Sandbox-runtime source upload; acceptance is a remote staging regression proving no sidecar reaches deploy targets or workspaces while valid dotfiles and intended files remain byte-identical, with skipped-sidecar counts in safe diagnostics. `[ops · remote staging]`
 
 ## 3. Environment lifecycle primitives `[vercel]`
 

@@ -92,6 +92,28 @@ def update_source(
             raise SecretBrokerError("input_invalid", "secret input cannot be represented safely") from exc
         raise
 
+    _atomic_replace(source, updated)
+    return ("updated" if exists else "created", opaque_revision(revision_key, updated))
+
+
+def rewrite_source(source: SafeSource, content: bytes, *, revision_key: bytes,
+                   expected_revision: str | None = None) -> str:
+    """Replace the whole source with pre-rendered bytes, returning the revision.
+
+    Callers must derive ``content`` from the parsed document so no value is
+    reconstructed here.  The same lock, signature, and durability guarantees as
+    a targeted update apply.
+    """
+    if not isinstance(content, bytes):
+        raise SecretBrokerError("input_invalid", "secret source content must be bytes")
+    current_revision = opaque_revision(revision_key, source.content)
+    if expected_revision is not None and not hmac.compare_digest(expected_revision, current_revision):
+        raise SecretBrokerError("revision_conflict", "secret source revision no longer matches")
+    _atomic_replace(source, content)
+    return opaque_revision(revision_key, content)
+
+
+def _atomic_replace(source: SafeSource, updated: bytes) -> None:
     path = source.policy.path
     safe_name = path.name.lstrip(".")
     lock_path = path.with_name(f".{safe_name}.sb-secrets.lock")
@@ -152,4 +174,3 @@ def update_source(
         raise
     except OSError as exc:
         raise SecretBrokerError("update_failed", "secret source update failed") from exc
-    return ("updated" if exists else "created", opaque_revision(revision_key, updated))

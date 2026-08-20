@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
@@ -30,6 +32,53 @@ class WorkspaceServiceProtocol(Protocol):
 
 _INCOMPLETE = {"unresolved", "conflict", "incomplete", "invalid", "indeterminate"}
 _SAFE_NAMESPACE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+# A degraded index must never hide occupied storage, so the on-disk report is
+# bounded rather than optional. Sizes stay unmeasured by default: a default
+# listing must not walk 85 GB of deployment trees.
+_ON_DISK_ENTRY_LIMIT = 2000
+_SIZE_ENTRY_BUDGET = 50_000
+_SIZE_TIME_BUDGET_SECONDS = 5.0
+_REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
+_REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
+_REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def _measure_tree(root: Path, *, entry_budget: int,
+                  deadline: float) -> tuple[int | None, str]:
+    """Sum a tree's apparent size under explicit entry and time budgets.
+
+    Returning ``None`` with a reason is always preferred over an unbounded walk
+    or a hanging ``du``: a report that cannot be measured cheaply must say so.
+    """
+    total = 0
+    seen = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > entry_budget:
+                        return None, "size_budget_exhausted"
+                    if time.monotonic() > deadline:
+                        return None, "size_deadline_exceeded"
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        return None, "size_unreadable"
+        except OSError:
+            return None, "size_unreadable"
+    return total, "measured"
 
 
 def _legacy_namespace(project_root: str, target_scope: str,
@@ -125,6 +174,11 @@ class WorkspaceService:
     resource_binding_resolver: Any | None = None
     deployment_receipt_resolver: Any | None = None
     deployment_root: Path | None = None
+    # Remote workspace control is allowed only after the selected MCP service
+    # has proved both ownership and parity with this runtime.  The resolver is
+    # injected at the composition boundary so this application service never
+    # reaches into the remote registry or reads its state files directly.
+    remote_service_status: Any | None = None
 
     def __post_init__(self) -> None:
         if self.repository is None and self.storage is not None:
@@ -230,6 +284,87 @@ class WorkspaceService:
         raise WorkspaceIndexError(
             "workspace_operation_unsupported", "unsupported workspace lifecycle action")
 
+    def _indexed_locators(self) -> dict[str, str]:
+        """Map every indexed deployment locator to its owning workspace ID."""
+        locators: dict[str, str] = {}
+        try:
+            records = self._repo().list(None)
+        except Exception:
+            return locators
+        for record in records:
+            for key in ("checkout_locator", "source_checkout_locator"):
+                value = record.metadata.get(key)
+                if isinstance(value, str) and value:
+                    locators.setdefault(
+                        str(Path(value).resolve(strict=False)), record.workspace_id)
+        return locators
+
+    def _on_disk_inventory(self, *, measure: bool = False,
+                           limit: int = _ON_DISK_ENTRY_LIMIT) -> dict[str, Any]:
+        """Report deployment storage that exists, indexed or not.
+
+        This is deliberately read-only and cheap: one directory listing plus one
+        ``stat`` per child. It exists so a degraded index can never make
+        occupied storage invisible to reporting and reclaim decisions.
+        """
+        root = self.deployment_root
+        if root is None:
+            return {"available": False, "reason": "deployment_root_unset",
+                    "root": None, "measured": False, "total": 0,
+                    "unindexed": 0, "truncated": False, "entries": []}
+        root = Path(root)
+        try:
+            children = sorted(root.iterdir(), key=lambda item: item.name)
+        except OSError as exc:
+            reason = ("deployment_root_missing"
+                      if isinstance(exc, FileNotFoundError)
+                      else "deployment_root_unreadable")
+            return {"available": False, "reason": reason, "root": str(root),
+                    "measured": False, "total": 0, "unindexed": 0,
+                    "truncated": False, "entries": []}
+        locators = self._indexed_locators()
+        deadline = time.monotonic() + _SIZE_TIME_BUDGET_SECONDS
+        entries: list[dict[str, Any]] = []
+        unindexed = 0
+        total = 0
+        for child in children:
+            try:
+                is_symlink = child.is_symlink()
+                if not child.is_dir():
+                    continue
+                stat = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            total += 1
+            resolved = str(child.resolve(strict=False))
+            workspace_id = locators.get(resolved) or locators.get(str(child))
+            if workspace_id is None:
+                unindexed += 1
+            if len(entries) >= limit:
+                continue
+            size_bytes: int | None = None
+            size_reason = "not_measured"
+            if measure and not is_symlink:
+                size_bytes, size_reason = _measure_tree(
+                    child, entry_budget=_SIZE_ENTRY_BUDGET, deadline=deadline)
+            elif measure:
+                size_reason = "size_symlink_skipped"
+            entries.append({
+                "path": str(child),
+                "name": child.name,
+                "indexed": workspace_id is not None,
+                "workspace_id": workspace_id,
+                "symlink": is_symlink,
+                "size_bytes": size_bytes,
+                "size_reason": size_reason,
+                "modified_at": _iso(stat.st_mtime),
+                "age_seconds": max(0, int(time.time() - stat.st_mtime)),
+            })
+        return {"available": True, "reason": None, "root": str(root),
+                "measured": bool(measure), "total": total,
+                "unindexed": unindexed,
+                "truncated": total > len(entries), "entries": entries}
+
     def _repo(self) -> WorkspaceRepository:
         if self.repository is None:
             raise WorkspaceIndexError(
@@ -272,10 +407,95 @@ class WorkspaceService:
         if self.remote_control is None:
             raise WorkspaceIndexError(
                 "workspace_remote_unavailable", "remote workspace control is unavailable")
+
+        self._assert_remote_service_ready(target)
         import inspect
         parameters = inspect.signature(self.remote_control).parameters
         return (self.remote_control(target, action, request)
                 if len(parameters) >= 3 else self.remote_control(target, action))
+
+    @staticmethod
+    def _safe_remote_observation(status: Any) -> dict[str, str]:
+        """Keep only finite enum observations from the remote status probe.
+
+        The status probe runs outside this process and is therefore treated as
+        untrusted input.  In particular, never copy a remote error, unit
+        content, endpoint, or credential-bearing field into a workspace error.
+        """
+        ownership = status.get("ownership") if isinstance(status, dict) else None
+        revision = status.get("runtime_revision_state") if isinstance(status, dict) else None
+        if not isinstance(ownership, str):
+            ownership = None
+        if not isinstance(revision, str):
+            revision = None
+        return {
+            "ownership": ownership if ownership in _REMOTE_OWNERSHIP_STATES else "unknown",
+            "runtime_revision_state": revision if revision in _REMOTE_REVISION_STATES else "unknown",
+        }
+
+    @staticmethod
+    def _remote_failure_message(message: str, observed: dict[str, str]) -> str:
+        """Render finite preflight evidence for adapters that flatten errors."""
+        return (
+            f"{message} (observed ownership={observed['ownership']}, "
+            f"runtime_revision_state={observed['runtime_revision_state']}; "
+            f"recovery: {_REMOTE_WORKSPACE_RECOVERY})"
+        )
+
+    def _assert_remote_service_ready(self, target) -> None:
+        """Fail closed before dispatching any remote workspace operation.
+
+        A configured service record is not evidence that the selected owned
+        service is running the same Sandbox runtime.  The injected status
+        resolver is the only authority for that live observation; absent or
+        malformed evidence is refused just like an explicit mismatch.
+        """
+        status: Any = None
+        probe_failed = False
+        if not callable(self.remote_service_status):
+            probe_failed = True
+        else:
+            try:
+                status = self.remote_service_status(target)
+            except Exception:
+                # Remote diagnostics are intentionally not forwarded.  The
+                # operator gets the supported refresh/migration command below.
+                probe_failed = True
+
+        observed = self._safe_remote_observation(status)
+        if probe_failed and not isinstance(status, dict):
+            observed = {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+        if probe_failed:
+            raise WorkspaceIndexError(
+                "workspace_remote_preflight_unavailable",
+                self._remote_failure_message(
+                    "remote MCP service revision evidence is unavailable; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
+
+        if observed["ownership"] != "proven":
+            raise WorkspaceIndexError(
+                "workspace_remote_service_unproven",
+                self._remote_failure_message(
+                    "remote MCP service ownership could not be proven; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
+
+        revision_state = observed["runtime_revision_state"]
+        if revision_state != "match":
+            code = f"workspace_remote_revision_{revision_state}"
+            raise WorkspaceIndexError(
+                code,
+                self._remote_failure_message(
+                    "remote MCP service runtime revision is not verified; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
 
     def _legacy_root(self, namespace: str) -> Path:
         if not isinstance(namespace, str) or not _SAFE_NAMESPACE.fullmatch(namespace):
@@ -524,16 +744,30 @@ class WorkspaceService:
         public = [_public_record(
             item, self._repo(), index_generation=generation) for item in records]
         incomplete = [item for item in public if item["status"] in _INCOMPLETE]
+        counts = {status: sum(item["status"] == status for item in public)
+                  for status in sorted(_INCOMPLETE)}
+        on_disk = self._on_disk_inventory(
+            measure=bool(getattr(request, "measure_sizes", False)))
+        # A degraded index is loud but not fatal for read-only reporting: an
+        # unreadable inventory is exactly how occupied storage becomes
+        # invisible. Mutation paths keep their own per-record readiness gate.
+        index_block = {
+            "generation": generation,
+            "complete": not incomplete,
+            "code": "workspace_index_incomplete" if incomplete else None,
+            "counts": counts,
+        }
+        payload: dict[str, Any] = {
+            "ok": True, "workspaces": public, "project_identity": identity,
+            "generation": generation, "counts": counts,
+            "index": index_block, "on_disk": on_disk,
+        }
         if incomplete:
-            return {
-                "ok": False, "code": "workspace_index_incomplete",
-                "project_identity": identity, "workspaces": public,
-                "counts": {status: sum(item["status"] == status for item in public)
-                           for status in sorted(_INCOMPLETE)},
-            }
-        return {"ok": True, "workspaces": public,
-                "project_identity": identity,
-                "generation": self._repo().schema_generation()}
+            payload["code"] = "workspace_index_incomplete"
+            payload["warning"] = (
+                "workspace index is incomplete; this listing is a read-only "
+                "report and workspace mutation stays refused")
+        return payload
 
     def status(self, request):
         target = self._target(request)
@@ -553,8 +787,16 @@ class WorkspaceService:
             # A legacy record that cannot be attributed is not a safe
             # workspace_not_found result.
             listing = self.list(request)
-            if listing.get("code") == "workspace_index_incomplete":
-                return listing
+            if listing.get("index", {}).get("complete") is False:
+                # Reporting degrades; single-workspace status does not. An
+                # unattributable legacy record is still not a safe
+                # workspace_not_found answer.
+                return {"ok": False, "code": "workspace_index_incomplete",
+                        "project_identity": listing.get("project_identity"),
+                        "workspaces": listing.get("workspaces", []),
+                        "counts": listing.get("counts"),
+                        "index": listing.get("index"),
+                        "on_disk": listing.get("on_disk")}
             return {"ok": False, "code": "workspace_not_found",
                     "workspace_id": workspace_id, "label": target.workspace_label}
         if record.status in _INCOMPLETE:

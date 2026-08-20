@@ -488,6 +488,72 @@ def _wildcard_san(domain: str) -> str:
     return f"*.{domain}"
 
 
+def _valid_alias(host: str) -> str | None:
+    """One normalized alias hostname, or None when it is not usable as one.
+
+    Stricter than `_valid_domain`: an alias is a bare hostname that Caddy can
+    match and mkcert can put in a SAN, so a scheme, a port, a path, or a
+    wildcard is rejected rather than silently truncated. Returns None instead
+    of dying — the caller decides whether a bad entry is fatal (config write)
+    or skippable (Caddyfile render, which runs on every `sb` invocation)."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host or host.startswith("*.") or "://" in host or "/" in host or ":" in host:
+        return None
+    if not DOMAIN_RE.match(host) or len(host) > 253:
+        return None
+    return host
+
+
+def normalize_aliases(value, primary: str | None = None,
+                      strict: bool = False) -> list[str]:
+    """Extra hostnames one instance answers on, de-duplicated and ordered.
+
+    The instance's own domain is filtered out — a site is not an alias of
+    itself, and emitting it twice would give Caddy a duplicate site address.
+    `strict` (config write path) dies on a bad entry so a typo surfaces at
+    `sb apply`; lenient (render path) drops it, because a single malformed
+    alias must never make every later `sb` command unusable."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        if strict:
+            die("`aliases` must be a list of hostnames")
+        return []
+    primary_norm = (primary or "").strip().lower().rstrip(".")
+    out: list[str] = []
+    for raw in value:
+        # A blank entry is not a typo — it is how a caller says "declared, and
+        # empty" (`--alias ""`, an MCP `aliases=[]`) to override an inherited
+        # project declaration. Skip it in both modes rather than dying.
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        host = _valid_alias(raw) if isinstance(raw, str) else None
+        if host is None:
+            if strict:
+                die(f"invalid alias {raw!r}. Use a bare hostname like "
+                    "cdn.example.com — no scheme, port, path, or wildcard.")
+            continue
+        if host == primary_norm or host in out:
+            continue
+        out.append(host)
+    return out
+
+
+def instance_aliases(inst_cfg: dict, strict: bool = False) -> list[str]:
+    """The alias hostnames an instance serves, resolved from its config block.
+
+    Empty for multisite: a network already maps hostnames to sites through
+    wp_site.domain, so a second name for site 1 would fight that mapping
+    rather than extend it. Empty for herd, whose sites are served by Herd at
+    <name>.test and never routed through the sandbox proxy."""
+    if _multisite_mode(inst_cfg) or inst_cfg.get("server") == "herd":
+        return []
+    return normalize_aliases(inst_cfg.get("aliases"),
+                             primary=inst_cfg.get("domain"), strict=strict)
+
+
 def render_proxy_compose() -> str:
     """The sandbox-proxy compose file. One Caddy container on a dedicated
     loopback IP serving plain HTTP on :80 (clean no-port URLs, no certs). It
@@ -522,7 +588,8 @@ volumes:
 """
 
 
-def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
+def _caddy_block(domain: str, port: int, wildcard: bool = False,
+                 cert_domain: str | None = None) -> str:
     """One Caddy site block. Default is plain http://<domain> (no port, no cert
     — zero CA-trust fragility, browsers never warn on http). If this domain has
     been secured (a mkcert cert exists), serve https + bounce http→https.
@@ -530,8 +597,13 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
     When `wildcard` is set (subdomain multisite), the site address list also
     includes `*.<domain>` so every sub-site host (sub1.<domain>) reverse-
     proxies to the same instance port. dnsmasq already wildcards `.tst`, and
-    the secured cert carries a matching `*.<domain>` SAN (see _mint_cert)."""
-    cert, key = _cert_paths(domain)
+    the secured cert carries a matching `*.<domain>` SAN (see _mint_cert).
+
+    `cert_domain` serves `domain` under ANOTHER domain's certificate. An
+    instance alias is minted as a SAN on the instance's own cert (one cert per
+    instance, keyed by its primary domain), so the alias block has to read the
+    primary's cert files or it would fall back to http while https is live."""
+    cert, key = _cert_paths(cert_domain or domain)
     hosts = [domain, _wildcard_san(domain)] if wildcard else [domain]
     if cert.exists() and key.exists():
         return "\n".join(
@@ -581,14 +653,24 @@ def regen_caddyfile(cfg: dict) -> None:
 """]
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
-        if not (dom and dom.endswith(f".{_tld(ic)}")):
-            continue
-        # No cert minting here — default is plain http. _caddy_block emits an
-        # https block only if a cert already exists (i.e. `./sb secure` ran).
-        # Subdomain multisite also needs a wildcard `*.<name>.tst` block so each
-        # sub-site host proxies to the same port.
-        wildcard = _multisite_mode(ic) == "subdomain"
-        blocks.append(_caddy_block(dom, ic["wordpress_port"], wildcard=wildcard))
+        routed = bool(dom and dom.endswith(f".{_tld(ic)}"))
+        port = ic.get("wordpress_port")
+        if routed:
+            # No cert minting here — default is plain http. _caddy_block emits an
+            # https block only if a cert already exists (i.e. `./sb secure` ran).
+            # Subdomain multisite also needs a wildcard `*.<name>.tst` block so each
+            # sub-site host proxies to the same port.
+            wildcard = _multisite_mode(ic) == "subdomain"
+            blocks.append(_caddy_block(dom, ic["wordpress_port"], wildcard=wildcard))
+        # Declared aliases get their own site block on the same port. They are
+        # emitted even when the instance has no routed .tst domain: the proxy
+        # matches on Host, so an alias resolved through /etc/hosts or real DNS
+        # still reaches the instance. Resolution is the operator's to arrange —
+        # only .tst names are wildcarded by the sandbox resolver.
+        if port:
+            for alias in instance_aliases(ic):
+                blocks.append(_caddy_block(alias, port,
+                                           cert_domain=dom if routed else None))
     for entry in _generic_proxy_entries():
         dom = entry.get("domain")
         port = entry.get("http_port")
@@ -1243,8 +1325,11 @@ def proxy_setup(cfg, tld=None) -> bool:
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
         if dom and dom.endswith(f".{_tld(ic)}"):
-            sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
-            _mint_cert(dom, extra_sans=sans)
+            sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else []
+            # Aliases ride on the instance's own cert as extra SANs — one cert
+            # per instance, so `sb secure` covers every name it answers on.
+            sans += instance_aliases(ic)
+            _mint_cert(dom, extra_sans=sans or None)
     regen_caddyfile(cfg)
     if not reload_proxy():
         info("proxy reload failed (is Docker running?).")
@@ -1326,8 +1411,9 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     #    Subdomain multisite needs a wildcard SAN so every sub-site host is
     #    covered by the one cert.
     ic = resolve_instances(cfg)[name]
-    sans = [_wildcard_san(domain)] if _multisite_mode(ic) == "subdomain" else None
-    _mint_cert(domain, extra_sans=sans)
+    sans = [_wildcard_san(domain)] if _multisite_mode(ic) == "subdomain" else []
+    sans += instance_aliases(ic)
+    _mint_cert(domain, extra_sans=sans or None)
     regen_caddyfile(cfg)
     reload_proxy()
     return True

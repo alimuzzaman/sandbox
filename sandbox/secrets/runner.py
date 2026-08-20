@@ -10,7 +10,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 
-from sandbox.jobs.output import StreamingRedactor
+from sandbox.services.redaction import StreamingRedactor
 
 from .models import (
     DEFAULT_TIMEOUT_SECONDS,

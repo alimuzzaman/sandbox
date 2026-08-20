@@ -16,31 +16,13 @@ import re
 import shlex
 from typing import Any, Callable, Mapping
 
+from sandbox.services.redaction import redact_structure, redact_text
+
 
 _MAX_REMOTE_JSON_BYTES = 1_048_576
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SAFE_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
-_REMOTE_SECRET = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(?P<name>[A-Za-z0-9_-]*(?:token|password|passphrase|secret|credential|"
-    r"private[_-]?key|api[_-]?key|authorization|cookie|basic[_-]?auth|"
-    r"access[_-]?key(?:[_-]?id)?)[A-Za-z0-9_-]*)"
-    r"\s*[=:]\s*(?:bearer\s+)?[^\s,;&]+"
-)
-_BARE_PROVIDER_SECRET = re.compile(
-    r"(?i)(?:"
-    r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
-    r"sk_(?:live|test)_[A-Za-z0-9]{12,}|rk_(?:live|test)_[A-Za-z0-9]{12,}|"
-    r"pk_(?:live|test)_[A-Za-z0-9]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-    r"(?:xoxe\.)?xox[baprs]-[A-Za-z0-9-]{12,}|(?:AKIA|ASIA)[0-9A-Z]{16}|"
-    r"FwoGZXIvYXdz[A-Za-z0-9+/=]{20,}|"
-    r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z._-]{12,}|1//[0-9A-Za-z._-]{12,}|"
-    r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|"
-    r"BEGIN (?:RSA|OPENSSH|EC|DSA|PGP|PRIVATE) KEY"
-    r")"
-)
-_URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@")
 
 
 class RemoteWorkspaceError(RuntimeError):
@@ -76,10 +58,7 @@ def _safe_detail(value: object, *, limit: int = 1024) -> str:
     """Bound remote diagnostics without forwarding credentials."""
     if not isinstance(value, str):
         return ""
-    text = _URL_USERINFO.sub(r"\1[REDACTED]@", value.strip())
-    text = _REMOTE_SECRET.sub(lambda match: f"{match.group('name')}=[REDACTED]", text)
-    text = _BARE_PROVIDER_SECRET.sub("[REDACTED]", text)
-    return text[-limit:]
+    return redact_text(value.strip())[-limit:]
 
 
 def _safe_id(value: object, label: str) -> str:
@@ -130,8 +109,11 @@ def _parse_envelope(stdout: object) -> dict[str, Any]:
         raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is empty")
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is not JSON") from exc
+    except json.JSONDecodeError:
+        # JSONDecodeError retains the complete source document in ``doc``.
+        raise RemoteWorkspaceError(
+            "workspace_protocol_invalid", "remote response is not JSON"
+        ) from None
     if not isinstance(payload, dict) or payload.get("ok") is not True and payload.get("ok") is not False:
         raise RemoteWorkspaceError(
             "workspace_protocol_invalid", "remote response must be a top-level ok object"
@@ -140,7 +122,10 @@ def _parse_envelope(stdout: object) -> dict[str, Any]:
         raise RemoteWorkspaceError(
             "workspace_protocol_invalid", "successful remote response cannot contain error"
         )
-    return payload
+    sanitized = redact_structure(payload)
+    if not isinstance(sanitized, dict):
+        raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response redaction failed")
+    return sanitized
 
 
 def _remote_error(payload: Mapping[str, Any]) -> RemoteWorkspaceError:
@@ -170,7 +155,10 @@ def _success(payload: dict[str, Any], operation: str) -> dict[str, Any]:
     # caller receives the exact feature-owned envelope from the remote.
     if not isinstance(payload, dict):  # defensive; _parse_envelope already checks
         raise RemoteWorkspaceError("workspace_protocol_invalid", f"{operation} response is invalid")
-    return payload
+    sanitized = redact_structure(payload)
+    if not isinstance(sanitized, dict):
+        raise RemoteWorkspaceError("workspace_protocol_invalid", f"{operation} response redaction failed")
+    return sanitized
 
 
 class RemoteWorkspaceTransport:
@@ -230,7 +218,9 @@ class RemoteWorkspaceTransport:
             raise
         except Exception as exc:  # injected runner failures have one stable code
             detail = _safe_detail(str(exc))
-            raise RemoteWorkspaceError("workspace_remote_failed", detail or "remote runner failed") from exc
+            raise RemoteWorkspaceError(
+                "workspace_remote_failed", detail or "remote runner failed"
+            ) from None
         return_code = _last_result_field(result, "returncode")
         stdout = _last_result_field(result, "stdout")
         stderr = _last_result_field(result, "stderr")
@@ -277,6 +267,7 @@ class RemoteWorkspaceTransport:
         workspace_id: str | None = None,
         limit: int = 50,
         active_only: bool = False,
+        measure_sizes: bool = False,
     ) -> dict[str, Any]:
         args = ["workspace", "list", "--limit", str(_positive_limit(limit))]
         if project_identity is not None:
@@ -287,6 +278,10 @@ class RemoteWorkspaceTransport:
             raise RemoteWorkspaceError("workspace_request_invalid", "active_only must be boolean")
         if active_only:
             args.append("--active-only")
+        if not isinstance(measure_sizes, bool):
+            raise RemoteWorkspaceError("workspace_request_invalid", "measure_sizes must be boolean")
+        if measure_sizes:
+            args.append("--measure-sizes")
         return self._control(remote_name, args)
 
     def status(
@@ -418,7 +413,9 @@ class RemoteWorkspaceTransport:
                 prepared = self.deploy(request)
             except Exception as exc:
                 detail = _safe_detail(str(exc))
-                raise RemoteWorkspaceError("workspace_checkout_unavailable", detail or "checkout deployment failed") from exc
+                raise RemoteWorkspaceError(
+                    "workspace_checkout_unavailable", detail or "checkout deployment failed"
+                ) from None
             if prepared is not None and not isinstance(prepared, Mapping):
                 raise RemoteWorkspaceError("workspace_protocol_invalid", "deployment result must be an object")
             prepared_receipt = self._prepared_receipt(prepared)
@@ -430,7 +427,9 @@ class RemoteWorkspaceTransport:
                 result = self.register(request, prepared)
             except Exception as exc:
                 detail = _safe_detail(str(exc))
-                raise RemoteWorkspaceError("workspace_create_failed", detail or "workspace registration failed") from exc
+                raise RemoteWorkspaceError(
+                    "workspace_create_failed", detail or "workspace registration failed"
+                ) from None
             if not isinstance(result, Mapping):
                 raise RemoteWorkspaceError("workspace_protocol_invalid", "registration result must be an object")
             payload = dict(result)

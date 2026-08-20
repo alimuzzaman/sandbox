@@ -428,6 +428,12 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     declared_services = [str(compose["service"]), *init_services, *background_services]
     if len(declared_services) != len(set(declared_services)):
         raise HostingError("compose service names must not be duplicated across service lists")
+    # An environment whose image build is too slow for the deploy timeout can
+    # opt out of rebuilding. Compose still builds a service whose image is
+    # missing, so this skips the rebuild, never the first build.
+    build = compose.get("build", True)
+    if not isinstance(build, bool):
+        raise HostingError("compose.build must be true or false")
     healthcheck = env.get("healthcheck") or {}
     if not isinstance(healthcheck.get("path"), str) or not healthcheck["path"].startswith("/"):
         raise HostingError("healthcheck.path must start with /")
@@ -472,7 +478,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     robots = env.get("robots", "allow")
     if robots not in {"allow", "deny"}:
         raise HostingError("robots must be allow or deny")
-    normalized_compose = {**compose, "files": compose_paths}
+    normalized_compose = {**compose, "files": compose_paths, "build": build}
     return {"project_root": str(source_root), "source_root": str(source_root),
             "manifest_root": str(root),
             "source_root_nested": source_root_nested,

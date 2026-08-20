@@ -12,7 +12,8 @@ from .parser import SecretParseError, parse_document
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
 from .runner import run_with_secret
 from .sources import SourceRegistry
-from .writer import load_revision_key, opaque_revision, update_source
+from .organizer import organize as organize_document
+from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
 
 
 def _bounded_call(callback):
@@ -253,6 +254,35 @@ class SecretService:
                            validation=checked, correlation_id=correlation)
         return self._operate("set", source, (key,), surface, perform,
                              profile=validation_profile, input_channel=input_channel)
+
+    def organize(self, source: str, *, apply: bool = False, expected_revision=None,
+                 surface: str = "cli") -> dict:
+        """Group one dotenv source into documented sections without reading values."""
+        if surface != "cli":
+            raise SecretBrokerError("organize_denied", "secret organization requires the local CLI")
+
+        def perform(correlation):
+            if self.registry.policy(source).format != "dotenv":
+                raise SecretBrokerError(
+                    "organize_unsupported", "secret organization supports dotenv sources only",
+                )
+            safe, document = self._document(source)
+            try:
+                report = organize_document(document)
+            except SecretParseError as exc:
+                code = exc.code if exc.code in {"mixed_newlines", "round_trip_failed"} else "syntax_unsupported"
+                raise SecretBrokerError(code, "secret source could not be organized safely") from exc
+            revision_key = load_revision_key(self.revision_key_path)
+            revision = opaque_revision(revision_key, safe.content)
+            if apply and report.changed:
+                revision = rewrite_source(safe, report.content, revision_key=revision_key,
+                                          expected_revision=expected_revision)
+            return success("organize", source=source, applied=bool(apply and report.changed),
+                           changed=report.changed, count=report.count,
+                           groups=[{"title": title, "keys": keys} for title, keys in report.groups],
+                           revision=revision, correlation_id=correlation)
+
+        return self._operate("organize", source, (), surface, perform)
 
     def copy_reference(self, source: str, key: str, reference_source: str,
                        reference_key: str, **kwargs) -> dict:

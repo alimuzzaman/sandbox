@@ -847,6 +847,7 @@ def _remote_workspace_control(resolved_target, action, request=None):
             workspace_id=workspace_id,
             limit=getattr(request, "limit", 50),
             active_only=getattr(request, "active_only", False),
+            measure_sizes=getattr(request, "measure_sizes", False),
         )
     if action == "migration_plan":
         return transport.migration_plan(
@@ -912,6 +913,28 @@ def _remote_workspace_control(resolved_target, action, request=None):
             resolved_target.remote_name, workspace_id, confirm=confirm,
             project_identity=identity)
     raise RuntimeError(f"unsupported remote workspace action {action!r}")
+
+
+def _remote_workspace_service_status(resolved_target):
+    """Read the selected remote MCP service status for workspace preflight.
+
+    WorkspaceService owns the fail-closed decision; this composition seam only
+    resolves the already-selected remote and delegates the bounded, secret-safe
+    live probe to the remote adapter.  No registry/state file is read here.
+    """
+    from sandbox.core import _remote
+
+    remote = getattr(resolved_target, "remote", None)
+    if not isinstance(remote, dict):
+        remote_name = getattr(resolved_target, "remote_name", None)
+        if not isinstance(remote_name, str) or not remote_name:
+            return {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+        remote = _remote.get_remote(remote_name)
+    if not isinstance(remote, dict):
+        # Let the application boundary classify absent evidence as unavailable
+        # without exposing the requested name or any registry payload.
+        return {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+    return _remote.remote_mcp_service_status(remote)
 
 
 def _resolve_workspace_deployment_receipt(receipt_id: str, project_identity: str) -> dict:
@@ -1033,7 +1056,8 @@ def durable_job_dependencies():
         repository=workspace_repository,
         resource_binding_resolver=workspace_resource_bindings,
         deployment_receipt_resolver=_resolve_workspace_deployment_receipt,
-        deployment_root=RUNTIME_DIR.parent / "deploy-src")
+        deployment_root=RUNTIME_DIR.parent / "deploy-src",
+        remote_service_status=_remote_workspace_service_status)
     job = JobService(
         repository, storage, components, scheduler=scheduler,
         runtime_selector=managed_native_project_selected,

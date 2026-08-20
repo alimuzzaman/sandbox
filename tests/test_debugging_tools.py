@@ -83,6 +83,53 @@ class TestDebuggingTools(unittest.TestCase):
                 "data": {"timing": [1]},
             })
 
+    def test_first_qm_capture_activates_installed_inactive_plugin_before_fetch(self):
+        from sandbox.commands import debug
+
+        with tempfile.TemporaryDirectory() as directory:
+            content = Path(directory) / "wp-content"
+            content.mkdir()
+            log = content / "qm.jsonl"
+            events = []
+
+            def wpcli(args, **_kwargs):
+                events.append(args)
+                if args[:3] == ["plugin", "is-installed", "query-monitor"]:
+                    return SimpleNamespace(returncode=0, stdout="")
+                if args[:3] == ["plugin", "is-active", "query-monitor"]:
+                    return SimpleNamespace(returncode=1, stdout="")
+                if args[:3] == ["plugin", "activate", "query-monitor"]:
+                    return SimpleNamespace(returncode=0, stdout="")
+                self.fail(f"unexpected wp-cli call: {args}")
+
+            def write_capture(_instance, path):
+                events.append("anonymous-fetch")
+                capture_id = parse_qs(urlsplit(path).query)["sandbox_qm_capture"][0]
+                log.write_text(json.dumps({
+                    "capture_id": capture_id,
+                    "data": {"timing": [1]},
+                }) + "\n")
+
+            args = SimpleNamespace(resolved_instance="demo", url="/", clear=False,
+                                   collectors="timing")
+            with mock.patch.object(debug, "wp_dir", return_value=Path(directory)), \
+                 mock.patch.object(debug, "wpcli", side_effect=wpcli), \
+                 mock.patch.object(debug, "_is_herd_instance", return_value=False), \
+                 mock.patch.object(debug, "_qm_fetch_docker", side_effect=write_capture), \
+                 mock.patch("sys.stdout", io.StringIO()):
+                debug.cmd_qm({}, args)
+
+            self.assertEqual(events, [
+                ["plugin", "is-installed", "query-monitor"],
+                ["plugin", "is-active", "query-monitor"],
+                ["plugin", "activate", "query-monitor"],
+                "anonymous-fetch",
+            ])
+            self.assertFalse(any(
+                isinstance(event, list) and event[:2] == ["plugin", "install"]
+                for event in events
+            ))
+
     def test_herd_xdebug_reports_actual_host_extension_state(self):
         from sandbox.commands import debug
 

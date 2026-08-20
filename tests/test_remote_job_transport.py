@@ -379,3 +379,22 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("[REDACTED]", str(raised.exception))
         self.assertNotIn("controller-token", str(raised.exception))
         self.assertNotIn("second-secret", str(raised.exception))
+
+    def test_runner_exception_is_replaced_without_raw_cause_or_context(self):
+        fixture = "runner-private-value"
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError(fixture)
+
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=fail,
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        with self.assertRaises(RemoteJobTransportError) as raised:
+            transport.control("r", ["job-status", "a" * 32])
+        public = raised.exception
+        self.assertEqual(str(public), "remote job transport runner failed")
+        self.assertIsNone(public.__cause__)
+        self.assertIsNone(public.__context__)
+        self.assertFalse(fixture in repr(public))

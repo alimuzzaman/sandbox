@@ -47,7 +47,12 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 7: US5 — Works on every driver (P1)
 
 - [x] T017 Herd path implemented (`setsid` + pinned `php<MM>`/`wp` via `_herd_wp_cmd`, `.sb-jobs/` host path, `kill -TERM -PGID`).
-- [~] T018 Herd live-verification BLOCKED — Herd 1.29.0 is installed, but the 2026-07-16 disposable Herd provision could not complete because host MySQL at `127.0.0.1:3306` is unavailable. Linking, TLS/PHP isolation, and WordPress core download succeeded. Start/configure the operator-owned host MySQL service, then run the background-job scenario against the disposable `.test` site.
+- [x] T018 Herd live verification completed 2026-08-14 against a disposable Herd
+  1.29.0 / external-DBngin WordPress instance. Detached job `244c28884de16b0a`
+  retained `phase-one` and `phase-two` and completed with exit 0. Job
+  `80812f40d818f0e6` retained its pre-sleep output, was killed through the
+  supported job surface, completed with exit 143 without the post-sleep marker,
+  and a repeated kill reported `already finished` without error.
 
 ## Phase 8: Polish
 

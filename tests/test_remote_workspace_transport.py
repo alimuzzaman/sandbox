@@ -54,6 +54,18 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
         self.assertNotIn("--project-dir", command)
         self.assertNotIn("/project", command)
 
+    def test_list_forwards_bounded_size_measurement_opt_in(self):
+        self.transport.list("remote-a", measure_sizes=True)
+        command = self._command()
+        self.assertIn("--measure-sizes", command)
+        self.assertNotIn("--project-dir", command)
+        self.calls.clear()
+        self.transport.list("remote-a")
+        self.assertNotIn("--measure-sizes", self._command())
+        with self.assertRaises(RemoteWorkspaceError) as invalid:
+            self.transport.list("remote-a", measure_sizes="yes")
+        self.assertEqual(invalid.exception.code, "workspace_request_invalid")
+
     def test_status_migration_plan_and_apply_are_id_based(self):
         self.transport.status("remote-a", "ws-123", project_identity="project-identity")
         command = self._command()

@@ -334,7 +334,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}), \
                 patch.object(instances, "_wire_project_plugins"), \
                 patch.object(instances, "_wire_project_themes"), \
-                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
                 patch.object(instances, "site_url", return_value="http://localhost:8188"), \
                 patch.object(instances, "wp_dir", return_value=root / "wp"):
             result = instances.apply_config({}, str(root))
@@ -352,6 +352,71 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         # The in-place apply command owns only web services; DB and uploads
         # are never passed to a destructive volume-removal command.
         self.assertEqual(persisted["instances"]["fixture"], block)
+
+    def test_herd_apply_reconciles_host_runtime_muplugins_without_compose(self):
+        import sandbox.core._instances as instances
+
+        root = Path(tempfile.mkdtemp(prefix="sb-herd-apply-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        existing = {
+            "instance": "fixture", "label": "default", "status": "ready",
+            "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
+            "server": "herd",
+        }
+        pconf = {"root": str(root), "server": "herd"}
+        block = {"server": "herd"}
+
+        class FakeCore:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_project, label=None):
+                return pconf
+
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return existing
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [existing]
+
+            @staticmethod
+            def registry_put(_root, **fields):
+                return {**existing, **fields}
+
+            @staticmethod
+            @contextmanager
+            def project_lock(_root):
+                yield
+
+        resolved = {"fixture": {
+            "server": "herd", "wordpress_port": 8188,
+            "db_port": 3318, "mailpit_port": 8125,
+        }}
+        with patch.object(instances, "_core", return_value=FakeCore()), \
+                patch.object(instances, "_capture_apply_rollback_state", return_value={}), \
+                patch.object(instances, "_local_yaml", return_value={"instances": {"fixture": {}}}), \
+                patch.object(instances, "_write_local_yaml"), \
+                patch.object(instances, "_build_instance_block", return_value=block), \
+                patch.object(instances, "prepare_php_extension_runtime", return_value=None), \
+                patch.object(instances, "load_config", return_value={}), \
+                patch.object(instances, "write_compose_files"), \
+                patch.object(instances, "resolve_instances", return_value=resolved), \
+                patch.object(instances, "compose") as compose, \
+                patch.object(instances, "_pin_wp_constants_in_config"), \
+                patch.object(instances, "wp_dir", return_value=root), \
+                patch.object(instances, "_write_host_runtime_muplugins") as host_plugins, \
+                patch.object(instances, "_remove_obsolete_builder_authoring_assets"), \
+                patch.object(instances, "_wire_project_plugins"), \
+                patch.object(instances, "_wire_project_themes"), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
+                patch.object(instances, "site_url", return_value="https://fixture.test"):
+            result = instances.apply_config({}, str(root))
+
+        self.assertEqual(result["status"], "ready")
+        host_plugins.assert_called_once_with("fixture")
+        compose.assert_not_called()
 
     def test_ensure_prepares_child_images_before_compose_up_and_verifies_planes(self):
         import sandbox.core._instances as instances
@@ -423,12 +488,21 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(lifecycle, "cmd_install", side_effect=lambda *_a, **_k: events.append("install")))
             stack.enter_context(patch.object(instances, "_wait_http"))
             stack.enter_context(patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}))
-            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
-            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(
+                instances, "_wire_project_plugins",
+                side_effect=lambda *_a, **_k: events.append("plugins"),
+            ))
+            stack.enter_context(patch.object(
+                instances, "_wire_project_themes",
+                side_effect=lambda *_a, **_k: events.append("themes"),
+            ))
             stack.enter_context(patch.object(instances, "_multisite_mode", return_value=False))
             stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
             stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
-            stack.enter_context(patch.object(data_commands, "capture_install_snapshots"))
+            capture = stack.enter_context(patch.object(
+                data_commands, "capture_install_snapshots",
+                side_effect=lambda *_a, **_k: events.append("snapshots"),
+            ))
             stack.enter_context(patch.object(instances, "info"))
             # A few legacy helpers invoke the CLI entrypoint when their
             # dependency discovery is not stubbed. Keep the harness argv
@@ -441,6 +515,52 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertLess(events.index("prepare"), events.index("up"))
         self.assertLess(events.index("persist"), events.index("compose-file"))
         self.assertLess(events.index("compose-file"), events.index("up"))
+        self.assertLess(events.index("install"), events.index("plugins"))
+        self.assertLess(events.index("plugins"), events.index("themes"))
+        self.assertLess(events.index("themes"), events.index("snapshots"))
+        capture.assert_called_once_with("fixture")
+
+    def test_ready_ensure_does_not_recapture_install_snapshots(self):
+        """The ready fast path must preserve existing install restore points."""
+        import sandbox.core._instances as instances
+        import sandbox.commands.data as data_commands
+
+        root = Path(tempfile.mkdtemp(prefix="sb-install-snapshot-idempotency-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        existing = {
+            "instance": "fixture", "label": "default", "status": "ready",
+            "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
+            "server": "nginx", "url": "https://fixture.tst",
+        }
+
+        class FakeCore:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_project, label=None):
+                return {"root": str(root), "server": "nginx"}
+
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return existing
+
+            @staticmethod
+            @contextmanager
+            def project_lock(_root):
+                yield
+
+        with patch.object(instances, "_core", return_value=FakeCore()), \
+                patch.object(instances, "_resolve_port_conflicts", return_value={}), \
+                patch.object(instances, "resolve_instances", return_value={"fixture": existing}), \
+                patch.object(instances, "_instance_reachable", return_value=True), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
+                patch.object(instances, "_auto_heal_wp_url"), \
+                patch.object(instances, "_refresh_registered_url", return_value=existing), \
+                patch.object(data_commands, "capture_install_snapshots") as capture:
+            result = instances.ensure_instance({}, str(root))
+
+        self.assertEqual(result, existing)
+        capture.assert_not_called()
 
     def test_apply_failed_verification_restores_state_compose_and_web_runtime(self):
         """A failed four-plane gate rolls back only the web tier.
@@ -549,7 +669,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                         "drift": {"state": "drift", "issues": [{"message": "GD plane mismatch"}]}}))
                     stack.enter_context(patch.object(instances, "_wire_project_plugins"))
                     stack.enter_context(patch.object(instances, "_wire_project_themes"))
-                    stack.enter_context(patch.object(instances, "_warn_version_drift"))
+                    stack.enter_context(patch.object(instances, "_reconcile_wp_core", return_value={}))
                     stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
                     with self.assertRaisesRegex(ValueError, "rollback=(succeeded|failed)") as raised:
                         instances.apply_config({}, str(root))
@@ -614,7 +734,10 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertTrue(any(command[command.index("--entrypoint") + 2] == "wp"
                             for command in commands if "--entrypoint" in command))
         self.assertEqual({call[1]["timeout"] for call in calls}, {2})
-        self.assertTrue(result["verification"]["comparison"]["ok"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["desired"]["catalog"]["revision"], 1)
+        self.assertIn("resolution_digest", result["desired"])
         self.assertEqual(result["staleness"]["state"], "fresh")
         self.assertEqual(result["drift"]["state"], "ready")
         # The payload is fixed PHP source and does not load WordPress/project
@@ -647,6 +770,93 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                             for row in result["observed"].values()))
         self.assertEqual(result["drift"]["state"], "unknown")
 
+    def test_status_does_not_forward_untrusted_probe_dimensions(self):
+        import sandbox.core._docker as docker
+
+        document = json.loads(_probe_document())
+        document["php_version"] = "https://user:pass@example.invalid/private"
+        document["sapi"] = "cli; sh -c secret"
+        document["extensions"]["gd"]["version"] = "/private/context/path"
+
+        def fake_compose(*_args, **_kwargs):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
+
+        with patch.object(docker, "_is_herd_instance", return_value=False), \
+                patch.object(docker, "compose", side_effect=fake_compose), \
+                patch("sandbox.core._tests.compose", side_effect=fake_compose), \
+                patch("sandbox.core._tests._managed_execution_gate", return_value=None):
+            report = docker.php_extension_status(
+                {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+
+        output = json.dumps(report)
+        self.assertNotIn("example.invalid", output)
+        self.assertNotIn("sh -c", output)
+        self.assertNotIn("/private/", output)
+        for row in report["observed"].values():
+            self.assertIsNone(row["php_version"])
+            self.assertIsNone(row["sapi"])
+            self.assertIsNone(row["extensions"]["gd"]["version"])
+
+    def test_status_redacts_provider_corpus_across_every_public_string_boundary(self):
+        import sandbox.core._docker as docker
+        from tests.redaction_corpus import AWS, GITHUB, GOOGLE, OPENAI, SLACK
+        from sandbox.php_extensions.probe import (
+            ExtensionObservation, PlaneObservation, ProbeError, ProbeResult,
+        )
+
+        probes = {}
+        for plane in ("web", "cli", "exec", "phpunit"):
+            observation = PlaneObservation(
+                plane, GITHUB,
+                (ExtensionObservation("gd", True, SLACK, plane),),
+                sapi=OPENAI,
+            )
+            probes[plane] = ProbeResult(
+                False, plane, observation=observation,
+                errors=(ProbeError("version_mismatch", "raw provider failure",
+                                   plane=plane, extension="gd",
+                                   expected=AWS, observed=GOOGLE),),
+            )
+        with patch.object(docker, "php_extension_probe", return_value=probes):
+            report = docker.php_extension_status(
+                {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+
+        output = json.dumps(report)
+        for forbidden in (AWS, GITHUB, GOOGLE, OPENAI, SLACK):
+            self.assertNotIn(forbidden, output)
+        self.assertEqual(report["desired"]["requirements"][0]["name"], "gd")
+        self.assertEqual(report["issues"][0]["code"], "version_mismatch")
+
+        profile = docker.php_extension_status({
+            "php_extensions": {"profile": GITHUB, "extensions": {"gd": True}},
+        })
+        self.assertNotIn(GITHUB, json.dumps(profile))
+
+    def test_status_omits_cache_recipe_ids_not_present_in_immutable_catalog(self):
+        import sandbox.core._docker as docker
+        from tests.redaction_corpus import GITHUB
+
+        digest = "sha256:" + "a" * 64
+        receipt = {
+            "state": "ready",
+            "provenance": {
+                "digest": digest,
+                "recipe_catalog_digest": "sha256:" + "b" * 64,
+                "parent_digests": {"web": "sha256:" + "c" * 64,
+                                   "wpcli": "sha256:" + "d" * 64},
+                "recipe_ids": [GITHUB],
+            },
+        }
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            report = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertNotIn("build_digest", report["desired"])
+        self.assertEqual(report["provenance"], {"state": "stale"})
+        self.assertNotIn(GITHUB, json.dumps(report))
+
     def test_status_blocks_version_mismatch_and_plane_drift(self):
         import sandbox.core._docker as docker
 
@@ -671,11 +881,85 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 instance="fixture", timeout=1,
             )
 
-        codes = {item["code"] for item in result["drift"]["issues"]}
+        codes = {item["code"] for item in result["issues"]}
         self.assertIn("version_mismatch", codes)
         self.assertIn("plane_drift", codes)
         self.assertEqual(result["staleness"]["state"], "fresh")
         self.assertEqual(result["drift"]["state"], "drift")
+
+    def test_status_constructor_emits_only_stable_failure_codes_and_safe_fields(self):
+        import sandbox.core._docker as docker
+        from sandbox.php_extensions.probe import ProbeError, ProbeResult
+
+        cases = {
+            "missing": ProbeError("missing", "raw missing output", plane="web",
+                                  extension="gd"),
+            "version_mismatch": ProbeError("version_mismatch", "raw mismatch", plane="cli",
+                                           extension="gd", expected="2.3.*", observed="3.0.0"),
+            "version_unobservable": ProbeError("version_unobservable", "raw unavailable", plane="exec",
+                                               extension="gd", expected="2.3.*"),
+            "unsupported_provisioning": ProbeError("unsupported_provisioning", "raw package detail",
+                                                   plane="phpunit", extension="xdebug"),
+            "unsupported_disable": ProbeError("unsupported_disable", "raw ini detail",
+                                              plane="web", extension="gd"),
+            "plane_drift": ProbeError("plane_drift", "raw plane output", plane="cli",
+                                      extension="gd"),
+        }
+        for expected, issue in cases.items():
+            probes = {plane: ProbeResult(False, plane, errors=(
+                issue if plane == issue.plane else ProbeError(
+                    "probe_unavailable", "raw stderr", plane=plane),
+            ), stderr="secret://context/path --shell") for plane in
+                ("web", "cli", "exec", "phpunit")}
+            with self.subTest(code=expected), \
+                    patch.object(docker, "php_extension_probe", return_value=probes):
+                report = docker.php_extension_status(
+                    {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+                codes = {row["code"] for row in report["issues"]}
+                self.assertIn(expected, codes)
+                output = json.dumps(report)
+                self.assertNotIn("raw ", output)
+                self.assertNotIn("secret://", output)
+                self.assertNotIn("--shell", output)
+                self.assertEqual(report["exit_code"], 1)
+
+    def test_status_exposes_build_digest_only_for_complete_safe_read_only_receipt(self):
+        import sandbox.core._docker as docker
+
+        digest = "sha256:" + "a" * 64
+        receipt = {
+            "state": "ready",
+            "provenance": {
+                "digest": digest,
+                "recipe_catalog_digest": "sha256:" + "b" * 64,
+                "parent_digests": {"web": "sha256:" + "c" * 64,
+                                   "wpcli": "sha256:" + "d" * 64},
+                "recipe_ids": ["php-gd"],
+                "parent_images": {"web": "https://user:pass@example.invalid/private"},
+                "context_path": "/private/project/path",
+                "commands": ["sh", "-c", "secret"],
+            },
+        }
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            report = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertEqual(report["desired"]["build_digest"], digest)
+        output = json.dumps(report)
+        self.assertNotIn("example.invalid", output)
+        self.assertNotIn("context_path", output)
+        self.assertNotIn("commands", output)
+
+        receipt["provenance"].pop("recipe_catalog_digest")
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            incomplete = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertNotIn("build_digest", incomplete["desired"])
 
     def test_new_wordpress_init_emits_explicit_profile(self):
         import sandbox.commands.instances_cmd as command

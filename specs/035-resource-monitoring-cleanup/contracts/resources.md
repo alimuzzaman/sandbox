@@ -5,13 +5,22 @@
 ### Fast or thorough status
 
 ```text
-sb resources status [--remote NAME] [--thorough] [--budget SECONDS] [--json]
+sb resources status [--remote NAME] [--thorough] [--deep] [--fast | --refresh]
+                    [--budget SECONDS] [--json]
 ```
 
 - No `--remote` means the current local machine.
 - A remote name must already be configured and resolve to one exact host.
 - Default mode is fast and read-only.
 - `--thorough` enables expensive providers within the overall budget.
+- `--fast` implies `--deep` with `directory_cache = cache_only`: it answers
+  from the cached host directory index, never walks a filesystem, and never
+  inventories the container engine. Default budget 10s.
+- `--refresh` implies `--deep` with `directory_cache = refresh`: it rebuilds
+  the cached host directory index. Default budget 900s.
+- `--fast` and `--refresh` are mutually exclusive (`invalid_mode`).
+- The `directory_cache` argument is passed to a provider only when the
+  provider accepts it, keeping older providers callable.
 - Human output ranks capacity, categories, owners, and incomplete measurements.
 - JSON output follows the common envelope below.
 
@@ -151,6 +160,28 @@ Every resource contains:
 - evidence quality, references, and bounded errors.
 
 An unavailable or timed-out size is `null`, never zero.
+
+Every category outcome whose category maps to observable resource kinds also
+carries `measured_bytes`, `measured_count`, and `unmeasured_count`, so a
+partial or timed-out category states what it did measure and how many rows it
+skipped instead of implying an empty category:
+
+```json
+{
+  "category": "deploy_worktrees",
+  "status": "timed_out",
+  "measured_bytes": 85900000000,
+  "measured_count": 174,
+  "unmeasured_count": 2
+}
+```
+
+A remote probe publishes its capacity envelope before starting bounded work.
+If the transport kills the probe, the envelope is still returned as a
+`partial` scan carrying capacity, with
+`{"category": "remote_probe", "status": "partial", "reason":
+"probe_incomplete_capacity_only"}`. Only total transport loss (no parseable
+record at all) returns `measurement_unavailable`.
 Nested detail can overlap a measured host root and therefore sets
 `capacity_accounted: false`; it remains ranked without inflating attributed
 host bytes.

@@ -278,9 +278,13 @@ def apply_config(project_dir: str, label: str | None = None) -> dict:
     multisite-convert if multisite was newly enabled. The DB volume is untouched,
     so all data is preserved.
 
-    Caveats: a changed wp_version is reported but NOT applied (core swaps under a
-    live DB are left to an explicit recreate_instance); switching an existing
-    multisite between subdirectory and subdomain also needs a recreate.
+    WordPress core is reconciled too: a pinned wpVersion is installed with
+    `wp core update --version=<pin> --force` (upgrade or downgrade), and an
+    UNPINNED project is brought to the current release — followed by
+    `wp core update-db`. The result is reported as `wp_core: {from, to, changed}`.
+
+    Caveats: switching an existing multisite between subdirectory and subdomain
+    still needs a recreate.
 
     project_dir: the plugin project to reconcile (call ensure_instance first).
     label: which of project_dir's instances, when it owns more than one.

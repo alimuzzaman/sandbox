@@ -44,6 +44,17 @@ Deep responses add:
   "deep_attribution": {
     "status": "partial",
     "capacity_scope_id": "opaque-id",
+    "directory_index": {
+      "mount": "/",
+      "source": "cache",
+      "complete": true,
+      "stale": false,
+      "age_seconds": 1840,
+      "depth": 6,
+      "minimum_row_bytes": 33554432,
+      "ttl_seconds": 21600,
+      "mode": "auto"
+    },
     "filesystems": [],
     "findings": [],
     "capabilities": [],
@@ -71,7 +82,20 @@ Deep responses add:
 All byte fields are raw non-negative integers. `overlapping_logical_bytes` is
 never included in `accounted_bytes`. The enclosing status `data` also has an
 opaque `capacity_scope_id`; deep reconciliation totals are used for the outer
-summary only when its scope identity and used-capacity snapshot match.
+summary only when its scope identity matches and its used-capacity snapshot is
+within the drift materiality threshold (the greater of one percent of used
+capacity or 64 MiB, capped at one tenth of used capacity). Exact byte equality
+is not required: capacity and the deep pass read the same live filesystem
+moments apart.
+
+`directory_index` states where the ranked directory evidence came from.
+`source` is one of `scan` (walked now), `cache` (reused a stored walk),
+`cache_missing` (fast mode with no stored walk), or `not_measured`. The walk is
+stored on the host under `$SANDBOX_HOME/runtime/resources/directory-index.json`
+and reused until `ttl_seconds` elapses; a truncated walk never replaces a
+complete stored one. Rows below `minimum_row_bytes` are dropped unless they sit
+under a managed root, and managed-root rows are named by their path relative to
+that root.
 
 ## Filesystem record
 

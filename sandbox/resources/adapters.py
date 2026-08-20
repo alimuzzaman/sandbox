@@ -17,9 +17,11 @@ from sandbox.services.process import BoundedProcessRunner, ProcessResult
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
+    NetworkLifecycle,
     ResourceRequest,
     ResourceObservation,
     StorageTarget,
+    normalize_active_references,
     utc_now,
 )
 from .attribution import (
@@ -70,6 +72,7 @@ class ProviderSnapshot:
     drift: dict | None = None
     deep_attribution: DeepAttribution | None = None
     capacity_scope_id: str | None = None
+    reclaim: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,9 @@ class _WorkspaceOwner:
     references: tuple[str, ...] = ()
     protected: bool = False
     active: bool = False
+    lifecycle: str | None = None
+    active_references: tuple[tuple[str, int | None], ...] = ()
+    observed_at: str | None = None
 
 
 class _WorkspaceOwnership:
@@ -97,7 +103,7 @@ class _WorkspaceOwnership:
     })
     _INVALID_STATUSES = frozenset({
         "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
-        "destroyed", "tombstoned",
+        "tombstoned",
     })
     _LIFECYCLES = frozenset({
         "provisioning", "ready", "resetting", "destroying", "destroyed",
@@ -108,7 +114,10 @@ class _WorkspaceOwnership:
         self.configured = configured
         self.available = False
         self.incomplete = False
-        self.bindings: dict[tuple[str, str], set[tuple[str, str, str, bool]]] = {}
+        self.bindings: dict[
+            tuple[str, str],
+            set[tuple[str, str, str, bool, tuple[tuple[str, int | None], ...], str]],
+        ] = {}
         self.reason = "workspace_index_unavailable"
         if not configured:
             self.reason = "workspace_projection_not_configured"
@@ -181,12 +190,21 @@ class _WorkspaceOwnership:
             if not isinstance(bindings, (list, tuple)):
                 continue
             active_references = record.get("active_references")
-            reference_active = False
             if isinstance(active_references, Mapping):
+                try:
+                    reference_counts = normalize_active_references(active_references)
+                except ValueError:
+                    self.incomplete = True
+                    reference_counts = ()
+            else:
+                # Missing evidence is unknown, never an observed zero.
+                reference_counts = tuple(
+                    (name, None) for name in ("leases", "containers", "jobs", "mounts")
+                )
+            reference_active = False
+            if reference_counts:
                 reference_active = any(
-                    isinstance(value, int) and not isinstance(value, bool) and value > 0
-                    or value is True
-                    for value in active_references.values()
+                    value is not None and value > 0 for _name, value in reference_counts
                 )
             for binding in bindings:
                 if not isinstance(binding, Mapping):
@@ -207,7 +225,7 @@ class _WorkspaceOwnership:
                     self.incomplete = True
                     continue
                 self.bindings.setdefault((resource_type, resource_id), set()).add(
-                    (workspace_id, lifecycle, binding_status, reference_active),
+                    (workspace_id, lifecycle, binding_status, reference_active, reference_counts, observed_at),
                 )
         self.reason = "workspace_index_incomplete" if self.incomplete else "workspace_projection"
 
@@ -233,7 +251,7 @@ class _WorkspaceOwnership:
             return _WorkspaceOwner("unknown", None, ("workspace_index_unavailable",))
         matches = self.bindings.get((resource_type, resource_id), set())
         if len(matches) == 1:
-            workspace_id, _lifecycle, binding_status, active = next(iter(matches))
+            workspace_id, lifecycle, binding_status, active, reference_counts, observed_at = next(iter(matches))
             if binding_status not in {"owned", "active", "retained", "ready"}:
                 return _WorkspaceOwner(
                     "unknown", None,
@@ -245,6 +263,9 @@ class _WorkspaceOwnership:
                 ("workspace_index",),
                 True,
                 active,
+                lifecycle,
+                reference_counts,
+                observed_at,
             )
         if len(matches) > 1:
             return _WorkspaceOwner(
@@ -926,6 +947,32 @@ class LocalResourceAdapter:
                     + workspace_owner.references if active or workspace_owner.active else
                     workspace_owner.references if workspace_owner.protected else ()
                 )
+                # Network lifecycle is derived from the same typed owner
+                # projection as status/plan/apply.  A destroyed workspace is
+                # represented as orphaned, while missing reference evidence
+                # remains active/unknown and therefore never cleanup-ready.
+                references_unknown = any(
+                    value is None for _name, value in workspace_owner.active_references
+                )
+                if references_unknown and not active and not workspace_owner.active:
+                    network_lifecycle = "indeterminate"
+                elif workspace_owner.lifecycle in {"destroyed", "destroying"} and not active and not workspace_owner.active:
+                    network_lifecycle = "orphaned"
+                elif active or workspace_owner.active:
+                    network_lifecycle = "active"
+                elif workspace_owner.lifecycle in {"ready", "resetting", "provisioning"}:
+                    network_lifecycle = "idle"
+                else:
+                    network_lifecycle = "indeterminate"
+                reference_map = dict(workspace_owner.active_references)
+                if active:
+                    # Docker connectivity is a bounded container reference;
+                    # do not overwrite an explicit larger count.
+                    if reference_map.get("containers") is None or reference_map.get("containers", 0) < 1:
+                        reference_map["containers"] = 1
+                active_references = tuple(sorted(reference_map.items()))
+                allocation_state = "allocated" if owner_kind == "workspace" and owner_id else "unknown"
+                last_observed = workspace_owner.observed_at
             else:
                 labels = network.get("Labels")
                 owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
@@ -935,6 +982,10 @@ class LocalResourceAdapter:
                 classification = "active" if active else "unmanaged"
                 evidence = ("ownership_unverified",)
                 references = ("connected_container",) if active else ()
+                network_lifecycle = "active" if active else "indeterminate"
+                active_references = (("containers", 1),) if active else (("containers", 0),)
+                allocation_state = "unknown"
+                last_observed = None
             resources.append(ResourceObservation(
                 resource_id=_resource_id("network", network_id),
                 kind="network", locator=network_id,
@@ -945,6 +996,11 @@ class LocalResourceAdapter:
                 capacity_accounted=False,
                 references=references,
                 evidence=evidence,
+                lifecycle=network_lifecycle,
+                active_references=active_references,
+                allocation_state=allocation_state,
+                cleanup_eligible=False,
+                last_observed=last_observed,
             ))
         used_images = {
             str(container.get("Image"))
@@ -1309,6 +1365,21 @@ class LocalResourceAdapter:
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         return self._find_current(candidate)
+
+    def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | Mapping[str, Any]) -> dict:
+        """Return a diagnostic release decision without mutating Docker.
+
+        Network cleanup is intentionally disabled at the resource adapter
+        boundary.  The typed lifecycle model still refuses active lease,
+        container, or job references before reporting that disabled state.
+        """
+        if isinstance(lifecycle, ResourceObservation):
+            lifecycle = NetworkLifecycle.from_observation(lifecycle)
+        elif isinstance(lifecycle, Mapping):
+            lifecycle = NetworkLifecycle.from_dict(lifecycle)
+        if not isinstance(lifecycle, NetworkLifecycle):
+            raise TypeError("network lifecycle evidence is required")
+        return lifecycle.release_decision(enabled=False)
 
     def _remove_path(self, path: Path, *, recreate: bool = False) -> str:
         if not _inside(path, self.sandbox_home) or path == self.sandbox_home:

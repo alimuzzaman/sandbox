@@ -11,6 +11,8 @@ import secrets
 import tempfile
 from typing import Any, Callable
 
+from sandbox.services.redaction import redact_text
+
 
 CATEGORIES = frozenset({"bug", "incident", "idea", "usability", "other"})
 SEVERITIES = frozenset({"low", "medium", "high", "critical"})
@@ -22,36 +24,6 @@ _SAFE_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,79}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-# Assignments are redacted before provider-specific bare-token matching.  The
-# key list deliberately includes the common spellings used in URLs, shell
-# output, and provider configuration files; it is still bounded to one value.
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(?P<name>token|access[_-]?token|refresh[_-]?token|password|passphrase|"
-    r"authorization|cookie|credential|secret|client[_-]?secret|api[_-]?key|"
-    r"private[_-]?key|basic[_-]?auth|aws[_-]?(?:access[_-]?key(?:[_-]?id)?|"
-    r"secret[_-]?access[_-]?key)|slack[_-]?token|stripe[_-]?key|"
-    r"google[_-]?api[_-]?key)"
-    r"\s*[=:]\s*(?:bearer\s+)?[^\s,;&]+"
-)
-_BASIC_AUTH_URL = re.compile(
-    r"(?i)(?P<prefix>https?://)(?P<credentials>[^\s/@:]+:[^\s/@]+)@"
-)
-_BEARER_TOKEN = re.compile(
-    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{4,}"
-)
-_BARE_SECRET = re.compile(
-    r"(?i)(?:"
-    r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|"
-    r"sk_(?:live|test)_[A-Za-z0-9]{12,}|rk_(?:live|test)_[A-Za-z0-9]{12,}|"
-    r"pk_(?:live|test)_[A-Za-z0-9]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-    r"(?:xoxe\.)?xox[baprs]-[A-Za-z0-9-]{12,}|"
-    r"(?:AKIA|ASIA)[0-9A-Z]{16}|"
-    r"FwoGZXIvYXdz[A-Za-z0-9+/=]{20,}|"
-    r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z._-]{12,}|1//[0-9A-Za-z._-]{12,}|"
-    r"BEGIN (?:RSA|OPENSSH|EC|DSA|PGP|PRIVATE) KEY"
-    r")"
-)
 _FEEDBACK_ID = re.compile(r"[a-f0-9]{32}\Z")
 _CURSOR_NAME = re.compile(r"[A-Za-z0-9_.TZ:-]{1,240}\.json\Z")
 _TIMESTAMP = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
@@ -99,12 +71,7 @@ def _sanitize_text(value: str, field: str, *, maximum: int, required: bool = Fal
         raise FeedbackError(f"{field} must be at most {maximum} characters")
     if _CONTROL.search(text):
         raise FeedbackError(f"{field} contains unsupported control characters")
-    redacted = _BASIC_AUTH_URL.sub(r"\g<prefix>[redacted]@", text)
-    redacted = _SECRET_ASSIGNMENT.sub(
-        lambda match: f"{match.group('name')}=[redacted]", redacted,
-    )
-    redacted = _BEARER_TOKEN.sub("Bearer [redacted]", redacted)
-    redacted = _BARE_SECRET.sub("[redacted]", redacted)
+    redacted = redact_text(text)
     return redacted, redacted != text
 
 

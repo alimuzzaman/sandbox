@@ -18,6 +18,7 @@ from .registry import JobRepository
 from .storage import JobStorage
 from .artifacts import collect as collect_artifacts
 from .metrics import append as append_metric, sample as sample_metric
+from sandbox.services.redaction import redact_structure, redact_text
 
 
 def run_descriptor(path: str | Path) -> int:
@@ -155,12 +156,13 @@ def run_descriptor(path: str | Path) -> int:
         repository.transition(job_id, Lifecycle.FAILED,
             termination_reason="storage_pressure" if pressure else "output_storage_failed",
             output_completeness="storage_pressure" if pressure else "write_failed",
-            result_json=json.dumps({"error": str(exc)}))
+            result_json=json.dumps(redact_structure({"error": str(exc)})))
         return 1
     except BaseException as exc:
         try:
             repository.transition(job_id, Lifecycle.FAILED, termination_reason="supervisor_error",
-                result_json=json.dumps({"error": type(exc).__name__, "detail": str(exc)}))
+                result_json=json.dumps(redact_structure(
+                    {"error": type(exc).__name__, "detail": str(exc)})))
         except Exception:
             pass
         return 1
@@ -217,7 +219,9 @@ def _run_managed_native(descriptor, repository, output: JobOutputStore) -> int:
     output.finish("stderr")
     integrity = output.complete()
     target = Lifecycle.SUCCEEDED if result.ok else Lifecycle.FAILED
-    reason = result.data.get("reason", {})
+    reason = redact_structure(result.data.get("reason", {}))
+    if not isinstance(reason, dict):
+        reason = {"code": "redaction_failed"}
     reason_code = reason.get("code") if isinstance(reason, dict) else None
     repository.transition(
         descriptor["job_id"], target, exit_code=result.exit_code,

@@ -320,6 +320,10 @@ add_action( 'wp_ajax_sandbox_snap', function () {
 		wp_send_json( sandbox_snapshots_bridge( 'POST', '/snapshot', array( 'name' => $name, 'force' => ! empty( $_POST['force'] ), 'db_only' => ! empty( $_POST['db_only'] ) ) ) );
 	} elseif ( 'restore' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'POST', '/restore', array( 'name' => $name ) ) );
+	} elseif ( 'reset' === $op ) {
+		$confirm = isset( $_POST['confirm'] )
+			&& '1' === sanitize_text_field( wp_unslash( $_POST['confirm'] ) );
+		wp_send_json( sandbox_snapshots_bridge( 'POST', '/reset', array( 'confirm' => $confirm ) ) );
 	} elseif ( 'delete' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'DELETE', '/snapshot/' . rawurlencode( $name ) ) );
 	} elseif ( 'job' === $op ) {
@@ -370,7 +374,7 @@ function sandbox_snapshots_render() {
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   document.getElementById('sbx-reset').onclick=function(){
     if(!confirm('Reset this database to its fresh-install baseline? Current posts, settings, and users will be replaced; uploads are kept.')){return;}
-    say('Resetting to fresh install…'); call('reset').then(function(r){
+    say('Resetting to fresh install…'); call('reset',{confirm:1}).then(function(r){
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
     if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');

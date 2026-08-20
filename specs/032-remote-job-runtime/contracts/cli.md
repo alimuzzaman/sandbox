@@ -167,7 +167,23 @@ sb workspace destroy --remote NAME --workspace-id ID --confirm [--json]
 `--project-dir` is not required or accepted for these remote controls. A migration plan
 is read-only until `--confirm` is supplied with its exact plan ID; apply rechecks the
 inventory digest and index generation. Status/list by workspace ID remain valid when a
-checkout locator is missing. Stable failures include `workspace_index_incomplete`,
+checkout locator is missing.
+
+`workspace list [--measure-sizes]` is read-only reporting and exits 0 even when the index
+is degraded. Its payload is `{"ok": true, "workspaces": [...], "counts": {...},
+"index": {"generation", "complete", "code", "counts"}, "on_disk": {...}}`; when
+`index.complete` is `false`, `index.code`, a top-level `code`, and a top-level `warning`
+all carry `workspace_index_incomplete`, and text output prints a leading `WARNING:` line.
+`on_disk` is `{"available", "reason", "root", "measured", "total", "unindexed",
+"truncated", "entries": [{"path", "name", "indexed", "workspace_id", "symlink",
+"size_bytes", "size_reason", "modified_at", "age_seconds"}]}` and enumerates the
+deployment root's children so unindexed storage stays visible. `size_bytes` is `null`
+with `size_reason: "not_measured"` unless `--measure-sizes` is supplied; measurement is
+bounded by entry and time budgets and degrades to `null` with `size_budget_exhausted`,
+`size_deadline_exceeded`, or `size_unreadable`. Mutating controls are unchanged: status,
+create, reset, destroy, and migration apply still fail on a degraded or non-ready record.
+
+Stable failures include `workspace_index_incomplete`,
 `workspace_identity_ambiguous`, `workspace_alias_collision`, `workspace_busy`,
 `workspace_migration_plan_stale`, and `workspace_ownership_drift`. Index migration is
 metadata-only and never performs cleanup or network release.

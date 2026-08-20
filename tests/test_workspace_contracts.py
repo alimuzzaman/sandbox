@@ -157,6 +157,35 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "workspace_index_incomplete")
 
+    def test_cli_json_remote_preflight_failure_preserves_safe_observation_and_recovery(self):
+        class FailedService:
+            def list(self, _request):
+                from sandbox.workspaces.repository import WorkspaceIndexError
+                raise WorkspaceIndexError(
+                    "workspace_remote_revision_mismatch",
+                    "remote MCP service runtime revision is not verified",
+                    observed={"ownership": "proven", "runtime_revision_state": "mismatch"},
+                    recovery_command="./sb remote service migrate <name> --confirm --json",
+                    secret="must-not-render",
+                )
+
+        output = StringIO()
+        with patch("sandbox.commands.workspaces.durable_job_dependencies",
+                   return_value={"workspace_service": FailedService()}), \
+             patch("sys.stdout", output), self.assertRaises(SystemExit):
+            cmd_workspace(None, self._cli_args("list"))
+        payload = __import__("json").loads(output.getvalue())
+        self.assertEqual(payload["error"]["code"], "workspace_remote_revision_mismatch")
+        self.assertEqual(
+            payload["error"]["observed"],
+            {"ownership": "proven", "runtime_revision_state": "mismatch"},
+        )
+        self.assertEqual(
+            payload["error"]["recovery_command"],
+            "./sb remote service migrate <name> --confirm --json",
+        )
+        self.assertNotIn("secret", output.getvalue())
+
     def test_cli_returned_failure_is_nonzero_and_preserves_top_level_code(self):
         class FailedService:
             def list(self, _request):

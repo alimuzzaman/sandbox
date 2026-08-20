@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "base_revision": "6e7c3263294d80aa81c5e327f03461f2ec511802",
+  "implementation_revision": "WORKTREE_UNCOMMITTED",
+  "patterns": [
+    "bearer_header",
+    "assignment_token",
+    "assignment_password_mixed",
+    "assignment_api_key_spacing",
+    "github_provider",
+    "openai_provider",
+    "slack_provider",
+    "aws_provider",
+    "google_provider",
+    "stripe_provider",
+    "basic_auth_url",
+    "token_query",
+    "nested_structure",
+    "serialized_argv",
+    "nested_exception",
+    "streaming_split",
+    "streaming_whitespace_split",
+    "streaming_overlong_fail_closed",
+    "durable_argv_refusal",
+    "argv_url_classification",
+    "remote_runner_exception"
+  ],
+  "surfaces": {
+    "cli": {"passed": 12, "failed": 0},
+    "mcp": {"passed": 12, "failed": 0},
+    "feedback": {"passed": 12, "failed": 0},
+    "remote_job": {"passed": 12, "failed": 0},
+    "remote_workspace": {"passed": 12, "failed": 0},
+    "remote_verification": {"passed": 12, "failed": 0},
+    "job_output": {"passed": 12, "failed": 0},
+    "process_stderr": {"passed": 12, "failed": 0},
+    "secret_child": {"passed": 12, "failed": 0}
+  },
+  "aggregate": {
+    "pattern_names": 21,
+    "surface_names": 9,
+    "surface_pattern_passes": 108,
+    "surface_pattern_failures": 0,
+    "fixture_value_matches": 0,
+    "parity_tests_passed": 12,
+    "parity_tests_failed": 0
+  },
+  "limitations": {
+    "transformed_or_encoded_output_guaranteed": false
+  }
+}

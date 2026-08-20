@@ -708,6 +708,35 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertEqual(result["staleness"]["state"], "stale")
         self.assertNotIn("password", json.dumps(result).lower())
 
+    def test_status_preserves_missing_and_discarded_cache_states_without_paths(self):
+        import sandbox.core._docker as docker
+        from sandbox.php_extensions.compose_builder import extension_build_root
+
+        digest = "sha256:" + "a" * 64
+        old_home = os.environ.get("SANDBOX_HOME")
+        with tempfile.TemporaryDirectory(prefix="sb-php-ext-status-") as home:
+            os.environ["SANDBOX_HOME"] = home
+            config = {
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            }
+            try:
+                missing = docker.php_extension_status(config)
+                self.assertEqual(missing["provenance"], {"state": "missing"})
+                context = extension_build_root() / digest
+                context.mkdir(parents=True, exist_ok=True)
+                (context / ".discarded").write_text("operator discard\n")
+                discarded = docker.php_extension_status(config)
+                self.assertEqual(discarded["provenance"], {"state": "discarded"})
+                serialized = json.dumps(discarded, sort_keys=True)
+                self.assertNotIn(str(Path(home).resolve()), serialized)
+                self.assertNotIn("operator discard", serialized)
+            finally:
+                if old_home is None:
+                    os.environ.pop("SANDBOX_HOME", None)
+                else:
+                    os.environ["SANDBOX_HOME"] = old_home
+
     def test_running_status_executes_four_standalone_planes_with_bounded_argv(self):
         import sandbox.core._docker as docker
 

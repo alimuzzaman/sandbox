@@ -6,7 +6,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from sandbox.commands import migrate
 from sandbox.workspaces.migration import correlate, scan_legacy
 from sandbox.workspaces.models import JobEvidence
 
@@ -112,6 +114,48 @@ class WorkspaceMigrationTests(unittest.TestCase):
         scan_legacy(self.root)
         self.assertEqual(path.read_bytes(), before[0])
         self.assertEqual(path.stat().st_mtime_ns, before[1])
+
+    def test_base_relocation_preserves_index_legacy_metadata_and_protected_assets(self):
+        old_base = Path(self.temp.name) / "old-home"
+        new_base = Path(self.temp.name) / "new-home"
+        old_runtime = old_base / "runtime"
+
+        def write(relative: str, payload: bytes) -> Path:
+            path = old_runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return path
+
+        files = {
+            "index": write("workspaces/index.sqlite3", b"sqlite-index-bytes"),
+            "metadata": write(
+                "jobs/workspaces/local-abc/default/workspace.json",
+                b'{"label":"default","namespace":"local:abc"}\n',
+            ),
+            "project": write("wp-fixture/project.php", b"project-bytes"),
+            "uploads": write("wp-fixture/wp-content/uploads/file.txt", b"upload-bytes"),
+            "snapshot": write("snapshots/fixture/db.sql", b"snapshot-bytes"),
+        }
+        before = {name: path.read_bytes() for name, path in files.items()}
+        with patch.object(migrate, "compose") as compose, \
+             patch.object(migrate, "write_compose_files") as write_compose_files, \
+             patch.object(migrate, "regen_caddyfile") as regen_caddyfile, \
+             patch.object(migrate, "ensure_tools_venv") as ensure_tools_venv:
+            moved = migrate._transfer(old_runtime, new_base / "runtime", old_base,
+                                      new_base, [])
+
+        # The transfer count is per top-level runtime artifact (the WP tree,
+        # snapshot tree, jobs tree, and workspaces tree each move once).
+        self.assertEqual(moved, 4)
+        for name, source in files.items():
+            destination = new_base / "runtime" / source.relative_to(old_runtime)
+            self.assertEqual(destination.read_bytes(), before[name])
+            self.assertFalse(source.exists())
+        # Relocation is filesystem metadata work only; lifecycle and
+        # generated-artifact operations remain outside the pure transfer path.
+        for operation in (compose, write_compose_files, regen_caddyfile,
+                          ensure_tools_venv):
+            operation.assert_not_called()
 
 
 if __name__ == "__main__":

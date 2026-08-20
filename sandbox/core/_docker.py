@@ -1441,9 +1441,18 @@ def _php_extension_build_receipt(inst_cfg: Mapping[str, object]) -> tuple[str | 
     from sandbox.php_extensions.compose_builder import RECIPES, extension_cache_status
 
     receipt = extension_cache_status(digest.lower())
+    receipt_state = receipt.get("state") if isinstance(receipt, Mapping) else None
     provenance = receipt.get("provenance") if isinstance(receipt, Mapping) else None
-    if receipt.get("state") != "ready" or not isinstance(provenance, Mapping):
-        return None, {"state": "stale"}
+    if receipt_state != "ready" or not isinstance(provenance, Mapping):
+        # Preserve the cache classifier for status consumers.  A missing or
+        # explicitly discarded entry is materially different from a tampered
+        # receipt, while malformed/legacy data remains the conservative stale
+        # state used by older callers.  The values come from the pure cache
+        # status helper and contain no paths or receipt contents.
+        state = receipt_state
+        if state not in {"missing", "discarded"}:
+            state = "stale"
+        return None, {"state": state}
     parent_digests = provenance.get("parent_digests")
     recipe_digest = provenance.get("recipe_catalog_digest")
     recipe_ids = provenance.get("recipe_ids")

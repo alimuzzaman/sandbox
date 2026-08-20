@@ -11,9 +11,13 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
+_JOBS_MODULE = None
 
 
 def _load_jobs_tool():
+    global _JOBS_MODULE
+    if _JOBS_MODULE is not None:
+        return _JOBS_MODULE
     dependencies = types.ModuleType("dependencies")
     dependencies.ToolDependencies = object
     spec = importlib.util.spec_from_file_location(
@@ -21,6 +25,7 @@ def _load_jobs_tool():
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, {"dependencies": dependencies}):
         spec.loader.exec_module(module)
+    _JOBS_MODULE = module
     return module
 
 

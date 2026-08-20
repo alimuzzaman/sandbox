@@ -207,7 +207,7 @@ PHP extension feature; they do not claim that the feature is implemented.
 - [ ] T036 Verify relocation and automatic migration move extension metadata without
   moving database volumes, uploads, snapshots, or project files, then regenerate every
   path-bearing build context under the destination base.
-- [ ] T037 Add CLI/MCP parity and redaction tests for extension cache/provenance status;
+- [x] T037 Add CLI/MCP parity and redaction tests for extension cache/provenance status;
   output MUST contain no secrets or private source contents and MUST remain safe when
   an entry is missing, stale, or discarded.
 
@@ -236,6 +236,9 @@ the implementation and evidence actually present in this branch.
 - [ ] T042 Add relocation tests proving the index and pure metadata move safely while
   legacy `workspace.json`, project files, uploads, snapshots, database volumes, and
   network/container/job counts remain unchanged; regenerate only path-bearing locators.
+  (partial: pure-transfer byte/no-orchestration tests pass; resource-count,
+  finalization, and regenerated-locator evidence remains for T045/T036 or a later
+  explicit slice.)
 - [X] T043 Add incomplete-index, missing-checkout, alias-collision, and duplicate-owner
   tests so list/status never false-empty and always expose stable safe error codes.
 - [X] T044 Add typed workspace-resource binding/projection fixtures and CLI/MCP/resource

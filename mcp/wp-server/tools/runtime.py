@@ -7,6 +7,9 @@ never need to pass through WP-CLI, WP REST, or the WordPress container model.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+
 from dependencies import ToolDependencies
 
 
@@ -15,6 +18,32 @@ _project_instance = None
 _runtime_service = None
 _native_preflight = None
 _managed_package_planner = None
+
+
+_MCP_PHP_PLANES = ("web", "cli", "exec", "phpunit")
+_MCP_PHP_STATES = frozenset({
+    "ready", "blocked", "unavailable", "unknown", "drift", "error",
+    "fresh", "stale", "missing", "discarded",
+})
+_MCP_PHP_ISSUE_CODES = frozenset({
+    "missing", "version_mismatch", "version_unobservable",
+    "unsupported_provisioning", "unsupported_disable", "plane_drift",
+})
+_MCP_PHP_ISSUE_MESSAGES = {
+    "missing": "required PHP extension is missing",
+    "version_mismatch": "PHP extension version does not match the requirement",
+    "version_unobservable": "PHP extension version cannot be observed",
+    "unsupported_provisioning": "PHP extension provisioning is unsupported",
+    "unsupported_disable": "disabling this PHP extension is unsupported",
+    "plane_drift": "PHP extension observations differ between execution planes",
+}
+_MCP_SAFE_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@|*-]{0,127}$")
+_MCP_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MCP_FORBIDDEN_TEXT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:password|passphrase|secret|token|credential|"
+    r"authorization|cookie|private(?:[_-]?key)?|bearer|basic|api[_-]?key)"
+    r"(?![A-Za-z0-9])"
+)
 
 
 def register(server, dependencies: ToolDependencies) -> None:
@@ -48,8 +77,272 @@ def _typed_invoke(project_dir: str, label: str | None, operation: str, arguments
                 "available_capabilities": list(result.available_capabilities),
                 **({"alternative": result.suggestion} if result.suggestion else {}),
                 "mutated": False}
-    return {"ok": bool(result.ok), "operation": result.operation,
-            **dict(result.data)}
+    payload = {"ok": bool(result.ok), "operation": result.operation,
+               **dict(result.data)}
+    # WordPress lifecycle status exposes the same PHP-extension cache receipt
+    # as the CLI status path.  Keep this enrichment status-only and adapter-
+    # specific: generic Compose remains runtime-neutral, while the canonical
+    # core producer owns active-base resolution, probing, and redaction.
+    if operation == "status":
+        # The runtime service is the source of the generic status envelope;
+        # never let an adapter smuggle an unprojected extension report through
+        # that envelope.  WordPress status is enriched only from the canonical
+        # core producer below; Compose remains runtime-neutral.
+        payload.pop("php_extensions", None)
+        if getattr(result, "project_kind", None) == "wordpress":
+            extension_status = _wordpress_extension_status(owner)
+            if isinstance(extension_status, dict):
+                payload["php_extensions"] = extension_status
+                payload["ok"] = bool(payload["ok"] and extension_status.get("ok", True))
+                payload["exit_code"] = 0 if payload["ok"] else 1
+    return payload
+
+
+def _wordpress_extension_status(owner: dict) -> dict | None:
+    """Return the canonical PHP-extension report for one WordPress owner.
+
+    The MCP runtime group must not inspect registry/state files or duplicate
+    cache/provenance parsing.  Resolve the instance through the existing core
+    config facade (which uses the active ``SANDBOX_HOME``), then delegate to
+    ``php_extension_status``—the same redacted producer used by CLI status.
+    Missing/invalid legacy config is a compatibility absence, not permission
+    to guess or expose raw state, so status simply retains its typed runtime
+    result in that case.
+    """
+    if not isinstance(owner, dict) or owner.get("kind") == "compose":
+        return None
+    instance = owner.get("instance")
+    if not isinstance(instance, str) or not instance:
+        return None
+    try:
+        from sandbox.core import load_config, php_extension_status, resolve_instances
+
+        instance_config = resolve_instances(load_config()).get(instance)
+        if not isinstance(instance_config, dict):
+            return None
+        report = php_extension_status(instance_config, instance=instance)
+    except Exception:
+        # The runtime status contract is still useful when an older or partial
+        # installation has no extension config.  Do not echo exception text:
+        # it could contain a private path or an untrusted provider response.
+        return None
+    if not isinstance(report, dict):
+        return None
+    # The core producer already applies this boundary, but keep the MCP
+    # transport fail-closed if a compatibility adapter returns an older or
+    # untrusted shape.  Project the complete documented public report rather
+    # than recursively redacting an open-ended receipt.  In particular,
+    # unknown keys, paths, generated receipt content, and credentials are
+    # discarded instead of crossing the MCP boundary.
+    return _public_php_extension_status(report)
+
+
+def _safe_php_value(value: object) -> str | None:
+    if (not isinstance(value, str) or not _MCP_SAFE_VALUE.fullmatch(value)
+            or _MCP_FORBIDDEN_TEXT.search(value)):
+        return None
+    return value
+
+
+def _safe_php_digest(value: object) -> str | None:
+    return value if isinstance(value, str) and _MCP_DIGEST.fullmatch(value) else None
+
+
+def _safe_php_state(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _MCP_PHP_STATES else None
+
+
+def _public_php_issue(value: object) -> dict | None:
+    if not isinstance(value, Mapping):
+        return None
+    code = value.get("code")
+    message = value.get("message")
+    if (not isinstance(code, str) or code not in _MCP_PHP_ISSUE_CODES
+            or message != _MCP_PHP_ISSUE_MESSAGES[code]):
+        return None
+    row = {"code": code, "message": message}
+    for key in ("plane", "extension", "expected", "observed"):
+        item = _safe_php_value(value.get(key))
+        if item is not None:
+            row[key] = item
+    return row
+
+
+def _public_php_issues(value: object) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [row for item in value if (row := _public_php_issue(item)) is not None]
+
+
+def _public_php_requirements(value: object) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    rows = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        name = _safe_php_value(item.get("name"))
+        state = item.get("state")
+        version = item.get("version")
+        if (name is None or not isinstance(state, str)
+                or state not in {"enabled", "disabled"}):
+            continue
+        if version is not None and _safe_php_value(version) is None:
+            continue
+        rows.append({"name": name, "state": state, "version": version})
+    return rows
+
+
+def _public_php_extensions(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    rows = {}
+    for name, item in value.items():
+        safe_name = _safe_php_value(name)
+        if safe_name is None or not isinstance(item, Mapping):
+            continue
+        enabled = item.get("enabled")
+        version = item.get("version")
+        if not isinstance(enabled, bool):
+            continue
+        if version is not None and _safe_php_value(version) is None:
+            continue
+        rows[safe_name] = {"enabled": enabled, "version": version}
+    return rows
+
+
+def _public_php_observed(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    observed = {}
+    for plane in _MCP_PHP_PLANES:
+        item = value.get(plane)
+        if not isinstance(item, Mapping):
+            continue
+        row = {}
+        state = _safe_php_state(item.get("state"))
+        if state is not None:
+            row["state"] = state
+        for key in ("php_version", "sapi"):
+            dimension = item.get(key)
+            if dimension is None:
+                row[key] = None
+            else:
+                safe_dimension = _safe_php_value(dimension)
+                if safe_dimension is not None:
+                    row[key] = safe_dimension
+        row["extensions"] = _public_php_extensions(item.get("extensions"))
+        row["issues"] = _public_php_issues(item.get("issues"))
+        observed[plane] = row
+    return observed
+
+
+def _public_php_catalog(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    catalog = {}
+    revision = value.get("revision")
+    if isinstance(revision, int) and not isinstance(revision, bool):
+        catalog["revision"] = revision
+    digest = _safe_php_digest(value.get("digest"))
+    if digest is not None:
+        catalog["digest"] = digest
+    return catalog
+
+
+def _public_php_desired(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    desired = {}
+    profile = value.get("profile")
+    if profile is None:
+        desired["profile"] = None
+    else:
+        safe_profile = _safe_php_value(profile)
+        if safe_profile is not None:
+            desired["profile"] = safe_profile
+    desired["catalog"] = _public_php_catalog(value.get("catalog"))
+    desired["requirements"] = _public_php_requirements(value.get("requirements"))
+    for key in ("resolution_digest", "build_digest"):
+        digest = _safe_php_digest(value.get(key))
+        if digest is not None:
+            desired[key] = digest
+    return desired
+
+
+def _public_php_provenance(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    provenance = {}
+    state = _safe_php_state(value.get("state"))
+    if state is not None:
+        provenance["state"] = state
+    digest = _safe_php_digest(value.get("recipe_catalog_digest"))
+    if digest is not None:
+        provenance["recipe_catalog_digest"] = digest
+    parent_digests = value.get("parent_digests")
+    if isinstance(parent_digests, Mapping):
+        safe_parents = {}
+        for role in ("web", "wpcli"):
+            digest = _safe_php_digest(parent_digests.get(role))
+            if digest is not None:
+                safe_parents[role] = digest
+        provenance["parent_digests"] = safe_parents
+    recipe_ids = value.get("recipe_ids")
+    if isinstance(recipe_ids, (list, tuple)):
+        provenance["recipe_ids"] = [
+            item for item in (_safe_php_value(raw) for raw in recipe_ids)
+            if item is not None
+        ]
+    return provenance
+
+
+def _public_php_status_map(value: object, keys: tuple[str, ...]) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    result = {}
+    for key in keys:
+        state = _safe_php_state(value.get(key))
+        if state is not None:
+            result[key] = state
+    return result
+
+
+def _public_php_staleness(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    result = {}
+    state = value.get("state")
+    if isinstance(state, str) and state in {"fresh", "stale"}:
+        result["state"] = state
+    reason = value.get("reason")
+    if isinstance(reason, str) and reason in {
+            "all_four_planes_observed", "one_or_more_planes_unavailable"}:
+        result["reason"] = reason
+    return result
+
+
+def _public_php_extension_status(report: object) -> dict | None:
+    """Project the documented, safe PHP-extension status contract for MCP."""
+    from sandbox.services.redaction import redact_structure
+
+    value = redact_structure(report)
+    if not isinstance(value, Mapping):
+        return None
+    public = {}
+    if isinstance(value.get("ok"), bool):
+        public["ok"] = value["ok"]
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code in {0, 1}:
+        public["exit_code"] = exit_code
+    public["desired"] = _public_php_desired(value.get("desired"))
+    public["provenance"] = _public_php_provenance(value.get("provenance"))
+    public["observed"] = _public_php_observed(value.get("observed"))
+    public["readiness"] = _public_php_status_map(value.get("readiness"), ("state",))
+    public["staleness"] = _public_php_staleness(value.get("staleness"))
+    public["drift"] = _public_php_status_map(value.get("drift"), ("state",))
+    public["issues"] = _public_php_issues(value.get("issues"))
+    return public
 
 
 def instance_status(project_dir: str, label: str | None = None,

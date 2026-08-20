@@ -9,6 +9,7 @@ code review caught once already.
 import os
 import json
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -471,6 +472,146 @@ print("WP_RESET_RESULT", json.dumps({{"result": result, "calls": calls}}, defaul
         self.assertNotIn("output", payload["result"])
         self.assertNotIn(sentinel_path, json.dumps(payload["result"]))
         self.assertNotIn("wp db reset", json.dumps(payload["result"]))
+
+
+@unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
+class TestMcpPhpExtensionBoundaries(unittest.TestCase):
+    """Exercise the runtime MCP projection in an isolated interpreter.
+
+    Loading the runtime group imports the shared command modules, whose global
+    command registry is intentionally single-writer.  Keep these status probes
+    in a child process so they cannot collide with the remote-first jobs tests,
+    regardless of unittest discovery order.
+    """
+
+    def _run_status_probe(self) -> dict:
+        probe = r'''
+import importlib.util
+import json
+import os
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+root = Path(os.environ["SANDBOX_ROOT"])
+dependencies = types.ModuleType("dependencies")
+dependencies.ToolDependencies = object
+spec = importlib.util.spec_from_file_location(
+    "sandbox_test_mcp_runtime", root / "mcp" / "wp-server" / "tools" / "runtime.py")
+module = importlib.util.module_from_spec(spec)
+with patch.dict(sys.modules, {"dependencies": dependencies}):
+    spec.loader.exec_module(module)
+
+module._project_instance = lambda _project_dir, _label: ("fixture", None)
+module._core = lambda: SimpleNamespace(
+    registry_find_instance=lambda _instance: {
+        "instance": "fixture", "root": "/project", "kind": "wordpress",
+        "label": "default",
+    })
+module._runtime_service = lambda: SimpleNamespace(invoke=lambda _request: SimpleNamespace(
+    ok=True, operation="status", project_kind="wordpress", data={"state": "ready"}))
+
+digest = "sha256:" + "a" * 64
+states = {}
+for state in ("ready", "missing", "stale", "discarded"):
+    report = {
+        "ok": state == "ready",
+        "exit_code": 0 if state == "ready" else 1,
+        "desired": {
+            "profile": "wordpress@1",
+            "catalog": {"revision": 1, "digest": digest,
+                         "private_path": "/private/catalog"},
+            "requirements": [
+                {"name": "gd", "state": "enabled", "version": None,
+                 "receipt": "private Dockerfile"},
+                {"name": "tokenizer", "state": "enabled", "version": None},
+            ],
+            "resolution_digest": digest,
+            "build_digest": digest,
+            "context_path": "/private/context",
+        },
+        "provenance": {
+            "state": state,
+            "recipe_catalog_digest": digest,
+            "parent_digests": {"web": digest, "wpcli": digest,
+                                "private": "/private/parent"},
+            "recipe_ids": ["php-gd"],
+            "context_path": "/private/receipt",
+            "receipt_content": "private Dockerfile contents",
+            "password": "fixture-password",
+        },
+        "observed": {
+            plane: {
+                "state": "ready",
+                "php_version": "8.3.0",
+                "sapi": plane,
+                "extensions": {
+                    "gd": {"enabled": True, "version": "2.3.0",
+                            "private_path": "/private/ext"},
+                    "tokenizer": {"enabled": True, "version": None},
+                },
+                "issues": [],
+                "receipt": "private probe output",
+            }
+            for plane in ("web", "cli", "exec", "phpunit")
+        },
+        "readiness": {"state": "ready", "private": "/private/readiness"},
+        "staleness": {"state": "fresh", "reason": "all_four_planes_observed",
+                       "private": "receipt body"},
+        "drift": {"state": "ready", "private": "credentials"},
+        "issues": [],
+        "receipt": {"path": "/private/raw-receipt", "content": "secret"},
+        "private_top_level": "fixture-password",
+    }
+    with patch("sandbox.core.load_config", return_value={}), \
+            patch("sandbox.core.resolve_instances", return_value={"fixture": {
+                "php_extensions": {"extensions": {"gd": True}},
+            }}), \
+            patch("sandbox.core.php_extension_status", return_value=report):
+        states[state] = module.instance_status("/project")
+print(json.dumps(states, sort_keys=True))
+'''
+        completed = subprocess.run(
+            [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT),
+                 "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout.strip())
+
+    def test_status_states_are_public_bounded_and_fail_closed(self):
+        states = self._run_status_probe()
+        allowed_extension_top_level = {
+            "ok", "exit_code", "desired", "provenance", "observed", "readiness",
+            "staleness", "drift", "issues",
+        }
+        for state, result in states.items():
+            with self.subTest(state=state):
+                self.assertEqual(set(result), {"ok", "operation", "state", "php_extensions", "exit_code"})
+                extension = result["php_extensions"]
+                self.assertEqual(set(extension), allowed_extension_top_level)
+                self.assertEqual(extension["provenance"]["state"], state)
+                self.assertEqual(extension["ok"], state == "ready")
+                self.assertEqual(extension["exit_code"], 0 if state == "ready" else 1)
+                self.assertEqual(set(extension["provenance"]), {
+                    "state", "recipe_catalog_digest", "parent_digests", "recipe_ids",
+                })
+                self.assertEqual(set(extension["provenance"]["parent_digests"]), {"web", "wpcli"})
+                for plane in extension["observed"].values():
+                    self.assertEqual(set(plane), {"state", "php_version", "sapi", "extensions", "issues"})
+                    for extension_name in ("gd", "tokenizer"):
+                        self.assertEqual(set(plane["extensions"][extension_name]), {
+                            "enabled", "version",
+                        })
+                serialized = json.dumps(result, sort_keys=True)
+                for forbidden in (
+                    "/private/", "private Dockerfile", "private probe output",
+                    "fixture-password", "credentials", "secret",
+                ):
+                    self.assertNotIn(forbidden, serialized)
 
 
 if __name__ == "__main__":

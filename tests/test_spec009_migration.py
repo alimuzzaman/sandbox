@@ -1,6 +1,7 @@
 """Focused filesystem safety tests for the spec-009 state relocation."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -126,3 +127,76 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--force", result.stdout)
+
+    def test_extension_context_and_workspace_metadata_relocate_without_private_paths(self):
+        """A base move carries pure metadata while generated locators are rebuilt.
+
+        This is intentionally a source-only proof: protected runtime bytes are
+        preserved while no Docker, database, network, or job lifecycle operation
+        is invoked by the pure transfer path.
+        """
+        from sandbox.php_extensions.compose_builder import (
+            extension_cache_status,
+            materialize_compose_extension_context,
+            plan_compose_extension_images,
+        )
+
+        old_base = self.root / "old-base"
+        new_base = self.root / "new-base"
+        old_runtime = old_base / "runtime"
+        old_home = os.environ.get("SANDBOX_HOME")
+        digest_a = "sha256:" + "a" * 64
+        digest_b = "sha256:" + "b" * 64
+        try:
+            os.environ["SANDBOX_HOME"] = str(old_base)
+            plan = plan_compose_extension_images(
+                {"profile": "wordpress@1", "extensions": {"gd": True}},
+                parent_image="wordpress:php8.3-fpm",
+                wpcli_image="wordpress:cli-php8.3",
+                parent_digest=digest_a,
+                wpcli_parent_digest=digest_b,
+                server="nginx", platform="linux", architecture="amd64",
+            )
+            materialize_compose_extension_context(plan)
+
+            protected = {
+                "project": self._write(old_runtime / "wp-fixture" / "project.php", "project"),
+                "uploads": self._write(old_runtime / "wp-fixture" / "wp-content" / "uploads" / "one.txt", "upload"),
+                "snapshot": self._write(old_runtime / "snapshots" / "fixture" / "one.sql", "snapshot"),
+                "workspace": self._write(
+                    old_runtime / "jobs" / "workspaces" / "local-abc" / "default" / "workspace.json",
+                    '{"label":"default","namespace":"local:abc"}\n',
+                ),
+                "index": self._write(old_runtime / "workspaces" / "index.sqlite3", "index-bytes"),
+            }
+            before = {name: path.read_bytes() for name, path in protected.items()}
+            with patch.object(migrate, "compose") as compose, \
+                 patch.object(migrate, "write_compose_files") as write_compose_files, \
+                 patch.object(migrate, "regen_caddyfile") as regen_caddyfile, \
+                 patch.object(migrate, "ensure_tools_venv") as ensure_tools_venv:
+                moved = migrate._transfer(
+                    old_runtime, new_base / "runtime", old_base, new_base, [],
+                )
+            # The transfer is counted by top-level runtime artifact (the
+            # protected WP tree and workspace tree each move as one entry).
+            self.assertGreaterEqual(moved, 5)
+            for name, source in protected.items():
+                destination = new_base / "runtime" / source.relative_to(old_runtime)
+                self.assertEqual(destination.read_bytes(), before[name])
+                self.assertFalse(source.exists())
+            for operation in (compose, write_compose_files, regen_caddyfile,
+                              ensure_tools_venv):
+                operation.assert_not_called()
+
+            os.environ["SANDBOX_HOME"] = str(new_base)
+            status = extension_cache_status(plan.digest)
+            self.assertEqual(status["state"], "ready")
+            rendered = json.dumps(status, sort_keys=True)
+            self.assertNotIn(str(old_base), rendered)
+            self.assertNotIn("Dockerfile.web", rendered)
+            self.assertNotIn("project.php", rendered)
+        finally:
+            if old_home is None:
+                os.environ.pop("SANDBOX_HOME", None)
+            else:
+                os.environ["SANDBOX_HOME"] = old_home

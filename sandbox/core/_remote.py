@@ -1347,6 +1347,7 @@ _MCP_PIDFILE = "/tmp/sandbox-mcp-remote.pid"
 REMOTE_MCP_SERVICE = "sandbox-mcp-remote.service"
 _REMOTE_MCP_ENV = "$HOME/.sandbox/mcp-remote.env"
 _REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
+_REMOTE_MCP_REVISION_RE = re.compile(r"[0-9a-f]{24}")
 
 
 def _remote_mcp_bind_allowed(bind: str) -> bool:
@@ -2196,6 +2197,32 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo ownership=proven; else echo ownership=ambiguous; fi; "
         if marker else "echo marker=0; "
     )
+    # Read only the selected unit's declared runtime revision. The value is
+    # validated in the remote probe before it is printed, so malformed or
+    # unexpectedly duplicated declarations can never flow into the status
+    # envelope (or expose arbitrary unit contents).
+    unit_path = f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}"
+    revision_program = (
+        "import re,sys\n"
+        "from pathlib import Path\n"
+        "try:\n"
+        " lines=Path(sys.argv[1]).read_text().splitlines()\n"
+        "except (OSError,UnicodeError):\n"
+        " print('remote_revision=unavailable')\n"
+        " raise SystemExit\n"
+        "prefix='Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION='\n"
+        "matches=[line[len(prefix):] for line in lines if line.startswith(prefix)]\n"
+        "if len(matches)!=1:\n"
+        " print('remote_revision=' + ('unavailable' if not matches else 'unknown'))\n"
+        " raise SystemExit\n"
+        "value=matches[0]\n"
+        "print('remote_revision=' + value if re.fullmatch(r'[0-9a-f]{24}', value) else 'remote_revision=unknown')"
+    )
+    revision_probe = (
+        f"if test -r \"{unit_path}\" && command -v python3 >/dev/null 2>&1; then "
+        f"python3 -c {shlex.quote(revision_program)} \"{unit_path}\"; "
+        "else echo remote_revision=unavailable; fi; "
+    )
     listener_probe = (
         f"if command -v ss >/dev/null 2>&1; then listeners=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk '{{print $4}}'); "
         f"if printf '%s\\n' \"$listeners\" | grep -Fqx -- {shlex.quote(bind + ':' + str(port))} || printf '%s\\n' \"$listeners\" | grep -Fqx -- {shlex.quote('[' + bind + ']:' + str(port))}; then echo listener=expected; "
@@ -2239,14 +2266,15 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"pid=$(systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true); printf 'pid=%s\\n' \"$pid\"; "
         "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        + marker_probe + pid_probe + listener_probe + auth_probe + legacy_probe
+        + marker_probe + revision_probe + pid_probe + listener_probe + auth_probe + legacy_probe
     )
     res = ssh_run(remote, command, timeout=20)
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "pid_ownership", "listener", "auth", "legacy_pidfile"}:
-            values[key] = value.strip().lower()
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "pid_ownership", "listener", "auth", "legacy_pidfile"}:
+            normalized = value.strip()
+            values[key] = normalized if key == "remote_revision" else normalized.lower()
     installed = values.get("enabled") not in {"", "not-found", "unknown"}
     active = values.get("active") == "active"
     enabled = values.get("enabled") == "enabled"
@@ -2254,6 +2282,20 @@ def remote_mcp_service_status(remote: dict) -> dict:
     unit_owned = expected and installed and values.get("ownership") == "proven"
     pid_owned = values.get("pid_ownership", "unknown")
     ownership = "proven" if unit_owned and (not active or pid_owned == "proven") else "missing" if not installed else "ambiguous"
+    local_revision = _remote_mcp_runtime_revision()
+    local_revision_valid = _REMOTE_MCP_REVISION_RE.fullmatch(local_revision) is not None
+    observed_revision = values.get("remote_revision")
+    observed_revision_valid = (
+        isinstance(observed_revision, str)
+        and _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is not None
+    )
+    installed_revision = observed_revision if observed_revision_valid else None
+    if observed_revision_valid and local_revision_valid:
+        revision_state = "match" if observed_revision == local_revision else "mismatch"
+    elif (observed_revision is not None and observed_revision != "unavailable") or not local_revision_valid:
+        revision_state = "unknown"
+    else:
+        revision_state = "unavailable"
     return {
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
@@ -2265,6 +2307,9 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "listener_state": values.get("listener", "unknown"),
         "auth_state": values.get("auth", "unknown"),
         "legacy_pidfile": values.get("legacy_pidfile", "unknown"),
+        "local_runtime_revision": local_revision if local_revision_valid else None,
+        "installed_runtime_revision": installed_revision,
+        "runtime_revision_state": revision_state,
         "bind": record.get("bind"), "port": record.get("port"),
     }
 

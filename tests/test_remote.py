@@ -1462,6 +1462,91 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_reports_matching_local_and_installed_runtime_revisions(self, mock_ssh_run):
+        local_revision = sr._remote_mcp_runtime_revision()
+        mock_ssh_run.return_value = _completed(
+            stdout=f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n"
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["local_runtime_revision"], local_revision)
+        self.assertEqual(status["installed_runtime_revision"], local_revision)
+        self.assertEqual(status["runtime_revision_state"], "match")
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_embedded_probe_extracts_hash_after_full_environment_prefix(self, mock_ssh_run):
+        local_revision = sr._remote_mcp_runtime_revision()
+        remote = {
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            unit = Path(temporary) / "sandbox-mcp-remote.service"
+            unit.write_text(
+                "[Service]\n"
+                f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={local_revision}\n"
+            )
+            # Capture the exact embedded parser from the generated SSH command,
+            # execute it against a realistic unit file, then feed its bounded
+            # output through the normal status parser.
+            mock_ssh_run.return_value = _completed()
+            sr.remote_mcp_service_status(remote)
+            command = mock_ssh_run.call_args.args[1]
+            parser = shlex.split(command)[shlex.split(command).index("-c") + 1]
+            probe = subprocess.run(
+                [sys.executable, "-c", parser, str(unit)],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(probe.stdout.strip(), f"remote_revision={local_revision}")
+            mock_ssh_run.return_value = _completed(
+                stdout=f"enabled=enabled\nactive=active\n{probe.stdout}"
+            )
+            status = sr.remote_mcp_service_status(remote)
+        self.assertEqual(status["installed_runtime_revision"], local_revision)
+        self.assertEqual(status["runtime_revision_state"], "match")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_reports_mismatching_runtime_revisions_without_reclassifying_ownership(self, mock_ssh_run):
+        local_revision = "a" * 24
+        installed_revision = "b" * 24
+        mock_ssh_run.return_value = _completed(
+            stdout=f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n"
+        )
+        with patch.object(sr, "_remote_mcp_runtime_revision", return_value=local_revision):
+            record = sr.remote_mcp_service_record("127.0.0.1", 9174)
+            status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": record})
+        self.assertEqual(status["ownership"], "proven")
+        self.assertEqual(status["local_runtime_revision"], local_revision)
+        self.assertEqual(status["installed_runtime_revision"], installed_revision)
+        self.assertEqual(status["runtime_revision_state"], "mismatch")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_distinguishes_unavailable_and_malformed_runtime_revision_evidence(self, mock_ssh_run):
+        remote = {"ssh": "registered-target", "mcp_service": {}}
+        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nremote_revision=unavailable\n")
+        unavailable = sr.remote_mcp_service_status(remote)
+        self.assertIsNone(unavailable["installed_runtime_revision"])
+        self.assertEqual(unavailable["runtime_revision_state"], "unavailable")
+
+        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\nremote_revision=unknown\n")
+        unknown = sr.remote_mcp_service_status(remote)
+        self.assertIsNone(unknown["installed_runtime_revision"])
+        self.assertEqual(unknown["runtime_revision_state"], "unknown")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_rejects_non_hash_remote_revision_values(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            stdout="enabled=enabled\nremote_revision=not-a-revision\n"
+        )
+        status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": {}})
+        self.assertIsNone(status["installed_runtime_revision"])
+        self.assertEqual(status["runtime_revision_state"], "unknown")
+        self.assertNotIn("not-a-revision", json.dumps(status))
+
 
 class TestRemoteDockerPool(unittest.TestCase):
     def _run_transaction(self, root: Path, *, systemctl_ok: bool = True):
@@ -1662,6 +1747,22 @@ class TestRemoteDomainInventory(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_status_json_passes_through_secret_safe_revision_evidence(self):
+        args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
+        status = {
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "runtime_revision_state": "match",
+        }
+        with patch.object(remote_cmd.sr, "get_remote", return_value={
+            "ssh": "ubuntu@1.2.3.4", "bearer_token": "secret-token",
+        }), patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=status), \
+                redirect_stdout(StringIO()) as output:
+            remote_cmd._cmd_service(args, as_json=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["data"], status)
+        self.assertNotIn("secret-token", output.getvalue())
+
     def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):

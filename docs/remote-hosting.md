@@ -483,7 +483,11 @@ plus `url` when exposure succeeds.
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
-listener scope, and an authenticated `/mcp` probe. It treats unavailable evidence as
+listener scope, and an authenticated `/mcp` probe. Its JSON evidence includes the
+current `local_runtime_revision`, an `installed_runtime_revision` only when the
+selected unit declares a valid non-secret digest, and `runtime_revision_state`
+(`match`, `mismatch`, `unavailable`, or `unknown`). A configured service record is
+not treated as proof of the installed revision. It treats unavailable evidence as
 degraded; it never reads a credential into command arguments or output.
 
 When an older PID-file-managed MCP process is detected, confirmed migration proves that

@@ -52,6 +52,25 @@ runtime:
     site_title: Sandbox
 
 # ---------------------------------------------------------------------------
+# Storage pressure monitor — machine-wide observation defaults.
+# `auto_enabled` and `reap_enabled` are deletion authority; both stay OFF
+# until an operator opts a target in through sandbox.local.yml.
+# ---------------------------------------------------------------------------
+resources:
+  monitor:
+    warn_ratio: 0.15
+    critical_ratio: 0.05
+    auto_enabled: false
+    auto_tier: safe
+    auto_ratio: null
+    reap_enabled: false
+    reap_ttl: null
+    schedule_calendar: hourly
+    schedule_randomized_delay: 5min
+    schedule_timeout: 30min
+    record_max_age_seconds: 21600
+
+# ---------------------------------------------------------------------------
 # Instances. In the per-project model you don't hand-author these: `./sb init`
 # / `./sb ensure` inside a plugin repo create one instance per project dir and
 # record it (ports, server, version pins) under `instances:` in

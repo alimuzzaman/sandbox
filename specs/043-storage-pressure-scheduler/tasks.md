@@ -8,14 +8,14 @@ parallel.
 
 ## Phase 1 — Configuration (foundation; everything else consumes it)
 
-- [ ] **T001** Create `sandbox/config/storage_monitor.py` with
+- [X] **T001** Create `sandbox/config/storage_monitor.py` with
   `StorageMonitorConfigError`, `DEFAULTS`, and pure `normalize_storage_monitor(raw)`
   implementing every rule in `contracts/config.md`: safe-only tier, threshold ordering,
   strict booleans, duration parsing, unknown-key rejection. No I/O.
-- [ ] **T002** Register the provider in `sandbox/config/manifest.py` as a new explicit
+- [X] **T002** Register the provider in `sandbox/config/manifest.py` as a new explicit
   `MACHINE_CONFIG_PROVIDERS` tuple with `apply_machine_config(result)`, mirroring the
   existing project-scoped tuple's `(key, provider, owner, order)` shape.
-- [ ] **T003** Add `resources: monitor:` machine defaults to `sandbox.yml` with a comment
+- [X] **T003** Add `resources: monitor:` machine defaults to `sandbox.yml` with a comment
   block stating that `auto_enabled` and `reap_enabled` authorise deletion and default off.
 
 ## Phase 2 — Policy resolution and the run record (user stories 1, 3)

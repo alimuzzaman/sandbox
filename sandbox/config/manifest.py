@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .domains import normalize_domain_policy
 from .php_extensions import normalize_php_extensions
 from .runtime import normalize_runtime_policy
 from .secrets import normalize_secret_config
+from .storage_monitor import StorageMonitorConfigError, normalize_storage_monitor
 from .wordpress_runtime import normalize_wordpress_runtime
 
 
@@ -18,6 +21,36 @@ COMMON_CONFIG_PROVIDERS = (
     ("phpExtensions", lambda result: normalize_php_extensions(result.get("phpExtensions")),
      "sandbox.config.php_extensions", 35),
     ("secrets", normalize_secret_config, "sandbox.config.secrets", 40),
+)
+
+
+def _machine_storage_monitor(result: Mapping) -> dict:
+    """Extract the raw nested machine block before normalizing it."""
+    resources = result.get("resources")
+    if resources is None:
+        if "resources" in result:
+            raise StorageMonitorConfigError(
+                "machine resources configuration must be an object",
+                "invalid_schedule_field",
+            )
+        raw = None
+    elif not isinstance(resources, Mapping):
+        raise StorageMonitorConfigError(
+            "machine resources configuration must be an object",
+            "invalid_schedule_field",
+        )
+    else:
+        raw = resources.get("monitor")
+    return normalize_storage_monitor(raw)
+
+
+# Machine configuration has a different raw shape from project descriptors:
+# the provider reads ``resources.monitor`` and apply_machine_config writes the
+# normalized value back into that same nested block.  Keep this sibling tuple
+# explicit rather than making project-scoped consumers aware of machine state.
+MACHINE_CONFIG_PROVIDERS = (
+    ("resources.monitor", _machine_storage_monitor,
+     "sandbox.config.storage_monitor", 10),
 )
 
 
@@ -38,4 +71,21 @@ def apply_common_config(result: dict) -> dict:
     resolved.pop("_persisted_hostname", None)
     resolved.pop("_wordpress_runtime_raw", None)
     resolved.pop("_secrets_raw", None)
+    return resolved
+
+
+def apply_machine_config(result: Mapping) -> dict:
+    """Apply registered machine providers without mutating the raw mapping."""
+    resolved = dict(result)
+    for key, provider, _owner, _order in sorted(
+        MACHINE_CONFIG_PROVIDERS, key=lambda item: item[3]
+    ):
+        if key == "resources.monitor":
+            monitor = provider(resolved)
+            resources = resolved.get("resources")
+            resources = {} if resources is None else dict(resources)
+            resources["monitor"] = monitor
+            resolved["resources"] = resources
+        else:
+            resolved[key] = provider(resolved)
     return resolved

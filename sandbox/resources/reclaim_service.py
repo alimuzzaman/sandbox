@@ -186,6 +186,23 @@ class ReclaimService:
         return {"code": code, "message": message[:240]}
 
     @staticmethod
+    def _monitor_payload_error(payload: Mapping[str, Any] | None,
+                               fallback: str) -> dict[str, str]:
+        """Normalize a failed cleanup/reap envelope into bounded evidence."""
+        error = payload.get("error") if isinstance(payload, Mapping) else None
+        if not isinstance(error, Mapping):
+            return {"code": fallback, "message": fallback.replace("_", " ")}
+        code = str(error.get("code") or fallback)
+        code = code.replace("\n", " ").replace("\r", " ")[:64]
+        if not code:
+            code = fallback
+        message = redact(
+            str(error.get("message") or fallback.replace("_", " "))
+            .replace("\n", " ").replace("\r", " ")
+        )
+        return {"code": code, "message": message[:240]}
+
+    @staticmethod
     def _monitor_reclaimed_bytes(payload: Mapping[str, Any] | None) -> int:
         data = payload.get("data") if isinstance(payload, Mapping) else None
         if not isinstance(data, Mapping):
@@ -344,7 +361,6 @@ class ReclaimService:
                         budget_seconds=budget,
                         directory_cache="cache_only",
                     )
-                    auto["ran"] = True
                     auto["reclaimed_bytes"] = self._monitor_reclaimed_bytes(
                         cleanup_payload,
                     )
@@ -352,27 +368,21 @@ class ReclaimService:
                     if isinstance(data, Mapping) and isinstance(data.get("run_id"), str):
                         auto["run_id"] = data["run_id"]
                     action_status = str(cleanup_payload.get("status") or "")
-                    if cleanup_payload.get("ok") and action_status == "completed":
-                        auto["reason"] = "completed"
-                    elif action_status == "partial":
-                        auto["reason"] = "partial"
-                    elif action_status:
-                        auto["reason"] = action_status
+                    if cleanup_payload.get("ok") is True:
+                        auto["ran"] = True
+                        if action_status == "completed":
+                            auto["reason"] = "completed"
+                        elif action_status == "partial":
+                            auto["reason"] = "partial"
+                        else:
+                            auto["reason"] = action_status or "completed"
                     else:
-                        error = cleanup_payload.get("error")
-                        auto["reason"] = (
-                            error.get("code") if isinstance(error, Mapping)
-                            else "cleanup_failed"
+                        auto["ran"] = False
+                        failure = self._monitor_payload_error(
+                            cleanup_payload, "cleanup_failed",
                         )
-                        if isinstance(error, Mapping):
-                            errors.append({
-                                "code": str(error.get("code") or "cleanup_failed")
-                                .replace("\n", " ").replace("\r", " ")[:64],
-                                "message": redact(
-                                    str(error.get("message") or "cleanup failed")
-                                    .replace("\n", " ").replace("\r", " ")
-                                )[:240],
-                            })
+                        auto["reason"] = failure["code"]
+                        errors.append(failure)
                 except Exception as exc:
                     auto["reason"] = "cleanup_failed"
                     errors.append(self._monitor_error(exc, "cleanup_failed"))
@@ -396,27 +406,19 @@ class ReclaimService:
                 reap["candidates"] = self._monitor_candidate_count(reap_payload)
                 reap["reclaimed_bytes"] = self._monitor_reclaimed_bytes(reap_payload)
                 action_status = str(reap_payload.get("status") or "")
-                if reap_payload.get("ok") and action_status in {"planned", "completed"}:
-                    reap["reason"] = "dry_run" if reap_dry_run else "completed"
-                elif action_status == "partial":
-                    reap["reason"] = "partial"
-                elif action_status:
-                    reap["reason"] = action_status
+                if reap_payload.get("ok") is True:
+                    if action_status in {"planned", "completed"}:
+                        reap["reason"] = "dry_run" if reap_dry_run else "completed"
+                    elif action_status == "partial":
+                        reap["reason"] = "partial"
+                    else:
+                        reap["reason"] = action_status or "completed"
                 else:
-                    error = reap_payload.get("error")
-                    reap["reason"] = (
-                        error.get("code") if isinstance(error, Mapping)
-                        else "reap_failed"
+                    failure = self._monitor_payload_error(
+                        reap_payload, "reap_failed",
                     )
-                    if isinstance(error, Mapping):
-                        errors.append({
-                            "code": str(error.get("code") or "reap_failed")
-                            .replace("\n", " ").replace("\r", " ")[:64],
-                            "message": redact(
-                                str(error.get("message") or "reap failed")
-                                .replace("\n", " ").replace("\r", " ")
-                            )[:240],
-                        })
+                    reap["reason"] = failure["code"]
+                    errors.append(failure)
             except Exception as exc:
                 reap["reason"] = "reap_failed"
                 errors.append(self._monitor_error(exc, "reap_failed"))

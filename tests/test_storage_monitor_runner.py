@@ -10,7 +10,7 @@ from sandbox.resources import monitor
 from sandbox.resources.context import PlanStore
 from sandbox.resources.models import StorageTarget
 from sandbox.resources.reclaim_service import ReclaimService
-from sandbox.resources.service import result
+from sandbox.resources.service import ResourceError, result
 
 
 TARGET = StorageTarget("remote", "fixture", "a" * 24)
@@ -203,6 +203,45 @@ class MonitorRunnerCase(unittest.TestCase):
         )
         self.assertTrue(payload["data"]["auto"]["ran"])
         self.assertEqual(payload["data"]["auto"]["reason"], "partial")
+
+    def test_refused_or_indeterminate_automatic_cleanup_is_an_error(self):
+        for status, code in (("refused", "confirmation_required"),
+                             ("indeterminate", "plan_indeterminate")):
+            class FailedCleanup(_Harness):
+                def cleanup(self, **kwargs):
+                    self.cleanup_calls.append(kwargs)
+                    return result(
+                        False, "cleanup", status=status, target=TARGET,
+                        error=ResourceError("cleanup did not complete", code),
+                    )
+
+            service = FailedCleanup(_Provider(self.capacity(1)), self.store)
+            payload = service.monitor(
+                {**POLICY, "auto_enabled": True}, budget_seconds=20,
+            )
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["data"]["auto"]["ran"])
+            self.assertEqual(payload["data"]["auto"]["reason"], code)
+            self.assertEqual(payload["data"]["errors"][0]["code"], code)
+
+    def test_refused_reap_is_an_error_in_the_run_record(self):
+        class FailedReap(_Harness):
+            def reap(self, **kwargs):
+                self.reap_calls.append(kwargs)
+                return result(
+                    False, "reap", status="refused", target=TARGET,
+                    error=ResourceError("reap refused", "confirmation_required"),
+                )
+
+        service = FailedReap(_Provider(self.capacity(50)), self.store)
+        payload = service.monitor(
+            {**POLICY, "reap_enabled": True}, budget_seconds=20,
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["data"]["reap"]["reason"],
+                         "confirmation_required")
+        self.assertEqual(payload["data"]["errors"][0]["code"],
+                         "confirmation_required")
 
     def test_dry_run_overrides_both_deletion_opt_ins(self):
         config = {**POLICY, "auto_enabled": True, "reap_enabled": True}

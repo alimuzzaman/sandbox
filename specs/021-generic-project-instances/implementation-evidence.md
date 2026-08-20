@@ -205,6 +205,30 @@ regressions.
   and the proxy route was removed.
 - Scenario 6 (WordPress parity): local HTTPS REST and lifecycle replay passed;
   exact command/output references are recorded above.
+
+## T060 live-state/session-refresh evidence — 2026-08-13
+
+- `python3 -m unittest -v tests.test_state_freshness tests.test_generic_compose tests.test_runtime_service`
+  — 21 tests passed in 0.125s.
+- A mutable Compose `ps --format json` observation changed from a running to an
+  exited service between two status sessions. The second response reflected the
+  new service state and carried a different `observation_generation` digest;
+  no process-local cache was used.
+- A live WordPress/plugin-shaped adapter fixture changed a plugin from active to
+  inactive between observations. The next response reflected the mutation and
+  changed generation. A registry snapshot with the same plugin data was retained
+  as evidence but returned `state_current=false`, `observation.stale=true`, and
+  could not satisfy an active/inactive truth claim; existing WordPress parity
+  evidence remains the live-stack boundary.
+- Compose status now derives its lifecycle state from the declared service row
+  when Docker returns structured output and marks the observation as live. The
+  shared runtime service adds UTC observation time, generation, and an explicit
+  stale/current marker to every status response.
+- `./sb status --help` exposes `--refresh`; MCP `instance_status` accepts the
+  matching `refresh` flag and both pass it through the shared runtime request.
+- `git diff --check` passed; no remote, Docker, SSH, deployment, or destructive
+  action was used for this evidence.
+
 ## Final local verification — 2026-07-16
 
 - `./.cli-venv/bin/python -m unittest discover -s tests -v` — 686 tests

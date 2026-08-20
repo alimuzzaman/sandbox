@@ -13,7 +13,9 @@ sb init --type astro
 
 `--type compose` validates or gathers the explicit Compose contract. `--type astro` proposes and writes an Astro-flavored Compose contract. Neither path starts the project until the user runs or confirms ensure.
 
-Status JSON adds, without removing existing fields:
+Status JSON adds, without removing existing fields. `sb status --refresh`
+explicitly requests the same fresh observation boundary (adapters still report
+the receipt when no cache exists):
 
 ```json
 {
@@ -25,7 +27,14 @@ Status JSON adds, without removing existing fields:
   "capabilities": ["instance.ensure", "instance.status"],
   "http_port": 43210,
   "url": "https://alimuzzaman-me.tst",
-  "status": "ready"
+  "status": "ready",
+  "observation": {
+    "freshness": "live",
+    "stale": false,
+    "observed_at": "2026-08-13T00:00:00Z",
+    "observation_generation": "sha256-digest"
+  },
+  "state_current": true
 }
 ```
 
@@ -37,7 +46,7 @@ Existing lifecycle names remain stable: `ensure_instance`, `destroy_instance`, `
 
 Add kind-neutral tools:
 
-- `instance_status(project_dir, label?)`
+- `instance_status(project_dir, label?, refresh=false)`
 - `instance_logs(project_dir, label?, lines=200, service?)`
 - `instance_exec(command, project_dir, label?, service?, timeout=60)`
 

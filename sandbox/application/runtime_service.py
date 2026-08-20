@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Callable
 
 from sandbox.runtimes.base import (
@@ -64,8 +67,39 @@ class RuntimeService:
         )
 
     @staticmethod
-    def _with_capability_envelope(result: OperationResult, adapter, *, runtime=None) -> OperationResult:
+    def _observe_status(data: dict) -> dict:
+        """Attach an explicit freshness receipt to one status observation.
+
+        Status adapters are allowed to return a bounded snapshot, but callers
+        must never mistake that snapshot for current runtime truth.  Live
+        adapters opt in with ``observation.freshness == 'live'``; everything
+        else is retained as evidence and marked stale.  The generation is a
+        digest of the observed state, so a later live observation can prove a
+        mutation without relying on a process-local cache.
+        """
+        raw_observation = data.get("observation")
+        observation = dict(raw_observation) if isinstance(raw_observation, Mapping) else {}
+        freshness = observation.get("freshness")
+        live = freshness == "live"
+        state = {key: value for key, value in data.items() if key != "observation"}
+        encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), default=str)
+        observation.update({
+            "freshness": "live" if live else "snapshot",
+            "stale": not live,
+            "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "observation_generation": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        })
+        data["observation"] = observation
+        # ``ok`` describes whether the adapter call completed.  ``state_current``
+        # is the separate truth claim and is false for an unrefreshed snapshot.
+        data["state_current"] = live
+        return data
+
+    @classmethod
+    def _with_capability_envelope(cls, result: OperationResult, adapter, *, runtime=None) -> OperationResult:
         data = dict(result.data)
+        if result.operation == "status":
+            data = cls._observe_status(data)
         data.setdefault("capabilities", capability_envelope(adapter))
         if isinstance(runtime, Mapping):
             mode = runtime.get("mode", "compose")

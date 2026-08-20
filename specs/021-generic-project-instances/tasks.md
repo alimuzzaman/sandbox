@@ -225,7 +225,7 @@ These tasks remain open; no previous checkbox is reclassified as complete.
 - [x] T059 [US1/US4] Add CLI/MCP parity tests for `2b080bf5` proving both
   adapters call the shared identity resolver and return equivalent root, kind,
   label, adapter, and capability fields.
-- [ ] T060 [US2/US4] Add live-state/session-refresh tests for `108318d9`: mutate
+- [x] T060 [US2/US4] Add live-state/session-refresh tests for `108318d9`: mutate
   plugin/runtime state between observations, assert the next session reflects
   current state, and reject stale cache as current without explicit refresh.
 

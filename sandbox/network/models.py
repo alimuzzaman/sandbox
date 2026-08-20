@@ -39,6 +39,28 @@ RESULT_STATES = frozenset({
     "incompatible_identity", "foreign_collision", "drifted", "cleanup_incomplete",
     "invalid",
 })
+# Closed status contract for selected-ingress diagnostics.  Rich adapter facts
+# are projected onto these reason/state tuples before crossing the application
+# boundary.  ``application_protocol_error`` is deliberately not a public
+# reason code: the probe itself is unavailable for application use, while the
+# protocol-error state remains useful to callers.  It therefore shares the
+# stable ``ingress_probe_unavailable`` code with the no-probe tuple.
+DIAGNOSTIC_TUPLES = {
+    "fresh_dns_unavailable": frozenset({("unavailable", "not_attempted")}),
+    "answer_mismatch": frozenset({("unavailable", "not_attempted")}),
+    "ingress_probe_unavailable": frozenset({
+        ("unavailable", "not_attempted"),
+        ("reachable", "protocol_error"),
+    }),
+    "ingress_listener_unreachable": frozenset({("unreachable", "not_attempted")}),
+    "ingress_connect_timeout": frozenset({("timed_out", "not_attempted")}),
+    "application_response_timeout": frozenset({("reachable", "timed_out")}),
+    "application_http_unhealthy": frozenset({("reachable", "http_unhealthy")}),
+    "ready": frozenset({("reachable", "ready")}),
+}
+DIAGNOSTIC_FALLBACK = (
+    "unavailable", "not_attempted", "ingress_probe_unavailable",
+)
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _SECRET_KEY = re.compile(r"(?i)(token|password|passphrase|authorization|cookie|credential|secret)")
@@ -94,6 +116,41 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")
     return MappingProxyType(dict(value))
+
+
+def project_diagnostic(
+    ingress: object, application: object, reason: object,
+) -> dict[str, dict[str, str]]:
+    """Project selected-ingress status onto its closed public shape.
+
+    Adapter implementations may retain richer internal facts, but malformed
+    or contradictory observations fail closed and never expose raw endpoint,
+    exception, header, or body data to callers.
+    """
+    # The wire shape is intentionally narrow.  Extra adapter facts are dropped
+    # rather than copied, while missing/ill-typed required fields fail closed.
+    # This lets a trusted transport retain useful state alongside private
+    # endpoint facts without allowing any of those facts across the boundary.
+    def component(value: object, key: str) -> object:
+        if not isinstance(value, Mapping) or key not in value:
+            return None
+        return value.get(key)
+
+    ingress_state = component(ingress, "state")
+    application_state = component(application, "state")
+    reason_code = component(reason, "code")
+    valid_pairs = DIAGNOSTIC_TUPLES.get(reason_code) \
+        if isinstance(reason_code, str) else None
+    if (not isinstance(ingress_state, str)
+            or not isinstance(application_state, str)
+            or valid_pairs is None
+            or (ingress_state, application_state) not in valid_pairs):
+        ingress_state, application_state, reason_code = DIAGNOSTIC_FALLBACK
+    return {
+        "ingress": {"state": ingress_state},
+        "application": {"state": application_state},
+        "reason": {"code": reason_code},
+    }
 
 
 def _address(value: object) -> str:
@@ -426,6 +483,10 @@ class DomainResult:
     fallback_url: str
     reason: Mapping[str, Any]
     mutated: bool
+    # Optional read-only selected-ingress status classes.  They are additive so
+    # existing plan/apply/cleanup positional construction remains compatible.
+    ingress: Mapping[str, Any] | None = None
+    application: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.ok, bool) or not isinstance(self.mutated, bool):
@@ -438,9 +499,23 @@ class DomainResult:
         object.__setattr__(self, "reason", _mapping(self.reason, "result reason"))
         object.__setattr__(self, "actual_answers", tuple(_address(item) for item in self.actual_answers))
         object.__setattr__(self, "expected_addresses", tuple(_address(item) for item in self.expected_addresses))
+        if self.ingress is not None or self.application is not None:
+            # ``reason`` is a legacy result object and normally carries a
+            # human-readable message.  A selected-ingress diagnostic is a
+            # separate closed envelope, so only its stable code is allowed to
+            # cross this boundary; messages and injected keys are discarded.
+            projected = project_diagnostic(
+                self.ingress, self.application,
+                {"code": self.reason.get("code")},
+            )
+            object.__setattr__(self, "reason", _mapping(
+                {"code": projected["reason"]["code"]}, "diagnostic reason",
+            ))
+            object.__setattr__(self, "ingress", _mapping(projected["ingress"], "ingress result"))
+            object.__setattr__(self, "application", _mapping(projected["application"], "application result"))
 
     def to_dict(self) -> dict[str, Any]:
-        return redact({
+        payload = {
             "ok": self.ok, "state": self.state, "hostname": self.hostname,
             "hostname_source": self.hostname_source, "strategy": self.strategy,
             "strategy_source": self.strategy_source, "resolver": dict(self.resolver),
@@ -449,4 +524,9 @@ class DomainResult:
             "ownership": self.ownership, "health": self.health,
             "fallback_url": self.fallback_url, "reason": dict(self.reason),
             "mutated": self.mutated,
-        })
+        }
+        if self.ingress is not None:
+            payload["ingress"] = dict(self.ingress)
+        if self.application is not None:
+            payload["application"] = dict(self.application)
+        return redact(payload)

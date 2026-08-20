@@ -110,6 +110,50 @@ class TestDomainServiceIntegration(unittest.TestCase):
         self.assertEqual(result.state, "ready")
         self.assertFalse(result.mutated)
 
+    def test_compatibility_offer_passes_effective_ingress_pin_without_autodetect(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import sandbox_core as sc
+        from sandbox.application.context import domain_service
+
+        class Ingress:
+            def __init__(self):
+                self.calls = []
+
+            def select(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    adapter_id=(None if kwargs["pin"] == "disabled" else kwargs["pin"]),
+                    accepted_addresses=("127.0.0.1",),
+                )
+
+        config = {
+            "root": "/tmp/project", "domains": {
+                "hostname": "demo.test", "tld": "test", "strategy": None,
+                "wildcard": False, "hostnameSource": "project",
+                "strategySource": "default", "ingress": "disabled",
+                "ingressSource": "machine_override",
+            },
+        }
+        for pin, source in (("disabled", "machine_override"), ("system-caddy", "project")):
+            ingress = Ingress()
+            config["domains"]["ingress"] = pin
+            config["domains"]["ingressSource"] = source
+            with mock.patch.object(sc, "registry_get", return_value={
+                "url": "http://localhost:8123",
+            }):
+                service = domain_service(
+                    {}, ingress=ingress,
+                    config_loader=lambda _root, label=None: config,
+                )
+                offer = service.ingress_offer("/tmp/project", "default")
+            self.assertEqual(ingress.calls[0]["pin"], pin)
+            self.assertEqual(ingress.calls[0]["pin_source"], source)
+            if pin == "disabled":
+                self.assertNotIn("probe", offer)
+            else:
+                self.assertEqual(offer["probe"]["address"], "127.0.0.1")
+
     def test_unregistered_project_fails_without_synthesizing_identity(self):
         from sandbox.application.domain_service import DomainService
         from sandbox.network.manifest import built_in_resolver_registry

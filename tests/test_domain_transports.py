@@ -45,6 +45,58 @@ class Service:
 
 
 class TestDomainTransports(unittest.TestCase):
+    def test_cli_and_mcp_preserve_the_same_closed_diagnostic_envelope(self):
+        from sandbox.commands import domains
+        from sandbox.network.models import DomainResult
+        from unittest import mock
+
+        diagnostic = DomainResult(
+            ok=True, state="ready", hostname="demo.test",
+            hostname_source="project", strategy="resolved",
+            strategy_source="project", resolver={}, actual_answers=(),
+            expected_addresses=("127.0.0.1",), ownership="owned",
+            health="healthy", fallback_url="http://localhost:8123",
+            reason={"code": "ready", "message": "secret body"}, mutated=False,
+            ingress={"state": "reachable", "endpoint": "127.0.0.1:80",
+                     "exception": "secret exception"},
+            application={"state": "ready", "headers": {"authorization": "secret"},
+                         "body": "secret body"},
+        )
+
+        class DiagnosticService:
+            def status(self, project_dir, *, label):
+                return diagnostic
+
+        service = DiagnosticService()
+        args = SimpleNamespace(
+            action="status", project_dir="/tmp/project", label="default",
+            resolver=None, json=True, tld=None,
+        )
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.domain_service",
+                        return_value=service), redirect_stdout(output):
+            domains.cmd_domains({}, args)
+        cli_payload = json.loads(output.getvalue())
+
+        mcp_root = Path(__file__).parent.parent / "mcp" / "wp-server"
+        sys.path.insert(0, str(mcp_root))
+        self.addCleanup(lambda: sys.path.remove(str(mcp_root)))
+        from tools import domains as domain_tools
+        previous = domain_tools._domain_service
+        self.addCleanup(lambda: setattr(domain_tools, "_domain_service", previous))
+        domain_tools._domain_service = lambda: service
+        mcp_payload = domain_tools.domain_status("/tmp/project")
+
+        for payload in (cli_payload, mcp_payload):
+            self.assertEqual(payload["ingress"], {"state": "reachable"})
+            self.assertEqual(payload["application"], {"state": "ready"})
+            self.assertEqual(payload["reason"], {"code": "ready"})
+            self.assertNotIn("secret", json.dumps(payload, sort_keys=True))
+        self.assertEqual(
+            {key: cli_payload[key] for key in ("ingress", "application", "reason")},
+            {key: mcp_payload[key] for key in ("ingress", "application", "reason")},
+        )
+
     def test_cli_has_no_proof_promotion_input(self):
         from sandbox.commands import domains
 

@@ -39,9 +39,15 @@ override beats project configuration, which beats detection, and status reports 
 source.
 
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
-authority failure, answer mismatch/stale cache, and an ingress verification failure.
+authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.
 Use `domains reconsider --resolver ID` to clear remembered consent after reviewing a
 resolver change.
+
+`domains status` is read-only. For an owned binding, it first performs a bounded fresh DNS
+validation and checks that the hostname has exactly one answer accepted by the selected
+ingress. Only after that check succeeds does it make the selected-ingress HTTP health
+probe. Status does not install, update, flush, or remove DNS, ACME, resolver, ingress, or
+application state.
 
 ## Ownership and cleanup
 
@@ -61,10 +67,31 @@ authority from the complete owned binding set, while cleanup removes a suffix ro
 after its final binding is gone. A racing plan cannot move an active endpoint or replace
 another project's fragment.
 
-Fresh HTTP verification parses the stored fallback only to recover an explicit loopback
-address and port, then uses a no-DNS, no-proxy, no-redirect route probe with the intended
-Host header. Public, link-local metadata, credential-bearing, and HTTPS fallback URLs are
-never ambient-probed.
+The status health target is the attributable selected-ingress probe: a concrete loopback
+address, port, and protocol supplied by the selected adapter, with the address belonging
+to its accepted listener set. `fallback_url` is recovery/display information only; it is
+never used as the status health target. The probe sends the requested hostname explicitly
+as the HTTP `Host` value and uses it as TLS SNI when an adapter supplies an HTTPS probe;
+without an adapter-owned SNI policy, HTTPS is reported unavailable rather than downgraded.
+It connects directly to the selected endpoint, with no DNS lookup, proxy discovery, or
+redirect following, and does not disclose response bodies or headers.
+
+The public selected-ingress diagnostic is a closed envelope containing only component
+states and one stable reason code:
+
+```json
+{
+  "ingress": {"state": "reachable"},
+  "application": {"state": "ready"},
+  "reason": {"code": "ready"}
+}
+```
+
+Its stable reason codes are exactly `fresh_dns_unavailable`, `answer_mismatch`,
+`ingress_listener_unreachable`, `ingress_connect_timeout`,
+`application_response_timeout`, `application_http_unhealthy`,
+`ingress_probe_unavailable`, and `ready`. Endpoint details, exceptions, response bodies,
+and response headers never cross this public boundary.
 
 ## Support and threat boundary
 

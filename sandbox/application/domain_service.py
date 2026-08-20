@@ -6,12 +6,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 import sys
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from sandbox.config.domains import normalize_hostname
 from sandbox.network.models import (
     CleanupRecovery, ConsentRecord, DomainResult, ResolutionBinding,
-    canonical_digest,
+    canonical_digest, project_diagnostic,
 )
 
 
@@ -29,6 +30,7 @@ class DomainService:
         platform: str | None = None, identity_persister: Callable | None = None,
         binding_observer: Callable | None = None,
         authority_observer: Callable | None = None,
+        diagnostic_verifier: Callable | None = None,
     ) -> None:
         self.config_loader = config_loader
         self.project_registry = project_registry
@@ -47,6 +49,7 @@ class DomainService:
         self.identity_persister = identity_persister
         self.binding_observer = binding_observer
         self.authority_observer = authority_observer
+        self.diagnostic_verifier = diagnostic_verifier
 
     def support(self) -> dict[str, Any]:
         return {
@@ -121,6 +124,7 @@ class DomainService:
                 mutated=False,
             )
         observation = self.observer(hostname) if self.observer else None
+        offer = {}
         resolver = (
             {"owner": observation.owner_id, "tier": observation.support_tier,
              "manager": observation.manager}
@@ -176,6 +180,49 @@ class DomainService:
                         **base, reason_code="authority_unhealthy",
                         message="The scoped answering authority is not healthy.",
                     )
+                diagnostic = None
+                if self.diagnostic_verifier is not None:
+                    probe = offer.get("probe") or offer.get("ingress_probe")
+                    try:
+                        raw_diagnostic = self.diagnostic_verifier(hostname, expected, probe)
+                    except Exception:
+                        raw_diagnostic = None
+                    try:
+                        diagnostic = project_diagnostic(
+                            raw_diagnostic.get("ingress") if isinstance(raw_diagnostic, Mapping) else None,
+                            raw_diagnostic.get("application") if isinstance(raw_diagnostic, Mapping) else None,
+                            raw_diagnostic.get("reason") if isinstance(raw_diagnostic, Mapping) else None,
+                        )
+                    except Exception:
+                        diagnostic = project_diagnostic(None, None, None)
+                if diagnostic is not None:
+                    reason_code = diagnostic["reason"]["code"]
+                    if reason_code != "ready":
+                        return self._result(
+                            state="drifted", hostname=hostname, policy=policy,
+                            observation=observation, expected=expected, fallback=fallback,
+                            reason_code=reason_code,
+                            message={
+                                "fresh_dns_unavailable": "Fresh DNS could not be verified.",
+                                "answer_mismatch": "Fresh DNS answers do not match the selected ingress.",
+                                "ingress_listener_unreachable": "The selected ingress listener is unreachable.",
+                                "ingress_connect_timeout": "The selected ingress listener timed out.",
+                                "application_response_timeout": "The selected ingress application response timed out.",
+                                "application_http_unhealthy": "The selected ingress returned an unhealthy HTTP status.",
+                                "ingress_probe_unavailable": "The selected ingress probe is unavailable.",
+                            }.get(reason_code, "The selected ingress could not be verified."),
+                            health="degraded", ownership="residual",
+                            ingress=diagnostic.get("ingress"),
+                            application=diagnostic.get("application"),
+                        )
+                    return self._result(
+                        state="ready", hostname=hostname, policy=policy,
+                        observation=observation, expected=expected, fallback=fallback,
+                        reason_code="ready", message="Owned hostname resolution is healthy.",
+                        ok=True, mutated=False, health="healthy", ownership="owned",
+                        ingress=diagnostic.get("ingress"),
+                        application=diagnostic.get("application"),
+                    )
                 if set(answers) != set(expected):
                     return self._result(
                         **base, reason_code="answer_mismatch",
@@ -208,7 +255,8 @@ class DomainService:
     def _result(self, *, state: str, hostname: str, policy: dict, observation,
                 expected: tuple[str, ...], fallback: str, reason_code: str,
                 message: str, ok: bool = False, mutated: bool = False,
-                health: str = "fallback", ownership: str = "none") -> DomainResult:
+                health: str = "fallback", ownership: str = "none",
+                ingress: dict | None = None, application: dict | None = None) -> DomainResult:
         return DomainResult(
             ok=ok, state=state, hostname=hostname,
             hostname_source=policy["hostnameSource"],
@@ -220,6 +268,7 @@ class DomainService:
             expected_addresses=expected, ownership=ownership, health=health,
             fallback_url=fallback,
             reason={"code": reason_code, "message": message}, mutated=mutated,
+            ingress=ingress, application=application,
         )
 
     def _prepare(self, project_dir: str, label: str, offer_override=None):

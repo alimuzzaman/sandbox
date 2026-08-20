@@ -69,6 +69,41 @@ class TestDomainModels(unittest.TestCase):
         self.assertEqual(payload["resolver"]["token"], "[redacted]")
         self.assertNotIn("do-not-print", str(payload))
 
+    def test_selected_ingress_diagnostic_is_closed_and_fail_closed(self):
+        from sandbox.network.models import DomainResult
+
+        result = DomainResult(
+            ok=True, state="ready", hostname="demo.test",
+            hostname_source="project", strategy="external",
+            strategy_source="detected", resolver={}, actual_answers=(),
+            expected_addresses=("127.0.0.77",), ownership="owned",
+            health="healthy", fallback_url="http://localhost:8123",
+            reason={"code": "ready", "message": "safe"}, mutated=False,
+            ingress={"state": "reachable", "address": "127.0.0.1",
+                     "exception": "https://secret.invalid"},
+            application={"state": "ready", "body": "password=hunter2"},
+        )
+        self.assertEqual(result.ingress, {"state": "reachable"})
+        self.assertEqual(result.application, {"state": "ready"})
+        self.assertEqual(result.to_dict()["ingress"], {"state": "reachable"})
+        self.assertEqual(result.to_dict()["application"], {"state": "ready"})
+
+        contradictory = DomainResult(
+            ok=False, state="drifted", hostname="demo.test",
+            hostname_source="project", strategy="external",
+            strategy_source="detected", resolver={}, actual_answers=(),
+            expected_addresses=("127.0.0.77",), ownership="residual",
+            health="degraded", fallback_url="http://localhost:8123",
+            reason={"code": "ready"}, mutated=False,
+            ingress={"state": "unreachable", "raw": "secret"},
+            application={"state": "ready", "raw": "secret"},
+        )
+        self.assertEqual(contradictory.to_dict()["ingress"], {"state": "unavailable"})
+        self.assertEqual(contradictory.to_dict()["application"], {"state": "not_attempted"})
+        self.assertEqual(
+            contradictory.to_dict()["reason"]["code"], "ingress_probe_unavailable",
+        )
+
     def test_invalid_entity_transitions_are_rejected(self):
         from sandbox.network.models import CleanupRecovery, ConsentRecord
 

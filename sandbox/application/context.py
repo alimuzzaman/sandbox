@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,8 @@ def domain_service(cfg, **overrides):
         BoundedProcessRunner, SocketDnsEndpointAllocator, UrlHttpProbe,
     )
 
+    config_loader = overrides.pop("config_loader", sc.load_project_config)
+
     network_root = sc.sandbox_base() / "runtime" / "network"
     state_path = network_root / "resolver-state.json"
     process = overrides.pop("process", BoundedProcessRunner())
@@ -145,21 +148,84 @@ def domain_service(cfg, **overrides):
             network_root / "authority", process=process, binary=dnsmasq,
         )
 
+    ingress = overrides.pop("ingress", None)
+    if ingress is None:
+        try:
+            ingress = ingress_service(cfg, process=process, http=http)
+        except Exception:
+            ingress = None
+
     def compatibility_offer(root, label):
+        """Build the status offer from the same effective ingress selection B uses.
+
+        The old compatibility address was a useful apply fallback, but using it
+        for status silently converted a disabled/failed selection into an
+        auto-detected route.  A missing or unavailable selection now produces
+        an empty offer; the diagnostic layer reports that capability gap
+        without probing a guessed endpoint.
+        """
         record = sc.registry_get(root, label=label) or {}
         port = record.get("wordpress_port") or record.get("http_port")
         fallback = record.get("url") or (
             f"http://localhost:{port}" if port else "http://localhost"
         )
-        return {
-            "accepted_addresses": ("127.0.0.77",),
+        offer = {
+            "accepted_addresses": (),
             "fallback_url": fallback,
             "capabilities": {"wildcard": True, "tls": True},
         }
+        if ingress is not None:
+            try:
+                loaded = config_loader(root, label=label)
+                domains = loaded.get("domains") if isinstance(loaded, Mapping) else None
+                if not isinstance(domains, Mapping):
+                    return offer
+                # ``load_project_config`` returns this normalized policy.  Keep
+                # the effective pin and provenance together, including the
+                # explicit ``disabled`` value; never derive a new pin by
+                # re-detecting the host when either is malformed.
+                pin = domains.get("ingress")
+                pin_source = domains.get("ingressSource")
+                if pin_source is None:
+                    pin_source = "default"
+                if pin_source not in {"default", "project", "machine_override"}:
+                    return offer
+                if pin is not None:
+                    if not isinstance(pin, str):
+                        return offer
+                    if pin != "disabled" and (
+                        not pin or len(pin) > 63 or not pin[0].islower()
+                        or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+                               for char in pin)
+                    ):
+                        return offer
+                    if pin_source == "default":
+                        return offer
+                elif pin_source != "default":
+                    return offer
+                selection = ingress.select(
+                    required_protocols=("http",),
+                    pin=pin,
+                    pin_source=pin_source,
+                )
+                if pin == "disabled":
+                    return offer
+                addresses = tuple(selection.accepted_addresses or ())
+                if selection.adapter_id and addresses:
+                    offer["accepted_addresses"] = addresses
+                    offer["probe"] = {
+                        "address": addresses[0], "port": 80, "protocol": "http",
+                    }
+            except Exception:
+                # Selection failure is itself diagnostic evidence; retaining
+                # the old compatibility address here would be an implicit
+                # auto-detection path.
+                pass
+        return offer
 
-    verifier = overrides.pop(
-        "verifier", DomainVerifier(process=process, http=http, platform=platform).verify,
-    )
+    verifier_impl = DomainVerifier(process=process, http=http, platform=platform)
+    verifier = overrides.pop("verifier", verifier_impl.verify)
+    diagnostic_verifier = overrides.pop("diagnostic_verifier", verifier_impl.diagnose)
 
     def interactive_consent(owner_id):
         answer = input(
@@ -169,7 +235,7 @@ def domain_service(cfg, **overrides):
         return answer in {"y", "yes"}
 
     return DomainService(
-        config_loader=overrides.pop("config_loader", sc.load_project_config),
+        config_loader=config_loader,
         project_registry=overrides.pop("project_registry", sc),
         adapters=overrides.pop(
             "adapters",
@@ -204,6 +270,7 @@ def domain_service(cfg, **overrides):
             "authority_observer",
             authority.status if authority is not None else None,
         ),
+        diagnostic_verifier=diagnostic_verifier,
         **overrides,
     )
 

@@ -18,8 +18,20 @@ class TestWpCliTimeout(unittest.TestCase):
     def setUp(self):
         self.previous = dict(_docker._WP_CLI_BUILTIN)
         _docker._WP_CLI_BUILTIN.clear()
+        # ``wpcli`` checks the managed-native gateway before selecting the
+        # Compose route.  This test is about timeout/routing mechanics, so keep
+        # that unrelated composition boundary inert under the unittest argv.
+        self.gate = mock.patch.object(_docker, "_managed_execution_gate", return_value=None)
+        self.gate.start()
+        # Docker routing tests do not exercise Herd/config discovery.  The
+        # latter may bootstrap the CLI venv (and re-exec) under a bare system
+        # Python, turning unittest's module selector into Sandbox CLI argv.
+        self.herd = mock.patch.object(_docker, "_is_herd_instance", return_value=False)
+        self.herd.start()
 
     def tearDown(self):
+        self.herd.stop()
+        self.gate.stop()
         _docker._WP_CLI_BUILTIN.clear()
         _docker._WP_CLI_BUILTIN.update(self.previous)
 

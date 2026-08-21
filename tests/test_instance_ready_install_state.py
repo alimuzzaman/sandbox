@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import contextlib
 import sys
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sandbox.core import _instances  # noqa: E402
+
+# ``ensure_instance`` imports the lifecycle handlers at call time.  Import that
+# module once with a neutral argv before unittest's selector can be interpreted
+# by the Sandbox CLI, then patch its real handlers in the sentinel test below.
+_TEST_ARGV = sys.argv[:]
+sys.argv[:] = ["sandbox-test"]
+from sandbox.commands import lifecycle as _lifecycle  # noqa: E402
+sys.argv[:] = _TEST_ARGV
 
 
 class _Result:
@@ -97,6 +104,10 @@ class TestReadyEnsureInstallState(unittest.TestCase):
             mock.patch.object(_instances, "_desired_source_mounts", return_value=["/plugins"]),
             mock.patch.object(_instances, "attest_source_mounts", return_value={"ok": True}),
             mock.patch.object(_instances, "_instance_reachable", return_value=True),
+            # Keep clean-URL setup out of this unit-level lifecycle contract;
+            # otherwise a host with the helper installed can re-exec the CLI
+            # while unittest's selector is still in sys.argv.
+            mock.patch.object(_instances, "_proxy_sudoers_installed", return_value=False),
         )
 
     def test_installed_site_keeps_fast_path_and_version_drift_is_only_warned(self):
@@ -126,6 +137,72 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         warn.assert_called_once()
         self.assertEqual(warn.call_args.args[2]["wpVersion"], "6.8.2")
         state.registry_put.assert_not_called()
+
+    def test_unreachable_ready_uses_existing_recovery_without_install_probe(self):
+        """A cold ready record keeps the historical up/install recovery path."""
+        state = _State()
+        captured = {}
+
+        def build(_cfg, _name, _root, pconf, _ports, _server):
+            captured.update(pconf)
+            return {}
+
+        class RecoveryReached(Exception):
+            pass
+
+        def install_sentinel(*_args, **_kwargs):
+            self.assertEqual(state.lock_events, ["project:enter", "ports:enter"])
+            raise RecoveryReached
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(_instances, "_core", return_value=state))
+            stack.enter_context(mock.patch.object(
+                _instances, "_desired_source_mounts", return_value=["/plugins"],
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "attest_source_mounts", return_value={"ok": True},
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_instance_reachable", return_value=False,
+            ))
+            probe = stack.enter_context(mock.patch.object(
+                _instances, "_wp_core_install_state",
+                side_effect=AssertionError("unreachable endpoint must not probe"),
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "resolve_instances", return_value={
+                    "fixture": state.registry_get("/project"),
+                },
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_build_instance_block", side_effect=build,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "prepare_php_extension_runtime", return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(_instances, "_local_yaml", return_value={}))
+            stack.enter_context(mock.patch.object(_instances, "_write_local_yaml"))
+            stack.enter_context(mock.patch.object(_instances, "write_compose_files"))
+            stack.enter_context(mock.patch.object(_instances, "load_config", return_value={}))
+            stack.enter_context(mock.patch.object(
+                _instances, "_proxy_sudoers_installed", return_value=False,
+            ))
+            stack.enter_context(mock.patch.object(_lifecycle, "cmd_up"))
+            stack.enter_context(mock.patch.object(
+                _lifecycle, "cmd_install", side_effect=install_sentinel,
+            ))
+            with self.assertRaises(RecoveryReached):
+                _instances.ensure_instance({}, "/project", wp_version="6.8.2")
+
+        probe.assert_not_called()
+        self.assertEqual(captured["wpVersion"], "6.8.2")
+        self.assertEqual(
+            state.lock_events,
+            ["project:enter", "ports:enter", "ports:exit", "project:exit"],
+        )
 
     def test_ambiguous_probe_refuses_before_every_write_capable_step(self):
         state = _State()
@@ -185,9 +262,6 @@ class TestReadyEnsureInstallState(unittest.TestCase):
             captured.update(pconf)
             return {}
 
-        lifecycle = types.ModuleType("sandbox.commands.lifecycle")
-        lifecycle.cmd_up = mock.Mock()
-        lifecycle.cmd_install = mock.Mock(side_effect=InstallReached)
         with contextlib.ExitStack() as stack:
             for patcher in self._ready_patches(state):
                 stack.enter_context(patcher)
@@ -211,14 +285,26 @@ class TestReadyEnsureInstallState(unittest.TestCase):
             stack.enter_context(mock.patch.object(_instances, "_write_local_yaml"))
             stack.enter_context(mock.patch.object(_instances, "write_compose_files"))
             stack.enter_context(mock.patch.object(_instances, "load_config", return_value={}))
-            import sandbox.commands
-            with mock.patch.dict(sys.modules, {"sandbox.commands.lifecycle": lifecycle}), \
-                    mock.patch.object(sandbox.commands, "lifecycle", lifecycle, create=True):
-                with self.assertRaises(InstallReached):
-                    _instances.ensure_instance({}, "/project", wp_version="6.8.2")
+            stack.enter_context(mock.patch.object(_lifecycle, "cmd_up"))
 
-        lifecycle.cmd_install.assert_called_once()
+            def install_sentinel(*_args, **_kwargs):
+                # The project lock must remain held through the write-capable
+                # resume path; a second ensure cannot observe a half-installed
+                # record between the probe and this command.
+                self.assertEqual(state.lock_events, ["project:enter", "ports:enter"])
+                raise InstallReached
+
+            stack.enter_context(mock.patch.object(
+                _lifecycle, "cmd_install", side_effect=install_sentinel,
+            ))
+            with self.assertRaises(InstallReached):
+                _instances.ensure_instance({}, "/project", wp_version="6.8.2")
+
         self.assertEqual(captured["wpVersion"], "6.8.2")
+        self.assertEqual(
+            state.lock_events,
+            ["project:enter", "ports:enter", "ports:exit", "project:exit"],
+        )
 
 
 if __name__ == "__main__":

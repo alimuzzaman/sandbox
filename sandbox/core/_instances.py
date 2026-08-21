@@ -1039,181 +1039,181 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 if ready_install_state == _WP_INSTALL_STATE_UNAVAILABLE:
                     return _wp_install_state_refusal()
 
-    with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
-        existing = sc.registry_get(root, label=label)
-        # A remote or local host may retain a listener that is not represented
-        # in the registry (for example a stale Mailpit container). Reconcile
-        # ports before the ready fast path; otherwise ensure can report a
-        # healthy HTTP container while the next compose up partially fails and
-        # leaves WP's database network unusable.
-        cfg = _resolve_port_conflicts(cfg)
-        resolved_existing = (
-            resolve_instances(cfg).get(existing.get("instance"))
-            if existing and existing.get("instance") else None
-        )
-        ports_changed = bool(
-            existing and resolved_existing and any(
-                resolved_existing.get(key) != existing.get(key)
-                for key in ("wordpress_port", "db_port", "mailpit_port")
+        with sc.project_lock(RUNTIME_DIR / ".instance-ports"):
+            existing = sc.registry_get(root, label=label)
+            # A remote or local host may retain a listener that is not represented
+            # in the registry (for example a stale Mailpit container). Reconcile
+            # ports before the ready fast path; otherwise ensure can report a
+            # healthy HTTP container while the next compose up partially fails and
+            # leaves WP's database network unusable.
+            cfg = _resolve_port_conflicts(cfg)
+            resolved_existing = (
+                resolve_instances(cfg).get(existing.get("instance"))
+                if existing and existing.get("instance") else None
             )
-        )
-        if existing and existing.get("status") == "ready" \
-                and not ports_changed and _instance_reachable(existing) \
-                and ready_install_state == _WP_INSTALL_STATE_INSTALLED:
-            # Already up. If the config's version pins no longer match the
-            # running instance's image, say so loudly — silently returning the
-            # stale record would let tests run against a different WP/PHP than
-            # the live site. Re-versioning in place is a tracked follow-up; for
-            # now the instance must be recreated to apply a changed pin.
-            _warn_version_drift(cfg, existing.get("instance"), pconf)
-            _auto_heal_wp_url(existing["instance"])
-            return _refresh_registered_url(sc, root, label, existing, cfg)
-
-        if not existing and label != "default" and not create:
-            known = [e["label"] for e in sc.registry_list_for_root(root)]
-            raise sc.ConfigError(
-                f"no instance labelled '{label}' for {root} "
-                f"(existing labels: {known or 'none'}). Pass create=True / "
-                f"`--label {label}` deliberately to mint a new one.")
-
-        # Resume a prior record for this (root, label) (a partial/failed boot,
-        # or a stopped instance) by REUSING its name + ports rather than
-        # deriving a fresh `<name>-2` and orphaning the half-built stack. Only
-        # when there's no record at all do we allocate a new name + ports.
-        if existing and existing.get("instance"):
-            name = existing["instance"]
-            resolved = resolve_instances(cfg).get(name) or existing
-            ports = {
-                "wordpress_port": resolved["wordpress_port"],
-                "db_port": resolved["db_port"],
-                "mailpit_port": resolved["mailpit_port"],
-            }
-        else:
-            taken = set(resolve_instances(cfg).keys())
-            taken |= {e.get("instance") for e in sc.registry_all().values()
-                      if e.get("instance")}
-            name = _derive_instance_name(root, taken, label=label)
-            ports = _pick_instance_ports(cfg)
-
-        server = _valid_server(pconf.get("server") or "nginx")
-        php_v = pconf.get("phpVersion")
-        wp_v = pconf.get("wpVersion")
-        info(f"ensure_instance: {root} → instance '{name}' "
-             f"(WP={ports['wordpress_port']} server={server}"
-             f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
-
-        block = _build_instance_block(cfg, name, root, pconf, ports, server)
-
-        # Resolve, materialize, and build extension images before writing
-        # sandbox.local.yml, generating Compose, or booting a container.  A
-        # fresh scaffold resolves trusted official parent digests through the
-        # bounded Docker adapter; no hidden digest input is required.
-        try:
-            _prepared_extensions = prepare_php_extension_runtime(block, server)
-            if _prepared_extensions is not None:
-                _persist_php_extension_runtime(block, _prepared_extensions)
-        except (TypeError, ValueError) as exc:
-            raise sc.ConfigError(str(exc)) from exc
-
-        local = _local_yaml()
-        local.setdefault("instances", {})[name] = block
-        _write_local_yaml(local)
-
-        # Record a 'pending' mapping BEFORE booting so a mid-boot crash leaves a
-        # resumable record (the reuse branch above finds it) instead of an
-        # orphan that forces the next run to a duplicate `<name>-2`.
-        sc.registry_put(root, label=label, instance=name, status="pending",
-                        wordpress_port=ports["wordpress_port"],
-                        db_port=ports["db_port"],
-                        mailpit_port=ports["mailpit_port"],
-                        server=server)
-
-        cfg = load_config()
-        write_compose_files(cfg)
-
-        ns = types.SimpleNamespace(resolved_instance=name)
-        secured = False
-        if server == "herd":
-            # Host driver: link + isolate + secure replace the docker boot.
-            _provision_herd(name, pconf)
-        else:
-            cmd_up(cfg, ns)
-            # Secure-at-create: when the clean-URL proxy is already set up, give
-            # the instance its https://<name>.<tld> BEFORE install so WP never
-            # stores an http localhost URL (whose port leaks into redirects).
-            # Single-site only; falls back to localhost otherwise.
-            if _proxy_sudoers_installed() and _secure_at_create(cfg, name):
-                secured = True
-                cfg = load_config()
-        cmd_install(cfg, ns)
-        # A version-pinned bootstrap may need to repair an empty or partial
-        # document root before WordPress can answer HTTP. Probe only after core
-        # installation, otherwise the first ensure fails before repair starts.
-        if server != "herd":
-            _wait_http(ports["wordpress_port"])
-            if block.get("php_extensions") is not None:
-                extension_status = php_extension_status(
-                    resolve_instances(cfg)[name], instance=name,
+            ports_changed = bool(
+                existing and resolved_existing and any(
+                    resolved_existing.get(key) != existing.get(key)
+                    for key in ("wordpress_port", "db_port", "mailpit_port")
                 )
-                drift = (extension_status or {}).get("drift", {})
-                if drift.get("state") != "ready":
-                    issues = drift.get("issues") or []
-                    detail = (issues[0].get("message")
-                              if issues and isinstance(issues[0], dict)
-                              else "PHP extension planes are not verified")
-                    raise sc.ConfigError(
-                        f"PHP extension verification blocked after ensure: {detail}")
-        if secured:
-            _auto_heal_wp_url(name)
-        # Multisite goes live only when the web tier reboots WITH the MULTISITE
-        # constants that multisite-convert's marker (written inside cmd_install)
-        # just enabled — and, when secured, with DOMAIN_CURRENT_SITE = <name>.
-        # <tld> matching the network domain convert stored. Re-render compose +
-        # recreate the web tier so multisite resolves in THIS pass (otherwise
-        # wp-cli + HTTP 500 'Site not found' until the next boot). Plugin/theme
-        # wiring below then runs against a working network.
-        if server != "herd" and _multisite_mode(resolve_instances(cfg)[name]):
+            )
+            if existing and existing.get("status") == "ready" \
+                    and not ports_changed and _instance_reachable(existing) \
+                    and ready_install_state == _WP_INSTALL_STATE_INSTALLED:
+                # Already up. If the config's version pins no longer match the
+                # running instance's image, say so loudly — silently returning the
+                # stale record would let tests run against a different WP/PHP than
+                # the live site. Re-versioning in place is a tracked follow-up; for
+                # now the instance must be recreated to apply a changed pin.
+                _warn_version_drift(cfg, existing.get("instance"), pconf)
+                _auto_heal_wp_url(existing["instance"])
+                return _refresh_registered_url(sc, root, label, existing, cfg)
+
+            if not existing and label != "default" and not create:
+                known = [e["label"] for e in sc.registry_list_for_root(root)]
+                raise sc.ConfigError(
+                    f"no instance labelled '{label}' for {root} "
+                    f"(existing labels: {known or 'none'}). Pass create=True / "
+                    f"`--label {label}` deliberately to mint a new one.")
+
+            # Resume a prior record for this (root, label) (a partial/failed boot,
+            # or a stopped instance) by REUSING its name + ports rather than
+            # deriving a fresh `<name>-2` and orphaning the half-built stack. Only
+            # when there's no record at all do we allocate a new name + ports.
+            if existing and existing.get("instance"):
+                name = existing["instance"]
+                resolved = resolve_instances(cfg).get(name) or existing
+                ports = {
+                    "wordpress_port": resolved["wordpress_port"],
+                    "db_port": resolved["db_port"],
+                    "mailpit_port": resolved["mailpit_port"],
+                }
+            else:
+                taken = set(resolve_instances(cfg).keys())
+                taken |= {e.get("instance") for e in sc.registry_all().values()
+                          if e.get("instance")}
+                name = _derive_instance_name(root, taken, label=label)
+                ports = _pick_instance_ports(cfg)
+
+            server = _valid_server(pconf.get("server") or "nginx")
+            php_v = pconf.get("phpVersion")
+            wp_v = pconf.get("wpVersion")
+            info(f"ensure_instance: {root} → instance '{name}' "
+                 f"(WP={ports['wordpress_port']} server={server}"
+                 f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
+
+            block = _build_instance_block(cfg, name, root, pconf, ports, server)
+
+            # Resolve, materialize, and build extension images before writing
+            # sandbox.local.yml, generating Compose, or booting a container.  A
+            # fresh scaffold resolves trusted official parent digests through the
+            # bounded Docker adapter; no hidden digest input is required.
+            try:
+                _prepared_extensions = prepare_php_extension_runtime(block, server)
+                if _prepared_extensions is not None:
+                    _persist_php_extension_runtime(block, _prepared_extensions)
+            except (TypeError, ValueError) as exc:
+                raise sc.ConfigError(str(exc)) from exc
+
+            local = _local_yaml()
+            local.setdefault("instances", {})[name] = block
+            _write_local_yaml(local)
+
+            # Record a 'pending' mapping BEFORE booting so a mid-boot crash leaves a
+            # resumable record (the reuse branch above finds it) instead of an
+            # orphan that forces the next run to a duplicate `<name>-2`.
+            sc.registry_put(root, label=label, instance=name, status="pending",
+                            wordpress_port=ports["wordpress_port"],
+                            db_port=ports["db_port"],
+                            mailpit_port=ports["mailpit_port"],
+                            server=server)
+
+            cfg = load_config()
             write_compose_files(cfg)
-            compose("up", "-d", "--force-recreate", "wp",
-                    *(["nginx"] if server == "nginx" else []),
-                    instance=name, check=False)
-            _wait_reachable(resolve_instances(cfg)[name])
-        _wire_project_plugins(name, root, pconf)
-        _wire_project_themes(name, root, pconf)
 
-        # Spec 008: a newly provisioned instance gets both restore points only
-        # after its project plugins/themes are in their final installed state.
-        # `capture_install_snapshots` is idempotent, so resuming a pending
-        # instance never replaces a clean baseline with later DB changes.
-        from sandbox.commands.data import capture_install_snapshots
-        capture_install_snapshots(name)
+            ns = types.SimpleNamespace(resolved_instance=name)
+            secured = False
+            if server == "herd":
+                # Host driver: link + isolate + secure replace the docker boot.
+                _provision_herd(name, pconf)
+            else:
+                cmd_up(cfg, ns)
+                # Secure-at-create: when the clean-URL proxy is already set up, give
+                # the instance its https://<name>.<tld> BEFORE install so WP never
+                # stores an http localhost URL (whose port leaks into redirects).
+                # Single-site only; falls back to localhost otherwise.
+                if _proxy_sudoers_installed() and _secure_at_create(cfg, name):
+                    secured = True
+                    cfg = load_config()
+            cmd_install(cfg, ns)
+            # A version-pinned bootstrap may need to repair an empty or partial
+            # document root before WordPress can answer HTTP. Probe only after core
+            # installation, otherwise the first ensure fails before repair starts.
+            if server != "herd":
+                _wait_http(ports["wordpress_port"])
+                if block.get("php_extensions") is not None:
+                    extension_status = php_extension_status(
+                        resolve_instances(cfg)[name], instance=name,
+                    )
+                    drift = (extension_status or {}).get("drift", {})
+                    if drift.get("state") != "ready":
+                        issues = drift.get("issues") or []
+                        detail = (issues[0].get("message")
+                                  if issues and isinstance(issues[0], dict)
+                                  else "PHP extension planes are not verified")
+                        raise sc.ConfigError(
+                            f"PHP extension verification blocked after ensure: {detail}")
+            if secured:
+                _auto_heal_wp_url(name)
+            # Multisite goes live only when the web tier reboots WITH the MULTISITE
+            # constants that multisite-convert's marker (written inside cmd_install)
+            # just enabled — and, when secured, with DOMAIN_CURRENT_SITE = <name>.
+            # <tld> matching the network domain convert stored. Re-render compose +
+            # recreate the web tier so multisite resolves in THIS pass (otherwise
+            # wp-cli + HTTP 500 'Site not found' until the next boot). Plugin/theme
+            # wiring below then runs against a working network.
+            if server != "herd" and _multisite_mode(resolve_instances(cfg)[name]):
+                write_compose_files(cfg)
+                compose("up", "-d", "--force-recreate", "wp",
+                        *(["nginx"] if server == "nginx" else []),
+                        instance=name, check=False)
+                _wait_reachable(resolve_instances(cfg)[name])
+            _wire_project_plugins(name, root, pconf)
+            _wire_project_themes(name, root, pconf)
 
-        # Read the autologin token that cmd_install just generated so we can
-        # include login_url in the return value for the agent / human.
-        _local_data = _local_yaml()
-        _autologin = (_local_data.get("instances", {}).get(name, {})
-                      .get("autologin_token", ""))
-        # Report the instance's real browser URL: its clean https://<name>.<tld>
-        # when secured (herd, or secure-at-create above), else localhost:<port>.
-        _base_url = site_url(resolve_instances(cfg)[name])
-        _login_url = f"{_base_url}/?sandbox_autologin={_autologin}" if _autologin else ""
+            # Spec 008: a newly provisioned instance gets both restore points only
+            # after its project plugins/themes are in their final installed state.
+            # `capture_install_snapshots` is idempotent, so resuming a pending
+            # instance never replaces a clean baseline with later DB changes.
+            from sandbox.commands.data import capture_install_snapshots
+            capture_install_snapshots(name)
 
-        return sc.registry_put(
-            root,
-            label=label,
-            instance=name,
-            url=_base_url,
-            login_url=_login_url,
-            admin_url=f"{_base_url}/wp-admin/",
-            wordpress_port=ports["wordpress_port"],
-            db_port=ports["db_port"],
-            mailpit_port=ports["mailpit_port"],
-            server=server,
-            php_version=pconf.get("phpVersion"),
-            wp_version=pconf.get("wpVersion"),
-            source=pconf.get("source"),
-            status="ready",
-        )
+            # Read the autologin token that cmd_install just generated so we can
+            # include login_url in the return value for the agent / human.
+            _local_data = _local_yaml()
+            _autologin = (_local_data.get("instances", {}).get(name, {})
+                          .get("autologin_token", ""))
+            # Report the instance's real browser URL: its clean https://<name>.<tld>
+            # when secured (herd, or secure-at-create above), else localhost:<port>.
+            _base_url = site_url(resolve_instances(cfg)[name])
+            _login_url = f"{_base_url}/?sandbox_autologin={_autologin}" if _autologin else ""
+
+            return sc.registry_put(
+                root,
+                label=label,
+                instance=name,
+                url=_base_url,
+                login_url=_login_url,
+                admin_url=f"{_base_url}/wp-admin/",
+                wordpress_port=ports["wordpress_port"],
+                db_port=ports["db_port"],
+                mailpit_port=ports["mailpit_port"],
+                server=server,
+                php_version=pconf.get("phpVersion"),
+                wp_version=pconf.get("wpVersion"),
+                source=pconf.get("source"),
+                status="ready",
+            )
 
 
 def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:

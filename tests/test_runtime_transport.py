@@ -383,6 +383,21 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertTrue(payload["login_url_redacted"])
         self.assertNotIn('"login_url_redacted":false', serialized)
 
+    def test_cli_ensure_json_marks_malformed_autologin_url_redacted(self):
+        import sandbox.commands.instances_cmd as commands
+
+        malformed = "https://[broken/?sandbox_autologin=malformed-token"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            commands._print_ensure_json({
+                "login_url": malformed,
+                "login_url_redacted": False,
+            })
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["login_url"], "[REDACTION_FAILED]")
+        self.assertTrue(payload["login_url_redacted"])
+        self.assertNotIn("malformed-token", output.getvalue())
+
     def test_cli_ensure_json_derives_redaction_status_instead_of_trusting_input(self):
         import sandbox.commands.instances_cmd as commands
 

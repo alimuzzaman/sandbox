@@ -33,7 +33,7 @@ from sandbox.application.context import (
     domain_service, ingress_service, runtime_service, wordpress_runtime_service,
 )
 from sandbox.runtimes.base import OperationError, OperationRequest
-from sandbox.services.redaction import redact_structure, redact_text
+from sandbox.services.redaction import REDACTION_FAILED, redact_structure, redact_text
 
 
 _GENERIC_INIT_TYPES = frozenset({
@@ -176,6 +176,9 @@ def _is_wordpress_project(config: dict) -> bool:
 
 
 _REDACTION_MARKERS = frozenset({"[REDACTED]", "[REDACTION_FAILED]"})
+_RAW_SANDBOX_AUTOLOGIN_QUERY = re.compile(
+    r"(?i)(?:[?&;])sandbox_autologin(?:=|[&;#]|$)"
+)
 
 
 def _sandbox_autologin_value(value: object) -> str | None:
@@ -198,6 +201,23 @@ def _sandbox_autologin_value(value: object) -> str | None:
     return None
 
 
+def _document_has_sandbox_autologin(document: object) -> bool:
+    """Classify a raw top-level login URL without returning any of it.
+
+    ``redact_structure`` deliberately turns malformed credential-bearing URLs
+    into ``[REDACTION_FAILED]``.  Once that happens the sanitized document no
+    longer retains the query name, so record this boolean before redaction;
+    it is used only to decide whether to emit the derived status field.
+    """
+    if not isinstance(document, Mapping):
+        return False
+    value = document.get("login_url")
+    if not isinstance(value, str):
+        return False
+    return (_sandbox_autologin_value(value) is not None
+            or bool(_RAW_SANDBOX_AUTOLOGIN_QUERY.search(value)))
+
+
 def _print_ensure_json(document: object, *, sort_keys: bool = False,
                        compact: bool = False, reveal_login: bool = False) -> None:
     """Emit one fail-closed public JSON document for ``sb ensure --json``.
@@ -218,13 +238,22 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
     obtains it, so it belongs in a gitignored descriptor, never in logs or a
     commit.
     """
+    # Preserve this classification before redaction so malformed token-bearing
+    # URLs that become ``[REDACTION_FAILED]`` still advertise that the emitted
+    # login URL is redacted.  It is a local boolean only; the raw value never
+    # reaches the output document.
+    has_autologin = _document_has_sandbox_autologin(document)
     payload = redact_structure(document)
+    if has_autologin and payload == REDACTION_FAILED:
+        # A malformed URL can make the recursive redactor fail at the document
+        # boundary.  Retain only the marker, not any sibling input fields, so
+        # the public JSON can still report the derived redaction state.
+        payload = {"login_url": REDACTION_FAILED}
     if isinstance(payload, dict):
         # Never trust a producer-supplied status field.  Derive it from the
         # sanitized login URL below, so a remote/native result cannot smuggle
         # an unverified ``false`` into durable JSON output.
         payload.pop("login_url_redacted", None)
-        has_autologin = _sandbox_autologin_value(payload.get("login_url")) is not None
         revealed = ""
         if (reveal_login and isinstance(document, Mapping)):
             revealed = _autologin_url_to_reveal(document)

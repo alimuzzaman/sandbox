@@ -34,6 +34,20 @@ def _safe_text(value: object) -> bool:
     return isinstance(value, str) and not any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
+def _normalize_node_store(compose: dict) -> bool:
+    """Normalize the explicit generic-Compose node-store opt-in.
+
+    The descriptor is deliberately strict: JSON/YAML values that merely have a
+    truthy or falsy interpretation must not silently change the generated
+    overlay.  ``type(...) is bool`` also keeps Python's ``bool``/``int``
+    relationship from accepting numbers as booleans.
+    """
+    value = compose.get("nodeStore", False)
+    if type(value) is not bool:
+        raise ValueError("compose.nodeStore must be a boolean")
+    return value
+
+
 class ComposeSchemaProvider:
     """Normalize the small, explicit Compose project descriptor."""
 
@@ -80,6 +94,7 @@ class ComposeSchemaProvider:
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
+        node_store = _normalize_node_store(compose)
         filename = compose.get("file")
         service = compose.get("service")
         port = compose.get("internal_port")
@@ -142,6 +157,7 @@ class ComposeSchemaProvider:
                 "http_port": http_port,
                 "startup_timeout_seconds": startup_timeout,
                 "recreate_on_ensure": recreate_on_ensure,
+                "node_store": node_store,
                 "resources": {"cpus": float(cpus), "memoryMB": memory_mb, "pids": pids},
                 "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",

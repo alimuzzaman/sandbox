@@ -456,9 +456,15 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         target_path = _remote.remote_workspace_path(
             remote, target.project_root, target.workspace_label)
     sb = _remote.remote_sb_path(remote)
-    command = [sb, action, "--local", "--project-dir", target_path, "--label", target.workspace_label]
+    # The durable workspace label belongs to the outer remote controller.  It
+    # selects the staged checkout above; it is not an inner instance label for
+    # the co-located CLI.  Let that CLI resolve its registered default (or
+    # report a genuine ambiguity) from the staged project root.  `ensure` is
+    # intentionally different: it creates the requested reusable inner label,
+    # so retain its explicit `--label` + `--create` contract.
+    command = [sb, action, "--local", "--project-dir", target_path]
     if action == "ensure":
-        command.append("--create")
+        command.extend(["--label", target.workspace_label, "--create"])
     # `ensure` must report the instance record (url, ports, instance name) the
     # same way the local path does; without --json the remote prints human text,
     # `_last_json` finds nothing, and callers get a bare {"ok": true} with no URL.

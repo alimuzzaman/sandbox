@@ -163,6 +163,28 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
     return False
 
 
+def _project_observation_route(args) -> tuple[bool, bool]:
+    """Classify the two explicit project-root lifecycle observation routes.
+
+    A remote observation is an outer controller request: the named remote owns
+    target resolution and the staged checkout is only an input to that control
+    plane.  A local observation is the inverse: the co-located CLI owns the
+    instance lookup, but the explicit staged root (not the controller cwd) is
+    authoritative.  Keeping this classification in one small seam prevents
+    the ordinary instance gate from accidentally handling either form.
+    """
+    observation = (
+        getattr(args, "cmd", None) in {"status", "logs"}
+        and bool(getattr(args, "project_dir", None))
+    )
+    return (
+        observation and bool(getattr(args, "remote", None))
+        and not bool(getattr(args, "local", False)),
+        observation and bool(getattr(args, "local", False))
+        and not bool(getattr(args, "remote", None)),
+    )
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -884,6 +906,34 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # A project-root status/logs request has two deliberately separate target
+    # domains.  The outer remote form is dispatched directly to the remote
+    # lifecycle adapter: it must not require a local sandbox config, registry
+    # record, cwd-selected instance, capability, migration, or generated-file
+    # write.  An explicit --instance is an inner local selector and therefore
+    # has no meaning on this outer route; reject it before any local helper can
+    # run (including the automatic migration check below).
+    outer_remote_observation, inner_local_observation = _project_observation_route(args)
+    if outer_remote_observation and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            f"{args.cmd} with --remote and --project-dir cannot combine --instance; "
+            "omit --instance because the remote workspace resolves its inner "
+            "instance, or use --local for a local project observation.",
+            2,
+        )
+
+    if outer_remote_observation:
+        # `cmd_status`/`cmd_logs` enter `_remote_lifecycle` before touching the
+        # local instance.  Passing an empty config is intentional: the remote
+        # target service loads the explicit project root itself, while the
+        # local global config may not exist on a controller-only machine.
+        args.resolved_instance = None
+        try:
+            COMMANDS[args.cmd]({}, args)
+        except RemoteJobAdmissionError as exc:
+            _dispatch_remote_admission_error(exc, args)
+        return
+
     # `setup` prepares the whole registry and is deliberately not an
     # instance-routing command. Refuse selectors before migration, config
     # loading, preflight, or any runtime handler can cause side effects.
@@ -921,7 +971,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         command_spec is not None
         and command_spec.predispatch_policy is not None
         and command_spec.predispatch_policy(args)
-    )
+    ) or inner_local_observation
     if args.cmd not in {"migrate", "home", "ensure"} and not predispatch_skip:
         from sandbox.commands.migrate import maybe_auto_migrate
         maybe_auto_migrate()
@@ -964,7 +1014,23 @@ Per-project (each plugin carries its own sandbox.config.json):
         for entry in _core().registry_all().values():
             if entry.get("kind") == "compose" and entry.get("instance"):
                 instances.setdefault(entry["instance"], entry)
-        chosen = explicit or _cwd_instance(label=cwd_label)
+        if inner_local_observation and not explicit:
+            # The controller may be running from a different checkout (the
+            # normal case for a staged remote workspace).  Resolve the inner
+            # instance from the explicit project root and its registry only;
+            # `_cwd_instance()` would silently inspect the controller cwd.
+            try:
+                selected = resolve_registered_instance(
+                    getattr(args, "project_dir", None), label=cwd_label,
+                )
+            except Exception as exc:
+                die(str(exc), 2)
+            chosen = selected.get("instance") if selected else None
+        else:
+            # An explicitly named instance (including an unknown name) keeps
+            # its normal precedence.  Do not replace an unknown selector with
+            # the project's default record.
+            chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
     PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
@@ -1015,6 +1081,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         and not explicit_instance
         and not remote_target
         and not allow_label_creation
+        and not inner_local_observation
     ):
         label_project_dir = getattr(args, "project_dir", None) or Path.cwd()
         try:
@@ -1035,6 +1102,14 @@ Per-project (each plugin carries its own sandbox.config.json):
         getattr(args, "local", False) or getattr(args, "remote", None) or getattr(args, "detach", False)
     )
     if chosen is None:
+        if inner_local_observation:
+            project_root = Path(getattr(args, "project_dir", "")).expanduser().resolve()
+            label_hint = f" with label '{cwd_label}'" if cwd_label else ""
+            die(
+                f"no sandbox instance for project directory {project_root}{label_hint}; "
+                "run `sb ensure --project-dir DIR` to create one.",
+                2,
+            )
         if args.cmd in INSTANCE_SCOPED and not durable_exec and not direct_instance_exec:
             # Distinguish "no instance at all for this cwd" from "cwd's
             # project owns MULTIPLE instances and neither --label nor a
@@ -1053,6 +1128,12 @@ Per-project (each plugin carries its own sandbox.config.json):
             die("no sandbox instance for this directory. cd into a registered "
                 "project, or run `sb init` / `sb ensure` to create one."
                 + (f"\nKnown instances: {_known}" if _known else ""))
+    elif inner_local_observation and explicit and chosen not in instances:
+        # A named selector remains an explicit selector even when the staged
+        # root owns a valid default.  Preserve the ordinary unknown-instance
+        # failure rather than silently switching to that default.
+        die(f"unknown instance '{chosen}'. "
+            f"Known: {', '.join(sorted(instances)) or '(none)'}.", 2)
     elif chosen not in instances and args.cmd not in PROJECT_ROUTED and not durable_exec and not direct_instance_exec:
         die(f"unknown instance '{chosen}'. "
             f"Known: {', '.join(sorted(instances)) or '(none)'}.")

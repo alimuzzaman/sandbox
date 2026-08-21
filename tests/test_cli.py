@@ -158,6 +158,195 @@ class TestResolutionGate(unittest.TestCase):
         auto_migrate.assert_not_called()
         finalize.assert_not_called()
 
+    def test_outer_remote_project_observation_skips_every_local_gate(self):
+        """A controller-only remote observation needs no local instance."""
+        import sandbox.cli as cli
+        import sandbox.commands.lifecycle as lifecycle
+        import sandbox.commands.migrate as migrate
+
+        remote_result = {"ok": True, "status": "ready"}
+        for command in ("status", "logs"):
+            argv = [
+                "sb", command, "--remote", "fixture-remote",
+                "--project-dir", "/srv/staged-project", "--workspace", "outer",
+            ]
+            with self.subTest(command=command), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(lifecycle, "_remote_lifecycle",
+                                      return_value=(remote_result if command == "status"
+                                                    else {"ok": True, "output": "ready\n"})) as remote, \
+                    mock.patch.object(cli, "load_config",
+                                      side_effect=AssertionError("local config loaded")), \
+                    mock.patch.object(cli, "resolve_instances",
+                                      side_effect=AssertionError("local registry loaded")), \
+                    mock.patch.object(cli, "_cwd_instance",
+                                      side_effect=AssertionError("controller cwd consulted")), \
+                    mock.patch.object(cli, "preflight_instance_capability",
+                                      side_effect=AssertionError("local capability checked")), \
+                    mock.patch.object(migrate, "maybe_auto_migrate",
+                                      side_effect=AssertionError("migration attempted")), \
+                    mock.patch.object(migrate, "finalize_auto_migration",
+                                      side_effect=AssertionError("finalization attempted")), \
+                    mock.patch.object(cli, "write_compose_files",
+                                      side_effect=AssertionError("compose written")), \
+                    mock.patch.object(cli, "write_env_for_compose",
+                                      side_effect=AssertionError("env written")):
+                cli.main()
+
+            remote.assert_called_once()
+            observed_args = remote.call_args.args[1]
+            self.assertIsNone(observed_args.resolved_instance)
+            self.assertEqual(observed_args.project_dir, "/srv/staged-project")
+
+    def test_project_routed_local_observation_uses_root_selector_and_skips_writes(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        for selector, record, expected in (
+            (None, {"instance": "inner-default"}, "inner-default"),
+            ("qa", {"instance": "inner-qa", "label": "qa"}, "inner-qa"),
+        ):
+            argv = ["sb", "status", "--local", "--project-dir", "/srv/staged-project"]
+            if selector:
+                argv.extend(["--label", selector])
+            observed = []
+            core = mock.Mock()
+            core.registry_all.return_value = {}
+            core.find_project_root.return_value = "/srv/staged-project"
+            core.registry_list_for_root.return_value = [record]
+            with self.subTest(selector=selector), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "COMMANDS", {
+                        "status": lambda _cfg, args: observed.append(args.resolved_instance),
+                    }), \
+                    mock.patch.object(cli, "load_config", return_value={}), \
+                    mock.patch.object(cli, "resolve_instances", return_value={expected: {}}), \
+                    mock.patch.object(cli, "_core", return_value=core), \
+                    mock.patch.object(cli, "resolve_registered_instance",
+                                      return_value=record) as resolve_root, \
+                    mock.patch.object(cli, "_cwd_instance",
+                                      side_effect=AssertionError("controller cwd consulted")), \
+                    mock.patch.object(cli, "write_compose_files") as compose, \
+                    mock.patch.object(cli, "write_env_for_compose") as env, \
+                    mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                    mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+                cli.main()
+
+            self.assertEqual(observed, [expected])
+            resolve_root.assert_called_once_with("/srv/staged-project", label=selector)
+            compose.assert_not_called()
+            env.assert_not_called()
+            auto_migrate.assert_not_called()
+            finalize.assert_not_called()
+
+    def test_project_routed_local_observation_preserves_known_and_unknown_explicit_instance(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        for instance, known, expected_error in (
+            ("known", {"known": {}}, None),
+            ("missing", {}, "unknown instance 'missing'"),
+        ):
+            observed = []
+            core = mock.Mock()
+            core.registry_all.return_value = {}
+            argv = [
+                "sb", "status", "--local", "--project-dir", "/srv/staged-project",
+                "--instance", instance,
+            ]
+            errors = StringIO()
+            with self.subTest(instance=instance), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "COMMANDS", {
+                        "status": lambda _cfg, args: observed.append(args.resolved_instance),
+                    }), \
+                    mock.patch.object(cli, "load_config", return_value={}), \
+                    mock.patch.object(cli, "resolve_instances", return_value=known), \
+                    mock.patch.object(cli, "_core", return_value=core), \
+                    mock.patch.object(cli, "resolve_registered_instance",
+                                      side_effect=AssertionError("explicit selector replaced")), \
+                    mock.patch.object(cli, "_cwd_instance",
+                                      side_effect=AssertionError("controller cwd consulted")), \
+                    mock.patch.object(cli, "write_compose_files"), \
+                    mock.patch.object(cli, "write_env_for_compose"), \
+                    mock.patch.object(migrate, "maybe_auto_migrate"), \
+                    mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                    redirect_stderr(errors):
+                if expected_error:
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main()
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn(expected_error, errors.getvalue())
+                else:
+                    cli.main()
+            if expected_error is None:
+                self.assertEqual(observed, [instance])
+
+    def test_project_routed_local_observation_refuses_ambiguity_and_missing_root(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        import sandbox_core
+        for failure, expected in (
+            (sandbox_core.ConfigError("project /srv/staged-project has multiple registered instances (default, qa); pass an exact --label"),
+             "multiple registered instances"),
+            (None, "no sandbox instance for project directory"),
+        ):
+            errors = StringIO()
+            core = mock.Mock()
+            core.registry_all.return_value = {}
+            resolve_kwargs = {"side_effect": failure} if failure is not None else {
+                "return_value": None,
+            }
+            with self.subTest(expected=expected), \
+                    mock.patch.object(sys, "argv", [
+                        "sb", "logs", "--local", "--project-dir", "/srv/staged-project",
+                    ]), \
+                    mock.patch.object(cli, "COMMANDS", {"logs": mock.Mock()}), \
+                    mock.patch.object(cli, "load_config", return_value={}), \
+                    mock.patch.object(cli, "resolve_instances", return_value={}), \
+                    mock.patch.object(cli, "_core", return_value=core), \
+                    mock.patch.object(cli, "resolve_registered_instance",
+                                      **resolve_kwargs), \
+                    mock.patch.object(cli, "_cwd_instance",
+                                      side_effect=AssertionError("controller cwd consulted")), \
+                    mock.patch.object(cli, "write_compose_files") as compose, \
+                    mock.patch.object(cli, "write_env_for_compose") as env, \
+                    mock.patch.object(migrate, "maybe_auto_migrate"), \
+                    mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                    redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(expected, errors.getvalue())
+            compose.assert_not_called()
+            env.assert_not_called()
+
+    def test_outer_remote_project_observation_rejects_instance_in_every_parser_position(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        for argv in (
+            ["sb", "--instance", "inner", "status", "--remote", "r", "--project-dir", "/srv/p"],
+            ["sb", "status", "--instance", "inner", "--remote", "r", "--project-dir", "/srv/p"],
+            ["sb", "--instance=inner", "logs", "--remote", "r", "--project-dir", "/srv/p"],
+        ):
+            errors = StringIO()
+            with self.subTest(argv=argv), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "load_config",
+                                      side_effect=AssertionError("local config loaded")), \
+                    mock.patch.object(cli, "COMMANDS", {
+                        "status": mock.Mock(), "logs": mock.Mock(),
+                    }), \
+                    mock.patch.object(migrate, "maybe_auto_migrate",
+                                      side_effect=AssertionError("migration attempted")), \
+                    redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("cannot combine --instance", errors.getvalue())
+
     def test_wordpress_only_legacy_commands_have_capability_gates(self):
         import sandbox.cli as cli
         self.assertEqual(cli.CLI_CAPABILITIES["wp"], "wordpress.cli")

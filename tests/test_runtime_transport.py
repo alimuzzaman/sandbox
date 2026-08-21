@@ -728,6 +728,48 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(forwarded["exit_code"], 1)
         self.assertEqual(forwarded["php_extensions"], document["php_extensions"])
 
+    def test_remote_observation_child_uses_staged_root_and_not_outer_label(self):
+        """Outer workspace labels must not select an inner instance."""
+        import sandbox.commands.lifecycle as commands
+        import sandbox.core._remote as remote
+
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="outer-workspace",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        for action, stdout in (
+            ("status", json.dumps({"ok": True, "status": "ready"})),
+            ("logs", "wp: ready\n"),
+        ):
+            args = types.SimpleNamespace(
+                remote="fixture-remote", local=False, project_dir="/tmp/project",
+                workspace="outer-workspace",
+            )
+            result = types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            with self.subTest(action=action), \
+                    mock.patch("sandbox.application.context.durable_job_dependencies",
+                               return_value={"target_service": service}), \
+                    mock.patch.object(remote, "remote_workspace_path",
+                                      return_value="/srv/staged-project"), \
+                    mock.patch.object(remote, "remote_sb_path",
+                                      return_value="/srv/sandbox/sb"), \
+                    mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+                observed = commands._remote_lifecycle({}, args, action)
+
+            command = ssh_run.call_args.args[1]
+            self.assertEqual(
+                command.split()[:5],
+                ["/srv/sandbox/sb", action, "--local", "--project-dir", "/srv/staged-project"],
+            )
+            self.assertNotIn("--workspace", command)
+            self.assertNotIn("--label", command)
+            if action == "status":
+                self.assertIn("--json", command)
+                self.assertEqual(observed["status"], "ready")
+            else:
+                self.assertEqual(observed["output"], stdout)
+
     def test_remote_ensure_requests_json_and_returns_instance_record(self):
         """Remote ensure must carry the instance record, not a bare ok flag.
 
@@ -759,6 +801,7 @@ class TestStatusJsonRedaction(unittest.TestCase):
             ensured = commands._remote_lifecycle({}, args, "ensure")
         command = ssh_run.call_args.args[1]
         self.assertIn("--json", command)
+        self.assertIn("--label default", command)
         self.assertIn("--create", command)
         self.assertEqual(ensured["url"], "http://localhost:8201")
         self.assertEqual(ensured["instance"], "fixture-master")

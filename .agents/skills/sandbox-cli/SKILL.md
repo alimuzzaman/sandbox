@@ -179,6 +179,16 @@ recursively selecting its named remote again. The controller's internal
 `--in-instance` execution then runs directly in the declared Compose service,
 so the project's pinned container image remains authoritative.
 
+Remote lifecycle observation has two label domains. The outer remote
+controller's `--workspace LABEL` selects the staged checkout; it must invoke
+the co-located CLI as `sb status|logs --local --project-dir STAGED_ROOT` and
+must not forward that workspace label as an inner `--label` (or `--workspace`).
+The co-located CLI resolves its registered default from the staged root, or
+requires an exact inner label when that root is ambiguous. `ensure` is the
+creation exception and keeps its explicit `--label LABEL --create` contract.
+An outer remote observation cannot combine `--instance`, which is an inner
+local selector; use `--local` when selecting a local project instance.
+
 Workspace list/status and migration controls are identity-based; never reconstruct a
 retired remote checkout as `--project-dir`. Review a migration plan before repeating
 it with `--plan-id ID --confirm`. Migration writes only the durable workspace index and

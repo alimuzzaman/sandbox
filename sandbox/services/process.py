@@ -117,7 +117,7 @@ class BoundedProcessRunner:
             return redacted
         bounded = _BoundedEdgeCapture(self.max_output)
         bounded.append(encoded)
-        return bounded.render().decode(errors="replace")
+        return _decode_bounded_output(bounded.render(), self.max_output)
 
     @staticmethod
     def _remaining(deadline: float | None) -> float | None:

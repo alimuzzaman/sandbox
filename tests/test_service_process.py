@@ -201,6 +201,14 @@ os._exit(0)
             self.assertTrue(value.endswith(tail))
             self.assertNotIn(secret, value)
 
+    def test_redaction_expansion_stays_within_utf8_bound(self):
+        runner = BoundedProcessRunner(max_output=128, secret_values=("x",))
+        rendered = runner._redact("x" + "😀" * 200 + "-tail")
+        self.assertLessEqual(len(rendered.encode("utf-8")), 128)
+        self.assertTrue(rendered.startswith("[REDACTED]"))
+        self.assertTrue(rendered.endswith("-tail"))
+        self.assertNotIn("x", rendered)
+
     def test_constructor_rejects_invalid_bounds_and_secret_types(self):
         with self.assertRaises(ValueError):
             BoundedProcessRunner(max_output=-1)

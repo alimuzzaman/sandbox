@@ -8,11 +8,18 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 
 ## 0. Immediate operational blockers (P0; before new remote harness work)
 
-- [ ] Add network-capacity admission evidence before remote workspace/test provisioning:
-  report usable subnet capacity (or a bounded unavailable state), fail before staging
-  when a network cannot be allocated, identify the owning resource class, and point to a
-  reviewed cleanup/capacity plan. Cover pool exhaustion with a deterministic regression;
-  do not infer capacity from disk space or network count alone. `[ops → prd 00 §5 P0]`
+- [x] Implement network-capacity admission before remote workspace/test provisioning:
+  report usable subnet capacity (or a bounded unavailable state), fail closed before
+  staging or network allocation when a network cannot be allocated, identify the owning
+  resource class, and never infer capacity from disk space or network count alone.
+  Deterministic exhaustion/collision regressions and safe refusal envelopes are landed in
+  `6763945`, `cb90aac`, and `7d40a1b`; this is source-complete, not live-host proof.
+  `[ops → prd 00 §5 P0]`
+- [ ] Gather live network-capacity admission evidence on the installed `scaleway-sandbox`
+  revision: capture a complete read-only IPAM/pool inventory with ownership attribution
+  and usable capacity (or a bounded unavailable/ambiguous result), and retain the
+  revision and a reviewed cleanup/capacity plan. This operational gate stays open; no
+  source tests or local output authorize remote provisioning or cleanup.
 - [ ] Complete the durable workspace index on `scaleway-sandbox` without guessing
   ownership. The current metadata-only plan exposes 32 unresolved legacy records and
   therefore correctly refuses a complete list. Preserve every legacy record, require

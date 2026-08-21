@@ -16,12 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from sandbox.commands import migrate
 from sandbox.workspaces.models import WorkspaceRecord
 from sandbox.workspaces.repository import WorkspaceIndexError, WorkspaceRepository
-from sandbox.resources.models import ResourceObservation
 from sandbox.workspaces.maintenance import base_maintenance_lock
 
 
@@ -224,7 +223,7 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         self.assertEqual(
             (new_base / legacy.relative_to(old_base)).read_bytes(), legacy_bytes)
 
-    def test_real_transfer_and_finalize_rebases_metadata_without_resource_lifecycle(self):
+    def test_real_transfer_and_finalize_rebases_metadata_and_protected_state(self):
         """The journal drives a real SQLite rebase; protected state is source-only."""
         fixture = self._real_relocation_fixture()
         old_base = fixture["old_base"]
@@ -235,52 +234,6 @@ class TestSpec009MigrationSafety(unittest.TestCase):
             name: path.read_bytes() for name, path in fixture["protected"].items()
         }
 
-        # This is deliberately a frozen typed *source simulation*, not a
-        # production inventory and not evidence that remote resources were
-        # counted. Its observation is called on both sides; lifecycle,
-        # reclaim, and release operations are intentionally never invoked.
-        inventory = (
-            ResourceObservation(
-                resource_id="sim-volume-db",
-                kind="volume",
-                locator="sim://volume/db-fixture",
-                display_name="simulated database volume",
-                owner_kind="workspace",
-                owner_id=fixture["record"].workspace_id,
-                classification="retained",
-                size_state="measured",
-                size_bytes=1024,
-                reclaimable_bytes=0,
-                references=("sim://container/wp",),
-                evidence=("source-simulation",),
-            ),
-            ResourceObservation(
-                resource_id="sim-network-fixture",
-                kind="network",
-                locator="sim://network/fixture",
-                display_name="simulated network",
-                owner_kind="workspace",
-                owner_id=fixture["record"].workspace_id,
-                classification="active",
-                size_state="not_measured",
-                size_bytes=None,
-                reclaimable_bytes=0,
-                evidence=("source-simulation",),
-                lifecycle="active",
-                active_references=(("containers", 1), ("jobs", 1)),
-                allocation_state="allocated",
-            ),
-        )
-        source_inventory_calls = {"observe": 0}
-        source_lifecycle = Mock(name="source_lifecycle")
-        source_reclaim = Mock(name="source_reclaim")
-        source_release = Mock(name="source_release")
-
-        def source_inventory():
-            source_inventory_calls["observe"] += 1
-            return inventory
-
-        before_inventory = source_inventory()
         with migrate._migration_lock(old_base, new_base):
             moved = migrate._transfer(
                 old_runtime, new_runtime, old_base, new_base, [],
@@ -299,12 +252,6 @@ class TestSpec009MigrationSafety(unittest.TestCase):
              patch.object(migrate, "compose") as compose:
             migrate._finalize({})
 
-        after_inventory = source_inventory()
-        self.assertEqual(after_inventory, before_inventory)
-        self.assertEqual(source_inventory_calls, {"observe": 2})
-        source_lifecycle.assert_not_called()
-        source_reclaim.assert_not_called()
-        source_release.assert_not_called()
         regenerate.assert_called_once_with({})
         resolve.assert_called_once_with({})
         running.assert_not_called()

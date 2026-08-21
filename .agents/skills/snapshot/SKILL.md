@@ -9,8 +9,8 @@ Save and restore DB + uploads state. The unlock for fast bug repro, QA
 loops, and any "I'm about to do something that might break things."
 
 ```bash
-./sb snapshot <name> [--force]
-./sb restore  <name>
+./sb snapshot <name> [--db-only] [--force]
+./sb restore  <name> [--yes]
 ./sb snapshots
 ```
 
@@ -58,7 +58,22 @@ Named snapshots are also take/restore/list/delete-able from **Tools → Sandbox
 Snapshots** in wp-admin — same format as the CLI (interchangeable). Take has an
 **overwrite** and a **DB only** toggle (db-only skips the uploads archive), and
 the list shows a **Type** column (full / db-only, from each snapshot's META).
+Restore and reset actions carry an explicit confirmation boolean through the
+nonce- and capability-checked AJAX proxy before the bridge accepts a job.
 Docker only (not herd).
+
+## Restore confirmation
+
+Named restore drops and recreates the current database. A non-interactive CLI
+call must include `--yes`; an interactive call prompts with a default-deny
+answer, so cancellation leaves the instance unchanged. The bridge equivalent
+requires `confirm=true` before it accepts the asynchronous job. The protected
+`@install` baseline is a reset target only: it is listed separately and cannot
+be restored or deleted as an ordinary named snapshot.
+
+MCP mutation responses are bounded metadata (`instance`, safe snapshot or
+operation identifier, mode/confirmation, and outcome). They do not return CLI
+command lines, host paths, credentials, database dumps, or archive contents.
 
 ---
 
@@ -93,7 +108,12 @@ sequence: `step1-fresh`, `step2-content-imported`, `step3-after-license`.
 
 ## Restore safety
 
-`restore` overwrites the live DB and uploads dir. Before running it:
+`restore` overwrites the live DB and uploads dir. Before running it, pass
+`--yes` in non-interactive contexts or answer the interactive prompt with an
+explicit `y`/`yes`; the default answer is cancellation. A DB-only snapshot
+does not contain `uploads.tgz`, so restoring one leaves existing uploads alone.
+
+Before running a restore:
 
 1. If you've made code changes you care about, they're safe — restore
    only touches DB + uploads, not plugin source. (Source is in your git

@@ -202,12 +202,13 @@ def _sandbox_autologin_value(value: object) -> str | None:
 
 
 def _document_has_sandbox_autologin(document: object) -> bool:
-    """Classify a raw top-level login URL without returning any of it.
+    """Classify raw input as a boolean without returning any of it.
 
     ``redact_structure`` deliberately turns malformed credential-bearing URLs
     into ``[REDACTION_FAILED]``.  Once that happens the sanitized document no
-    longer retains the query name, so record this boolean before redaction;
-    it is used only to decide whether to emit the derived status field.
+    longer retains the query name, so record this boolean before redaction.
+    It is used only to decide whether to emit the derived status field; a
+    producer-supplied status is never an input to this classification.
     """
     if not isinstance(document, Mapping):
         return False
@@ -250,9 +251,9 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
         # the public JSON can still report the derived redaction state.
         payload = {"login_url": REDACTION_FAILED}
     if isinstance(payload, dict):
-        # Never trust a producer-supplied status field.  Derive it from the
-        # sanitized login URL below, so a remote/native result cannot smuggle
-        # an unverified ``false`` into durable JSON output.
+        # Discard a producer-supplied status.  ``has_autologin`` is the
+        # boolean-only raw-input classification from above; neither the raw
+        # URL nor token is copied into this public document.
         payload.pop("login_url_redacted", None)
         revealed = ""
         if (reveal_login and isinstance(document, Mapping)):

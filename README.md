@@ -525,7 +525,9 @@ If `login_url` carries a `sandbox_autologin` parameter, the same JSON document
 also contains the derived `login_url_redacted` boolean. It remains `true` for
 placeholders, already-redacted input, unusable/non-loopback local URLs, and
 failed reveals; only a successful explicit `--reveal-login` produces `false`.
-The value is recomputed after redaction rather than trusting an input field.
+It derives from a boolean-only classification of raw input before redaction;
+any producer-supplied status is discarded, and the raw URL or token is never
+emitted.
 Remote reachability checks are read-only and strict: one non-multiplexed
 `ssh ... true` probe, bounded to ten seconds, with no stateful transport
 fallback.

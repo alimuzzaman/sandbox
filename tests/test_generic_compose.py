@@ -8,7 +8,7 @@ from unittest.mock import patch
 from sandbox.runtimes.base import RuntimeDependencies, OperationRequest
 from sandbox.services.process import BoundedProcessRunner
 from sandbox.services.process import ProcessResult
-from sandbox.runtimes.compose import ComposeAdapter
+from sandbox.runtimes.compose import ComposeAdapter, _bounded_exec_output
 
 
 class _Process:
@@ -214,6 +214,15 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertNotIn("stderr-head", result.data["stdout"])
             self.assertNotIn("stdout-head", result.data["stderr"])
             self.assertIsNone(registry.registry_get(str(root)))
+
+    def test_compose_output_bound_is_utf8_safe_for_split_multibyte_edges(self):
+        value = _bounded_exec_output(
+            "compose-head-" + "😀" * 262_200 + "-compose-tail"
+        )
+        self.assertLessEqual(len(value.encode("utf-8")), 1_048_576)
+        self.assertTrue(value.startswith("compose-head-"))
+        self.assertTrue(value.endswith("-compose-tail"))
+        self.assertIn("output truncated", value)
 
     def test_overlay_enforces_instance_resource_limits(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -183,6 +183,24 @@ os._exit(0)
         self.assertEqual(len(result.stdout), 128)
         self.assertEqual(result.stderr, "")
 
+    def test_unicode_edge_capture_stays_utf8_bounded_after_redaction(self):
+        secret = "unicode-process-secret-sentinel"
+        runner = BoundedProcessRunner(max_output=128, secret_values=(secret,))
+        script = (
+            "import sys; "
+            f"sys.stdout.write('stdout-head-' + '😀' * 200 + '-stdout-tail-{secret}'); "
+            f"sys.stderr.write('stderr-head-' + '🧪' * 200 + '-stderr-tail-{secret}')"
+        )
+        result = runner.run([sys.executable, "-c", script])
+        self.assertEqual(result.returncode, 0)
+        for value, head, tail in (
+                (result.stdout, "stdout-head-", "-stdout-tail-[REDACTED]"),
+                (result.stderr, "stderr-head-", "-stderr-tail-[REDACTED]")):
+            self.assertLessEqual(len(value.encode("utf-8")), 128)
+            self.assertTrue(value.startswith(head))
+            self.assertTrue(value.endswith(tail))
+            self.assertNotIn(secret, value)
+
     def test_constructor_rejects_invalid_bounds_and_secret_types(self):
         with self.assertRaises(ValueError):
             BoundedProcessRunner(max_output=-1)

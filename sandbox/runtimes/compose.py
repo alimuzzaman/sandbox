@@ -34,11 +34,13 @@ def _bounded_exec_output(value: object) -> str:
     if len(encoded) <= _MAX_EXEC_OUTPUT:
         return text
     if _MAX_EXEC_OUTPUT < len(marker):
-        return encoded[:_MAX_EXEC_OUTPUT].decode(errors="replace")
+        return encoded[:_MAX_EXEC_OUTPUT].decode(errors="ignore")
     available = _MAX_EXEC_OUTPUT - len(marker)
     head = available // 2
     tail = available - head
-    return (encoded[:head] + marker + encoded[-tail:]).decode(errors="replace")
+    # Ignore only incomplete UTF-8 endpoints; replacing them can expand the
+    # byte count beyond the declared bound.
+    return (encoded[:head] + marker + encoded[-tail:]).decode(errors="ignore")
 
 
 def _valid_port(value: object) -> bool:

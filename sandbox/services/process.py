@@ -66,6 +66,20 @@ class _BoundedEdgeCapture:
         return bytes(self._head) + self._marker + bytes(self._tail)
 
 
+def _decode_bounded_output(raw: bytes, limit: int) -> str:
+    """Decode captured bytes without expanding a split UTF-8 edge past bound."""
+    text = raw.decode(errors="replace")
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return text
+    # A raw edge cut can split a multibyte code point; ``replace`` expands
+    # that fragment. Re-bound the expanded representation and ignore only an
+    # incomplete endpoint so the returned string's encoded size stays exact.
+    bounded = _BoundedEdgeCapture(limit)
+    bounded.append(encoded)
+    return bounded.render().decode(errors="ignore")
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     argv: tuple[str, ...]
@@ -246,13 +260,13 @@ class BoundedProcessRunner:
             return ProcessResult(
                 command,
                 124,
-                self._redact(output["stdout"].render().decode(errors="replace")),
-                self._redact(output["stderr"].render().decode(errors="replace") + "\nprocess timed out"),
+                self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
+                self._redact(_decode_bounded_output(output["stderr"].render(), self.max_output) + "\nprocess timed out"),
             )
         process.stdout.close()
         process.stderr.close()
         return ProcessResult(
             command, process.returncode,
-            self._redact(output["stdout"].render().decode(errors="replace")),
-            self._redact(output["stderr"].render().decode(errors="replace")),
+            self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
+            self._redact(_decode_bounded_output(output["stderr"].render(), self.max_output)),
         )

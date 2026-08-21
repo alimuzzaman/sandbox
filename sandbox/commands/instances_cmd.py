@@ -241,8 +241,9 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
     """
     # Preserve this classification before redaction so malformed token-bearing
     # URLs that become ``[REDACTION_FAILED]`` still advertise that the emitted
-    # login URL is redacted.  It is a local boolean only; the raw value never
-    # reaches the output document.
+    # login URL is redacted.  It is a local boolean only; the classification
+    # never reaches the output document.  A validated raw URL is emitted only
+    # by the explicit reveal path below.
     has_autologin = _document_has_sandbox_autologin(document)
     payload = redact_structure(document)
     if has_autologin and payload == REDACTION_FAILED:

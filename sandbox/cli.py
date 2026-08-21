@@ -147,6 +147,22 @@ def _explicit_global_label(argv: list[str]) -> str | None:
     return None
 
 
+def _explicit_global_option(argv: list[str], option: str) -> bool:
+    """Return whether a top-level selector option appeared in ``argv``.
+
+    Setup has no passthrough payload, but keeping the ``--`` boundary here
+    makes this helper safe to reuse for commands whose child arguments may
+    contain a similarly named option.
+    """
+    prefix = f"{option}="
+    for token in argv:
+        if token == "--":
+            break
+        if token == option or token.startswith(prefix):
+            return True
+    return False
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -870,6 +886,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     if not args.cmd:
         p.print_help()
         return
+
+    # `setup` prepares the whole registry and is deliberately not an
+    # instance-routing command. Refuse selectors before migration, config
+    # loading, preflight, or any runtime handler can cause side effects.
+    if args.cmd == "setup" and (
+        _explicit_global_option(raw_argv, "--instance")
+        or _explicit_global_option(raw_argv, "--label")
+    ):
+        die(
+            "setup is registry-wide; use `sb apply --instance NAME` or "
+            "`sb ensure --project-dir DIR` for project-scoped setup.",
+            2,
+        )
 
     # Spec 009 upgrade path: before a normal command can touch the legacy
     # fallback, move it once when the selected base is genuinely empty.  The

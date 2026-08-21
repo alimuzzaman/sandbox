@@ -27,6 +27,41 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_registry_wide_setup_rejects_instance_and_label_selectors_before_side_effects(self):
+        import sandbox.cli as cli
+        import sandbox.commands.config_setup as config_setup
+        import sandbox.commands.lifecycle as lifecycle
+        import sandbox.commands.migrate as migrate
+
+        invocations = [
+            ["sb", "--instance", "demo", "setup"],
+            ["sb", "setup", "--instance", "demo"],
+            ["sb", "--label", "qa", "setup"],
+            ["sb", "setup", "--label", "qa"],
+        ]
+        for argv in invocations:
+            with self.subTest(argv=argv):
+                errors = StringIO()
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                        mock.patch.object(cli, "load_config") as load_config, \
+                        mock.patch.object(config_setup, "_docker_preflight") as docker_preflight, \
+                        mock.patch.object(lifecycle, "cmd_up") as cmd_up, \
+                        redirect_stderr(errors):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main()
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(
+                    errors.getvalue(),
+                    "error: setup is registry-wide; use `sb apply --instance NAME` "
+                    "or `sb ensure --project-dir DIR` for project-scoped setup.\n",
+                )
+                auto_migrate.assert_not_called()
+                load_config.assert_not_called()
+                docker_preflight.assert_not_called()
+                cmd_up.assert_not_called()
+
     def test_project_routed_ensure_skips_compose_and_env_predispatch_writes(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

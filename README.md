@@ -94,6 +94,11 @@ cd sandbox
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
 
+`sb setup` is registry-wide and cannot be targeted with `--instance` or the
+routing `--label`. To reconcile an existing named instance, use
+`sb apply --instance NAME`; to prepare one project, use the project-scoped
+`sb ensure --project-dir DIR`.
+
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
 opening local Sandbox documentation and read-only remote documentation folders.

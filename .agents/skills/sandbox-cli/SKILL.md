@@ -249,6 +249,11 @@ commands; WordPress projects receive WordPress commands.
 
 ## Generic Compose projects
 
+`sb setup` is registry-wide and cannot be targeted with `--instance` or the
+routing `--label`. To reconcile an existing named instance, use
+`sb apply --instance NAME`; to prepare one project, use the project-scoped
+`sb ensure --project-dir DIR`.
+
 ```bash
 sb init --type compose          # first-time project setup
 sb ensure                       # create/start/reconcile the local instance

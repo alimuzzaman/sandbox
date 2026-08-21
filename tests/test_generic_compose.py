@@ -136,7 +136,7 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertNotIn("stdout: beginning", result.data["stderr"])
             self.assertIsNone(registry.registry_get(str(root)))
 
-    def test_exec_failure_bounds_each_stream_and_retains_both_edges(self):
+    def test_exec_failure_bounds_custom_stream_and_retains_both_edges(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")

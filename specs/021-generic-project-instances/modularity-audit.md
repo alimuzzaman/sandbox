@@ -141,10 +141,11 @@ job, CI, resource, and other discriminators; it is not a claim that every such
 branch is runtime selection.
 
 The same test maintains a separate AST-derived `Counter` for the registered
-project kinds (`compose` and `wordpress`). It includes mapping-key accesses to
-`kind`, direct `kind` comparisons, and direct `project_kind` comparisons, and
-also covers comprehension filters. The approved Counter has **25** occurrences
-across the following 23 `(relative path, enclosing function)` locations; only
+project kinds (`compose` and `wordpress`). Its scope is only `if`, `ifexp`, and
+comprehension filters that inspect those kinds through `kind` or directly
+through `project_kind`; the broad inventory above remains separate. The
+approved Counter has **26** occurrences across the following 24 `(relative
+path, enclosing function)` locations; only
 `sandbox/application/runtime_service.py:invoke` and
 `sandbox/commands/instances_cmd.py:cmd_init` occur twice:
 

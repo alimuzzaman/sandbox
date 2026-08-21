@@ -309,6 +309,8 @@ class TestReadyEnsureInstallState(unittest.TestCase):
 
     def test_plugin_state_failure_cannot_persist_ready_registry_record(self):
         class FreshState(_State):
+            ConfigError = _project_core.ConfigError
+
             @staticmethod
             def registry_get(_root, label=None):
                 return None
@@ -319,9 +321,13 @@ class TestReadyEnsureInstallState(unittest.TestCase):
 
         state = FreshState()
         ports = {"wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025}
-        plugin_error = _project_core.ConfigError(
-            "managed plugin activate failed; unresolved declared plugin(s): elementor-pro"
-        )
+        plugin_calls = []
+
+        def plugin_failure(*_args, **kwargs):
+            plugin_calls.append(kwargs)
+            raise kwargs["error_factory"](
+                "managed plugin activate failed; unresolved declared plugin(s): elementor-pro"
+            )
 
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(_instances, "_core", return_value=state))
@@ -355,7 +361,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
             stack.enter_context(mock.patch.object(_lifecycle, "cmd_install"))
             stack.enter_context(mock.patch.object(_instances, "_wait_http", return_value=True))
             stack.enter_context(mock.patch.object(
-                _instances, "_wire_project_plugins", side_effect=plugin_error,
+                _instances, "_wire_project_plugins", side_effect=plugin_failure,
             ))
             stack.enter_context(mock.patch.object(_instances, "_wire_project_themes"))
             with self.assertRaises(_project_core.ConfigError):
@@ -364,6 +370,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         statuses = [call.kwargs.get("status") for call in state.registry_put.call_args_list]
         self.assertEqual(statuses, ["pending"])
         self.assertNotIn("ready", statuses)
+        self.assertEqual(plugin_calls[0]["error_factory"], _project_core.ConfigError)
 
 
 if __name__ == "__main__":

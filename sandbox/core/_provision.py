@@ -1022,6 +1022,7 @@ def _plugin_state_unresolved(
 
 def _plugin_configuration_error(
         actions: list[str], unresolved: list[str],
+        error_factory=RuntimeError,
     ) -> Exception:
     """Build a bounded, source-safe configuration error for plugin drift.
 
@@ -1039,11 +1040,7 @@ def _plugin_configuration_error(
         f"managed plugin {action_text} failed; unresolved declared plugin(s): "
         f"{rendered or 'unknown'}; retry after repairing the configured plugin state"
     )
-    # Keep the error in the same configuration-error channel used by ensure and
-    # the CLI.  Import lazily to avoid making the split core namespace import
-    # order-sensitive during test discovery.
-    import sandbox_core
-    return sandbox_core.ConfigError(message)
+    return error_factory(message)
 
 
 def _relax_perms_for_uid_switch(inst: str) -> None:
@@ -1078,7 +1075,9 @@ def _relax_perms_for_uid_switch(inst: str) -> None:
                 pass
 
 
-def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
+def _wire_project_plugins(
+        name: str, root: str, pconf: dict, *, error_factory=RuntimeError,
+    ) -> None:
     """Wire the project's plugins into the instance from the canonical resolved
     map (spec 010: `plugins_resolved` = {slug: {source, active, on_demand}}).
 
@@ -1301,6 +1300,7 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
         if unresolved:
             raise _plugin_configuration_error(
                 [action for action, _slugs in failed_commands], unresolved,
+                error_factory,
             )
 
     _write_local_sources(name, local_sources)

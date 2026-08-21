@@ -188,6 +188,9 @@ class PluginActivationOrderTests(unittest.TestCase):
     @patch("sandbox.core._provision.wp_dir")
     def test_missing_elementor_dependency_activation_fails_closed(
             self, wp_dir, plugins_dir, _gate, write_sources):
+        class SentinelPluginError(Exception):
+            pass
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pdir = root / "wp-content" / "plugins"
@@ -212,7 +215,7 @@ class PluginActivationOrderTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with patch("sandbox.core._provision.wpcli", side_effect=wpcli) as mocked:
-                with self.assertRaisesRegex(Exception, "elementor-pro"):
+                with self.assertRaisesRegex(SentinelPluginError, "elementor-pro"):
                     provision._wire_project_plugins("fixture", str(root), {
                         "plugins_resolved": {
                             "elementor-pro": {
@@ -220,7 +223,7 @@ class PluginActivationOrderTests(unittest.TestCase):
                                 "active": True,
                             },
                         },
-                    })
+                    }, error_factory=SentinelPluginError)
 
             write_sources.assert_not_called()
             activation = next(call for call in mocked.call_args_list
@@ -292,7 +295,7 @@ class PluginActivationOrderTests(unittest.TestCase):
                 return SimpleNamespace(returncode=1, stdout="", stderr="not installed")
 
             with patch("sandbox.core._provision.wpcli", side_effect=wpcli):
-                with self.assertRaisesRegex(Exception, "missing-plugin"):
+                with self.assertRaisesRegex(RuntimeError, "missing-plugin"):
                     provision._wire_project_plugins("fixture", str(root), {
                         "plugins_resolved": {
                             "missing-plugin": {
@@ -330,7 +333,7 @@ class PluginActivationOrderTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with patch("sandbox.core._provision.wpcli", side_effect=wpcli):
-                with self.assertRaisesRegex(Exception, "managed"):
+                with self.assertRaisesRegex(RuntimeError, "managed"):
                     provision._wire_project_plugins("fixture", str(root), {
                         "plugins_resolved": {
                             "managed": {

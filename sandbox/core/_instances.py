@@ -1178,7 +1178,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                         *(["nginx"] if server == "nginx" else []),
                         instance=name, check=False)
                 _wait_reachable(resolve_instances(cfg)[name])
-            _wire_project_plugins(name, root, pconf)
+            _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
             _wire_project_themes(name, root, pconf)
 
             # Spec 008: a newly provisioned instance gets both restore points only
@@ -1383,7 +1383,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
                 _remove_obsolete_builder_authoring_assets(name)
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
-        _wire_project_plugins(name, root, pconf)
+        _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
         _wire_project_themes(name, root, pconf)
 
         # 4. Multisite: convert if newly enabled. Skip if it was already a

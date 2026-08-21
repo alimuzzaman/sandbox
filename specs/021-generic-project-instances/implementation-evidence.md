@@ -27,6 +27,29 @@ Existing explicit kind/framework conflicts fail closed before any runtime call.
 The no-type WordPress init path retains its historical config scaffold, instance
 ensure, and optional test-harness behavior.
 
+The init parser and its generic-type predicate are now owned by
+`sandbox.commands.instances_cmd` through the built-in `CommandSpec` manifest;
+`init` is no longer part of `LEGACY_BRIDGE_COMMANDS`. The CLI composition root
+consults the resolved spec's predispatch policy before automatic migration,
+finalization, Compose generation, or environment generation, so the review-only
+generic path remains side-effect-free without duplicating generic type knowledge
+in `sandbox/cli.py`. The seven accepted type spellings and the no-type
+WordPress path are unchanged.
+
+Ownership-boundary verification:
+
+```text
+.cli-venv/bin/python -m unittest -v tests.test_command_composition tests.test_generic_init tests.test_modularity tests.test_cli
+Ran 63 tests — OK
+python3 -m py_compile sandbox/registry.py sandbox/commands/instances_cmd.py sandbox/commands/manifest.py sandbox/cli.py
+git diff --check
+```
+
+The requested `./sb selftest` replay completed 3,033 tests but remains a
+repository baseline failure outside this change: two existing architecture/skill
+mirror failures and two MCP transport errors because the MCP venv is not built.
+The generic-init and command-composition tests passed in that replay.
+
 Focused regression evidence:
 
 ```text

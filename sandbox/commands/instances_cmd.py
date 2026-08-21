@@ -28,7 +28,7 @@ from sandbox.core import (
     wpcli, _write_abilities_context,
 )
 
-from sandbox.registry import register
+from sandbox.registry import CommandSpec, register, register_specs
 from sandbox.application.context import (
     domain_service, ingress_service, runtime_service, wordpress_runtime_service,
 )
@@ -39,6 +39,50 @@ from sandbox.services.redaction import redact_structure, redact_text
 _GENERIC_INIT_TYPES = frozenset({
     "compose", "generic", "astro", "laravel", "php", "node", "javascript",
 })
+
+_GENERIC_INIT_CHOICES = (
+    "compose", "generic", "astro", "laravel", "php", "node", "javascript",
+)
+
+
+def _is_explicit_generic_init(args) -> bool:
+    """Return whether parsed args select the initialization-only generic path.
+
+    This predicate belongs to the instance command because it describes the
+    command's own parser contract. The CLI only asks the resolved
+    :class:`~sandbox.registry.CommandSpec` for its predispatch policy, keeping
+    generic type knowledge out of the compatibility composition root.
+    """
+    if getattr(args, "cmd", None) != "init":
+        return False
+    value = getattr(args, "type", None)
+    return isinstance(value, str) and value.strip().lower() in _GENERIC_INIT_TYPES
+
+
+def configure_init_parser(parser) -> None:
+    """Compose the feature-owned ``sb init`` parser beside its handler."""
+    parser.add_argument(
+        "--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="regenerate sandbox.config.json even if one already exists",
+    )
+    parser.add_argument(
+        "--no-test-harness", dest="no_test_harness", action="store_true",
+        help="skip provisioning the phpunit test harness",
+    )
+    parser.add_argument(
+        "--type", choices=_GENERIC_INIT_CHOICES,
+        help=("explicit generic project type; validate/write config only, "
+              "then run sb ensure"),
+    )
+
+
+def generic_init_predispatch_policy(args) -> bool:
+    """Tell the CLI to skip shared writes for explicit generic initialization."""
+    return _is_explicit_generic_init(args)
 
 
 def _generic_init_family(value: object) -> str:
@@ -721,9 +765,20 @@ def cmd_instances(cfg, args) -> None:
     print()
 
 register({
-    'init': cmd_init,
     'ensure': cmd_ensure,
     'instances': cmd_instances,
     'instance': cmd_instance,
     'focus': cmd_focus,
 })
+
+register_specs((CommandSpec(
+    name="init",
+    handler=cmd_init,
+    owner=__name__,
+    order=0,
+    configure=configure_init_parser,
+    scope="project",
+    predispatch_policy=generic_init_predispatch_policy,
+    help=("Initialize a project descriptor; explicit generic --type is "
+          "review-only (run sb ensure next)"),
+),))

@@ -18,6 +18,12 @@ class CommandSpec:
     required_capability: str | None = None
     destructive: bool = False
     legacy_id: str | None = None
+    # Optional command-owned policy consulted by the CLI before it performs
+    # shared migration/finalization/Compose/environment preparation. A true
+    # result means the command owns a side-effect-free predispatch path and
+    # the compatibility writers must be skipped for this invocation.
+    predispatch_policy: Callable | None = None
+    help: str | None = None
 
 
 class CommandRegistry:
@@ -76,7 +82,8 @@ def compose_missing_parsers(subparsers, specs: Iterable[CommandSpec]) -> tuple[s
     for spec in sorted(specs, key=lambda item: (item.order, item.name)):
         if spec.name in existing:
             continue
-        parser = subparsers.add_parser(spec.name)
+        parser_kwargs = {"help": spec.help} if spec.help else {}
+        parser = subparsers.add_parser(spec.name, **parser_kwargs)
         if spec.configure is not None:
             spec.configure(parser)
         for alias in spec.aliases:

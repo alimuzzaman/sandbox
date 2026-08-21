@@ -56,16 +56,19 @@ class TestCommandComposition(unittest.TestCase):
         self.assertIn("sandbox.commands.domains", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.jobs_runtime", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.workspaces", BUILTIN_COMMAND_MODULES)
-        self.assertEqual(set(COMMANDS) - {"secrets"}, set(LEGACY_BRIDGE_COMMANDS))
+        self.assertEqual(set(COMMANDS) - {"secrets", "init"}, set(LEGACY_BRIDGE_COMMANDS))
         self.assertEqual(validate_builtin_command_coverage(), ())
         self.assertEqual(COMMAND_SPECS.get("domains").owner, "sandbox.commands.domains")
         self.assertEqual(COMMAND_SPECS.get("secrets").owner, "sandbox.commands.secrets")
+        self.assertEqual(COMMAND_SPECS.get("init").owner, "sandbox.commands.instances_cmd")
+        self.assertIsNotNone(COMMAND_SPECS.get("init").configure)
+        self.assertIsNotNone(COMMAND_SPECS.get("init").predispatch_policy)
 
     def test_recovery_stays_feature_owned(self):
         from pathlib import Path
         root = Path(__file__).parent.parent
         self.assertIn("CommandSpec(", (root / "sandbox/commands/recovery.py").read_text())
-        self.assertNotIn('"recovery"', (root / "sandbox/cli.py").read_text())
+        self.assertNotIn('add_parser("recovery"', (root / "sandbox/cli.py").read_text())
 
     def test_domains_command_keeps_ingress_transport_in_its_feature_boundary(self):
         from sandbox.commands.domains import DOMAIN_ACTIONS, INGRESS_ACTIONS

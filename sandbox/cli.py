@@ -163,26 +163,6 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
     return False
 
 
-_GENERIC_INIT_TYPES = frozenset({
-    "compose", "generic", "astro", "laravel", "php", "node", "javascript",
-})
-
-
-def _is_explicit_generic_init(args) -> bool:
-    """Return whether parsed args select the initialization-only generic path.
-
-    This predicate intentionally keys off the parsed raw ``--type`` value,
-    rather than project config or the current instance.  It must be available
-    before config/migration dispatch so even a conflicting descriptor cannot
-    trigger automatic migration, Compose/env generation, or other runtime
-    preparation before ``cmd_init`` fails closed.
-    """
-    if getattr(args, "cmd", None) != "init":
-        return False
-    value = getattr(args, "type", None)
-    return isinstance(value, str) and value.strip().lower() in _GENERIC_INIT_TYPES
-
-
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -722,20 +702,6 @@ Per-project (each plugin carries its own sandbox.config.json):
     ensure_target.add_argument("--remote", help="ensure on a provisioned remote")
     en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
 
-    ini = sub.add_parser(
-        "init",
-        help="Initialize a project descriptor; explicit generic --type is review-only "
-             "(run sb ensure next)",
-    )
-    ini.add_argument("--project-dir", dest="project_dir", default=None,
-        help="project directory (default: current directory)")
-    ini.add_argument("--force", action="store_true",
-        help="regenerate sandbox.config.json even if one already exists")
-    ini.add_argument("--no-test-harness", dest="no_test_harness", action="store_true",
-        help="skip provisioning the phpunit test harness")
-    ini.add_argument("--type", choices=["compose", "generic", "astro", "laravel", "php", "node", "javascript"],
-        help="explicit generic project type; validate/write config only, then run sb ensure")
-
     ins = sub.add_parser("instance",
         help="Delete a sandbox instance (create via `./sb init` in a plugin dir)")
     ins.add_argument("action", choices=["delete"])
@@ -950,8 +916,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     # fallback, move it once when the selected base is genuinely empty.  The
     # helper re-execs this exact command after staging the data; explicit
     # migration/home commands keep their own dry-run and relocation semantics.
-    generic_init = _is_explicit_generic_init(args)
-    if args.cmd not in {"migrate", "home", "ensure"} and not generic_init:
+    command_spec = COMMAND_SPECS.get(args.cmd)
+    predispatch_skip = bool(
+        command_spec is not None
+        and command_spec.predispatch_policy is not None
+        and command_spec.predispatch_policy(args)
+    )
+    if args.cmd not in {"migrate", "home", "ensure"} and not predispatch_skip:
         from sandbox.commands.migrate import maybe_auto_migrate
         maybe_auto_migrate()
 
@@ -1108,7 +1079,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # resolution and capability preflight preserves the historical ordering
     # for commands that must refuse an invalid target first.
     auto_migration_finalized = False
-    if args.cmd != "ensure" and not generic_init:
+    if args.cmd != "ensure" and not predispatch_skip:
         from sandbox.commands.migrate import finalize_auto_migration
         auto_migration_finalized = finalize_auto_migration(cfg)
 
@@ -1124,7 +1095,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Compose or the legacy environment here would mutate persistent state
     # before it can refuse a stale live mount set.
     ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
-    if (not generic_init and not bounded_resource_status and
+    if (not predispatch_skip and not bounded_resource_status and
             args.cmd != "secrets" and not ensure_attestation_gate):
         if not auto_migration_finalized:
             write_compose_files(cfg)

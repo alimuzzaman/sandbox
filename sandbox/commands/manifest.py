@@ -55,7 +55,7 @@ LEGACY_BRIDGE_COMMANDS = {
     "logs": "lifecycle", "shell": "lifecycle", "install": "lifecycle",
     "smoke": "lifecycle", "doctor": "lifecycle", "update": "lifecycle",
     "open": "lifecycle",
-    "init": "instances_cmd", "ensure": "instances_cmd",
+    "ensure": "instances_cmd",
     "instances": "instances_cmd", "instance": "instances_cmd", "focus": "instances_cmd",
     "setup": "config_setup", "apply": "config_setup", "onboard": "config_setup",
     "global": "config_setup", "connect": "config_setup",

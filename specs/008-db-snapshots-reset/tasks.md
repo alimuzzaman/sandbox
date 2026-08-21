@@ -102,6 +102,10 @@ full/db snapshot"):
   install plus final plugin/theme wiring and proves the ready-instance fast path does
   not recapture. Seed-completion ordering and the required live new-instance proof
   remain open.
+  **PARTIAL 2026-08-21:** focused local onboarding coverage now proves the seed-order
+  gate: a successful import completes before exactly one forced refresh, while failed
+  or unselected seeds leave existing restore points untouched. The required live
+  new-instance proof remains open.
 - [x] T017 Remove a pre-existing `uploads.tgz` when `snapshot --db-only --force` overwrites a full snapshot, so its recorded mode and restore behavior remain DB-only per FR-001/FR-002. **DONE 2026-08-20 (source/tests): staged `_capture_snapshot` replacement removes stale archives; focused CLI-path and helper tests assert no `uploads.tgz`, `mode=db-only`, and no uploads archive restore.**
 - [x] T018 Make `./sb snapshots` and the dashboard bridge represent the protected `@install` baseline explicitly and separately from normal snapshots, without exposing it as an ordinary restore/delete target, per FR-003/FR-006. **DONE 2026-08-20 (source/tests): CLI and bridge list the baseline as a protected reset target; CLI, bridge, and dashboard capture/restore/delete paths reject reserved baseline labels before dispatch.**
 - [ ] T019 Dispatch the dashboard’s reset operation through `cmd_reset` with its explicit confirmed arguments and add focused coverage, per FR-008. **PARTIAL (2026-08-14): the wp-admin AJAX proxy now recognizes reset and forwards the UI's explicit boolean confirmation; the bridge refuses missing/false confirmation before job acceptance and passes `yes=true`, `confirm=true`, and `rebaseline=false` to `cmd_reset`. Focused template/bridge tests pass. Live wp-admin reset and polling remain unverified.**

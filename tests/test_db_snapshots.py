@@ -282,6 +282,82 @@ class TestSnapshotCapture(unittest.TestCase):
             self.assertIn("named", rendered)
 
 
+class TestSeedOnboardingSnapshotOrder(unittest.TestCase):
+    @staticmethod
+    def _args(seed=None):
+        return SimpleNamespace(
+            seed=seed,
+            plugins=[],
+            theme=None,
+            wp_debug=False,
+            minimal=True,
+        )
+
+    def test_successful_seed_import_precedes_one_forced_install_refresh(self):
+        """A selected seed becomes part of both post-onboarding restore points."""
+        from sandbox.commands import data
+        from sandbox.core import _misc
+
+        events = []
+
+        def import_seed(*_args, **_kwargs):
+            events.append("seed-import-complete")
+
+        def refresh_snapshots(*_args, **_kwargs):
+            events.append("snapshot-refresh")
+
+        with mock.patch("sandbox.commands.wp.cmd_seed", side_effect=import_seed) as seed, \
+                mock.patch.object(data, "capture_install_snapshots",
+                                   side_effect=refresh_snapshots) as capture:
+            _misc._onboard_instance({}, "fixture", self._args("demo"))
+
+        self.assertEqual(events, ["seed-import-complete", "snapshot-refresh"])
+        seed.assert_called_once()
+        capture.assert_called_once_with("fixture", force=True)
+
+    def test_failed_seed_import_preserves_existing_restore_points(self):
+        """A failed seed must not replace either already-captured restore point."""
+        from sandbox.commands import data
+        from sandbox.core import _misc
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prior = {}
+            for name in ("__install__", "install-baseline"):
+                target = root / name
+                target.mkdir()
+                for filename, contents in (("db.sql", f"prior {name}"),
+                                           ("META", f"name={name}\n")):
+                    path = target / filename
+                    path.write_text(contents)
+                    prior[path] = path.read_bytes()
+
+            def fail_import(*_args, **_kwargs):
+                raise RuntimeError("seed import failed")
+
+            with mock.patch("sandbox.commands.wp.cmd_seed", side_effect=fail_import), \
+                    mock.patch.object(data, "capture_install_snapshots") as capture, \
+                    mock.patch.object(_misc, "info"):
+                _misc._onboard_instance({}, "fixture", self._args("demo"))
+
+            capture.assert_not_called()
+            self.assertEqual(
+                {path: path.read_bytes() for path in prior},
+                prior,
+            )
+
+    def test_no_selected_seed_does_not_refresh_install_snapshots(self):
+        from sandbox.commands import data
+        from sandbox.core import _misc
+
+        with mock.patch("sandbox.commands.wp.cmd_seed") as seed, \
+                mock.patch.object(data, "capture_install_snapshots") as capture:
+            _misc._onboard_instance({}, "fixture", self._args())
+
+        seed.assert_not_called()
+        capture.assert_not_called()
+
+
 class TestRestoreConfirmation(unittest.TestCase):
     @staticmethod
     def _args(**kwargs):

@@ -75,27 +75,62 @@ class TestPublishedListenerCheck(unittest.TestCase):
         self.assertIn(_domains.PROXY_BIND_IP, check["label"])
 
     def test_dead_endpoint_names_the_owner_and_the_recovery(self):
+        from unittest import mock
+
         from sandbox.core import _domains
 
-        check = _domains._published_listener_check(
-            connector=lambda *_: False,
-            listeners={80: "nginx (127.0.0.1:80)", 443: "nginx (127.0.0.1:443)"},
-        )
+        with mock.patch.object(_domains, "_lo0_alias_present") as alias_present:
+            check = _domains._published_listener_check(
+                connector=lambda *_: False,
+                listeners={80: "nginx (127.0.0.1:80)", 443: "nginx (127.0.0.1:443)"},
+            )
+
         self.assertFalse(check["ok"])
         self.assertIn("nginx", check["label"])
         self.assertIn("domains use", check["hint"])
         self.assertIn("free the port", check["hint"])
+        alias_present.assert_not_called()
 
-    def test_unidentifiable_owner_still_reports_the_failure(self):
+    def test_ownerless_missing_alias_guides_setup_without_lifecycle_work(self):
+        from unittest import mock
+
         from sandbox.core import _domains
 
-        check = _domains._published_listener_check(
-            connector=lambda *_: False, listeners={},
-        )
+        with mock.patch.object(_domains, "_lo0_alias_present", return_value=False) as alias_present, \
+             mock.patch.object(_domains, "proxy_up") as proxy_up, \
+             mock.patch.object(_domains, "proxy_setup") as proxy_setup, \
+             mock.patch.object(_domains, "_ensure_url_proxy") as ensure_url_proxy:
+            check = _domains._published_listener_check(
+                connector=lambda *_: False, listeners={},
+            )
+
+        self.assertFalse(check["ok"])
+        self.assertIn("no other listener identified", check["label"])
+        self.assertIn(_domains.PROXY_BIND_IP, check["hint"])
+        self.assertIn("./sb domains setup", check["hint"])
+        self.assertNotIn("./sb domains up", check["hint"])
+        self.assertNotIn("free the port", check["hint"])
+        alias_present.assert_called_once_with()
+        proxy_up.assert_not_called()
+        proxy_setup.assert_not_called()
+        ensure_url_proxy.assert_not_called()
+
+    def test_ownerless_present_alias_guides_proxy_restart(self):
+        from unittest import mock
+
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_lo0_alias_present", return_value=True) as alias_present:
+            check = _domains._published_listener_check(
+                connector=lambda *_: False, listeners={},
+            )
+
         self.assertFalse(check["ok"])
         self.assertIn("no other listener identified", check["label"])
         self.assertIn("./sb domains up", check["hint"])
+        self.assertNotIn("./sb domains setup", check["hint"])
         self.assertNotIn("free the port", check["hint"])
+        alias_present.assert_called_once_with()
 
     def test_check_is_wired_into_doctor_when_the_proxy_runs(self):
         from unittest import mock

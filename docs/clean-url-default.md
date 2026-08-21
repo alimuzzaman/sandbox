@@ -59,8 +59,10 @@ merely that Docker reports a mapping. A container runtime can widen a published
 `127.0.0.1:80`). When doctor can identify the owner, it names the owning process and points
 at the two recoveries: free the port, or `./sb domains use <provider>` to route through the
 incumbent instead. If no owner is identified, doctor does not guess or advise stopping an
-arbitrary service; it points to the supported `./sb domains up` recovery and keeps the
-per-port fallback available.
+arbitrary service. It first checks the `127.0.0.77` loopback alias without changing it: a
+missing alias is a host prerequisite and points to `./sb domains setup`; when the alias is
+present, it points to the supported `./sb domains up` proxy recovery. The per-port fallback
+remains available in either case.
 
 ## Do not re-retire this path
 

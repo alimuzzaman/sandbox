@@ -392,6 +392,13 @@ def _published_listener_check(*, connector=None, listeners=None) -> dict:
         hint = ("free the port (stop the owning service), or select an adopted "
                 "ingress with `./sb domains use <provider>`; per-port URLs keep "
                 "working meanwhile")
+    elif not _lo0_alias_present():
+        # No listener is attributable, and the required loopback address is
+        # absent. The supported setup command restores that host prerequisite;
+        # doctor itself only observes it and must not start proxy lifecycle work.
+        hint = (f"the {PROXY_BIND_IP} loopback alias is missing; run "
+                "`./sb domains setup` to restore the required host setup; "
+                "per-port URLs keep working meanwhile")
     else:
         # There is no evidence that another process owns the endpoint, so do not
         # tell the operator to stop an arbitrary service.  The supported recovery

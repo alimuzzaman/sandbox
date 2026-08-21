@@ -23,9 +23,9 @@ The module and class forms are useful while iterating on one area; `discover -p`
 selects test files by their filename pattern. These commands run Sandbox's stdlib
 `unittest` suite from this checkout and do not provision a WordPress instance.
 
-`sb test` is a different command. Its `auto` and `integration` plugin modes
-provision and run the external WordPress/PHPUnit harness; `unit` runs plugin unit
-PHPUnit with the runner tools. Declared Compose modes and `matrix` are separate
+`sb test` is a different command. Its `auto` plugin mode resolves to `unit` or
+`integration`; `integration` provisions and runs the external WordPress/PHPUnit
+harness, while `unit` runs plugin unit PHPUnit with the runner tools. Declared Compose modes and `matrix` are separate
 execution paths; none run the Sandbox Python package tests.
 
 ## Layout
@@ -45,7 +45,7 @@ isolate state via the `SANDBOX_RUNTIME` env var.
 ## Plugin tests ("from the instance")
 
 For its `auto` and `integration` modes, `sb test --project-dir <plugin>`
-provisions the external WP phpunit harness and runs a plugin's suite inside the
+resolves a plugin test mode; `integration` provisions the external WP phpunit harness and runs a plugin's suite inside the
 instance — covered by the harness code, not this suite. `unit` runs plugin unit
 PHPUnit with the runner tools; declared Compose modes and `matrix` do not use this
 PHP harness. Two real harness bugs were fixed while exercising it: composer couldn't

@@ -25,6 +25,29 @@ def _probe_document(*, gd=True, version="2.3.3", php="8.3.10"):
 
 
 class PhpExtensionIntegrationTests(unittest.TestCase):
+    def _assert_named_db_volume_contract(self, docker, runtime_root, project_root):
+        """Prove the rendered Compose DB tier retains its named volume."""
+        with patch.object(docker, "RUNTIME_DIR", runtime_root):
+            compose_text = docker.render_compose(
+                "fixture",
+                {
+                    "server": "nginx",
+                    "wordpress_port": 8188,
+                    "db_port": 3318,
+                    "mailpit_port": 8125,
+                    "wordpress_image": "wordpress:php8.3-fpm",
+                    "wpcli_image": "wordpress:cli-php8.3",
+                    "mariadb_image": "mariadb:latest",
+                    "php_version": "8.3",
+                    "wp_version": None,
+                },
+                project_root / "plugins",
+            )
+        self.assertIn("\n  db:\n", compose_text)
+        self.assertIn(f"{runtime_root}/wp-fixture:/var/www/html", compose_text)
+        self.assertIn("      - db_data:/var/lib/mysql\n", compose_text)
+        self.assertIn("\nvolumes:\n  db_data:\n", compose_text)
+
     def test_instance_block_detaches_normalized_config_and_omission_is_legacy(self):
         import sandbox.core._instances as instances
         from sandbox.config.php_extensions import normalize_php_extensions
@@ -268,14 +291,17 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
     def test_apply_recreates_only_web_planes_and_preserves_db_uploads_contract(self):
         import sandbox.core._instances as instances
+        import sandbox.core._docker as docker
 
-        root = Path(tempfile.mkdtemp(prefix="sb-php-ext-apply-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        home = Path(tempfile.mkdtemp(prefix="sb-php-ext-apply-home-"))
+        root = home / "project"
+        root.mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
+        runtime_root = home / "runtime"
         sentinel_paths = {
             root / "project-sentinel.txt": b"project stays mounted\n",
-            root / "uploads-volume" / "sentinel.txt": b"uploads stay mounted\n",
-            root / "snapshots" / "fixture" / "install-baseline" / "db.sql": b"snapshot stays\n",
-            root / "database-volume" / "sentinel.txt": b"database stays\n",
+            runtime_root / "wp-fixture" / "wp-content" / "uploads" / "sentinel.txt": b"uploads stay mounted\n",
+            runtime_root / "snapshots" / "fixture" / "install-baseline" / "db.sql": b"snapshot stays\n",
         }
         for path, value in sentinel_paths.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,25 +375,49 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         def persist_extensions(target, _prepared):
             target.update(extension_identity)
 
-        with patch.object(instances, "_core", return_value=FakeCore()), \
-                patch.object(instances, "_local_yaml", return_value={"instances": {"fixture": {}}}), \
-                patch.object(instances, "_write_local_yaml", side_effect=lambda value: persisted.update(value)), \
-                patch.object(instances, "_build_instance_block", return_value=block), \
-                patch.object(instances, "prepare_php_extension_runtime", return_value=fake_prepared), \
-                patch.object(instances, "_persist_php_extension_runtime", side_effect=persist_extensions), \
-                patch.object(instances, "load_config", return_value={}), \
-                patch.object(instances, "write_compose_files"), \
-                patch.object(instances, "resolve_instances", return_value=resolved), \
-                patch.object(instances, "compose", side_effect=lambda *args, **kwargs: compose_calls.append((args, kwargs))), \
-                patch.object(instances, "_wait_reachable", return_value=True) as wait_reachable, \
-                patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}), \
-                patch.object(instances, "_wire_project_plugins"), \
-                patch.object(instances, "_wire_project_themes"), \
-                patch.object(instances, "_reconcile_wp_core", return_value={}), \
-                patch.object(instances, "site_url", return_value="http://localhost:8188"), \
-                patch.object(instances, "wp_dir", return_value=root / "wp"):
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"SANDBOX_HOME": str(home)}))
+            stack.enter_context(patch.object(instances, "RUNTIME_DIR", runtime_root))
+            stack.enter_context(patch.object(docker, "RUNTIME_DIR", runtime_root))
+            stack.enter_context(patch.object(instances, "_core", return_value=FakeCore()))
+            stack.enter_context(patch.object(
+                instances, "_local_yaml", return_value={"instances": {"fixture": {}}}))
+            stack.enter_context(patch.object(
+                instances, "_write_local_yaml",
+                side_effect=lambda value: persisted.update(value),
+            ))
+            stack.enter_context(patch.object(instances, "_build_instance_block", return_value=block))
+            stack.enter_context(patch.object(
+                instances, "prepare_php_extension_runtime", return_value=fake_prepared))
+            stack.enter_context(patch.object(
+                instances, "_persist_php_extension_runtime",
+                side_effect=persist_extensions,
+            ))
+            stack.enter_context(patch.object(instances, "load_config", return_value={}))
+            stack.enter_context(patch.object(instances, "write_compose_files"))
+            stack.enter_context(patch.object(instances, "resolve_instances", return_value=resolved))
+            stack.enter_context(patch.object(
+                instances, "compose",
+                side_effect=lambda *args, **kwargs: compose_calls.append((args, kwargs)),
+            ))
+            wait_reachable = stack.enter_context(
+                patch.object(instances, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(
+                instances, "php_extension_status", return_value={"drift": {"state": "ready"}}))
+            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
+            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(instances, "_reconcile_wp_core", return_value={}))
+            stack.enter_context(patch.object(
+                instances, "site_url", return_value="http://localhost:8188"))
+            for helper in (
+                "_write_mail_muplugin", "_write_dl_cache_muplugin",
+                "_write_ondemand_muplugin", "_write_host_runtime_muplugins",
+                "_write_licensing_muplugin", "_remove_obsolete_builder_authoring_assets",
+            ):
+                stack.enter_context(patch.object(instances, helper))
             result = instances.apply_config({}, str(root))
 
+        self._assert_named_db_volume_contract(docker, runtime_root, root)
         self.assertEqual(result["status"], "ready")
         self.assertTrue(compose_calls)
         argv = compose_calls[0][0]
@@ -376,8 +426,9 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertIn("nginx", argv)
         self.assertNotIn("db", argv)
         self.assertNotIn("mailpit", argv)
-        self.assertNotIn("down", argv)
-        self.assertNotIn("-v", argv)
+        for args, _kwargs in compose_calls:
+            self.assertNotIn("down", args)
+            self.assertNotIn("-v", args)
         # The in-place apply command owns only web services; DB and uploads
         # are never passed to a destructive volume-removal command.
         self.assertEqual(persisted["instances"]["fixture"], block)
@@ -614,14 +665,17 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         when the rollback itself cannot reconcile the prior web services.
         """
         import sandbox.core._instances as instances
+        import sandbox.core._docker as docker
 
         def run_case(*, rollback_ok, fail_before_runtime=False):
-            root = Path(tempfile.mkdtemp(prefix="sb-php-ext-rollback-"))
+            home = Path(tempfile.mkdtemp(prefix="sb-php-ext-rollback-home-"))
+            root = home / "project"
+            root.mkdir()
+            runtime_root = home / "runtime"
             sentinel_paths = {
                 root / "project-sentinel.txt": b"project rollback marker\n",
-                root / "uploads-volume" / "sentinel.txt": b"uploads rollback marker\n",
-                root / "snapshots" / "fixture" / "named" / "db.sql": b"snapshot rollback marker\n",
-                root / "database-volume" / "sentinel.txt": b"database rollback marker\n",
+                runtime_root / "wp-fixture" / "wp-content" / "uploads" / "sentinel.txt": b"uploads rollback marker\n",
+                runtime_root / "snapshots" / "fixture" / "named" / "db.sql": b"snapshot rollback marker\n",
             }
             for path, value in sentinel_paths.items():
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -741,6 +795,9 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 target.update(new_extension_identity)
             try:
                 with ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, {"SANDBOX_HOME": str(home)}))
+                    stack.enter_context(patch.object(instances, "RUNTIME_DIR", runtime_root))
+                    stack.enter_context(patch.object(docker, "RUNTIME_DIR", runtime_root))
                     stack.enter_context(patch.object(instances, "_core", return_value=FakeCore()))
                     stack.enter_context(patch.object(instances, "_local_yaml", side_effect=read_local))
                     stack.enter_context(patch.object(instances, "_write_local_yaml", side_effect=write_local))
@@ -770,8 +827,15 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch.object(instances, "_wire_project_themes"))
                     stack.enter_context(patch.object(instances, "_reconcile_wp_core", return_value={}))
                     stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
+                    stack.enter_context(patch.object(instances, "_write_mail_muplugin"))
+                    stack.enter_context(patch.object(instances, "_write_dl_cache_muplugin"))
+                    stack.enter_context(patch.object(instances, "_write_ondemand_muplugin"))
+                    stack.enter_context(patch.object(instances, "_write_host_runtime_muplugins"))
+                    stack.enter_context(patch.object(instances, "_write_licensing_muplugin"))
+                    stack.enter_context(patch.object(instances, "_remove_obsolete_builder_authoring_assets"))
                     with self.assertRaisesRegex(ValueError, "rollback=(succeeded|failed)") as raised:
                         instances.apply_config({}, str(root))
+                self._assert_named_db_volume_contract(docker, runtime_root, root)
                 self.assertEqual(current_local["value"], old_local)
                 self.assertEqual(compose_path.read_bytes(), old_compose)
                 self.assertTrue(writes)
@@ -793,12 +857,14 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     self.assertIn("rollback=succeeded", str(raised.exception))
                 else:
                     self.assertGreaterEqual(len(compose_calls), 2)
-                    for args, kwargs in compose_calls[:2]:
+                    for args, kwargs in compose_calls:
                         self.assertEqual(args[:4], ("up", "-d", "--no-deps", "--force-recreate"))
                         self.assertIn("wp", args)
                         self.assertIn("nginx", args)
                         self.assertNotIn("db", args)
                         self.assertNotIn("mailpit", args)
+                        self.assertNotIn("down", args)
+                        self.assertNotIn("-v", args)
                     expected = "rollback=succeeded" if rollback_ok else "rollback=failed"
                     self.assertIn(expected, str(raised.exception))
                     self.assertEqual(len(wait_reachable.call_args_list),
@@ -811,7 +877,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 if fail_before_runtime:
                     self.assertEqual(wait_reachable.call_args_list, [])
             finally:
-                __import__("shutil").rmtree(root, ignore_errors=True)
+                __import__("shutil").rmtree(home, ignore_errors=True)
 
         run_case(rollback_ok=True)
         run_case(rollback_ok=False)

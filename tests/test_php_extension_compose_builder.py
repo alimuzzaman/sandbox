@@ -77,14 +77,25 @@ class TestComposeExtensionBuilder(unittest.TestCase):
                 candidate = self._plan(**kwargs)
                 self.assertNotEqual(base.digest, candidate.digest)
 
-        apache = self._plan(
-            server="apache",
-            parent_image="wordpress:php8.3-apache",
-        )
+        import sandbox.php_extensions.compose_builder as builder
+        # The real validator requires an Apache-compatible parent image. Freeze
+        # its normalized parent output at the validator seam so this row varies
+        # only the canonical server field, not a second FR-055 input.
+        with patch.object(
+            builder,
+            "_official_wordpress_parent",
+            return_value=("wordpress:php8.3-fpm", None),
+        ) as parent_validator:
+            apache = self._plan(server="apache")
         self.assertNotEqual(base.digest, apache.digest)
         self.assertEqual(apache.web.provenance["server"], "apache")
+        self.assertEqual(apache.web.provenance["parent_images"],
+                         base.web.provenance["parent_images"])
+        self.assertEqual(apache.web.provenance["parent_digests"],
+                         base.web.provenance["parent_digests"])
+        parent_validator.assert_called_once_with(
+            "wordpress:php8.3-fpm", server="apache")
 
-        import sandbox.php_extensions.compose_builder as builder
         with patch.object(
             builder,
             "_recipe_catalog_digest",

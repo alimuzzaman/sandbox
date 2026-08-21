@@ -658,14 +658,16 @@ def _ensure_wp_cli_phar() -> None:
         pass  # fall back to the wpcli `run` container if the download fails
 
 
-def _wp_has_builtin_cli(instance: str) -> bool:
+def _wp_has_builtin_cli(instance: str, timeout: float | None = None) -> bool:
     """True if the instance's running `wp` container has the mounted wp binary.
     Doubles as a running-check (the exec fails if the container is down). Positive
     results are cached for the process; negatives are retried (transient downtime)."""
     if _WP_CLI_BUILTIN.get(instance):
         return True
-    r = compose("exec", "-T", "wp", "test", "-f", "/usr/local/bin/wp",
-                instance=instance, check=False, capture=True)
+    kwargs = {"instance": instance, "check": False, "capture": True}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    r = compose("exec", "-T", "wp", "test", "-f", "/usr/local/bin/wp", **kwargs)
     ok = getattr(r, "returncode", 1) == 0
     if ok:
         _WP_CLI_BUILTIN[instance] = True
@@ -695,7 +697,15 @@ def wpcli(args: list[str], instance: str,
     # work on every server tier (the exec-into-web path 500s with
     # "env: 'mysql': No such file or directory" on nginx).
     needs_db_client = bool(args) and args[0] == "db"
-    if _wp_has_builtin_cli(instance) and not needs_db_client:
+    # The web image does not carry the mysql client.  Avoid even the built-in
+    # CLI preflight for database commands so a bounded ``wp db`` call has one
+    # timeout and one execution path (the dedicated wpcli service).
+    if not needs_db_client:
+        cli_available = (_wp_has_builtin_cli(instance, timeout=timeout)
+                         if timeout is not None else _wp_has_builtin_cli(instance))
+    else:
+        cli_available = False
+    if cli_available:
         # exec into the running web container as www-data (uid 33) so files stay
         # www-data-owned and no --allow-root is needed; same PHP the site serves.
         return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,

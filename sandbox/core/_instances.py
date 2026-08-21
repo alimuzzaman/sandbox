@@ -625,6 +625,79 @@ def _instance_reachable(entry: dict) -> bool:
         return False
 
 
+_WP_INSTALL_STATE_INSTALLED = "installed"
+_WP_INSTALL_STATE_UNINSTALLED = "uninstalled"
+_WP_INSTALL_STATE_UNAVAILABLE = "unavailable"
+_WP_INSTALL_STATE_TIMEOUT = 15
+
+
+def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_TIMEOUT) -> str:
+    """Classify a bounded, read-only WordPress install-state observation.
+
+    A ready HTTP setup screen can be served before WordPress has initialized
+    its database.  ``wp core is-installed`` is the authoritative first probe.
+    Its only resume-safe negative result is an empty ``rc=1`` response followed
+    by a successful, bounded ``SELECT 1`` database probe.  Diagnostics from
+    either command are deliberately not interpreted: transport failures,
+    malformed results, timeouts, and any output make the state unavailable so
+    callers can fail closed before a write-capable ensure step.
+    """
+    try:
+        result = wpcli(
+            ["core", "is-installed"], instance=instance,
+            check=False, capture=True, timeout=timeout,
+        )
+    except Exception:
+        return _WP_INSTALL_STATE_UNAVAILABLE
+
+    returncode = getattr(result, "returncode", None)
+    stdout = getattr(result, "stdout", None)
+    stderr = getattr(result, "stderr", None)
+    if (isinstance(returncode, bool) or not isinstance(returncode, int) or
+            not isinstance(stdout, str) or not isinstance(stderr, str)):
+        return _WP_INSTALL_STATE_UNAVAILABLE
+    if returncode == 0:
+        return _WP_INSTALL_STATE_INSTALLED
+    if returncode != 1 or stdout or stderr:
+        return _WP_INSTALL_STATE_UNAVAILABLE
+
+    # An empty negative result is not enough to authorize installation: it can
+    # equally be an unavailable WP-CLI/database transport.  Route the query
+    # through ``wp db`` (which deliberately skips the web-container CLI
+    # preflight) and accept only a well-formed success result.
+    try:
+        database = wpcli(
+            ["db", "query", "SELECT 1", "--skip-column-names"],
+            instance=instance, check=False, capture=True, timeout=timeout,
+        )
+    except Exception:
+        return _WP_INSTALL_STATE_UNAVAILABLE
+    db_returncode = getattr(database, "returncode", None)
+    db_stdout = getattr(database, "stdout", None)
+    db_stderr = getattr(database, "stderr", None)
+    if (isinstance(db_returncode, bool) or not isinstance(db_returncode, int) or
+            not isinstance(db_stdout, str) or not isinstance(db_stderr, str) or
+            db_returncode != 0):
+        return _WP_INSTALL_STATE_UNAVAILABLE
+    return _WP_INSTALL_STATE_UNINSTALLED
+
+
+def _wp_install_state_refusal() -> dict:
+    """Return the typed, redacted, write-free install-state refusal envelope."""
+    return {
+        "ok": False,
+        "mutated": False,
+        "error": {
+            "code": "instance_install_state_unavailable",
+            "message": (
+                "could not verify whether WordPress is installed; retry "
+                "`sb ensure --project-dir <project-dir>` after the instance "
+                "is reachable"
+            ),
+        },
+    }
+
+
 def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
                           ports: dict, server: str) -> dict:
     """Construct the sandbox.local.yml `instances.<name>` block from a project's
@@ -938,6 +1011,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     # Docker observation is bounded but may still take several seconds.  Keep
     # it under this project's lock only: unrelated projects must not queue on
     # the global port-allocation lock before any port allocation is needed.
+    ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
         # The ready fast path must prove the live containers still expose the
@@ -955,6 +1029,15 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 )
                 if not attestation.get("ok"):
                     return _mount_attestation_refusal(attestation.get("code"))
+            # A reachable setup screen is not proof that WordPress completed
+            # its database install.  Observe install state while the project
+            # lock is held, before acquiring the global port-allocation lock:
+            # the latter may reconcile and persist ports, while an ambiguous
+            # install observation must return with ``mutated:false`` first.
+            if _instance_reachable(existing):
+                ready_install_state = _wp_core_install_state(existing["instance"])
+                if ready_install_state == _WP_INSTALL_STATE_UNAVAILABLE:
+                    return _wp_install_state_refusal()
 
     with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
         existing = sc.registry_get(root, label=label)
@@ -975,7 +1058,8 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             )
         )
         if existing and existing.get("status") == "ready" \
-                and not ports_changed and _instance_reachable(existing):
+                and not ports_changed and _instance_reachable(existing) \
+                and ready_install_state == _WP_INSTALL_STATE_INSTALLED:
             # Already up. If the config's version pins no longer match the
             # running instance's image, say so loudly — silently returning the
             # stale record would let tests run against a different WP/PHP than

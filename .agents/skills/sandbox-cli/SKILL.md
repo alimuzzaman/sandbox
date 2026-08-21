@@ -285,6 +285,16 @@ Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
 
+For a record already marked ready, `sb ensure` verifies install state after
+source-mount attestation and canonical reachability. A bounded
+`wp core is-installed` success keeps the idempotent fast path; only an empty
+`rc=1` followed by a successful `wp db query SELECT 1 --skip-column-names`
+resumes the existing install flow with current configuration and overrides.
+Any output, malformed result, timeout, transport or database failure returns
+the typed `instance_install_state_unavailable` envelope with `mutated:false`
+before write-capable reconciliation. An installed site's version-pin drift is
+still apply-only.
+
 ### Version pins in `sandbox.config.json`
 
 `wpVersion` is an EXACT build, not a version line: `"7.0"` means the 7.0.0

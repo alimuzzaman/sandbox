@@ -321,6 +321,15 @@ attested, `sb ensure` returns `instance_mount_drift` or
 state, then use the explicit `sb apply --project-dir .`; do not retry ensure as
 a substitute for reconciliation. Herd has no Docker mount attestation.
 
+After source-mount attestation and canonical reachability, `sb ensure` also
+runs a bounded, read-only `wp core is-installed` check. A successful result
+keeps the ready fast path. Only an empty `rc=1` result followed by a successful
+`wp db query SELECT 1 --skip-column-names` is treated as uninstalled and resumes
+the current install path (including version overrides). Any output, malformed
+result, timeout, transport or database failure returns the typed,
+write-free `instance_install_state_unavailable` envelope with `mutated:false`.
+An installed site's `wpVersion` drift remains an explicit `sb apply` concern.
+
 Apply moves WordPress core to match the config: a pin installs that exact build
 (upgrade or downgrade), no pin updates to the current release, and both run
 `wp core update-db` afterwards. Editing a pin without applying changes nothing

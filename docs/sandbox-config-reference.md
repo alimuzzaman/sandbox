@@ -711,6 +711,17 @@ Compose, environment, snapshots, or project wiring. Run the explicit
 `sb apply --project-dir <DIR>` / `apply_config` reconciliation after the state
 is available; Herd has no Docker source-bind attestation.
 
+After mount attestation and canonical HTTP reachability, `sb ensure` also runs
+a bounded, read-only `wp core is-installed` gate. A successful result keeps the
+ready fast path; only an empty `rc=1` result followed by a successful
+`wp db query SELECT 1 --skip-column-names` is treated as uninstalled and falls
+through to the existing install path using the current project configuration
+and per-call overrides. Any output, malformed result, timeout, transport or
+database failure returns `instance_install_state_unavailable` with
+`mutated:false`, before port, Compose, registry, or project-wiring writes. A
+changed `wpVersion` on an installed site remains apply-only; `ensure` only
+warns about drift.
+
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra
    bind-mounts).

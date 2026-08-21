@@ -402,7 +402,7 @@ def _published_listener_check(*, connector=None, listeners=None) -> dict:
     else:
         # There is no evidence that another process owns the endpoint, so do not
         # tell the operator to stop an arbitrary service.  The supported recovery
-        # asks the proxy lifecycle to restore its alias and published endpoints.
+        # asks the proxy lifecycle to restore its published endpoints.
         hint = ("no owning listener identified; run `./sb domains up` to restore "
                 "the proxy's published endpoints; per-port URLs keep working "
                 "meanwhile")

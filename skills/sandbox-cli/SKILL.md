@@ -148,6 +148,13 @@ streaming process pipes across SSH. The MCP workspace tools mirror `sb
 workspace create|list|status|reset|destroy`; remote `run_tests` returns a
 durable job ID for the same observation flow.
 
+Generic Compose `exec` failures preserve stdout and stderr as separate bounded
+streams (the beginning and end are retained when a stream exceeds the process
+runner limit) and carry the child `exit_code`. Human `sb exec` writes each stream
+to its matching local stream; `--json` emits one envelope containing both and
+exits with the child code. Nested remote controllers use the human path so the
+outer durable supervisor can retain the same separate evidence.
+
 ### Detached job observation is required
 
 `--detach` confirms only that a durable job was accepted. It is not evidence

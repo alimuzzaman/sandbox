@@ -412,6 +412,14 @@ disables a one-shot wait) to suit the agent's output verbosity; `--follow`
 converts a validated zero into its one-second polling wait. The complete sealed
 log remains available for later retrieval.
 
+Generic Compose `exec` failures retain stdout and stderr independently (each
+bounded to the process-runner limit, with both the beginning and end preserved
+when truncation is needed) and include the child `exit_code`. Human `sb exec`
+writes those streams to their matching local streams; `--json` returns one
+envelope containing both fields and exits with the child code. A nested remote
+controller uses the human path so the outer durable supervisor persists the
+same separate evidence.
+
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
   --request-id node-unit-tests-1 -- npm test

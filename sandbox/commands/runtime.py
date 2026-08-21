@@ -124,6 +124,35 @@ def configure_exec_parser(parser) -> None:
     parser.add_argument("--in-instance", action="store_true", help=argparse.SUPPRESS)
 
 
+def _exec_exit_code(data: dict) -> int:
+    """Return a safe child exit status from an operation envelope."""
+    value = data.get("exit_code")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 1
+
+
+def _emit_exec_result(data: dict, *, as_json: bool) -> None:
+    """Render one Compose exec result while preserving its child streams.
+
+    Human output keeps stdout and stderr separate so a durable parent can
+    retain the same evidence. JSON callers receive one machine-readable
+    envelope; the streams remain fields in that envelope to preserve the
+    contract that stdout contains one document.
+    """
+    if as_json:
+        print(json.dumps(data))
+    else:
+        stdout = data.get("stdout", data.get("output", ""))
+        stderr = data.get("stderr", "")
+        if isinstance(stdout, str):
+            print(stdout, end="")
+        if isinstance(stderr, str):
+            print(stderr, file=sys.stderr, end="")
+    if not data.get("ok", True):
+        raise SystemExit(_exec_exit_code(data))
+
+
 def configure_guide_parser(parser) -> None:
     parser.description = "Show the CLI-first workflow for a project runtime."
     parser.add_argument("--project-dir", default=None,
@@ -285,10 +314,7 @@ def cmd_exec(cfg, args) -> None:
     if isinstance(result, OperationError):
         die(result.message)
     data = {"ok": result.ok, "operation": result.operation, **dict(result.data)}
-    if getattr(args, "json", False):
-        print(json.dumps(data))
-        return
-    print(data.get("output", ""), end="")
+    _emit_exec_result(data, as_json=bool(getattr(args, "json", False)))
 
 
 def cmd_guide(_cfg, args) -> None:

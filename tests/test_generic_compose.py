@@ -110,20 +110,58 @@ class TestGenericComposeAdapter(unittest.TestCase):
                     "argv": ["pnpm", "test:fast"], "timeout": 0,
                 }))
 
-    def test_exec_failure_keeps_bounded_compose_diagnostics(self):
+    def test_exec_failure_returns_separate_bounded_compose_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
-            adapter, process, _, _ = self.make_adapter(root)
+            adapter, process, _, registry = self.make_adapter(root)
 
             def fail(argv, *, cwd=None, env=None, timeout=None):
                 if "config" in argv:
                     return ProcessResult(tuple(argv), 0, "web\n", "")
-                return ProcessResult(tuple(argv), 1, "container is not running\n", "exec rejected\n")
+                return ProcessResult(tuple(argv), 23,
+                                     "stdout: beginning\n" + "x" * 5000 + "\nstdout: ending\n",
+                                     "stderr: beginning\n" + "y" * 5000 + "\nstderr: ending\n")
 
             process.run = fail
-            with self.assertRaisesRegex(RuntimeError, "(?s)exec rejected.*container is not running"):
-                adapter.invoke(OperationRequest(str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            result = adapter.invoke(OperationRequest(
+                str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["exit_code"], 23)
+            self.assertEqual(result.data["stdout"],
+                             "stdout: beginning\n" + "x" * 5000 + "\nstdout: ending\n")
+            self.assertEqual(result.data["stderr"],
+                             "stderr: beginning\n" + "y" * 5000 + "\nstderr: ending\n")
+            self.assertNotIn("stderr: beginning", result.data["stdout"])
+            self.assertNotIn("stdout: beginning", result.data["stderr"])
+            self.assertIsNone(registry.registry_get(str(root)))
+
+    def test_exec_failure_bounds_each_stream_and_retains_both_edges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+
+            def fail(argv, *, cwd=None, env=None, timeout=None):
+                if "config" in argv:
+                    return ProcessResult(tuple(argv), 0, "web\n", "")
+                return ProcessResult(tuple(argv), 17,
+                                     "stdout-head\n" + "s" * 1_100_000 + "\nstdout-tail\n",
+                                     "stderr-head\n" + "e" * 1_100_000 + "\nstderr-tail\n")
+
+            process.run = fail
+            result = adapter.invoke(OperationRequest(
+                str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            for stream, head, tail in (
+                    ("stdout", "stdout-head\n", "\nstdout-tail\n"),
+                    ("stderr", "stderr-head\n", "\nstderr-tail\n")):
+                value = result.data[stream]
+                self.assertLessEqual(len(value), 1_048_576)
+                self.assertTrue(value.startswith(head))
+                self.assertTrue(value.endswith(tail))
+                self.assertIn("output truncated", value)
+            self.assertEqual(result.data["exit_code"], 17)
+            self.assertIsNone(registry.registry_get(str(root)))
 
     def test_overlay_enforces_instance_resource_limits(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,6 +15,27 @@ from .base import OperationRequest, OperationResult, RuntimeDependencies
 _SAFE = re.compile(r"[^a-z0-9-]+")
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 
+# ``BoundedProcessRunner`` already enforces this limit for the normal
+# dependency used by the adapter.  Keep the limit at this seam as well so a
+# custom process dependency cannot turn an adapter result (or a durable job
+# receipt carrying it) into an unbounded payload.  Preserve both edges when a
+# caller supplies more than the bounded amount: the beginning usually carries
+# the command/setup context while the end usually carries the assertion and
+# exit summary that explains a failed test.
+_MAX_EXEC_OUTPUT = 1_048_576
+_EXEC_OUTPUT_TRUNCATION_MARKER = "\n...[output truncated]...\n"
+
+
+def _bounded_exec_output(value: object) -> str:
+    """Return one bounded, edge-preserving execution stream."""
+    text = value if isinstance(value, str) else str(value or "")
+    if len(text) <= _MAX_EXEC_OUTPUT:
+        return text
+    available = _MAX_EXEC_OUTPUT - len(_EXEC_OUTPUT_TRUNCATION_MARKER)
+    head = available // 2
+    tail = available - head
+    return text[:head] + _EXEC_OUTPUT_TRUNCATION_MARKER + text[-tail:]
+
 
 def _valid_port(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
@@ -220,11 +241,33 @@ class ComposeAdapter:
             timeout=self._operation_timeout(request) if op == "exec" else self.timeout,
         )
         if result.returncode != 0:
-            # Docker Compose occasionally writes useful execution diagnostics to
-            # stdout (not stderr). Preserve a bounded combined tail so a
-            # durable remote receipt can distinguish a stopped container from
-            # a missing executable without attaching child stdio over SSH.
-            detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())[-4096:]
+            if op == "exec":
+                # Keep execution failures in the transport-neutral result
+                # contract.  Raising here used to merge stdout and stderr into
+                # a 4 KiB exception tail; the caller (and, for remote runs,
+                # the outer durable supervisor) could no longer distinguish
+                # test output from Compose diagnostics or recover the child
+                # exit status.  A failed exec is observational and therefore
+                # must not write a ready/stopped registry record.
+                return OperationResult(
+                    False, op, descriptor["root"], "compose",
+                    {
+                        "instance": runtime_id,
+                        "root": descriptor["root"],
+                        "label": request.label,
+                        "kind": "compose",
+                        "adapter": self.adapter_id,
+                        "service": service,
+                        "http_port": http_port,
+                        "url": f"http://127.0.0.1:{http_port}",
+                        "status": "error",
+                        "stdout": _bounded_exec_output(result.stdout),
+                        "stderr": _bounded_exec_output(result.stderr),
+                        "exit_code": int(result.returncode),
+                        "reason": {"code": "compose_exec_failed"},
+                    },
+                )
+            detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())
             raise RuntimeError(detail or f"Compose {op} failed")
         data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "destroy"} else "ready", output=result.stdout[-10000:])
         if op == "destroy":

@@ -7,11 +7,25 @@ only — no extra deps (the `.cli-venv` already has PyYAML).
 ## Run
 
 ```sh
-./sb selftest                                   # the friendly wrapper
-.cli-venv/bin/python -m unittest discover -s tests -v   # direct
+./sb selftest                                      # the friendly wrapper
+.cli-venv/bin/python -m unittest discover -s tests -v # the full Python suite
 ```
 
-66 tests, typically < 4s.
+For a focused Python run, target a module, class, method, or filename pattern:
+
+```sh
+.cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate -v
+.cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate.test_test_command_lists_explicit_modes -v
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_feedback.py' -v
+```
+
+The module and class forms are useful while iterating on one area; `discover -p`
+selects test files by their filename pattern. These commands run Sandbox's stdlib
+`unittest` suite from this checkout and do not provision a WordPress instance.
+
+`sb test` is a different command: it provisions and runs a plugin's external
+WordPress/PHPUnit harness. Use it from a plugin project when you want that plugin's
+PHP tests, not when you want to test the Sandbox Python package.
 
 ## Layout
 

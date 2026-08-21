@@ -619,6 +619,15 @@ and pass `--instance NAME`. Most of the remaining commands accept
 `--instance <name>` (or `--project-dir <dir>` for `ensure`/`test`/`init`) to
 target a specific project.
 
+`sandbox test` / `./sb test` is the plugin-facing WordPress/PHPUnit harness; it
+does not run Sandbox's own Python tests. To test this checkout, use the stdlib
+`unittest` commands in [`tests/README.md`](tests/README.md), for example:
+
+```bash
+.cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate -v
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_feedback.py' -v
+```
+
 ---
 
 ## Configuration

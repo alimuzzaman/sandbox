@@ -389,6 +389,17 @@ falls back to downloading that configured slug from the registry. Re-provisionin
 also reconciles declared plugins from active to inactive or on-demand by
 deactivating that declared slug; unrelated user-installed plugins are untouched.
 
+Every managed `plugin install`, `plugin activate`, and `plugin deactivate` batch
+is captured with its exit status. A non-zero result is tolerated only when a
+bounded follow-up `plugin list --format=json` observation proves every declared
+slug is already in its requested final state (including a harmless idempotent
+no-op). If any declared slug is missing or has the wrong active/inactive state,
+provisioning fails with a sanitized configuration error that names the
+unresolved slugs and does not persist a `ready` registry record; the pending
+identity remains available for a later retry. This prevents a missing dependency
+such as Elementor from being reported as a ready instance after an activation
+batch partially failed.
+
 The generated Apache and Nginx/FPM stacks also reconcile ownership of
 `wp-content/plugins` during bootstrap. This keeps the WordPress web user able to
 create a new plugin directory for ordinary wp.org and wp-admin installs on the

@@ -940,6 +940,108 @@ def _plugin_activation_order(pdir: Path, slugs: list[str]) -> list[str]:
     return ordered
 
 
+def _plugin_state_snapshot(instance: str, slugs: list[str]) -> dict[str, str] | None:
+    """Read the live state of declared plugins after a managed mutation.
+
+    The provisioning path intentionally uses ``check=False`` for aggregate
+    WP-CLI commands: WordPress may report a non-zero result when one member of
+    a batch is already in the requested state.  A non-zero result is only
+    recoverable when this bounded, read-only observation proves every declared
+    plugin is in its final requested state.  Treat any transport, exit-status,
+    or JSON-shape ambiguity as unavailable rather than guessing.
+    """
+    if not slugs:
+        return {}
+    try:
+        result = wpcli(
+            [
+                "plugin", "list", *slugs,
+                "--fields=name,status", "--format=json", "--skip-plugins",
+            ],
+            instance=instance, check=False, capture=True,
+        )
+    except Exception:
+        return None
+    returncode = getattr(result, "returncode", None)
+    if returncode not in (None, 0):
+        return None
+    output = getattr(result, "stdout", "")
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    if not isinstance(output, str) or not output.strip():
+        return None
+    try:
+        rows = json.loads(output)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    wanted = set(slugs)
+    states: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        slug = row.get("name")
+        status = row.get("status")
+        if not isinstance(slug, str) or slug not in wanted:
+            continue
+        if not isinstance(status, str) or not status.strip():
+            return None
+        states[slug] = status.strip().lower()
+    return states
+
+
+def _plugin_state_unresolved(
+        desired: dict[str, str], states: dict[str, str] | None,
+        fallback: list[str],
+    ) -> list[str]:
+    """Return declared slugs whose observed postcondition is not satisfied."""
+    if states is None:
+        return sorted(set(desired) or set(fallback))
+    unresolved: list[str] = []
+    for slug, wanted in desired.items():
+        status = states.get(slug)
+        if wanted == "installed":
+            # ``plugin list`` includes installed normal, network, and special
+            # plugin states.  Presence is the only postcondition install needs;
+            # activation/deactivation commands validate their exact state below.
+            if not status:
+                unresolved.append(slug)
+        elif wanted == "active":
+            if status not in {"active", "active-network"}:
+                unresolved.append(slug)
+        elif wanted == "inactive":
+            if status != "inactive":
+                unresolved.append(slug)
+    return unresolved
+
+
+def _plugin_configuration_error(
+        actions: list[str], unresolved: list[str],
+    ) -> Exception:
+    """Build a bounded, source-safe configuration error for plugin drift.
+
+    Command output is deliberately excluded: WP-CLI errors can contain local
+    paths, URLs, or other environment details.  The slugs have already passed
+    the canonical config slug validator, and the bounded list is enough to
+    identify the repair target without leaking command output.
+    """
+    names = sorted(set(unresolved))
+    rendered = ", ".join(names)
+    if len(rendered) > 400:
+        rendered = rendered[:397].rstrip(", ") + "..."
+    action_text = ", ".join(sorted(set(actions))) or "state reconciliation"
+    message = (
+        f"managed plugin {action_text} failed; unresolved declared plugin(s): "
+        f"{rendered or 'unknown'}; retry after repairing the configured plugin state"
+    )
+    # Keep the error in the same configuration-error channel used by ensure and
+    # the CLI.  Import lazily to avoid making the split core namespace import
+    # order-sensitive during test discovery.
+    import sandbox_core
+    return sandbox_core.ConfigError(message)
+
+
 def _relax_perms_for_uid_switch(inst: str) -> None:
     """Make the instance's WP files readable+writable across web-server uids.
 
@@ -1018,9 +1120,34 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
 
     activate: list[str] = []            # slugs to activate (symlinked or present)
     org_install_active, org_install_inactive = [], []
-    zip_install_active, zip_install_inactive = [], []
+    # Keep the authoritative slug alongside each zip URL.  The URL is a
+    # command argument, while the slug is what the postcondition query proves.
+    zip_install_active: list[tuple[str, str]] = []
+    zip_install_inactive: list[tuple[str, str]] = []
     local_sources: dict[str, dict] = {}  # slug -> {path|zip} for the mu-plugin
     deactivate: list[str] = []            # configured slugs that must no longer run
+    desired_state: dict[str, str] = {}
+    failed_commands: list[tuple[str, list[str]]] = []
+
+    def _run_plugin_command(args: list[str], slugs: list[str], action: str) -> None:
+        """Run one aggregate managed command and retain only its safe outcome."""
+        try:
+            result = wpcli(args, instance=name, check=False, capture=True)
+        except Exception:
+            # A transport/launcher exception is equivalent to a non-zero
+            # aggregate command.  Continue the bounded reconciliation so the
+            # final live-state proof can distinguish a recoverable no-op from
+            # an unresolved declaration, without exposing exception text.
+            failed_commands.append((action, list(slugs)))
+            return
+        returncode = getattr(result, "returncode", None)
+        # Real wpcli results always expose an integer returncode.  ``None`` and
+        # non-result test doubles represent a successful legacy fixture; any
+        # actual integer other than zero is a failed state command.
+        if isinstance(returncode, bool):
+            returncode = int(returncode)
+        if isinstance(returncode, int) and returncode != 0:
+            failed_commands.append((action, list(slugs)))
 
     for slug, e in resolved.items():
         src = e.get("source") or {"kind": "org", "value": None}
@@ -1041,6 +1168,7 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
                 local_sources[slug] = {"zip": src["value"]}
             if (pdir / slug).exists():
                 deactivate.append(slug)
+                desired_state[slug] = "inactive"
             continue  # org on-demand: nothing to register (WP pulls org on demand)
         if kind == "path":
             p = _abs(src["value"])
@@ -1052,8 +1180,10 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             local_sources[slug] = {"path": str(p)}  # also serve local on re-install
             if e.get("active"):
                 activate.append(slug)
+                desired_state[slug] = "active"
             else:
                 deactivate.append(slug)
+                desired_state[slug] = "inactive"
         elif kind == "zip":
             if (pdir / slug).exists():
                 # Already present (prior provision / bundled). Reinstalling only
@@ -1061,24 +1191,31 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
                 # installed." noise — skip it, same as org and theme entries.
                 if e.get("active"):
                     activate.append(slug)
+                    desired_state[slug] = "active"
                 else:
                     deactivate.append(slug)
+                    desired_state[slug] = "inactive"
             else:
                 (zip_install_active if e.get("active")
-                 else zip_install_inactive).append(src["value"])
+                 else zip_install_inactive).append((slug, src["value"]))
                 if e.get("active"):
                     activate.append(slug)
+                    desired_state[slug] = "active"
                 else:
                     deactivate.append(slug)
+                    desired_state[slug] = "inactive"
         else:  # org
             if (pdir / slug).exists():
                 if e.get("active"):
                     activate.append(slug)
+                    desired_state[slug] = "active"
                 else:
                     deactivate.append(slug)
+                    desired_state[slug] = "inactive"
             else:
                 (org_install_active if e.get("active") else org_install_inactive).append(
                     slug)
+                desired_state[slug] = "active" if e.get("active") else "inactive"
                 if e.get("active"):
                     activate.append(slug)
                 else:
@@ -1100,29 +1237,67 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
                 _force_symlink(dest, src_p)
 
     if org_install_active:
-        wpcli(["plugin", "install", *org_install_active],
-              instance=name, check=False)
+        for slug in org_install_active:
+            desired_state[slug] = "active"
+        _run_plugin_command(
+            ["plugin", "install", *org_install_active],
+            list(org_install_active), "install",
+        )
     if org_install_inactive:
-        wpcli(["plugin", "install", *org_install_inactive], instance=name, check=False)
+        for slug in org_install_inactive:
+            desired_state[slug] = "inactive"
+        _run_plugin_command(
+            ["plugin", "install", *org_install_inactive],
+            list(org_install_inactive), "install",
+        )
     if zip_install_active:
-        wpcli(["plugin", "install", *zip_install_active],
-              instance=name, check=False)
+        _run_plugin_command(
+            ["plugin", "install", *(value for _slug, value in zip_install_active)],
+            [slug for slug, _value in zip_install_active], "install",
+        )
     if zip_install_inactive:
-        wpcli(["plugin", "install", *zip_install_inactive], instance=name, check=False)
+        _run_plugin_command(
+            ["plugin", "install", *(value for _slug, value in zip_install_inactive)],
+            [slug for slug, _value in zip_install_inactive], "install",
+        )
     if deactivate:
         # Only configured entries are reconciled. Plugins a user installed but
         # did not declare are never touched; a declared state change is applied
         # before new activations so re-provisioning is idempotent.
-        wpcli(["plugin", "deactivate", *sorted(set(deactivate)), "--skip-plugins"],
-              instance=name, check=False)
+        deactivation_order = sorted(set(deactivate))
+        for slug in deactivation_order:
+            desired_state[slug] = "inactive"
+        _run_plugin_command(
+            ["plugin", "deactivate", *deactivation_order, "--skip-plugins"],
+            deactivation_order, "deactivate",
+        )
     if activate:
         # Install every source before activation, then honor Requires Plugins.
         # Skipping already-active plugins prevents their wp_loaded onboarding
         # redirects from polluting or aborting this non-interactive WP-CLI run;
         # WP-CLI still loads each explicit target for its activation hook.
         activation_order = _plugin_activation_order(pdir, activate)
-        wpcli(["plugin", "activate", *activation_order, "--skip-plugins"],
-              instance=name, check=False)
+        for slug in activation_order:
+            desired_state[slug] = "active"
+        _run_plugin_command(
+            ["plugin", "activate", *activation_order, "--skip-plugins"],
+            activation_order, "activate",
+        )
+
+    if failed_commands:
+        # A failed aggregate command is tolerated only when the final live
+        # state proves every declared managed plugin is already correct.  This
+        # also handles idempotent retries where WP-CLI reports a no-op as an
+        # error while all requested states are satisfied.
+        desired_slugs = sorted(desired_state)
+        states = _plugin_state_snapshot(name, desired_slugs)
+        unresolved = _plugin_state_unresolved(desired_state, states, [
+            slug for _action, slugs in failed_commands for slug in slugs
+        ])
+        if unresolved:
+            raise _plugin_configuration_error(
+                [action for action, _slugs in failed_commands], unresolved,
+            )
 
     _write_local_sources(name, local_sources)
 

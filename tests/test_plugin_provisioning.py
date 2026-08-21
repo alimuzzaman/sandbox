@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.core import _provision as provision
@@ -179,6 +181,162 @@ class PluginActivationOrderTests(unittest.TestCase):
             })
         plugins_dir.assert_not_called()
         wp_dir.assert_not_called()
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_missing_elementor_dependency_activation_fails_closed(
+            self, wp_dir, plugins_dir, _gate, write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            (pdir / "elementor-pro").mkdir()
+            (pdir / "elementor-pro" / "elementor-pro.php").write_text(
+                "<?php\nPlugin Name: Elementor Pro\n"
+                "Requires Plugins: elementor\n"
+            )
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            def wpcli(args, **_kwargs):
+                if args[:2] == ["plugin", "activate"]:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="missing dependency")
+                if args[:2] == ["plugin", "list"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps([{"name": "elementor-pro", "status": "inactive"}]),
+                        stderr="",
+                    )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("sandbox.core._provision.wpcli", side_effect=wpcli) as mocked:
+                with self.assertRaisesRegex(Exception, "elementor-pro"):
+                    provision._wire_project_plugins("fixture", str(root), {
+                        "plugins_resolved": {
+                            "elementor-pro": {
+                                "source": {"kind": "org", "value": None},
+                                "active": True,
+                            },
+                        },
+                    })
+
+            write_sources.assert_not_called()
+            activation = next(call for call in mocked.call_args_list
+                              if call.args[0][:2] == ["plugin", "activate"])
+            self.assertTrue(activation.kwargs["capture"])
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_nonzero_activation_is_tolerated_when_state_is_already_correct(
+            self, wp_dir, plugins_dir, _gate, write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            (pdir / "managed").mkdir()
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            def wpcli(args, **_kwargs):
+                if args[:2] == ["plugin", "activate"]:
+                    return SimpleNamespace(returncode=1, stdout="already active", stderr="")
+                if args[:2] == ["plugin", "list"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps([{"name": "managed", "status": "active"}]),
+                        stderr="",
+                    )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("sandbox.core._provision.wpcli", side_effect=wpcli) as mocked:
+                provision._wire_project_plugins("fixture", str(root), {
+                    "plugins_resolved": {
+                        "managed": {
+                            "source": {"kind": "org", "value": None},
+                            "active": True,
+                        },
+                    },
+                })
+
+            write_sources.assert_called_once_with("fixture", {})
+            observed = next(call for call in mocked.call_args_list
+                            if call.args[0][:2] == ["plugin", "list"])
+            self.assertTrue(observed.kwargs["capture"])
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_install_failure_does_not_write_ready_state(
+            self, wp_dir, plugins_dir, _gate, write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            def wpcli(args, **_kwargs):
+                if args[:2] == ["plugin", "install"]:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="download failed")
+                if args[:2] == ["plugin", "list"]:
+                    return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+                return SimpleNamespace(returncode=1, stdout="", stderr="not installed")
+
+            with patch("sandbox.core._provision.wpcli", side_effect=wpcli):
+                with self.assertRaisesRegex(Exception, "missing-plugin"):
+                    provision._wire_project_plugins("fixture", str(root), {
+                        "plugins_resolved": {
+                            "missing-plugin": {
+                                "source": {"kind": "org", "value": None},
+                                "active": True,
+                            },
+                        },
+                    })
+
+            write_sources.assert_not_called()
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_deactivate_failure_does_not_write_ready_state(
+            self, wp_dir, plugins_dir, _gate, write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            (pdir / "managed").mkdir()
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            def wpcli(args, **_kwargs):
+                if args[:2] == ["plugin", "deactivate"]:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="deactivate failed")
+                if args[:2] == ["plugin", "list"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps([{"name": "managed", "status": "active"}]),
+                        stderr="",
+                    )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("sandbox.core._provision.wpcli", side_effect=wpcli):
+                with self.assertRaisesRegex(Exception, "managed"):
+                    provision._wire_project_plugins("fixture", str(root), {
+                        "plugins_resolved": {
+                            "managed": {
+                                "source": {"kind": "org", "value": None},
+                                "active": False,
+                            },
+                        },
+                    })
+
+            write_sources.assert_not_called()
 
 
 class ThemeProvisioningTests(unittest.TestCase):

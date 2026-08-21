@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.php_extensions.compose_builder import (
     UnsupportedExtensionError,
@@ -35,12 +36,66 @@ class TestComposeExtensionBuilder(unittest.TestCase):
         args.update(kwargs)
         return plan_compose_extension_images(**args)
 
-    def test_fingerprint_contains_all_runtime_inputs(self):
+    def test_fingerprint_contains_every_independent_fr055_input(self):
+        """Every trusted resolution input gets its own cache identity.
+
+        The Apache case uses its compatible official parent because the
+        allowlisted planner rejects an Apache/FPM mismatch before it can
+        produce a digest.  The other rows vary exactly one planner input.
+        """
         base = self._plan()
         self.assertEqual(base.digest, self._plan().digest)
-        self.assertNotEqual(base.digest, self._plan(parent_digest="sha256:" + "c" * 64).digest)
-        self.assertNotEqual(base.digest, self._plan(architecture="arm64").digest)
-        self.assertNotEqual(base.digest, self._plan(requirements={"extensions": {"zip": True}}).digest)
+
+        cases = {
+            "web parent digest": {
+                "parent_digest": "sha256:" + "c" * 64,
+            },
+            "wpcli parent digest": {
+                "wpcli_parent_digest": "sha256:" + "d" * 64,
+            },
+            "web parent image": {
+                "parent_image": "wordpress:php8.4-fpm",
+            },
+            "wpcli parent image": {
+                "wpcli_image": "wordpress:cli-php8.4",
+            },
+            "php version": {"php_version": "8.4"},
+            "platform": {"platform": "darwin"},
+            "architecture": {"architecture": "arm64"},
+            "requirements": {
+                "requirements": {
+                    "profile": "wordpress@1",
+                    "extensions": {"gd": "2.3.3"},
+                },
+            },
+            "profile": {
+                "requirements": {"profile": None, "extensions": {"gd": True}},
+            },
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label=label):
+                candidate = self._plan(**kwargs)
+                self.assertNotEqual(base.digest, candidate.digest)
+
+        apache = self._plan(
+            server="apache",
+            parent_image="wordpress:php8.3-apache",
+        )
+        self.assertNotEqual(base.digest, apache.digest)
+        self.assertEqual(apache.web.provenance["server"], "apache")
+
+        import sandbox.php_extensions.compose_builder as builder
+        with patch.object(
+            builder,
+            "_recipe_catalog_digest",
+            return_value="sha256:" + "e" * 64,
+        ):
+            revised_catalog = self._plan()
+        self.assertNotEqual(base.digest, revised_catalog.digest)
+        self.assertEqual(
+            revised_catalog.web.provenance["recipe_catalog_digest"],
+            "sha256:" + "e" * 64,
+        )
 
     def test_official_and_litespeed_boundaries_are_fail_closed(self):
         with self.assertRaises(UnsupportedParentImageError):

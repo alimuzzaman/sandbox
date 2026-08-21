@@ -309,4 +309,6 @@ boundaries explicitly; a checked regression task is not remote release evidence.
 - [ ] T087 [US1/US2/US4] Add apply/cache regression coverage proving content-addressed
   cache invalidation and preservation of database volumes, uploads, snapshots, project
   files, instance identity, and rollback metadata; capture remote GD proof in web,
-  WP-CLI, and PHPUnit environments.
+  WP-CLI, and PHPUnit environments. (partial — 2026-08-21: local digest-matrix and
+  apply/rollback preservation regressions pass; remote GD proof remains required for
+  web, WP-CLI, and PHPUnit.)

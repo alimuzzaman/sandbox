@@ -271,6 +271,16 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
         root = Path(tempfile.mkdtemp(prefix="sb-php-ext-apply-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        sentinel_paths = {
+            root / "project-sentinel.txt": b"project stays mounted\n",
+            root / "uploads-volume" / "sentinel.txt": b"uploads stay mounted\n",
+            root / "snapshots" / "fixture" / "install-baseline" / "db.sql": b"snapshot stays\n",
+            root / "database-volume" / "sentinel.txt": b"database stays\n",
+        }
+        for path, value in sentinel_paths.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+        sentinel_bytes = {path: path.read_bytes() for path in sentinel_paths}
         existing = {
             "instance": "fixture", "label": "default", "status": "ready",
             "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
@@ -282,6 +292,20 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         block = {"server": "nginx", "php_extensions": pconf["phpExtensions"]}
         compose_calls = []
         persisted = {}
+        registry_calls = []
+        extension_identity = {
+            "php_extension_parent_digests": {
+                "web": "sha256:" + "a" * 64,
+                "wpcli": "sha256:" + "b" * 64,
+            },
+            "php_extension_parent_images": {
+                "web": "wordpress:php8.3-fpm",
+                "wpcli": "wordpress:cli-php8.3",
+            },
+            "php_extension_digest": "sha256:" + "c" * 64,
+            "platform": "linux",
+            "architecture": "amd64",
+        }
 
         class FakeCore:
             ConfigError = ValueError
@@ -300,6 +324,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
             @staticmethod
             def registry_put(_root, **fields):
+                registry_calls.append(dict(fields))
                 return {**existing, **fields}
 
             @staticmethod
@@ -320,12 +345,16 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
             "web": "sha256:" + "a" * 64,
             "wpcli": "sha256:" + "b" * 64,
         }}
+
+        def persist_extensions(target, _prepared):
+            target.update(extension_identity)
+
         with patch.object(instances, "_core", return_value=FakeCore()), \
                 patch.object(instances, "_local_yaml", return_value={"instances": {"fixture": {}}}), \
                 patch.object(instances, "_write_local_yaml", side_effect=lambda value: persisted.update(value)), \
                 patch.object(instances, "_build_instance_block", return_value=block), \
                 patch.object(instances, "prepare_php_extension_runtime", return_value=fake_prepared), \
-                patch.object(instances, "_persist_php_extension_runtime"), \
+                patch.object(instances, "_persist_php_extension_runtime", side_effect=persist_extensions), \
                 patch.object(instances, "load_config", return_value={}), \
                 patch.object(instances, "write_compose_files"), \
                 patch.object(instances, "resolve_instances", return_value=resolved), \
@@ -352,6 +381,17 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         # The in-place apply command owns only web services; DB and uploads
         # are never passed to a destructive volume-removal command.
         self.assertEqual(persisted["instances"]["fixture"], block)
+        self.assertEqual(
+            persisted["instances"]["fixture"]["php_extension_digest"],
+            extension_identity["php_extension_digest"],
+        )
+        self.assertEqual(result["instance"], existing["instance"])
+        self.assertEqual(result["label"], existing["label"])
+        self.assertEqual(registry_calls[-1]["instance"], existing["instance"])
+        self.assertEqual(registry_calls[-1]["label"], existing["label"])
+        for path, expected in sentinel_bytes.items():
+            self.assertTrue(path.exists(), path)
+            self.assertEqual(path.read_bytes(), expected, path)
         wait_reachable.assert_called_once_with(resolved["fixture"])
 
     def test_herd_apply_reconciles_host_runtime_muplugins_without_compose(self):
@@ -577,6 +617,16 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
         def run_case(*, rollback_ok, fail_before_runtime=False):
             root = Path(tempfile.mkdtemp(prefix="sb-php-ext-rollback-"))
+            sentinel_paths = {
+                root / "project-sentinel.txt": b"project rollback marker\n",
+                root / "uploads-volume" / "sentinel.txt": b"uploads rollback marker\n",
+                root / "snapshots" / "fixture" / "named" / "db.sql": b"snapshot rollback marker\n",
+                root / "database-volume" / "sentinel.txt": b"database rollback marker\n",
+            }
+            for path, value in sentinel_paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(value)
+            sentinel_bytes = {path: path.read_bytes() for path in sentinel_paths}
             old_compose = b"old compose artifact\n"
             compose_path = root / "fixture.yml"
             compose_path.write_bytes(old_compose)
@@ -585,12 +635,39 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
                 "server": "nginx",
             }
+            old_extension_identity = {
+                "php_extension_parent_digests": {
+                    "web": "sha256:" + "1" * 64,
+                    "wpcli": "sha256:" + "2" * 64,
+                },
+                "php_extension_parent_images": {
+                    "web": "wordpress:php8.2-fpm",
+                    "wpcli": "wordpress:cli-php8.2",
+                },
+                "php_extension_digest": "sha256:" + "3" * 64,
+                "platform": "linux",
+                "architecture": "amd64",
+            }
+            new_extension_identity = {
+                "php_extension_parent_digests": {
+                    "web": "sha256:" + "a" * 64,
+                    "wpcli": "sha256:" + "b" * 64,
+                },
+                "php_extension_parent_images": {
+                    "web": "wordpress:php8.3-fpm",
+                    "wpcli": "wordpress:cli-php8.3",
+                },
+                "php_extension_digest": "sha256:" + "c" * 64,
+                "platform": "linux",
+                "architecture": "arm64",
+            }
             old_local = {"instances": {"fixture": {
                 "server": "nginx", "wordpress_port": 8188,
                 "db_port": 3318, "mailpit_port": 8125,
                 "php_extensions": {"extensions": {"gd": True}},
                 "keep": "prior",
             }}}
+            old_local["instances"]["fixture"].update(old_extension_identity)
             current_local = {"value": old_local}
             writes = []
             compose_calls = []
@@ -599,6 +676,12 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
             }}
             block = {"server": "nginx", "php_extensions": pconf["phpExtensions"],
                      "keep": "new"}
+            expected_runtime = {
+                "server": "nginx", "wordpress_port": 8188,
+                "db_port": 3318, "mailpit_port": 8125,
+                "php_extensions": block["php_extensions"],
+                **old_extension_identity,
+            }
 
             class FakeCore:
                 ConfigError = ValueError
@@ -653,6 +736,9 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 "web": "sha256:" + "a" * 64,
                 "wpcli": "sha256:" + "b" * 64,
             }}
+
+            def persist_extensions(target, _prepared):
+                target.update(new_extension_identity)
             try:
                 with ExitStack() as stack:
                     stack.enter_context(patch.object(instances, "_core", return_value=FakeCore()))
@@ -663,10 +749,14 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch.object(instances, "resolve_instances", return_value={
                         "fixture": {"server": "nginx", "wordpress_port": 8188,
                                     "db_port": 3318, "mailpit_port": 8125,
-                                    "php_extensions": block["php_extensions"]}}))
+                                    "php_extensions": block["php_extensions"],
+                                    **old_extension_identity}}))
                     stack.enter_context(patch.object(instances, "_build_instance_block", return_value=block))
                     stack.enter_context(patch.object(instances, "prepare_php_extension_runtime", return_value=fake_prepared))
-                    stack.enter_context(patch.object(instances, "_persist_php_extension_runtime"))
+                    stack.enter_context(patch.object(
+                        instances, "_persist_php_extension_runtime",
+                        side_effect=persist_extensions,
+                    ))
                     stack.enter_context(patch.object(instances, "write_compose_files", side_effect=write_compose))
                     stack.enter_context(patch.object(instances, "compose", side_effect=fake_compose))
                     stack.enter_context(patch.object(instances, "_wait_http",
@@ -684,6 +774,19 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                         instances.apply_config({}, str(root))
                 self.assertEqual(current_local["value"], old_local)
                 self.assertEqual(compose_path.read_bytes(), old_compose)
+                self.assertTrue(writes)
+                self.assertEqual(
+                    writes[0]["instances"]["fixture"]["php_extension_digest"],
+                    new_extension_identity["php_extension_digest"],
+                )
+                for key, expected in old_extension_identity.items():
+                    self.assertEqual(
+                        current_local["value"]["instances"]["fixture"][key],
+                        expected,
+                    )
+                for path, expected in sentinel_bytes.items():
+                    self.assertTrue(path.exists(), path)
+                    self.assertEqual(path.read_bytes(), expected, path)
                 if fail_before_runtime:
                     self.assertEqual(compose_calls, [])
                     self.assertIn("before web reconcile", str(raised.exception))
@@ -701,9 +804,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     self.assertEqual(len(wait_reachable.call_args_list),
                                      2 if rollback_ok else 1)
                     self.assertEqual(wait_reachable.call_args_list[0].args[0],
-                                     {"server": "nginx", "wordpress_port": 8188,
-                                      "db_port": 3318, "mailpit_port": 8125,
-                                      "php_extensions": block["php_extensions"]})
+                                     expected_runtime)
                     if rollback_ok:
                         self.assertEqual(wait_reachable.call_args_list[1].args[0],
                                          wait_reachable.call_args_list[0].args[0])

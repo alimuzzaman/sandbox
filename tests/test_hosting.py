@@ -59,6 +59,12 @@ def _public_acme_manifest(aliases=None):
     )
 
 
+def _manifest_with_environments(names):
+    source = _manifest()
+    prefix, block = source.split("  production:\n", 1)
+    return prefix + "".join(f"  {name}:\n{block}" for name in names)
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -72,6 +78,51 @@ class TestHostingManifest(unittest.TestCase):
         hosts = [route["hostname"] for route in result["routes"]]
         self.assertEqual(hosts[0], "xn--94b2eraib0c0bd9i.xn--54b7fta0cc")
         self.assertIn("*.xn--94b2eraib0c0bd9i.xn--54b7fta0cc", hosts)
+
+    def test_single_environment_can_omit_environment_choice(self):
+        with self._write(_manifest()) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(result["environment"], "production")
+
+    def test_missing_environment_lists_sorted_escaped_choices(self):
+        manifest = _manifest_with_environments([
+            '"zeta"', '"a\\nb"', '"alpha"',
+        ])
+        with self._write(manifest) as directory:
+            with self.assertRaises(hosting.HostingError) as caught:
+                hosting.validate_manifest(directory)
+        self.assertEqual(
+            str(caught.exception),
+            "--environment is required when a manifest has multiple environments; "
+            "available: 'a\\nb', 'alpha', 'zeta'",
+        )
+
+    def test_unknown_environment_lists_sorted_escaped_choices(self):
+        manifest = _manifest_with_environments([
+            '"zeta"', '"a\\nb"', '"alpha"',
+        ])
+        with self._write(manifest) as directory:
+            with self.assertRaises(hosting.HostingError) as caught:
+                hosting.validate_manifest(directory, "bad\x1b[31m")
+        self.assertEqual(
+            str(caught.exception),
+            "unknown hosting environment 'bad\\x1b[31m'; "
+            "available: 'a\\nb', 'alpha', 'zeta'",
+        )
+
+    def test_environment_choice_list_is_bounded(self):
+        names = [f'"environment-{index:02d}"' for index in range(20)]
+        manifest = _manifest_with_environments(names)
+        with self._write(manifest) as directory:
+            with self.assertRaises(hosting.HostingError) as caught:
+                hosting.validate_manifest(directory)
+        self.assertEqual(
+            str(caught.exception),
+            "--environment is required when a manifest has multiple environments; "
+            "available: " + ", ".join(
+                [*(f"'environment-{index:02d}'" for index in range(16)), "... (4 more)"]
+            ),
+        )
 
     def test_rejects_duplicate_alias(self):
         aliases = "        - hostname: আমারসোনার.বাংলা\n          mode: serve"

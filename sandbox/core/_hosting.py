@@ -43,6 +43,8 @@ _ROBOTS_DENY_BLOCK = (
 )
 _PORT_START = 18000
 _PORT_COUNT = 1000
+_ENVIRONMENT_DISPLAY_LIMIT = 80
+_ENVIRONMENT_CHOICES_LIMIT = 16
 _CLOUDFLARE_PROXY_CIDRS = (
     "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
     "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
@@ -184,12 +186,38 @@ def _environment(manifest: dict, name: str | None) -> tuple[str, dict]:
         raise HostingError("manifest requires a non-empty environments mapping")
     if name is None:
         if len(environments) != 1:
-            raise HostingError("--environment is required when a manifest has multiple environments")
+            raise HostingError(
+                "--environment is required when a manifest has multiple environments; "
+                f"available: {_environment_choices(environments)}"
+            )
         name = next(iter(environments))
     env = environments.get(name)
     if not isinstance(env, dict):
-        raise HostingError(f"unknown hosting environment {name!r}")
+        raise HostingError(
+            f"unknown hosting environment {_environment_display_name(name)}; "
+            f"available: {_environment_choices(environments)}"
+        )
     return name, env
+
+
+def _environment_display_name(value: object) -> str:
+    """Return one bounded, terminal-safe representation of a manifest key."""
+    text = str(value)
+    if len(text) > _ENVIRONMENT_DISPLAY_LIMIT:
+        text = text[:_ENVIRONMENT_DISPLAY_LIMIT - 3] + "..."
+    # ``ascii`` quotes strings and escapes controls, bidi characters, and all
+    # non-ASCII text.  Manifest keys are untrusted input and must never be
+    # allowed to inject terminal control sequences into a CLI error.
+    return ascii(text)
+
+
+def _environment_choices(environments: dict) -> str:
+    """Return deterministic, bounded choices for an actionable selection error."""
+    choices = sorted(_environment_display_name(value) for value in environments)
+    visible = choices[:_ENVIRONMENT_CHOICES_LIMIT]
+    if len(choices) > _ENVIRONMENT_CHOICES_LIMIT:
+        visible.append(f"... ({len(choices) - _ENVIRONMENT_CHOICES_LIMIT} more)")
+    return ", ".join(visible) or "(none)"
 
 
 def _environment_values(value: object, name: str) -> dict[str, str]:

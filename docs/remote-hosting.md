@@ -297,6 +297,12 @@ Any Docker Compose project can carry a project-local `sandbox.hosting.yml`. It d
 a Compose web service, optional long-lived worker services, deployment policy,
 primary hostname, aliases, redirects, and the required Cloudflare policy.
 
+The `--environment` option may be omitted only when the manifest declares exactly one
+environment. Manifests with multiple environments require an explicit declared name;
+Sandbox does not infer a default environment. If a selection is missing or unknown,
+validation lists a bounded, escaped set of the declared names so the choice can be
+corrected without exposing manifest text as terminal control sequences.
+
 ```bash
 ./sb host validate --project-dir /path/to/site
 ./sb host plan --project-dir /path/to/site --environment production --remote myvps

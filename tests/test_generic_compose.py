@@ -1,8 +1,12 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.runtimes.base import RuntimeDependencies, OperationRequest
+from sandbox.services.process import BoundedProcessRunner
 from sandbox.services.process import ProcessResult
 from sandbox.runtimes.compose import ComposeAdapter
 
@@ -161,6 +165,54 @@ class TestGenericComposeAdapter(unittest.TestCase):
                 self.assertTrue(value.endswith(tail))
                 self.assertIn("output truncated", value)
             self.assertEqual(result.data["exit_code"], 17)
+            self.assertIsNone(registry.registry_get(str(root)))
+
+    def test_exec_failure_with_real_runner_retains_edges_redacts_and_separates_streams(self):
+        secret = "compose-failure-secret-sentinel"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            docker = root / "docker"
+            docker.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if 'config' in sys.argv:\n"
+                "    print('web')\n"
+                "    raise SystemExit(0)\n"
+                f"sys.stdout.write('stdout-head\\n' + 's' * 1100000 + '\\nstdout-tail {secret}\\n')\n"
+                f"sys.stderr.write('stderr-head\\n' + 'e' * 1100000 + '\\nstderr-tail {secret}\\n')\n"
+                "raise SystemExit(23)\n"
+            )
+            docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+            descriptor = {
+                "root": str(root), "kind": "compose", "compose_file": str(root / "compose.yaml"),
+                "service": "web", "internal_port": 80, "health_path": "/healthz",
+                "display_name": root.name, "label": "default", "framework": "node",
+            }
+            registry = _Registry(root, descriptor)
+            deps = RuntimeDependencies(
+                process=BoundedProcessRunner(secret_values=(secret,)), http=_Http(), ports=_Ports(),
+                paths=object(), proxy=object(), registry=registry,
+            )
+            adapter = ComposeAdapter(deps, registry)
+            with patch.dict(os.environ, {
+                    "PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}",
+            }, clear=False):
+                result = adapter.invoke(OperationRequest(
+                    str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["exit_code"], 23)
+            for stream, head, tail in (
+                    ("stdout", "stdout-head\n", "\nstdout-tail [REDACTED]\n"),
+                    ("stderr", "stderr-head\n", "\nstderr-tail [REDACTED]\n")):
+                value = result.data[stream]
+                self.assertLessEqual(len(value.encode()), 1_048_576)
+                self.assertTrue(value.startswith(head))
+                self.assertTrue(value.endswith(tail))
+                self.assertIn("output truncated", value)
+                self.assertNotIn(secret, value)
+            self.assertNotIn("stderr-head", result.data["stdout"])
+            self.assertNotIn("stdout-head", result.data["stderr"])
             self.assertIsNone(registry.registry_get(str(root)))
 
     def test_overlay_enforces_instance_resource_limits(self):

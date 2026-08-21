@@ -12,6 +12,60 @@ import subprocess
 from .redaction import redact_text
 
 
+_EDGE_TRUNCATION_MARKER = b"\n...[output truncated]...\n"
+
+
+class _BoundedEdgeCapture:
+    """Retain one bounded byte stream, preserving both edges after overflow.
+
+    Until the stream crosses ``limit`` this behaves like the historical
+    prefix buffer and retains the complete value. Once it does, the already
+    captured prefix is split into a head and tail and subsequent chunks update
+    only the bounded tail. At no point does the capture hold more than the
+    configured per-stream limit plus one bounded pipe-read chunk.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._data = bytearray()
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._truncated = False
+        # A marker should not consume a tiny caller-selected bound entirely;
+        # when there is no room for the full marker, retain the two edges and
+        # omit the marker rather than returning only a diagnostic fragment.
+        self._marker = (_EDGE_TRUNCATION_MARKER
+                        if limit >= len(_EDGE_TRUNCATION_MARKER) else b"")
+        available = max(0, limit - len(self._marker))
+        self._head_limit = available // 2
+        self._tail_limit = available - self._head_limit
+
+    def append(self, chunk: bytes) -> None:
+        if not chunk or self.limit == 0:
+            return
+        if not self._truncated:
+            if len(self._data) + len(chunk) <= self.limit:
+                self._data.extend(chunk)
+                return
+            # The first overflow is the only time we split the complete
+            # prefix. Thereafter the tail is a fixed-size rolling window.
+            prefix = bytes(self._data) + chunk
+            self._head.extend(prefix[:self._head_limit])
+            if self._tail_limit:
+                self._tail.extend(prefix[-self._tail_limit:])
+            self._data.clear()
+            self._truncated = True
+        if self._tail_limit:
+            self._tail.extend(chunk)
+            if len(self._tail) > self._tail_limit:
+                del self._tail[:-self._tail_limit]
+
+    def render(self) -> bytes:
+        if not self._truncated:
+            return bytes(self._data)
+        return bytes(self._head) + self._marker + bytes(self._tail)
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     argv: tuple[str, ...]
@@ -42,7 +96,14 @@ class BoundedProcessRunner:
         self._secrets = tuple(value for value in secret_values if value)
 
     def _redact(self, value: str) -> str:
-        return redact_text(value, exact_values=self._secrets)[:self.max_output]
+        """Redact and re-bound one stream without losing its retained tail."""
+        redacted = redact_text(value, exact_values=self._secrets)
+        encoded = redacted.encode("utf-8", errors="replace")
+        if len(encoded) <= self.max_output:
+            return redacted
+        bounded = _BoundedEdgeCapture(self.max_output)
+        bounded.append(encoded)
+        return bounded.render().decode(errors="replace")
 
     @staticmethod
     def _remaining(deadline: float | None) -> float | None:
@@ -132,7 +193,8 @@ class BoundedProcessRunner:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             start_new_session=os.name == "posix", bufsize=0,
         )
-        output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+        output = {name: _BoundedEdgeCapture(self.max_output)
+                  for name in ("stdout", "stderr")}
 
         def drain(name: str, stream) -> None:
             try:
@@ -140,9 +202,7 @@ class BoundedProcessRunner:
                     chunk = stream.read(65_536)
                     if not chunk:
                         return
-                    remaining = self.max_output - len(output[name])
-                    if remaining > 0:
-                        output[name].extend(chunk[:remaining])
+                    output[name].append(chunk)
             except (OSError, ValueError):
                 # A bounded timeout can close a pipe while its daemon reader is
                 # still draining an escaped or otherwise uncooperative child.
@@ -186,13 +246,13 @@ class BoundedProcessRunner:
             return ProcessResult(
                 command,
                 124,
-                self._redact(bytes(output["stdout"]).decode(errors="replace")),
-                self._redact(bytes(output["stderr"]).decode(errors="replace") + "\nprocess timed out"),
+                self._redact(output["stdout"].render().decode(errors="replace")),
+                self._redact(output["stderr"].render().decode(errors="replace") + "\nprocess timed out"),
             )
         process.stdout.close()
         process.stderr.close()
         return ProcessResult(
             command, process.returncode,
-            self._redact(bytes(output["stdout"]).decode(errors="replace")),
-            self._redact(bytes(output["stderr"]).decode(errors="replace")),
+            self._redact(output["stdout"].render().decode(errors="replace")),
+            self._redact(output["stderr"].render().decode(errors="replace")),
         )

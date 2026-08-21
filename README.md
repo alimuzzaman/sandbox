@@ -413,7 +413,8 @@ converts a validated zero into its one-second polling wait. The complete sealed
 log remains available for later retrieval.
 
 Generic Compose `exec` failures retain stdout and stderr independently, each
-bounded to the process-runner limit, and include the child `exit_code`. Human `sb exec`
+bounded to the 1 MiB process-runner limit; when a stream overflows, the runner
+keeps both edges around an explicit truncation marker. Failures include the child `exit_code`. Human `sb exec`
 writes those streams to their matching local streams; `--json` returns one
 envelope containing both fields and exits with the child code. A nested remote
 controller uses the human path so the outer durable supervisor persists the

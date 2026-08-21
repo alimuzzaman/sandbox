@@ -1,8 +1,9 @@
 """Focused filesystem safety tests for the spec-009 state relocation."""
 from __future__ import annotations
 
-import json
+import hashlib
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -15,11 +16,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sandbox.commands import migrate
 from sandbox.workspaces.models import WorkspaceRecord
-from sandbox.workspaces.repository import WorkspaceRepository
+from sandbox.workspaces.repository import WorkspaceIndexError, WorkspaceRepository
+from sandbox.resources.models import ResourceObservation
 from sandbox.workspaces.maintenance import base_maintenance_lock
 
 
@@ -38,6 +40,82 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(value)
         return path
+
+    @staticmethod
+    def _locator_digest(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(str(path).encode()).hexdigest()
+
+    def _real_relocation_fixture(self):
+        """Create source-owned SQLite metadata plus protected byte sentinels."""
+        old_base = self.root / "relocation-old"
+        new_base = self.root / "relocation-new"
+        old_runtime = old_base / "runtime"
+        legacy_root = old_runtime / "jobs" / "workspaces"
+        workspace_json = legacy_root / "local-abc" / "default" / "workspace.json"
+        checkout = old_runtime / "deploy" / "checkout"
+        source_checkout = old_runtime / "deploy" / "source"
+        external_locator = self.root / "external-deployment" / "checkout"
+        workspace_json.parent.mkdir(parents=True, exist_ok=True)
+        checkout.mkdir(parents=True, exist_ok=True)
+        source_checkout.mkdir(parents=True, exist_ok=True)
+        external_locator.mkdir(parents=True, exist_ok=True)
+        workspace_bytes = b'{"label":"default","namespace":"local:abc"}\n'
+        workspace_json.write_bytes(workspace_bytes)
+        (checkout / "manifest.json").write_bytes(b"managed checkout\n")
+        (source_checkout / "manifest.json").write_bytes(b"managed source checkout\n")
+
+        protected = {
+            "legacy_workspace": workspace_json,
+            "project": self._write(old_runtime / "wp-fixture" / "project.php", "project-bytes"),
+            "uploads": self._write(
+                old_runtime / "wp-fixture" / "wp-content" / "uploads" / "one.txt",
+                "upload-bytes",
+            ),
+            "snapshot": self._write(
+                old_runtime / "snapshots" / "fixture" / "one.sql", "snapshot-bytes",
+            ),
+            "database_volume": self._write(
+                old_runtime / "volumes" / "db-fixture" / "volume.dat", "database-bytes",
+            ),
+            "registry": self._write(old_runtime / "registry.json", "registry-bytes"),
+            "job_metadata": self._write(
+                old_runtime / "jobs" / "job-001.json", "job-metadata-bytes",
+            ),
+        }
+
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3", legacy_root,
+        )
+        record = repository.register(
+            "project:relocation", "default", namespace="local-abc",
+            path=str(workspace_json), aliases=("stable",),
+            metadata={
+                "checkout_locator": str(checkout),
+                "checkout_locator_digest": self._locator_digest(checkout),
+                "source_checkout_locator": str(source_checkout),
+                "source_checkout_locator_digest": self._locator_digest(source_checkout),
+                "external_locator": str(external_locator),
+                "source_identity": "git:relocation-source",
+                "source_generation": "source-generation-17",
+            },
+        )
+        repository.bind_resource(record.workspace_id, "compose_project", "sandbox-relocation")
+        generation = repository.schema_generation()
+        return {
+            "old_base": old_base,
+            "new_base": new_base,
+            "old_runtime": old_runtime,
+            "new_runtime": new_base / "runtime",
+            "legacy_root": legacy_root,
+            "workspace_json": workspace_json,
+            "checkout": checkout,
+            "source_checkout": source_checkout,
+            "external_locator": external_locator,
+            "protected": protected,
+            "repository": repository,
+            "record": record,
+            "generation": generation,
+        }
 
     def test_different_destination_never_deletes_source(self):
         source = self._write(self.source / "snapshots" / "one.txt", "legacy")
@@ -145,6 +223,173 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         )
         self.assertEqual(
             (new_base / legacy.relative_to(old_base)).read_bytes(), legacy_bytes)
+
+    def test_real_transfer_and_finalize_rebases_metadata_without_resource_lifecycle(self):
+        """The journal drives a real SQLite rebase; protected state is source-only."""
+        fixture = self._real_relocation_fixture()
+        old_base = fixture["old_base"]
+        new_base = fixture["new_base"]
+        old_runtime = fixture["old_runtime"]
+        new_runtime = fixture["new_runtime"]
+        before_bytes = {
+            name: path.read_bytes() for name, path in fixture["protected"].items()
+        }
+
+        # This is deliberately a frozen typed *source simulation*, not a
+        # production inventory and not evidence that remote resources were
+        # counted. Its observation is called on both sides; lifecycle,
+        # reclaim, and release operations are intentionally never invoked.
+        inventory = (
+            ResourceObservation(
+                resource_id="sim-volume-db",
+                kind="volume",
+                locator="sim://volume/db-fixture",
+                display_name="simulated database volume",
+                owner_kind="workspace",
+                owner_id=fixture["record"].workspace_id,
+                classification="retained",
+                size_state="measured",
+                size_bytes=1024,
+                reclaimable_bytes=0,
+                references=("sim://container/wp",),
+                evidence=("source-simulation",),
+            ),
+            ResourceObservation(
+                resource_id="sim-network-fixture",
+                kind="network",
+                locator="sim://network/fixture",
+                display_name="simulated network",
+                owner_kind="workspace",
+                owner_id=fixture["record"].workspace_id,
+                classification="active",
+                size_state="not_measured",
+                size_bytes=None,
+                reclaimable_bytes=0,
+                evidence=("source-simulation",),
+                lifecycle="active",
+                active_references=(("containers", 1), ("jobs", 1)),
+                allocation_state="allocated",
+            ),
+        )
+        source_inventory_calls = {"observe": 0}
+        source_lifecycle = Mock(name="source_lifecycle")
+        source_reclaim = Mock(name="source_reclaim")
+        source_release = Mock(name="source_release")
+
+        def source_inventory():
+            source_inventory_calls["observe"] += 1
+            return inventory
+
+        before_inventory = source_inventory()
+        with migrate._migration_lock(old_base, new_base):
+            moved = migrate._transfer(
+                old_runtime, new_runtime, old_base, new_base, [],
+            )
+        self.assertGreater(moved, 0)
+        journal = migrate._load_journal(new_base)
+        self.assertIsNotNone(journal)
+        self.assertEqual(journal["source"], str(old_base.resolve()))
+
+        with patch.object(migrate, "BASE", new_base), \
+             patch.object(migrate, "RUNTIME_DIR", new_runtime), \
+             patch.object(migrate, "_regenerate_baked_artifacts") as regenerate, \
+             patch.object(migrate, "resolve_instances", return_value={}) as resolve, \
+             patch.object(migrate, "_instance_running") as running, \
+             patch.object(migrate, "_wait_reachable") as reachable, \
+             patch.object(migrate, "compose") as compose:
+            migrate._finalize({})
+
+        after_inventory = source_inventory()
+        self.assertEqual(after_inventory, before_inventory)
+        self.assertEqual(source_inventory_calls, {"observe": 2})
+        source_lifecycle.assert_not_called()
+        source_reclaim.assert_not_called()
+        source_release.assert_not_called()
+        regenerate.assert_called_once_with({})
+        resolve.assert_called_once_with({})
+        running.assert_not_called()
+        reachable.assert_not_called()
+        compose.assert_not_called()
+        self.assertFalse(migrate._journal_path(new_base).exists(),
+                         "journal clears only after real rebase and finalization succeed")
+
+        for name, source in fixture["protected"].items():
+            destination = new_base / source.relative_to(old_base)
+            self.assertEqual(destination.read_bytes(), before_bytes[name])
+            self.assertFalse(source.exists())
+        moved_workspace = WorkspaceRepository(
+            new_runtime / "workspaces" / "index.sqlite3",
+            new_runtime / "jobs" / "workspaces",
+        ).get(fixture["record"].workspace_id)
+        self.assertEqual(moved_workspace.workspace_id, fixture["record"].workspace_id)
+        self.assertEqual(moved_workspace.project_identity, "project:relocation")
+        self.assertEqual(moved_workspace.namespace, "local-abc")
+        self.assertEqual(moved_workspace.aliases, ("stable",))
+        self.assertEqual(moved_workspace.bindings[0]["resource_id"], "sandbox-relocation")
+        self.assertEqual(moved_workspace.path,
+                         str(new_base / fixture["workspace_json"].relative_to(old_base)))
+        moved_checkout = new_base / fixture["checkout"].relative_to(old_base)
+        moved_source_checkout = new_base / fixture["source_checkout"].relative_to(old_base)
+        self.assertEqual(moved_workspace.metadata["checkout_locator"], str(moved_checkout))
+        self.assertEqual(moved_workspace.metadata["source_checkout_locator"],
+                         str(moved_source_checkout))
+        self.assertEqual(moved_workspace.metadata["checkout_locator_digest"],
+                         self._locator_digest(moved_checkout))
+        self.assertEqual(moved_workspace.metadata["source_checkout_locator_digest"],
+                         self._locator_digest(moved_source_checkout))
+        self.assertEqual(moved_workspace.metadata["external_locator"],
+                         str(fixture["external_locator"]))
+        self.assertEqual(moved_workspace.metadata["source_identity"],
+                         "git:relocation-source")
+        self.assertEqual(moved_workspace.metadata["source_generation"],
+                         "source-generation-17")
+        self.assertEqual(
+            WorkspaceRepository(
+                new_runtime / "workspaces" / "index.sqlite3",
+                new_runtime / "jobs" / "workspaces",
+            ).schema_generation(), fixture["generation"],
+        )
+
+    def test_real_finalize_rebase_failure_retains_journal_before_generation_orchestration(self):
+        """A typed rebase failure remains retryable and never reaches runtime seams."""
+        fixture = self._real_relocation_fixture()
+        old_base = fixture["old_base"]
+        new_base = fixture["new_base"]
+        with migrate._migration_lock(old_base, new_base):
+            migrate._transfer(
+                fixture["old_runtime"], fixture["new_runtime"],
+                old_base, new_base, [],
+            )
+        journal_path = migrate._journal_path(new_base)
+        journal_bytes = journal_path.read_bytes()
+        with patch.object(migrate, "BASE", new_base), \
+             patch.object(migrate, "RUNTIME_DIR", fixture["new_runtime"]), \
+             patch.object(
+                 WorkspaceRepository,
+                 "rebase_home_locators",
+                 side_effect=WorkspaceIndexError(
+                     "workspace_index_unavailable", "simulated source-only rebase failure",
+                 ),
+             ) as rebase, \
+             patch.object(migrate, "_regenerate_baked_artifacts") as regenerate, \
+             patch.object(migrate, "resolve_instances") as resolve, \
+             patch.object(migrate, "_instance_running") as running, \
+             patch.object(migrate, "_wait_reachable") as reachable, \
+             patch.object(migrate, "compose") as compose, \
+             patch.object(migrate, "die", side_effect=SystemExit(1)) as die:
+            with self.assertRaises(SystemExit) as raised:
+                migrate._finalize({})
+
+        self.assertEqual(raised.exception.code, 1)
+        rebase.assert_called_once()
+        regenerate.assert_not_called()
+        resolve.assert_not_called()
+        running.assert_not_called()
+        reachable.assert_not_called()
+        compose.assert_not_called()
+        die.assert_called_once()
+        self.assertEqual(journal_path.read_bytes(), journal_bytes)
+        self.assertTrue(journal_path.exists())
 
     def test_competing_repository_writer_blocks_transfer_without_lost_update(self):
         old_base = self.root / "old-home"

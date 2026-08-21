@@ -236,9 +236,10 @@ the implementation and evidence actually present in this branch.
 - [ ] T042 Add relocation tests proving the index and pure metadata move safely while
   legacy `workspace.json`, project files, uploads, snapshots, database volumes, and
   network/container/job counts remain unchanged; regenerate only path-bearing locators.
-  (partial: pure-transfer byte/no-orchestration tests pass; resource-count,
-  finalization, and regenerated-locator evidence remains for T045/T036 or a later
-  explicit slice.)
+  (partial: source-only integration now exercises a real SQLite transfer/finalization
+  and locator/digest/byte-preservation proof; live network/container/job inventory
+  counts and the isolated migration quickstart remain unverified for T045/T036 or a
+  later explicitly authorized slice.)
 - [X] T043 Add incomplete-index, missing-checkout, alias-collision, and duplicate-owner
   tests so list/status never false-empty and always expose stable safe error codes.
 - [X] T044 Add typed workspace-resource binding/projection fixtures and CLI/MCP/resource

@@ -18,8 +18,9 @@ from sandbox.runtimes.base import ExecutionRequest, OperationError, OperationReq
 
 _GUIDES = {
     "compose": (
-        ("init", "./sb init --type compose", "Create a local Compose project instance."),
-        ("ensure", "./sb ensure", "Start or reconcile the local instance."),
+        ("init", "./sb init --type compose",
+         "Write/validate a reviewable Compose descriptor and print the ensure next step."),
+        ("ensure", "./sb ensure", "Create, start, or reconcile the declared project."),
         ("status", "./sb status", "Inspect the declared runtime."),
         ("logs", "./sb logs", "Read service logs."),
         ("exec", "./sb exec [--local|--remote <name>] --workspace <name> --timeout <seconds> "

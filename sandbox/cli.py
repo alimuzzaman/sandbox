@@ -722,8 +722,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     ensure_target.add_argument("--remote", help="ensure on a provisioned remote")
     en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
 
-    ini = sub.add_parser("init",
-        help="Make a plugin dir a sandbox project (config + instance + test harness)")
+    ini = sub.add_parser(
+        "init",
+        help="Initialize a project descriptor; explicit generic --type is review-only "
+             "(run sb ensure next)",
+    )
     ini.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
     ini.add_argument("--force", action="store_true",
@@ -731,7 +734,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     ini.add_argument("--no-test-harness", dest="no_test_harness", action="store_true",
         help="skip provisioning the phpunit test harness")
     ini.add_argument("--type", choices=["compose", "generic", "astro", "laravel", "php", "node", "javascript"],
-        help="explicit generic project type; uses the framework-neutral Compose runtime")
+        help="explicit generic project type; validate/write config only, then run sb ensure")
 
     ins = sub.add_parser("instance",
         help="Delete a sandbox instance (create via `./sb init` in a plugin dir)")

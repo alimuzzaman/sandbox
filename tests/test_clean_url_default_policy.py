@@ -84,6 +84,7 @@ class TestPublishedListenerCheck(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertIn("nginx", check["label"])
         self.assertIn("domains use", check["hint"])
+        self.assertIn("free the port", check["hint"])
 
     def test_unidentifiable_owner_still_reports_the_failure(self):
         from sandbox.core import _domains
@@ -93,6 +94,8 @@ class TestPublishedListenerCheck(unittest.TestCase):
         )
         self.assertFalse(check["ok"])
         self.assertIn("no other listener identified", check["label"])
+        self.assertIn("./sb domains up", check["hint"])
+        self.assertNotIn("free the port", check["hint"])
 
     def test_check_is_wired_into_doctor_when_the_proxy_runs(self):
         from unittest import mock

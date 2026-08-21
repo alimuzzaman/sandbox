@@ -388,13 +388,22 @@ def _published_listener_check(*, connector=None, listeners=None) -> dict:
     owners = _port_owners(dead) if listeners is None else listeners
     detail = "; ".join(f"{port} held by {owner}" for port, owner in sorted(owners.items())) \
         or "no other listener identified"
+    if owners:
+        hint = ("free the port (stop the owning service), or select an adopted "
+                "ingress with `./sb domains use <provider>`; per-port URLs keep "
+                "working meanwhile")
+    else:
+        # There is no evidence that another process owns the endpoint, so do not
+        # tell the operator to stop an arbitrary service.  The supported recovery
+        # asks the proxy lifecycle to restore its alias and published endpoints.
+        hint = ("no owning listener identified; run `./sb domains up` to restore "
+                "the proxy's published endpoints; per-port URLs keep working "
+                "meanwhile")
     return {
         "label": (f"proxy published on {PROXY_BIND_IP}:{','.join(map(str, dead))} "
                   f"but nothing accepts there ({detail})"),
         "ok": False,
-        "hint": ("free the port (stop the owning service), or select an adopted "
-                 "ingress with `./sb domains use <provider>`; per-port URLs keep "
-                 "working meanwhile"),
+        "hint": hint,
     }
 
 

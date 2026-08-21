@@ -553,8 +553,12 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         with patch.object(instances, "_core", return_value=FakeCore()), \
                 patch.object(instances, "_resolve_port_conflicts", return_value={}), \
                 patch.object(instances, "resolve_instances", return_value={"fixture": existing}), \
+                patch.object(instances, "_desired_source_mounts", return_value=["/plugins"]), \
+                patch.object(instances, "attest_source_mounts", return_value={"ok": True}), \
                 patch.object(instances, "_instance_reachable", return_value=True), \
-                patch.object(instances, "_reconcile_wp_core", return_value={}), \
+                patch.object(instances, "_wp_core_install_state",
+                             return_value=instances._WP_INSTALL_STATE_INSTALLED), \
+                patch.object(instances, "_warn_version_drift"), \
                 patch.object(instances, "_auto_heal_wp_url"), \
                 patch.object(instances, "_refresh_registered_url", return_value=existing), \
                 patch.object(data_commands, "capture_install_snapshots") as capture:

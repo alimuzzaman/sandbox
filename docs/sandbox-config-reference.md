@@ -117,8 +117,10 @@ then writes `sandbox.config.json` and `sandbox.compose.yml`. PHP,
 Node/JavaScript, Docker-native, Laravel/Sail, Astro, and similar projects use
 the same Compose adapter rather than separate framework runtimes. If a project
 already declares a different explicit kind/framework, `sb init --type ...`
-fails closed before any runtime action; resolve the descriptor first, then run
-`sb ensure` deliberately.
+fails closed before any runtime action. The CLI also skips automatic migration,
+Compose/env regeneration, and shared WP-CLI artifact preparation on this
+initialization-only path. Resolve the descriptor first, then run `sb ensure`
+deliberately.
 
 ## Resolution order
 

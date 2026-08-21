@@ -163,6 +163,26 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
     return False
 
 
+_GENERIC_INIT_TYPES = frozenset({
+    "compose", "generic", "astro", "laravel", "php", "node", "javascript",
+})
+
+
+def _is_explicit_generic_init(args) -> bool:
+    """Return whether parsed args select the initialization-only generic path.
+
+    This predicate intentionally keys off the parsed raw ``--type`` value,
+    rather than project config or the current instance.  It must be available
+    before config/migration dispatch so even a conflicting descriptor cannot
+    trigger automatic migration, Compose/env generation, or other runtime
+    preparation before ``cmd_init`` fails closed.
+    """
+    if getattr(args, "cmd", None) != "init":
+        return False
+    value = getattr(args, "type", None)
+    return isinstance(value, str) and value.strip().lower() in _GENERIC_INIT_TYPES
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -927,7 +947,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     # fallback, move it once when the selected base is genuinely empty.  The
     # helper re-execs this exact command after staging the data; explicit
     # migration/home commands keep their own dry-run and relocation semantics.
-    if args.cmd not in {"migrate", "home", "ensure"}:
+    generic_init = _is_explicit_generic_init(args)
+    if args.cmd not in {"migrate", "home", "ensure"} and not generic_init:
         from sandbox.commands.migrate import maybe_auto_migrate
         maybe_auto_migrate()
 
@@ -1084,7 +1105,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # resolution and capability preflight preserves the historical ordering
     # for commands that must refuse an invalid target first.
     auto_migration_finalized = False
-    if args.cmd != "ensure":
+    if args.cmd != "ensure" and not generic_init:
         from sandbox.commands.migrate import finalize_auto_migration
         auto_migration_finalized = finalize_auto_migration(cfg)
 
@@ -1100,7 +1121,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Compose or the legacy environment here would mutate persistent state
     # before it can refuse a stale live mount set.
     ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
-    if not bounded_resource_status and args.cmd != "secrets" and not ensure_attestation_gate:
+    if (not generic_init and not bounded_resource_status and
+            args.cmd != "secrets" and not ensure_attestation_gate):
         if not auto_migration_finalized:
             write_compose_files(cfg)
         # Keep the legacy `.env` populated so anyone still invoking the

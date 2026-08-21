@@ -20,9 +20,12 @@ bounded health probing, and generic destroy without Compose volume removal.
 after descriptor validation/proposal. It writes only reviewable project files,
 prints `./sb ensure --project-dir ...` as the next action, and does not invoke a
 runtime adapter, start a service, execute a package command, or provision the
-WordPress test harness. Existing explicit kind/framework conflicts fail closed
-before any runtime call. The no-type WordPress init path retains its historical
-config scaffold, instance ensure, and optional test-harness behavior.
+WordPress test harness. The top-level parser also skips automatic migration,
+finalization, Compose generation, environment generation, and the shared WP-CLI
+artifact preparation for this exact parsed `--type` path, including conflicts.
+Existing explicit kind/framework conflicts fail closed before any runtime call.
+The no-type WordPress init path retains its historical config scaffold, instance
+ensure, and optional test-harness behavior.
 
 Focused regression evidence:
 

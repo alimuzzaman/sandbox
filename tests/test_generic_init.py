@@ -148,6 +148,63 @@ class TestGenericInitNoBoot(TestCase):
             ensure.assert_called_once_with(mock.ANY, str(root.resolve()))
             runtime_factory.assert_not_called()
 
+    def _run_top_level(self, root: Path, requested_type: str):
+        """Run the real parser/dispatch boundary with the runtime mocked."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        output, errors = io.StringIO(), io.StringIO()
+        argv = ["sb", "init", "--project-dir", str(root),
+                "--type", requested_type, "--no-test-harness"]
+        with mock.patch.object(cli, "COMMANDS", {"init": command.cmd_init}), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(migrate, "maybe_auto_migrate") as maybe_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False) as finalize, \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(cli, "_ensure_wp_cli_phar") as wp_cli_phar, \
+                mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                mock.patch.object(command, "runtime_service") as runtime_factory, \
+                mock.patch.object(cli.sys, "argv", argv), \
+                redirect_stdout(output), redirect_stderr(errors):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                return (exc.code, output.getvalue(), errors.getvalue(),
+                        (maybe_migrate, finalize, compose, env, wp_cli_phar,
+                         runtime_factory))
+        return (0, output.getvalue(), errors.getvalue(),
+                (maybe_migrate, finalize, compose, env, wp_cli_phar,
+                 runtime_factory))
+
+    def test_top_level_generic_init_skips_migration_and_compose_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._compose_project(root)
+            code, output, errors, mocks = self._run_top_level(root, "compose")
+            self.assertEqual(code, 0, errors)
+            self.assertIn("next: ./sb ensure", output)
+            self.assertEqual(errors, "")
+            for observed in mocks:
+                observed.assert_not_called()
+
+    def test_top_level_conflicting_generic_init_skips_migration_and_compose_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._compose_project(root)
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose", "framework": "astro",
+                "compose": {"file": "compose.yaml", "service": "web",
+                             "internal_port": 80, "health_path": "/"},
+            }) + "\n")
+            code, _output, errors, mocks = self._run_top_level(root, "laravel")
+            self.assertEqual(code, 1)
+            self.assertIn("conflicts", errors)
+            for observed in mocks:
+                observed.assert_not_called()
+
 
 if __name__ == "__main__":
     import unittest

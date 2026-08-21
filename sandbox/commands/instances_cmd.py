@@ -36,6 +36,96 @@ from sandbox.runtimes.base import OperationError, OperationRequest
 from sandbox.services.redaction import redact_structure, redact_text
 
 
+_GENERIC_INIT_TYPES = frozenset({
+    "compose", "generic", "astro", "laravel", "php", "node", "javascript",
+})
+
+
+def _generic_init_family(value: object) -> str:
+    """Return the comparison family for an explicit generic init type.
+
+    The CLI deliberately keeps the caller's raw ``--type`` value for the
+    reviewable descriptor.  This helper is only for conflict checks: Node and
+    JavaScript are equivalent aliases, while Compose/generic are the broad
+    framework-neutral family.
+    """
+    if not isinstance(value, str):
+        return ""
+    value = value.strip().lower()
+    if value in {"node", "javascript", "js"}:
+        return "node"
+    if value in {"compose", "generic"}:
+        return "compose"
+    if value == "laravel-sail":
+        return "laravel"
+    return value
+
+
+def _generic_descriptor_document(project_root: Path) -> dict:
+    """Read the selected native descriptor for an init conflict check.
+
+    ``load_project_config`` intentionally normalizes kind aliases to
+    ``compose``.  Init needs the raw declared kind too, so a request such as
+    ``--type laravel`` cannot silently reinterpret an existing explicit
+    ``kind: astro``/``kind: wordpress`` document.  This is read-only and is
+    kept local to the CLI compatibility surface.
+    """
+    try:
+        from sandbox.config.descriptors import _load_mapping, primary_config
+        path = primary_config(project_root)
+        return _load_mapping(path) if path is not None else {}
+    except (OSError, ValueError, TypeError):
+        # The canonical loader below remains authoritative for malformed or
+        # ambiguous descriptors; this helper must not hide that error.
+        return {}
+
+
+def _generic_init_conflict(requested_type: str, descriptor: Mapping,
+                           resolved: Mapping) -> str | None:
+    """Return a deterministic conflict message, or ``None`` when compatible."""
+    requested_family = _generic_init_family(requested_type)
+    raw_kind = descriptor.get("kind")
+    raw_framework = descriptor.get("framework") or descriptor.get("preset")
+
+    # A WordPress descriptor is never converted implicitly by a generic init
+    # request.  This check happens before any runtime call (and before force
+    # regeneration) so an accidental type cannot boot or rewrite a plugin.
+    resolved_kind = str(resolved.get("kind") or "").strip().lower()
+    if resolved_kind != "compose":
+        return (f"--type {requested_type!r} conflicts with the existing "
+                f"project kind {resolved_kind or 'unknown'!r}; keep the "
+                "WordPress descriptor or remove it before generic init")
+
+    # An explicitly declared framework/kind is a stronger signal than the
+    # normalized compose kind.  Broad compose/generic declarations can be
+    # refined by a specific preset; specific declarations may not be changed
+    # in place by a differently typed init request.
+    declared = raw_framework if isinstance(raw_framework, str) else raw_kind
+    declared_family = _generic_init_family(declared)
+    if declared_family and declared_family != "compose":
+        if requested_family != declared_family:
+            return (f"--type {requested_type!r} conflicts with the existing "
+                    f"project type {declared!r}")
+
+    resolved_framework = resolved.get("framework")
+    if isinstance(resolved_framework, str) and resolved_framework.strip():
+        resolved_family = _generic_init_family(resolved_framework)
+        if (resolved_family and resolved_family != "compose"
+                and requested_family != resolved_family):
+            return (f"--type {requested_type!r} conflicts with the existing "
+                    f"project framework {resolved_framework!r}")
+    return None
+
+
+def _finish_generic_init(project_root: Path, requested_type: str,
+                         resolved: Mapping) -> None:
+    """Report reviewable generic config without starting project processes."""
+    framework = resolved.get("framework") or requested_type
+    ok(f"validated generic {framework} project configuration")
+    print(f"  project: {project_root}")
+    print(f"  next: ./sb ensure --project-dir {project_root}")
+
+
 def _is_wordpress_project(config: dict) -> bool:
     """Return whether a resolved descriptor uses the WordPress schema."""
     return config.get("kind") == "wordpress"
@@ -243,48 +333,103 @@ def cmd_ensure(cfg, args) -> None:
             print(f"  server:  {entry['server']}  (source: {entry.get('source')})")
 
 def cmd_init(cfg, args) -> None:
-    """`./sb init [--project-dir DIR] [--force] [--no-test-harness]` — turn a
-    plugin checkout into a sandbox project in one command: write a native config
-    (scaffold sandbox.config.json, or convert an existing .wp-env.json; --force
-    regenerates the same native file), boot its per-directory instance
-    (create-if-missing), and provision the phpunit test harness. From a bare
-    checkout to a running, testable stack."""
+    """Initialize a project descriptor, preserving the legacy WordPress boot.
+
+    An explicit generic ``--type`` is intentionally initialization-only: it
+    may inspect or write a reviewable Compose descriptor, but project code is
+    not started until the operator runs ``sb ensure``.  Omitting ``--type``
+    retains the historical WordPress (and already-configured Compose) boot
+    behavior for compatibility.
+    """
     pd = getattr(args, "project_dir", None) or os.getcwd()
     sc = _core()
     requested_type = getattr(args, "type", None)
     project_root = Path(pd).expanduser().resolve()
-    if requested_type and not any((project_root / name).exists() for name in sc.CONFIG_BASENAMES):
-        if requested_type == "astro":
-            from sandbox.runtimes.presets import propose_astro
-            propose_astro(project_root)
-            ok("wrote reviewable Astro Compose and Sandbox configuration")
-            requested_type = None
-        compose_file = next((project_root / name for name in ("compose.yaml", "compose.yml", "docker-compose.yml") if (project_root / name).exists()), None)
-        if requested_type and compose_file is None:
-            die("generic initialization requires an existing compose.yaml, compose.yml, or docker-compose.yml; no project command was guessed")
-        if requested_type:
-            import yaml
-            document = yaml.safe_load(compose_file.read_text()) or {}
-            services = document.get("services") if isinstance(document, dict) else None
-            if not isinstance(services, dict) or not services:
-                die("generic initialization found no Compose services")
-            preferred = ("web", "app", "laravel.test", "node", "frontend")
-            service = next((name for name in preferred if name in services), next(iter(services)))
-            service_doc = services.get(service) or {}
-            ports = service_doc.get("expose") or service_doc.get("ports") or []
-            internal_port = 80
-            if ports:
-                raw = ports[0]
-                raw = raw.get("target") if isinstance(raw, dict) else str(raw).split(":")[-1].split("/")[0]
-                try:
-                    internal_port = int(raw)
-                except (TypeError, ValueError):
-                    pass
-            config = {"kind": "compose", "framework": requested_type,
-                      "compose": {"file": compose_file.name, "service": service,
-                                   "internal_port": internal_port, "health_path": "/"}}
-            (project_root / "sandbox.config.json").write_text(json.dumps(config, indent=2) + "\n")
-            ok(f"wrote sandbox.config.json for generic {requested_type} project")
+
+    # Keep the raw spelling for the generated, reviewable framework field;
+    # parser choices already constrain normal CLI callers, while this guard
+    # keeps direct command users from bypassing the same contract.
+    if requested_type:
+        requested_type = str(requested_type).strip().lower()
+        if requested_type not in _GENERIC_INIT_TYPES:
+            die(f"unsupported generic project type: {requested_type!r}")
+
+        # ``primary_config`` also sees the conventional nested config home;
+        # the root-level fallback keeps small test doubles and old callers
+        # compatible with the command's prior ``CONFIG_BASENAMES`` contract.
+        try:
+            from sandbox.config.descriptors import primary_config
+            native_path = primary_config(project_root)
+        except (ImportError, OSError, TypeError, ValueError):
+            native_path = next(
+                (project_root / name for name in sc.CONFIG_BASENAMES
+                 if (project_root / name).exists()), None,
+            )
+
+        if native_path is None:
+            # Astro's preset is read-only with respect to project execution:
+            # it examines package metadata and writes only explicit files.
+            if requested_type == "astro":
+                from sandbox.runtimes.presets import propose_astro
+                propose_astro(project_root)
+                ok("wrote reviewable Astro Compose and Sandbox configuration")
+            else:
+                compose_file = next(
+                    (project_root / name for name in (
+                        "compose.yaml", "compose.yml", "docker-compose.yml",
+                    ) if (project_root / name).exists()), None,
+                )
+                if compose_file is None:
+                    die("generic initialization requires an existing compose.yaml, "
+                        "compose.yml, or docker-compose.yml; no project command "
+                        "was guessed")
+                ensure_pyyaml()
+                import yaml
+                document = yaml.safe_load(compose_file.read_text()) or {}
+                services = document.get("services") if isinstance(document, dict) else None
+                if not isinstance(services, dict) or not services:
+                    die("generic initialization found no Compose services")
+                preferred = ("web", "app", "laravel.test", "node", "frontend")
+                service = next((name for name in preferred if name in services), next(iter(services)))
+                service_doc = services.get(service) or {}
+                ports = service_doc.get("expose") or service_doc.get("ports") or []
+                internal_port = 80
+                if ports:
+                    raw = ports[0]
+                    raw = (raw.get("target") if isinstance(raw, dict)
+                           else str(raw).split(":")[-1].split("/")[0])
+                    try:
+                        internal_port = int(raw)
+                    except (TypeError, ValueError):
+                        pass
+                config = {
+                    "kind": "compose", "framework": requested_type,
+                    "compose": {"file": compose_file.name, "service": service,
+                                 "internal_port": internal_port, "health_path": "/"},
+                }
+                (project_root / "sandbox.config.json").write_text(
+                    json.dumps(config, indent=2) + "\n",
+                )
+                ok(f"wrote sandbox.config.json for generic {requested_type} project")
+
+        # Resolve/validate the descriptor after any proposal has been written,
+        # but before deciding what (if anything) to boot.  The raw document is
+        # retained for explicit kind/framework conflict checks because the
+        # schema facade normalizes all generic aliases to ``kind=compose``.
+        descriptor = _generic_descriptor_document(project_root)
+        try:
+            pconf = sc.load_project_config(pd)
+        except sc.ConfigError as e:
+            die(str(e))
+        conflict = _generic_init_conflict(requested_type, descriptor, pconf)
+        if conflict:
+            die(conflict)
+        if pconf.get("kind") == "compose":
+            _finish_generic_init(project_root, requested_type, pconf)
+            return
+
+    # Legacy/no-type flow below intentionally retains its historical boot and
+    # test-harness provisioning behavior.
     try:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:

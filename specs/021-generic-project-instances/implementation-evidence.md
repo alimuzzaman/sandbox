@@ -14,6 +14,23 @@ The adapter uses argument-list-only subprocess execution, loopback-only host
 publication, Sandbox-owned overlays under `$SANDBOX_HOME/runtime/projects/`,
 bounded health probing, and generic destroy without Compose volume removal.
 
+## 2026-08-21 — explicit generic init is review-only
+
+`sb init --type compose|generic|astro|laravel|php|node|javascript` now stops
+after descriptor validation/proposal. It writes only reviewable project files,
+prints `./sb ensure --project-dir ...` as the next action, and does not invoke a
+runtime adapter, start a service, execute a package command, or provision the
+WordPress test harness. Existing explicit kind/framework conflicts fail closed
+before any runtime call. The no-type WordPress init path retains its historical
+config scaffold, instance ensure, and optional test-harness behavior.
+
+Focused regression evidence:
+
+```text
+.cli-venv/bin/python -m unittest -v tests.test_generic_init
+Ran 4 tests — OK
+```
+
 Focused evidence:
 
 ```text

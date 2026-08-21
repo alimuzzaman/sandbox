@@ -101,11 +101,24 @@ subsequent theme provisioning commands. This keeps dependency activation
 deterministic and prevents onboarding redirects from interfering with
 non-interactive startup.
 
-`sb init --type astro` is a convenience preset: it reads `package.json` and
-the lockfile/configuration without executing project code, then writes an
-explicit `sandbox.config.json` and `sandbox.compose.yml` for review. PHP,
+Explicit generic initialization is configuration-only. The accepted aliases
+are `compose`, `generic`, `astro`, `laravel`, `php`, `node`, and `javascript`:
+
+```bash
+sb init --type astro
+sb init --type laravel
+```
+
+Each form validates or writes an explicit, reviewable Compose descriptor and
+prints the next step (`./sb ensure --project-dir ...`). It does not start a
+Compose service, run a package script, or provision a test harness. Astro reads
+`package.json` and the lockfile/configuration without executing project code,
+then writes `sandbox.config.json` and `sandbox.compose.yml`. PHP,
 Node/JavaScript, Docker-native, Laravel/Sail, Astro, and similar projects use
-the same Compose adapter rather than separate framework runtimes.
+the same Compose adapter rather than separate framework runtimes. If a project
+already declares a different explicit kind/framework, `sb init --type ...`
+fails closed before any runtime action; resolve the descriptor first, then run
+`sb ensure` deliberately.
 
 ## Resolution order
 

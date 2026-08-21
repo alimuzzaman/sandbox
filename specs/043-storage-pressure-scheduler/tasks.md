@@ -98,11 +98,12 @@ parallel.
 
 ## Phase 8 — Docs and verification
 
-> Status note: the monitor implementation and monitor guidance are source-complete
-> through T020. Schedule rendering/activation and the corresponding scheduling docs
-> remain pending T008/T009; no schedule command, activation, or live remote evidence
-> is claimed. Keep T008, T009, T018, T021, T022, and T023 open until those gates are
-> actually delivered and verified.
+> Status note: source-complete work currently covers the policy/record/lock helpers,
+> runner T010/T011, the monitor-only CLI portions of T012/T013, doctor T014, and the
+> policy/MCP/runner tests. Schedule rendering/activation and the schedule portions of
+> T008/T009/T012/T013 remain pending. T022 remains open because the README and skill
+> documentation are not fully landed. No schedule command, activation, or live remote
+> evidence is claimed. Keep T008, T009, T012, T013, T018, T021, T022, and T023 unchecked.
 
 - [ ] **T021** Extend `docs/resource-monitoring.md` with the monitoring/scheduling section,
   the config keys and defaults, the activation gate, and the doctor output.

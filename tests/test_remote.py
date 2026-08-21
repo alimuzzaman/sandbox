@@ -421,6 +421,32 @@ class TestCheckReachable(unittest.TestCase):
     def test_true_on_zero_exit(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
         self.assertTrue(sr.check_reachable({"ssh": "ubuntu@1.2.3.4"}))
+        mock_run.assert_called_once_with(
+            [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
+                "-o", "ConnectionAttempts=1",
+                "-o", "ControlMaster=no",
+                "ubuntu@1.2.3.4",
+                "true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    @patch("subprocess.run")
+    def test_custom_port_keeps_probe_single_and_non_multiplexed(self, mock_run):
+        mock_run.return_value = _completed(returncode=0)
+        self.assertTrue(sr.check_reachable({"ssh": "ubuntu@1.2.3.4:2222"}))
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(argv[-2:], ["ubuntu@1.2.3.4", "true"])
+        self.assertEqual(argv[argv.index("-p") + 1], "2222")
+        self.assertIn("ControlMaster=no", argv)
+        self.assertNotIn("ControlPath", " ".join(argv))
+        self.assertEqual(mock_run.call_count, 1)
 
     @patch("subprocess.run")
     def test_false_on_nonzero_exit(self, mock_run):
@@ -430,6 +456,11 @@ class TestCheckReachable(unittest.TestCase):
     @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10))
     def test_false_on_timeout(self, mock_run):
         self.assertFalse(sr.check_reachable({"ssh": "ubuntu@1.2.3.4"}))
+
+    @patch("subprocess.run", side_effect=OSError("ssh unavailable"))
+    def test_false_on_ssh_os_error(self, mock_run):
+        self.assertFalse(sr.check_reachable({"ssh": "ubuntu@1.2.3.4"}))
+        self.assertEqual(mock_run.call_count, 1)
 
     def test_false_on_missing_ssh_config(self):
         self.assertFalse(sr.check_reachable({}))

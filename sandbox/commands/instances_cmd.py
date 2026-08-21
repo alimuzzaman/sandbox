@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 import types as _types
 from contextlib import contextmanager
 import io
@@ -175,6 +175,29 @@ def _is_wordpress_project(config: dict) -> bool:
     return config.get("kind") == "wordpress"
 
 
+_REDACTION_MARKERS = frozenset({"[REDACTED]", "[REDACTION_FAILED]"})
+
+
+def _sandbox_autologin_value(value: object) -> str | None:
+    """Return the safe-to-classify ``sandbox_autologin`` query value.
+
+    This helper is deliberately only a classifier.  It never returns a value
+    to the caller's output path; the sole caller that needs the raw URL still
+    validates the URL and the explicit reveal policy separately.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+        for name, item in parse_qsl(
+                parsed.query, keep_blank_values=True, strict_parsing=False):
+            if name.lower() == "sandbox_autologin":
+                return item
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def _print_ensure_json(document: object, *, sort_keys: bool = False,
                        compact: bool = False, reveal_login: bool = False) -> None:
     """Emit one fail-closed public JSON document for ``sb ensure --json``.
@@ -196,10 +219,22 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
     commit.
     """
     payload = redact_structure(document)
-    if reveal_login and isinstance(document, Mapping) and isinstance(payload, dict):
-        revealed = _autologin_url_to_reveal(document)
-        if revealed:
-            payload["login_url"] = revealed
+    if isinstance(payload, dict):
+        # Never trust a producer-supplied status field.  Derive it from the
+        # sanitized login URL below, so a remote/native result cannot smuggle
+        # an unverified ``false`` into durable JSON output.
+        payload.pop("login_url_redacted", None)
+        has_autologin = _sandbox_autologin_value(payload.get("login_url")) is not None
+        revealed = ""
+        if (reveal_login and isinstance(document, Mapping)):
+            revealed = _autologin_url_to_reveal(document)
+            if revealed:
+                payload["login_url"] = revealed
+        if has_autologin:
+            # ``false`` is reserved for the one path above: a successful,
+            # explicitly requested reveal.  A placeholder, unusable URL,
+            # non-loopback local target, or already-redacted input is true.
+            payload["login_url_redacted"] = not bool(revealed)
     separators = (",", ":") if compact else None
     print(json.dumps(
         payload,
@@ -219,7 +254,15 @@ def _autologin_url_to_reveal(document: Mapping) -> str:
     Empty string when the record carries no autologin token at all.
     """
     value = document.get("login_url")
-    if not isinstance(value, str) or "sandbox_autologin=" not in value:
+    token = _sandbox_autologin_value(value)
+    if (not isinstance(value, str) or token is None or not token
+            or token in _REDACTION_MARKERS):
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return ""
     target = document.get("target")
     if isinstance(target, Mapping) and target.get("remote"):
@@ -229,7 +272,7 @@ def _autologin_url_to_reveal(document: Mapping) -> str:
         return value
     try:
         resolved = socket.gethostbyname(host)
-    except OSError:
+    except (OSError, ValueError):
         return ""
     return value if resolved.startswith("127.") else ""
 
@@ -337,7 +380,11 @@ def cmd_ensure(cfg, args) -> None:
         # working instance is worse than useless.
         if isinstance(entry, dict) and entry.get("ok"):
             if getattr(args, "json", False):
-                _print_ensure_json(entry, compact=True)
+                _print_ensure_json(
+                    entry,
+                    compact=True,
+                    reveal_login=getattr(args, "reveal_login", False),
+                )
             else:
                 backend = entry.get("backend") or {}
                 where = (f"{backend.get('address')}:{backend.get('port')}"

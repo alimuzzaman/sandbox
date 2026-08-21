@@ -521,6 +521,15 @@ ensure record qualifies on the flag, which is forwarded to the VPS so its own
 redaction runs after. A revealed URL for a publicly exposed instance is an
 admin credential — keep it in a gitignored descriptor, out of logs and commits.
 
+If `login_url` carries a `sandbox_autologin` parameter, the same JSON document
+also contains the derived `login_url_redacted` boolean. It remains `true` for
+placeholders, already-redacted input, unusable/non-loopback local URLs, and
+failed reveals; only a successful explicit `--reveal-login` produces `false`.
+The value is recomputed after redaction rather than trusting an input field.
+Remote reachability checks are read-only and strict: one non-multiplexed
+`ssh ... true` probe, bounded to ten seconds, with no stateful transport
+fallback.
+
 `./sb mcp --project-dir .` remains available for an MCP-capable client. It is
 runtime-scoped: generic Compose projects do not load WordPress tools, and
 WordPress projects do not load generic container-exec tools.

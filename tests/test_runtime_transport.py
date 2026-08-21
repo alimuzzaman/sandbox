@@ -206,6 +206,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
             payload["login_url"],
             "https://fixture.tst/?sandbox_autologin=%5BREDACTED%5D",
         )
+        self.assertTrue(payload["login_url_redacted"])
         self.assertEqual(payload["autologin_token"], "[REDACTED]")
         self.assertEqual(payload["password"], "[REDACTED]")
         self.assertEqual(payload["authorization"], "[REDACTED]")
@@ -245,6 +246,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         with mock.patch("socket.gethostbyname", return_value="127.0.0.42"):
             serialized, payload = self._ensure_json_payload(login_url, reveal_login=True)
         self.assertEqual(payload["login_url"], login_url)
+        self.assertFalse(payload["login_url_redacted"])
         # The opt-in covers login_url alone; every other credential stays redacted.
         self.assertEqual(payload["autologin_token"], "[REDACTED]")
         self.assertEqual(payload["password"], "[REDACTED]")
@@ -278,6 +280,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         serialized = output.getvalue()
         payload = json.loads(serialized)
         self.assertEqual(payload["login_url"], login_url)
+        self.assertFalse(payload["login_url_redacted"])
         self.assertEqual(payload["autologin_token"], "[REDACTED]")
         self.assertNotIn("remote-token", serialized)
 
@@ -356,6 +359,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
             payload["login_url"],
             "https://public.example/?sandbox_autologin=%5BREDACTED%5D",
         )
+        self.assertTrue(payload["login_url_redacted"])
         self.assertNotIn("login-token", serialized)
 
     def test_cli_ensure_json_reveal_login_refuses_unresolvable_host(self):
@@ -367,6 +371,42 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
             )
         self.assertNotIn("login-token", serialized)
         self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        self.assertTrue(payload["login_url_redacted"])
+
+    def test_cli_ensure_json_reveal_login_keeps_already_redacted_input_safe(self):
+        """A placeholder supplied by an older remote stays redacted."""
+        serialized, payload = self._ensure_json_payload(
+            "https://fixture.tst/?sandbox_autologin=%5BREDACTED%5D",
+            reveal_login=True,
+        )
+        self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        self.assertTrue(payload["login_url_redacted"])
+        self.assertNotIn('"login_url_redacted":false', serialized)
+
+    def test_cli_ensure_json_derives_redaction_status_instead_of_trusting_input(self):
+        import sandbox.commands.instances_cmd as commands
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            commands._print_ensure_json({
+                "login_url": "https://fixture.tst/?sandbox_autologin=secret",
+                "login_url_redacted": False,
+            })
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["login_url_redacted"])
+        self.assertNotIn("secret", output.getvalue())
+
+    def test_cli_ensure_json_omits_redaction_status_without_autologin(self):
+        import sandbox.commands.instances_cmd as commands
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            commands._print_ensure_json({
+                "login_url": "https://fixture.tst/wp-admin/",
+                "login_url_redacted": False,
+            })
+        payload = json.loads(output.getvalue())
+        self.assertNotIn("login_url_redacted", payload)
 
     def test_cli_ensure_json_redacts_remote_credentials(self):
         import sandbox.commands.instances_cmd as commands
@@ -394,6 +434,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertEqual(payload["autologin_token"], "[REDACTED]")
         self.assertEqual(payload["nested"]["password"], "[REDACTED]")
         self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        self.assertTrue(payload["login_url_redacted"])
         for secret in ("remote-login", "remote-token", "remote-password"):
             self.assertNotIn(secret, serialized)
 
@@ -427,6 +468,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertEqual(payload["backend"]["password"], "[REDACTED]")
         self.assertEqual(payload["autologin_token"], "[REDACTED]")
         self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        self.assertTrue(payload["login_url_redacted"])
         for secret in ("native-password", "native-login", "native-token"):
             self.assertNotIn(secret, serialized)
 

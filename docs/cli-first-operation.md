@@ -130,6 +130,15 @@ without it and reports that — restage with `./sb remote provision <name>`.
 Treat a revealed URL from a publicly exposed instance as an admin credential:
 write it to a gitignored descriptor, never to a log or a commit.
 
+When `login_url` contains a `sandbox_autologin` query parameter, the JSON also
+includes the derived boolean `login_url_redacted`. It is `true` whenever the
+placeholder remains, the URL is unusable or non-loopback for a local reveal,
+the input was already redacted, or the reveal fails. It is `false` only after a
+successful explicit `--reveal-login`; callers must not use a producer-supplied
+status field as proof that a token was revealed. Remote-list reachability is a
+separate read-only SSH probe: it runs exactly one non-multiplexed `ssh ... true`
+with a ten-second bound and never falls back to the stateful SSH transport.
+
 ## MCP
 
 Run `./sb mcp --project-dir .` only when an MCP-capable client needs live tool

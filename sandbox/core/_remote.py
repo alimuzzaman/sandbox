@@ -576,13 +576,32 @@ def scp_run(remote: dict, local_path: str, remote_path: str,
 
 
 def check_reachable(remote: dict) -> bool:
-    """A quick liveness ping -- true only if SSH can run a trivial command and
-    get a zero exit. Never raises; an unreachable remote is a normal, expected
-    outcome for `remote list` to report, not an error to propagate."""
+    """Run one strict, read-only SSH liveness probe.
+
+    Reachability is intentionally independent from the normal multiplexed
+    transport.  A stale or broken ControlMaster must not turn a healthy host
+    into a false negative (or make the probe create a socket as a side effect),
+    so this path invokes exactly one ``ssh ... true`` with multiplexing disabled
+    and a ten-second client bound.  It never falls back to ``ssh_run``.
+    """
     try:
-        res = ssh_run(remote, "true", timeout=10)
+        parts = remote_ssh_parts(remote)
+        args = [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "ConnectionAttempts=1",
+            "-o", "ControlMaster=no",
+        ]
+        if parts["port"]:
+            args.extend(["-p", str(parts["port"])])
+        args.extend([parts["target"], "true"])
+        res = subprocess.run(
+            args, capture_output=True, text=True, timeout=10, check=False,
+        )
         return res.returncode == 0
-    except (subprocess.TimeoutExpired, OSError, ValueError):
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError,
+            OSError, TypeError, ValueError):
         return False
 
 

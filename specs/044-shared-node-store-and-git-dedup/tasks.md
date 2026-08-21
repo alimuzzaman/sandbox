@@ -4,8 +4,9 @@
 [data-model.md](./data-model.md), [quickstart.md](./quickstart.md), and
 [contracts/](./contracts/)
 
-**Status**: planning only. Every task below is intentionally unchecked. Completing a static
-task or local test does not waive the live-remote evidence gates in T016–T018.
+**Status**: planning remains in progress. Completed rows record evidence-backed implementation
+or validation; unchecked rows remain pending. Completing a static task or local test does not
+waive the live-remote evidence gates in T016–T018.
 
 ## Phase 1 — Shared checkout foundation (User Story 1, P1)
 

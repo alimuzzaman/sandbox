@@ -33,6 +33,11 @@ Ubuntu execution is advertised only after effective namespace, mount, network, c
 resource, and hostile-path proofs pass. Herd, Valet, and declared POSIX profiles are labeled
 `trusted_shared_host` and are intended only for trusted project code.
 
+> **Compose trust boundary:** Use Compose only with trusted project, plugin, and
+> agent-generated code. Docker containers and workspaces share the host kernel and Docker
+> daemon; this is not a hostile-code or multi-tenant security boundary. No per-instance
+> deny-by-default egress policy exists.
+
 Inspect support without mutation:
 
 ```bash

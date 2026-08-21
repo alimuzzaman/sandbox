@@ -85,9 +85,11 @@ not adopted: `.ai/research/2026-08-19-vercel-sandbox/findings.md`. Research only
 - [ ] Deferred unless the threat model changes: per-instance egress policy
   (deny-all base, domain/CIDR allowlists). Only relevant if Sandbox ever runs
   untrusted plugin or agent-generated code; not needed for today's trusted-code
-  workload. Related: Sandbox isolates with Docker on a shared kernel, shared
-  across workspaces on the remote host, so documentation must keep saying
-  trusted code only. `[vercel → findings §3.9, §4]`
+  workload. The trusted-code-only/shared-kernel boundary is now stated in
+  `README.md` and `docs/remote-hosting.md`; this checkbox remains open because
+  no per-instance egress isolation exists. Related: Sandbox uses Docker on a
+  shared kernel, with workspaces shared across the remote host, so documentation
+  must keep saying trusted code only. `[vercel → findings §3.9, §4]`
 
 ## Phase 0 — WordPress Plugin Release Guardian / Operations Agent `[prd 00]`
 

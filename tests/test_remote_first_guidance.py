@@ -37,6 +37,21 @@ class RemoteFirstGuidanceTests(unittest.TestCase):
         self.assertIn("co-located remote MCP", context)
         self.assertIn("durable status/output", context)
 
+    def test_public_docs_state_the_docker_trust_boundary(self):
+        required = (
+            "trusted project, plugin, and agent-generated code",
+            "share the host kernel and docker daemon",
+            "hostile-code or multi-tenant security boundary",
+            "per-instance deny-by-default egress policy",
+        )
+        for relative_path in ("README.md", "docs/remote-hosting.md"):
+            content = " ".join(
+                (ROOT / relative_path).read_text().lower().replace(">", " ").split()
+            )
+            with self.subTest(path=relative_path):
+                for phrase in required:
+                    self.assertIn(phrase, content)
+
 
 if __name__ == "__main__":
     unittest.main()

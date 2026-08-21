@@ -495,6 +495,15 @@ has passed; it is intentionally an explicit command, not a background reaper.
 
 ## 7. Security
 
+### Operational trust boundary
+
+Remote execution is for trusted project, plugin, and agent-generated code only. Docker
+containers and workspaces on a remote target share the host kernel and Docker daemon;
+this is not a hostile-code or multi-tenant security boundary. No per-instance
+deny-by-default egress policy exists. Treat every remote `deploy`, `test`, `exec`, `ci`,
+preview, and hosting workflow as trusted-code execution; separate workspaces do not
+provide hostile-code containment or tenant isolation.
+
 - In HTTPS mode, the remote MCP server binds only to `127.0.0.1`; Caddy exposes it as a
   TLS virtual host. In Tailscale mode, it binds only to the VPS's Tailscale address. It
   never binds to `0.0.0.0`.

@@ -102,13 +102,22 @@ select --local/--remote`.
 ./sb init
 ./sb ensure
 ./sb status
-./sb wp -- plugin list
+./sb wp --timeout 60 -- plugin list
 ./sb test
 ./sb deploy --remote <name> --ensure --expose
 ```
 
 WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
+
+Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
+through 3600 with `--timeout` before the `--` delimiter to change that bound:
+`./sb wp --timeout 120 -- plugin list`. The Compose client wait is a caller
+bound only; it does not guarantee that the container process terminated. A
+timeout therefore reports completion as unknown—inspect state before retrying,
+or use `--async` for long work. Sandbox never retries a timed-out command
+automatically, and synchronous WP stdout remains raw rather than wrapped in
+JSON.
 
 `./sb ensure --json` redacts every credential-shaped field, so `login_url`
 arrives as `?sandbox_autologin=[REDACTED]`. A local test harness that needs a

@@ -23,6 +23,21 @@ from sandbox.application.context import (
 )
 
 
+def _timeout_stream(value) -> str:
+    """Normalize partial ``TimeoutExpired`` output without changing streams."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def _print_stream(value, *, stderr: bool = False) -> None:
+    if not value:
+        return
+    print(value, end="" if value.endswith("\n") else "\n", file=sys.stderr if stderr else sys.stdout)
+
+
 
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
@@ -52,7 +67,24 @@ def cmd_wp(cfg, args) -> None:
         pt = pt[1:]
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
-    result = wpcli(pt, instance=args.resolved_instance, check=False, capture=True)
+    # Keep direct command namespaces (including out-of-tree callers/tests)
+    # aligned with the parser's bounded synchronous default.
+    timeout = getattr(args, "timeout", 60)
+    try:
+        result = wpcli(pt, instance=args.resolved_instance, check=False,
+                       capture=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run may return partial output on a timeout. Preserve each
+        # stream exactly where it belongs, then make the completion uncertainty
+        # explicit: a caller must inspect before retrying or choose --async.
+        _print_stream(_timeout_stream(getattr(exc, "stdout", None)
+                                      or getattr(exc, "output", None)))
+        _print_stream(_timeout_stream(getattr(exc, "stderr", None)), stderr=True)
+        die(
+            f"wp command timed out after {timeout} seconds; completion is "
+            "unknown—inspect state before retrying, or use --async for long work",
+            code=124,
+        )
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
     if stdout:

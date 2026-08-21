@@ -490,9 +490,23 @@ class TestResolutionGate(unittest.TestCase):
                 redirect_stdout(out), redirect_stderr(err):
             command.cmd_wp({}, args)
         wpcli.assert_called_once_with(["option", "get", "siteurl"],
-                                      instance="fixture", check=False, capture=True)
+                                      instance="fixture", check=False, capture=True,
+                                      timeout=60)
         self.assertEqual(out.getvalue(), "https://example.test\n")
         self.assertIn("docker compose", err.getvalue())
+
+    def test_wp_timeout_parser_rejects_async_combination_before_instance_work(self):
+        r = run_sb("wp", "--async", "--timeout", "5", "--", "option", "get", "siteurl")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("argument --timeout: not allowed with argument --async", r.stderr)
+        self.assertNotIn("no sandbox instance", r.stderr + r.stdout)
+
+    def test_wp_timeout_parser_enforces_one_to_3600_seconds(self):
+        for value in ("0", "3601", "not-an-integer"):
+            with self.subTest(value=value):
+                r = run_sb("wp", "--timeout", value, "--", "option", "get", "siteurl")
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("--timeout must be an integer from 1 to 3600 seconds", r.stderr)
 
     def test_exec_requires_an_instance_outside_a_project(self):
         r = run_sb("exec", "--", "echo", "hello")

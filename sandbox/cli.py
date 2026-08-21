@@ -185,6 +185,21 @@ def _project_observation_route(args) -> tuple[bool, bool]:
     )
 
 
+def _wp_timeout(value: str) -> int:
+    """Parse the bounded synchronous ``sb wp`` timeout."""
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            "--timeout must be an integer from 1 to 3600 seconds"
+        )
+    if not 1 <= timeout <= 3600:
+        raise argparse.ArgumentTypeError(
+            "--timeout must be an integer from 1 to 3600 seconds"
+        )
+    return timeout
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -247,8 +262,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     configure_lifecycle_parser(sub)
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
-    w.add_argument("--async", dest="run_async", action="store_true",
-                   help="run as a background job (spec 004) — prints a job id")
+    wp_options = w.add_mutually_exclusive_group()
+    wp_options.add_argument("--async", dest="run_async", action="store_true",
+                            help="run as a background job (spec 004) — prints a job id")
+    wp_options.add_argument("--timeout", type=_wp_timeout, default=60,
+                            help="synchronous wait bound in seconds (default: 60; 1-3600)")
     w.add_argument("passthrough", nargs=argparse.REMAINDER)
 
     s = sub.add_parser("seed", help="Import a WXR from runtime/seeds/")

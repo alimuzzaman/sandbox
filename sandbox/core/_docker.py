@@ -682,7 +682,14 @@ def wpcli(args: list[str], instance: str,
     `wp` container) via `exec -u www-data` — no per-call container. Falls back to the
     one-shot `wpcli` service container if the built-in isn't present yet (e.g. an
     instance not recreated since this landed, or the web container is down)."""
-    gateway = _managed_execution_gate(instance, "wordpress.cli", "wordpress_cli", ("wp", *args))
+    # The synchronous CLI caller supplies its bounded timeout explicitly. Keep
+    # legacy/internal callers' historical 300-second managed default when they
+    # do not provide one, but never drop an explicit ``sb wp --timeout`` value.
+    gateway_timeout = timeout if timeout is not None else 300
+    gateway = _managed_execution_gate(
+        instance, "wordpress.cli", "wordpress_cli", ("wp", *args),
+        timeout=gateway_timeout,
+    )
     if gateway is not None:
         return gateway
     if _is_herd_instance(instance):

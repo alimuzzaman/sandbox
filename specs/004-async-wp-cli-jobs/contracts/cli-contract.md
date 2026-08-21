@@ -29,11 +29,26 @@
 
 ## CLI (`sandbox/commands/`)
 
-- `./sb wp --async <args>` → prints the `job_id`.
+- `./sb wp --timeout SECONDS -- <args>` → runs synchronously with a 60-second
+  default and an integer bound from 1 through 3600. `--timeout` and `--async`
+  are mutually exclusive and rejected by argparse before instance resolution
+  or runtime work.
+- `./sb wp --async <args>` → prints the `job_id`; use this detached path for
+  work that should outlive the synchronous wait bound.
 - `./sb job <id> [--follow] [--kill]` → show status + tail; `--follow` streams; `--kill` cancels.
 - `./sb jobs [--prune]` → list active/recent jobs; both normal listing and
   `--prune` sweep only old *terminal* artifact groups, never individual files
   from a running job.
+
+The synchronous CLI passes the selected timeout through WP-CLI and the
+managed execution gate. A `subprocess.TimeoutExpired` preserves any partial
+stdout/stderr on their matching streams, exits 124, and reports exactly:
+`error: wp command timed out after 60 seconds; completion is unknown—inspect
+state before retrying, or use --async for long work` (with the requested
+integer substituted). This is distinct from a child that completes with exit
+124. The Compose client wait is not a guarantee that the container process has
+terminated; Sandbox does not retry automatically after a timeout. Synchronous
+WP output remains raw and has no JSON wrapper.
 
 All take the standard instance resolution (cwd project → registry; `--instance`/`$SANDBOX_INSTANCE`); MCP tools require the mandatory `project_dir` and `ensure_instance` first. New MCP tools ⇒ Claude Code restart (gotcha #4).
 

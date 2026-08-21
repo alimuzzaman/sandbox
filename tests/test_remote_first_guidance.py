@@ -17,6 +17,9 @@ class RemoteFirstGuidanceTests(unittest.TestCase):
             self.assertIn("configured remote", entries["test"][1])
             self.assertIn("job-status", entries["jobs"][0])
             self.assertIn("retained output", entries["jobs"][1])
+            if kind == "wordpress":
+                self.assertIn("--timeout 60 --", entries["wp"][0])
+                self.assertIn("--async", entries["wp"][1])
         exec_recipe = dict((name, command) for name, command, _ in _GUIDES["compose"])["exec"]
         self.assertIn("--workspace", exec_recipe)
         self.assertIn("--detach", exec_recipe)

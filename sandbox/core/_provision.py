@@ -955,7 +955,11 @@ def _plugin_state_snapshot(instance: str, slugs: list[str]) -> dict[str, str] | 
     try:
         result = wpcli(
             [
-                "plugin", "list", *slugs,
+                # ``wp plugin list`` has no positional plugin filter.  Ask for
+                # the bounded fields for the installed set, then filter the
+                # declared slugs locally below; passing slugs here makes the
+                # real WP-CLI command fail before it can prove a no-op.
+                "plugin", "list",
                 "--fields=name,status", "--format=json", "--skip-plugins",
             ],
             instance=instance, check=False, capture=True,

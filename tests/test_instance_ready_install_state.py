@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sandbox.core import _instances  # noqa: E402
+import sandbox_core as _project_core  # noqa: E402
 
 # ``ensure_instance`` imports the lifecycle handlers at call time.  Import that
 # module once with a neutral argv before unittest's selector can be interpreted
@@ -305,6 +306,64 @@ class TestReadyEnsureInstallState(unittest.TestCase):
             state.lock_events,
             ["project:enter", "ports:enter", "ports:exit", "project:exit"],
         )
+
+    def test_plugin_state_failure_cannot_persist_ready_registry_record(self):
+        class FreshState(_State):
+            @staticmethod
+            def registry_get(_root, label=None):
+                return None
+
+            @staticmethod
+            def registry_all():
+                return {}
+
+        state = FreshState()
+        ports = {"wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025}
+        plugin_error = _project_core.ConfigError(
+            "managed plugin activate failed; unresolved declared plugin(s): elementor-pro"
+        )
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(_instances, "_core", return_value=state))
+            stack.enter_context(mock.patch.object(
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "resolve_instances",
+                return_value={"fixture": {"server": "apache", "multisite": False}},
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_derive_instance_name", return_value="fixture",
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_pick_instance_ports", return_value=ports,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_build_instance_block", return_value={},
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "prepare_php_extension_runtime", return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(_instances, "_local_yaml", return_value={}))
+            stack.enter_context(mock.patch.object(_instances, "_write_local_yaml"))
+            stack.enter_context(mock.patch.object(_instances, "write_compose_files"))
+            stack.enter_context(mock.patch.object(_instances, "load_config", return_value={}))
+            stack.enter_context(mock.patch.object(
+                _instances, "_proxy_sudoers_installed", return_value=False,
+            ))
+            stack.enter_context(mock.patch.object(_lifecycle, "cmd_up"))
+            stack.enter_context(mock.patch.object(_lifecycle, "cmd_install"))
+            stack.enter_context(mock.patch.object(_instances, "_wait_http", return_value=True))
+            stack.enter_context(mock.patch.object(
+                _instances, "_wire_project_plugins", side_effect=plugin_error,
+            ))
+            stack.enter_context(mock.patch.object(_instances, "_wire_project_themes"))
+            with self.assertRaises(_project_core.ConfigError):
+                _instances.ensure_instance({}, "/project")
+
+        statuses = [call.kwargs.get("status") for call in state.registry_put.call_args_list]
+        self.assertEqual(statuses, ["pending"])
+        self.assertNotIn("ready", statuses)
 
 
 if __name__ == "__main__":

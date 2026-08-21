@@ -265,6 +265,10 @@ class PluginActivationOrderTests(unittest.TestCase):
             write_sources.assert_called_once_with("fixture", {})
             observed = next(call for call in mocked.call_args_list
                             if call.args[0][:2] == ["plugin", "list"])
+            self.assertEqual(observed.args[0], [
+                "plugin", "list", "--fields=name,status", "--format=json",
+                "--skip-plugins",
+            ])
             self.assertTrue(observed.kwargs["capture"])
 
     @patch("sandbox.core._provision._write_local_sources")

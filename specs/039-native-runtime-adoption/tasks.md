@@ -275,7 +275,7 @@ T023 credential/FD tests
 ## Phase 9: Convergence
 
 - [X] T079 Revalidate the digest-bound active egress-grant broker immediately before every isolated payload launch, with an execution-path regression test, per FR-011 and FR-016 (partial)
-- [ ] T080 Restore and prove the plan's <=3-second managed-host preflight bound before retaining T076 as complete; do not weaken the Spec 039 performance target to the current 6-second harness allowance (contradicts)
+- [ ] T080 Restore and prove the plan's <=3-second managed-host preflight bound before retaining T076 as complete. (partial — 2026-08-21: the source gate and fixed batch helper are restored to 3 seconds; authorized managed-Ubuntu evidence for primary, sibling, and post-cleanup preflights remains required.)
 - [X] T081 Record exact source revision/worktree identity and durable-job identifiers in generated live acceptance evidence, with harness coverage, per the evidence-index provenance contract and T077 (partial)
 
 ## Phase 10: Convergence — 2026-08-13 (PHP extension requirements)

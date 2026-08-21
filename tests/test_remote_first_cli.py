@@ -8,7 +8,7 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sandbox.commands.runtime import cmd_exec
+from sandbox.commands.runtime import cmd_exec, configure_exec_parser
 from sandbox.runtimes.base import OperationResult
 
 
@@ -18,6 +18,7 @@ class RemoteFirstCliTests(unittest.TestCase):
             "command": ["--", "npm", "test"], "local": False, "remote": None,
             "workspace": None, "timeout": None, "detach": False,
             "output_profile": "smart", "json": True, "in_instance": False,
+            "request_id": None,
             "resolved_instance": "default",
         }
         values.update(overrides)
@@ -43,10 +44,11 @@ class RemoteFirstCliTests(unittest.TestCase):
              patch("sandbox.core._remote.get_remote"), \
              patch("sandbox.core._remote.remote_sb_path"), \
              patch("sys.stdout", output):
-            cmd_exec(None, self._args(output_profile="agent"))
+            cmd_exec(None, self._args(output_profile="agent", request_id="exec-remote-1"))
         self.assertEqual(json.loads(output.getvalue())["remote"], "vps")
         self.assertEqual(submissions[0].output_profile_definition, {"mode": "errors"})
         self.assertEqual(submissions[0].project_identity, "project:remote")
+        self.assertEqual(submissions[0].request_id, "exec-remote-1")
         self.assertEqual(
             submissions[0].source.identity,
             "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
@@ -54,8 +56,9 @@ class RemoteFirstCliTests(unittest.TestCase):
 
     def test_explicit_local_does_not_resolve_the_configured_remote(self):
         accepted = {"job_id": "b" * 32}
+        submissions = []
         local_service = SimpleNamespace(
-            submit=lambda _submission: accepted,
+            submit=lambda submission: submissions.append(submission) or accepted,
             get=lambda _job_id: {"lifecycle": "succeeded"},
             read_output=lambda _job_id: {"data": "ok\n"},
         )
@@ -66,8 +69,9 @@ class RemoteFirstCliTests(unittest.TestCase):
         output = StringIO()
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
              patch("sys.stdout", output):
-            cmd_exec(None, self._args(local=True, detach=True))
+            cmd_exec(None, self._args(local=True, detach=True, request_id="exec-local-1"))
         self.assertEqual(json.loads(output.getvalue()), accepted)
+        self.assertEqual(submissions[0].request_id, "exec-local-1")
 
     def test_explicit_named_remote_is_forwarded_to_the_shared_target_resolver(self):
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="named-vps",
@@ -115,11 +119,45 @@ class RemoteFirstCliTests(unittest.TestCase):
         self.assertEqual(invocations[0].arguments, {"argv": ["npm", "test"], "timeout": 120})
         self.assertEqual(json.loads(output.getvalue())["output"], "v22.18.0\n")
 
+    def test_request_id_refuses_bare_direct_local_before_runtime_invocation(self):
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project:local"})
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        runtime = SimpleNamespace(invoke=lambda _request: self.fail("direct runtime must not run"))
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.commands.runtime.runtime_service", return_value=runtime), \
+             patch("sandbox.commands.runtime.die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                cmd_exec(None, self._args(request_id="exec-direct-local-1"))
+        die.assert_called_once_with(
+            "--request-id requires durable execution; add --detach or select --local/--remote")
+
+    def test_request_id_refuses_hidden_in_instance_before_target_or_runtime(self):
+        dependencies = {"target_service": self.fail}
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.commands.runtime.die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                cmd_exec(None, self._args(local=True, in_instance=True,
+                                          request_id="exec-in-instance-1"))
+        die.assert_called_once_with(
+            "--request-id requires durable execution; add --detach or select --local/--remote")
+
+    def test_exec_parser_exposes_request_id_without_changing_target_defaults(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_exec_parser(parser)
+        args = parser.parse_args(["--request-id", "exec-parser-1", "--", "echo", "ok"])
+        self.assertEqual(args.request_id, "exec-parser-1")
+        self.assertFalse(args.local)
+        self.assertIsNone(args.remote)
+        self.assertFalse(args.detach)
+        self.assertIn("--request-id", parser.format_help())
+
     def test_exec_help_exposes_target_and_finite_deadline_controls(self):
         result = subprocess.run([str(__import__("pathlib").Path(__file__).parent.parent / "sb"),
                                  "exec", "--help"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for option in ("--local", "--remote", "--workspace", "--timeout"):
+        for option in ("--local", "--remote", "--workspace", "--timeout", "--request-id"):
             self.assertIn(option, result.stdout)
 
     def test_detached_human_output_includes_target_workspace_and_deadline_source(self):

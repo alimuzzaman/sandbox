@@ -22,7 +22,8 @@ _GUIDES = {
         ("ensure", "./sb ensure", "Start or reconcile the local instance."),
         ("status", "./sb status", "Inspect the declared runtime."),
         ("logs", "./sb logs", "Read service logs."),
-        ("exec", "./sb exec [--local] --workspace <name> --timeout <seconds> -- <argv...>",
+        ("exec", "./sb exec [--local|--remote <name>] --workspace <name> --timeout <seconds> "
+         "--detach --request-id <stable-id> -- <argv...>",
          "Run a durable job; a configured remote is the default and --local is explicit."),
         ("test", "./sb test <declared-mode> [--local] --timeout <seconds>",
          "Run the declared test command with a configured remote by default."),
@@ -112,6 +113,8 @@ def configure_exec_parser(parser) -> None:
     parser.add_argument("--no-cancel-on-stall", action="store_false", dest="cancel_on_stall")
     parser.add_argument("--cleanup-policy", choices=("retain", "always", "on-success", "ephemeral"))
     parser.add_argument("--detach", action="store_true", help="return a durable job ID without waiting")
+    parser.add_argument("--request-id",
+                        help="stable idempotency key for a durable submission")
     parser.add_argument("--output-profile", help="retained-output presentation profile")
     # Internal controller escape hatch.  A remote durable job has already
     # selected its VPS and owns the process/output lifecycle; it needs to
@@ -139,6 +142,10 @@ def cmd_exec(cfg, args) -> None:
     if any(not isinstance(item, str) or not item or "\x00" in item for item in command):
         die("exec requires a non-empty argv list without NUL bytes")
 
+    request_id = getattr(args, "request_id", None)
+    if request_id and getattr(args, "in_instance", False):
+        die("--request-id requires durable execution; add --detach or select --local/--remote")
+
     target = None
     if not args.local and not args.remote:
         # Resolve the configured target even when the caller did not spell out
@@ -159,6 +166,10 @@ def cmd_exec(cfg, args) -> None:
     # VPS and ensured the project Compose service. It must invoke that service
     # directly; submitting another local durable job would execute the argv on
     # the VPS host instead of in the declared container image.
+    if (request_id and not args.in_instance and not args.local and not args.remote and
+            not args.detach and target is not None and target.kind == "local"):
+        die("--request-id requires durable execution; add --detach or select --local/--remote")
+
     if not args.in_instance and (args.local or args.remote or args.detach or
                                  (target is not None and target.kind == "remote")):
         from sandbox.application.context import durable_job_dependencies
@@ -187,7 +198,8 @@ def cmd_exec(cfg, args) -> None:
             execution_profile=policy.execution_profile, deadline_source=policy.deadline_source,
             deadline_reminder=policy.deadline_reminder, stall_seconds=policy.stall_seconds,
             cancel_grace_seconds=policy.cancel_grace_seconds, cancel_on_stall=policy.cancel_on_stall,
-            cleanup_policy=policy.cleanup_policy, execution_policy_provenance=policy.provenance)
+            cleanup_policy=policy.cleanup_policy, execution_policy_provenance=policy.provenance,
+            request_id=request_id)
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport

@@ -30,7 +30,8 @@ The internal `--in-instance` mode then runs the explicit command directly in
 the declared Compose service, preserving the project's pinned container image.
 
 ```sh
-./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
+  --request-id node-unit-tests-1 -- npm test
 ./sb job-status <job-id> --json
 ./sb job-output <job-id> --follow
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
@@ -89,6 +90,11 @@ The guide detects the runtime and emits only its useful commands.
 
 `sb exec` accepts an explicit argv list and runs it in the configured public
 Compose service. It does not invent a shell, service, or package command.
+For durable submissions, pass a stable `--request-id` so an uncertain caller
+can replay the same request without creating a duplicate. A request ID cannot
+turn a direct local or internal `--in-instance` invocation into a durable job;
+those calls fail with `--request-id requires durable execution; add --detach or
+select --local/--remote`.
 
 ## WordPress
 

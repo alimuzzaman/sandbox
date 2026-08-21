@@ -402,7 +402,8 @@ converts a validated zero into its one-second polling wait. The complete sealed
 log remains available for later retrieval.
 
 ```sh
-./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
+  --request-id node-unit-tests-1 -- npm test
 ./sb job-status <job-id> --json
 ./sb job-output <job-id> --follow
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2

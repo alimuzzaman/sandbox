@@ -119,7 +119,8 @@ the workstation. Every long-running command needs a finite `--timeout`; use
 an SSH or MCP stdio stream open.
 
 ```sh
-sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
+  --request-id node-unit-tests-1 -- npm test
 sb job-status <job-id> --json
 sb job-output <job-id> --follow
 sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
@@ -156,7 +157,8 @@ reaches a terminal lifecycle, then surface a non-success lifecycle and its
 relevant output to the user.
 
 ```sh
-sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
+  --request-id node-unit-tests-1 -- npm test
 sb job-status <job-id> --remote scaleway-sandbox --json
 sb job-output <job-id> --remote scaleway-sandbox --stream stderr --tail-bytes 8192 --wait-seconds 20 --json
 ```

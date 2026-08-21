@@ -12,7 +12,8 @@ Use a finite timeout for every long-running command, a reusable workspace for
 development, and isolated labels for matrix cells:
 
 ```sh
-./sb exec --remote NAME --workspace node-unit --timeout 3600 --detach -- npm test
+./sb exec --remote NAME --workspace node-unit --timeout 3600 --detach \
+  --request-id node-unit-tests-1 -- npm test
 ./sb e2e --remote NAME --workspace e2e-dev --timeout 7200 --workers 4 --json
 ./sb job-status JOB --json
 ./sb job-output JOB --stream combined --cursor CURSOR --max-bytes 65536

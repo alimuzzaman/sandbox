@@ -17,7 +17,10 @@ class RemoteFirstGuidanceTests(unittest.TestCase):
             self.assertIn("configured remote", entries["test"][1])
             self.assertIn("job-status", entries["jobs"][0])
             self.assertIn("retained output", entries["jobs"][1])
-        self.assertIn("--workspace", dict((name, command) for name, command, _ in _GUIDES["compose"])["exec"])
+        exec_recipe = dict((name, command) for name, command, _ in _GUIDES["compose"])["exec"]
+        self.assertIn("--workspace", exec_recipe)
+        self.assertIn("--detach", exec_recipe)
+        self.assertIn("--request-id", exec_recipe)
 
     def test_cli_skill_covers_deploy_deadlines_workspace_isolation_and_remote_mcp(self):
         content = (ROOT / "skills" / "sandbox-cli" / "SKILL.md").read_text()

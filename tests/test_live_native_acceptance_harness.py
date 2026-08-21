@@ -29,10 +29,9 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
             "cpu", "memory", "pids", "runtime", "disk", "inodes", "fds",
             "connections", "io",
         })
-        # Measured on a host where preflight actually probes. The former 3.0 came
-        # from macOS, where the managed runtime is unsupported and the command
-        # short-circuits, so it timed a check that never ran.
-        self.assertEqual(live.PREFLIGHT_LIMIT_SECONDS, 6.0)
+        # The fixed batch helper pays one sudo/controller round trip while each
+        # effective probe retains its own isolated token and cleanup contract.
+        self.assertEqual(live.PREFLIGHT_LIMIT_SECONDS, 3.0)
         self.assertEqual(live.STATUS_LIMIT_SECONDS, 3.0)
         self.assertEqual(live.WARM_START_LIMIT_SECONDS, 20.0)
 

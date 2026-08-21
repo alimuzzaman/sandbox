@@ -38,15 +38,10 @@ SB = REPOSITORY_ROOT / "sb"
 MAX_CAPTURE_BYTES = 16 * 1024
 MAX_EVENTS = 384
 _GIT_REVISION_LENGTH = 40
-# Measured on a host where the check actually runs. The previous 3-second bound
-# came from macOS, where the managed runtime is unsupported and preflight
-# short-circuits without probing anything -- it recorded 0.30s. On Ubuntu the
-# same command costs 0.55s of interpreter and virtualenv startup plus ~2.6s of
-# real host probing, consistently 3.0-3.4s, so the old bound could never pass
-# on the only host where the number means anything.
-PREFLIGHT_LIMIT_SECONDS = 6.0
-# Status is unchanged: measured at 0.52s and 0.55s on the same host, well inside
-# its bound. Only preflight does the host probing that made the old number wrong.
+# The fixed helper batch pays one sudo/controller round trip while preserving
+# the four isolated kernel-effect probes, so the acceptance bound is 3 seconds.
+PREFLIGHT_LIMIT_SECONDS = 3.0
+# Status remains independently bounded.
 STATUS_LIMIT_SECONDS = 3.0
 WARM_START_LIMIT_SECONDS = 20.0
 # A cold provision builds a fixed-size image, debootstraps a root filesystem and

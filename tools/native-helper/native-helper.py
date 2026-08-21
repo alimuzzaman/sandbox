@@ -97,6 +97,9 @@ BROKER_NETWORK_RULES = ("egress_broker_request", "egress_broker_reply")
 CREDENTIAL_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 PROBE_TOKEN = re.compile(r"^[a-f0-9]{16}$")
 LOGIN_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+PREFLIGHT_PROBES = (
+    "cgroup-delegation", "private-network", "nftables", "seccomp",
+)
 
 
 def fail(message, code=65):
@@ -4240,7 +4243,7 @@ def _probe_child_seccomp(_token):
 
 def preflight_probe(probe):
     """Run one bounded kernel-effect probe through the installed helper."""
-    if probe not in {"private-network", "nftables", "cgroup-delegation", "seccomp"}:
+    if probe not in PREFLIGHT_PROBES:
         return {"ok": False, "probe": str(probe)[:32], "state": "invalid"}
     if not installed_helper_ready():
         return {"ok": False, "probe": probe, "state": "helper_unavailable"}
@@ -4290,6 +4293,18 @@ def preflight_probe(probe):
             elif description:
                 state = "collision"
     return {"ok": state == "ready", "probe": probe, "state": state}
+
+
+def preflight_probes():
+    """Run the fixed effective-probe manifest once and retain every result."""
+    probes = [preflight_probe(probe) for probe in PREFLIGHT_PROBES]
+    ok = all(result["ok"] for result in probes)
+    return {
+        "schema": "sandbox.native-helper-preflight/v1",
+        "ok": ok,
+        "state": "ready" if ok else "blocked",
+        "probes": probes,
+    }
 
 
 def preflight_child(probe, token):
@@ -4553,11 +4568,10 @@ def main(argv=None):
     cleanup_parser.add_argument("machine"); cleanup_parser.add_argument("digest")
     cleanup_parser.add_argument("resource_digest")
     probe = sub.add_parser("preflight-probe")
-    probe.add_argument("probe", choices=("private-network", "nftables",
-                                         "cgroup-delegation", "seccomp"))
+    probe.add_argument("probe", choices=PREFLIGHT_PROBES)
+    sub.add_parser("preflight-probes")
     probe_child = sub.add_parser("_preflight-child")
-    probe_child.add_argument("probe", choices=("private-network", "nftables",
-                                               "cgroup-delegation", "seccomp"))
+    probe_child.add_argument("probe", choices=PREFLIGHT_PROBES)
     probe_child.add_argument("token")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
                  "network-apply", "network-grants-apply", "network-status", "network-remove",
@@ -4616,6 +4630,10 @@ def main(argv=None):
         require_root(); host_baseline_observe()
     elif args.verb == "preflight-probe":
         require_root(); result = preflight_probe(args.probe)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        if not result["ok"]: raise SystemExit(69)
+    elif args.verb == "preflight-probes":
+        require_root(); result = preflight_probes()
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         if not result["ok"]: raise SystemExit(69)
     elif args.verb == "_preflight-child":

@@ -368,23 +368,65 @@ def clean_url_service(cfg, **overrides):
     )
 
 
-def _native_helper_effective_probe(process, helper, gate):
+_NATIVE_HELPER_PREFLIGHT_PROBES = (
+    ("cgroup_delegation", "cgroup-delegation"),
+    ("private_network", "private-network"),
+    ("nftables", "nftables"),
+    ("seccomp", "seccomp"),
+)
+
+
+def _native_helper_preflight_results(process, helper):
     import json
 
-    probes = {"private_network": "private-network", "nftables": "nftables",
-              "cgroup_delegation": "cgroup-delegation", "seccomp": "seccomp"}
-    probe = probes.get(gate)
-    if probe is None:
-        return None
+    failed = {gate: False for gate, _probe in _NATIVE_HELPER_PREFLIGHT_PROBES}
     try:
-        result = process.run(("sudo", "-n", helper, "preflight-probe", probe), timeout=20)
+        result = process.run(("sudo", "-n", helper, "preflight-probes"), timeout=20)
+        if (type(result.returncode) is not int or
+                not isinstance(result.stdout, str)):
+            return failed
         observed = json.loads(result.stdout or "")
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return bool(result.returncode == 0 and isinstance(observed, dict) and
-                set(observed) == {"ok", "probe", "state"} and
-                observed.get("ok") is True and observed.get("probe") == probe and
-                observed.get("state") == "ready")
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return failed
+    if (not isinstance(observed, dict) or
+            set(observed) != {"schema", "ok", "state", "probes"} or
+            observed.get("schema") != "sandbox.native-helper-preflight/v1" or
+            type(observed.get("ok")) is not bool or
+            not isinstance(observed.get("state"), str) or
+            observed["state"] not in {"ready", "blocked"} or
+            not isinstance(observed.get("probes"), list) or
+            len(observed["probes"]) != len(_NATIVE_HELPER_PREFLIGHT_PROBES)):
+        return failed
+    allowed_states = {
+        "ready", "failed", "timeout", "collision", "helper_unavailable",
+    }
+    values = {}
+    for item, (gate, expected_probe) in zip(
+            observed["probes"], _NATIVE_HELPER_PREFLIGHT_PROBES):
+        if (not isinstance(item, dict) or set(item) != {"ok", "probe", "state"} or
+                type(item.get("ok")) is not bool or
+                item.get("probe") != expected_probe or
+                not isinstance(item.get("state"), str) or
+                item["state"] not in allowed_states or
+                item["ok"] != (item["state"] == "ready")):
+            return failed
+        values[gate] = item["ok"]
+    aggregate = all(values.values())
+    if (observed["ok"] != aggregate or
+            observed["state"] != ("ready" if aggregate else "blocked") or
+            result.returncode != (0 if aggregate else 69)):
+        return failed
+    return values
+
+
+def _native_helper_effective_probe(process, helper, gate, cache=None):
+    if gate not in dict(_NATIVE_HELPER_PREFLIGHT_PROBES):
+        return None
+    if cache is None:
+        cache = _native_helper_preflight_results(process, helper)
+    elif not cache:
+        cache.update(_native_helper_preflight_results(process, helper))
+    return cache[gate]
 
 
 def native_isolation_preflight(cfg, **overrides):
@@ -396,6 +438,7 @@ def native_isolation_preflight(cfg, **overrides):
     from sandbox.services import BoundedProcessRunner
     process = overrides.pop("process", BoundedProcessRunner())
     helper = overrides.pop("helper", "/usr/local/libexec/sandbox-native-helper")
+    probe_cache = {}
 
     def facts():
         values = {}
@@ -413,7 +456,9 @@ def native_isolation_preflight(cfg, **overrides):
                 "systemd_version": version}
 
     def effective(gate):
-        helper_result = _native_helper_effective_probe(process, helper, gate)
+        helper_result = _native_helper_effective_probe(
+            process, helper, gate, cache=probe_cache,
+        )
         if helper_result is not None:
             return helper_result
         if gate == "pid1_systemd":
@@ -429,8 +474,14 @@ def native_isolation_preflight(cfg, **overrides):
         if gate == "seccomp": return False
         return False
 
+    facts_provider = overrides.pop("facts", facts)
+
+    def inspection_facts():
+        probe_cache.clear()
+        return facts_provider()
+
     return IsolationPreflight(
-        facts=overrides.pop("facts", facts),
+        facts=inspection_facts,
         command_probe=overrides.pop("command_probe", lambda command: shutil.which(command) is not None),
         effective_probe=overrides.pop("effective_probe", effective),
     )

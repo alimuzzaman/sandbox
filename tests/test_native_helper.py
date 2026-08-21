@@ -1,6 +1,7 @@
 import importlib.util
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -250,6 +251,57 @@ class TestNativeHelper(unittest.TestCase):
                     self.assertTrue(any(value.endswith(".scope") for value in command))
                 else:
                     self.assertEqual(command[:3], ("unshare", "--net", "--"))
+
+    def test_preflight_batch_emits_complete_canonical_ready_and_blocked_documents(self):
+        helper = module()
+        self.assertEqual((HELPER.parent / "VERSION").read_text().strip(), "11")
+        self.assertEqual(helper.PREFLIGHT_PROBES, (
+            "cgroup-delegation", "private-network", "nftables", "seccomp",
+        ))
+        ready = lambda probe: {"ok": True, "probe": probe, "state": "ready"}
+        output = io.StringIO()
+        with mock.patch.object(helper, "require_root"), \
+                mock.patch.object(helper, "preflight_probe", side_effect=ready) as probe, \
+                redirect_stdout(output):
+            helper.main(["preflight-probes"])
+        self.assertEqual(json.loads(output.getvalue()), {
+            "schema": "sandbox.native-helper-preflight/v1",
+            "ok": True,
+            "state": "ready",
+            "probes": [ready(name) for name in helper.PREFLIGHT_PROBES],
+        })
+        self.assertEqual(
+            [call.args[0] for call in probe.call_args_list],
+            list(helper.PREFLIGHT_PROBES),
+        )
+
+        def one_blocked(name):
+            state = "failed" if name == "private-network" else "ready"
+            return {"ok": state == "ready", "probe": name, "state": state}
+
+        output = io.StringIO()
+        with mock.patch.object(helper, "require_root"), \
+                mock.patch.object(helper, "preflight_probe", side_effect=one_blocked) as probe, \
+                redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            helper.main(["preflight-probes"])
+        self.assertEqual(stopped.exception.code, 69)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["state"], "blocked")
+        self.assertFalse(document["ok"])
+        self.assertEqual(document["probes"], [
+            one_blocked(name) for name in helper.PREFLIGHT_PROBES
+        ])
+        self.assertEqual(probe.call_count, 4)
+
+    def test_preflight_batch_does_not_shape_a_hard_probe_failure(self):
+        helper = module()
+        output = io.StringIO()
+        with mock.patch.object(helper, "require_root"), \
+                mock.patch.object(helper, "preflight_probe", side_effect=SystemExit(73)), \
+                redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            helper.main(["preflight-probes"])
+        self.assertEqual(stopped.exception.code, 73)
+        self.assertEqual(output.getvalue(), "")
 
     def test_preflight_refuses_unit_collision_before_probe(self):
         helper = module(); present = mock.Mock(returncode=0, stdout="loaded\n", stderr="")

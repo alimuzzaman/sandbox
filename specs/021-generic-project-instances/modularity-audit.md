@@ -127,11 +127,45 @@ Every registered command appears once below. “Candidate” means the concept c
 
 ## Modularity acceptance checks
 
-- Current automated inventory (2026-07-26): 84 CLI commands, 50 decorated MCP
+- Historical automated inventory (2026-07-26): 84 CLI commands, 50 decorated MCP
   tools, 20 wildcard imports, and 77 `kind`-referencing conditional expressions.
-  The conditional count is a broad static regression proxy (it includes job and CI
-  discriminators as well as runtime selection), so it is updated alongside each
-  intentional feature addition rather than treated as a runtime-adapter-only limit.
+  The historical conditional count is retained for audit continuity.
+
+### 2026-08-21 — explicit modularity metric and runtime-kind allow-list
+
+`tests.test_modularity.TestModularityInventory` now names the broad static
+regression proxy `kind_referencing_conditionals`. The current source baseline is
+88 CLI commands, 44 decorated MCP tools, 20 wildcard imports, and **141**
+kind-referencing conditional expressions. The broad metric intentionally includes
+job, CI, resource, and other discriminators; it is not a claim that every such
+branch is runtime selection.
+
+The same test maintains a separate AST-derived `Counter` for the registered
+project kinds (`compose` and `wordpress`). It includes mapping-key accesses to
+`kind`, direct `kind` comparisons, and direct `project_kind` comparisons, and
+also covers comprehension filters. The approved Counter has **25** occurrences
+across the following 23 `(relative path, enclosing function)` locations; only
+`sandbox/application/runtime_service.py:invoke` and
+`sandbox/commands/instances_cmd.py:cmd_init` occur twice:
+
+```text
+mcp/wp-server/tools/instances.py: destroy_instance, recreate_instance, secure_instance
+mcp/wp-server/tools/runtime.py: _typed_invoke, _wordpress_extension_status
+sandbox/application/runtime_service.py: check (1), invoke (2)
+sandbox/cli.py: main
+sandbox/commands/ci.py: cmd_ci
+sandbox/commands/debug.py: cmd_test
+sandbox/commands/instances_cmd.py: cmd_ensure, cmd_init (2), cmd_instance
+sandbox/commands/lifecycle.py: _status_json_payload, cmd_down, cmd_logs, cmd_open, cmd_status, cmd_up
+sandbox/commands/net.py: cmd_secure
+sandbox/core/_domains.py: _generic_proxy_entries, secure_generic_instance
+sandbox/core/_instances.py: resolve_instances
+sandbox/runtimes/compose.py: _descriptor
+```
+
+Evidence: `python3 -m unittest -v tests.test_modularity` passed on this date;
+`git diff --check` passed. No production runtime branches were changed to reach
+the count.
 - New `sandbox/runtimes/` files use no wildcard imports.
 - Runtime-kind branching is confined to descriptor normalization and adapter selection; a repository search verifies exceptions.
 - New CLI parsers are registered from their feature module, not appended directly to `sandbox/cli.py`.

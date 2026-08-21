@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).parent.parent
+REGISTERED_PROJECT_KINDS = frozenset({"compose", "wordpress"})
 
 
 def production_python_files() -> list[Path]:
@@ -29,10 +31,88 @@ def _has_tool_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
+def _enclosing_function(node: ast.AST, functions: tuple[str, ...]) -> str:
+    """Return the nearest feature function for an AST condition."""
+
+    return functions[-1] if functions else "<module>"
+
+
+def _is_project_kind_test(test: ast.AST) -> bool:
+    """Recognize a registered project-kind discriminator without text matching.
+
+    The broad inventory below remains a historical regression proxy. This
+    predicate is deliberately narrower: it requires a comparison against one
+    of the registered project kinds and an AST access to ``kind`` or
+    ``project_kind``. That keeps unrelated resource/job ``kind`` fields out of
+    the runtime-adapter inventory while retaining direct ``project_kind``
+    comparisons.
+    """
+
+    nodes = tuple(ast.walk(test))
+    values = {
+        node.value
+        for node in nodes
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    direct_project_kind = any(
+        (isinstance(node, ast.Name) and node.id == "project_kind")
+        or (isinstance(node, ast.Attribute) and node.attr == "project_kind")
+        or (isinstance(node, ast.Constant) and node.value == "project_kind")
+        for node in nodes
+    )
+    if not values & REGISTERED_PROJECT_KINDS and not direct_project_kind:
+        return False
+    return direct_project_kind or any(
+        (isinstance(node, ast.Name) and node.id in {"kind", "project_kind"})
+        or (isinstance(node, ast.Attribute) and node.attr in {"kind", "project_kind"})
+        or (isinstance(node, ast.Constant) and node.value in {"kind", "project_kind"})
+        for node in nodes
+    )
+
+
+def _runtime_kind_locations(tree: ast.AST, relative: str) -> Counter[tuple[str, str]]:
+    """Count approved runtime-kind conditionals by file and enclosing function."""
+
+    locations: Counter[tuple[str, str]] = Counter()
+
+    def visit(node: ast.AST, functions: tuple[str, ...] = ()) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions = (*functions, node.name)
+
+        tests: tuple[ast.AST, ...]
+        if isinstance(node, (ast.If, ast.IfExp)):
+            tests = (node.test,)
+        elif isinstance(node, ast.comprehension):
+            tests = tuple(node.ifs)
+        else:
+            tests = ()
+
+        if any(_is_project_kind_test(test) for test in tests):
+            locations[(relative, _enclosing_function(node, functions))] += sum(
+                _is_project_kind_test(test) for test in tests
+            )
+
+        for child in ast.iter_child_nodes(node):
+            visit(child, functions)
+
+    visit(tree)
+    return locations
+
+
+def approved_runtime_kind_locations() -> Counter[tuple[str, str]]:
+    locations: Counter[tuple[str, str]] = Counter()
+    for path in production_python_files():
+        tree = ast.parse(path.read_text())
+        locations.update(
+            _runtime_kind_locations(tree, str(path.relative_to(ROOT)))
+        )
+    return locations
+
+
 def audit_metrics() -> dict[str, int]:
     wildcard_imports = 0
     mcp_tools = 0
-    runtime_kind_branches = 0
+    kind_referencing_conditionals = 0
     for path in production_python_files():
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -42,7 +122,7 @@ def audit_metrics() -> dict[str, int]:
                 mcp_tools += _has_tool_decorator(node)
             if isinstance(node, (ast.If, ast.IfExp)):
                 test = ast.unparse(node.test)
-                runtime_kind_branches += "kind" in test
+                kind_referencing_conditionals += "kind" in test
 
     from sandbox.commands.manifest import load_builtin_commands
     from sandbox.registry import COMMANDS
@@ -52,7 +132,7 @@ def audit_metrics() -> dict[str, int]:
         "cli_commands": len(COMMANDS),
         "mcp_tools": mcp_tools,
         "wildcard_imports": wildcard_imports,
-        "runtime_kind_branches": runtime_kind_branches,
+        "kind_referencing_conditionals": kind_referencing_conditionals,
     }
 
 
@@ -71,8 +151,39 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 88,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "runtime_kind_branches": 141,
+                "kind_referencing_conditionals": 141,
             },
+        )
+
+    def test_approved_runtime_kind_locations_are_explicit(self):
+        self.assertEqual(
+            approved_runtime_kind_locations(),
+            Counter({
+                ("sandbox/cli.py", "main"): 1,
+                ("sandbox/core/_instances.py", "resolve_instances"): 1,
+                ("sandbox/core/_domains.py", "_generic_proxy_entries"): 1,
+                ("sandbox/core/_domains.py", "secure_generic_instance"): 1,
+                ("sandbox/runtimes/compose.py", "_descriptor"): 1,
+                ("sandbox/commands/ci.py", "cmd_ci"): 1,
+                ("sandbox/commands/instances_cmd.py", "cmd_ensure"): 1,
+                ("sandbox/commands/instances_cmd.py", "cmd_init"): 2,
+                ("sandbox/commands/instances_cmd.py", "cmd_instance"): 1,
+                ("sandbox/commands/net.py", "cmd_secure"): 1,
+                ("sandbox/commands/lifecycle.py", "cmd_up"): 1,
+                ("sandbox/commands/lifecycle.py", "cmd_down"): 1,
+                ("sandbox/commands/lifecycle.py", "cmd_status"): 1,
+                ("sandbox/commands/lifecycle.py", "_status_json_payload"): 1,
+                ("sandbox/commands/lifecycle.py", "cmd_logs"): 1,
+                ("sandbox/commands/lifecycle.py", "cmd_open"): 1,
+                ("sandbox/commands/debug.py", "cmd_test"): 1,
+                ("sandbox/application/runtime_service.py", "invoke"): 2,
+                ("sandbox/application/runtime_service.py", "check"): 1,
+                ("mcp/wp-server/tools/instances.py", "destroy_instance"): 1,
+                ("mcp/wp-server/tools/instances.py", "recreate_instance"): 1,
+                ("mcp/wp-server/tools/instances.py", "secure_instance"): 1,
+                ("mcp/wp-server/tools/runtime.py", "_typed_invoke"): 1,
+                ("mcp/wp-server/tools/runtime.py", "_wordpress_extension_status"): 1,
+            }),
         )
 
 

@@ -29,12 +29,16 @@ _EXEC_OUTPUT_TRUNCATION_MARKER = "\n...[output truncated]...\n"
 def _bounded_exec_output(value: object) -> str:
     """Return one bounded, edge-preserving execution stream."""
     text = value if isinstance(value, str) else str(value or "")
-    if len(text) <= _MAX_EXEC_OUTPUT:
+    encoded = text.encode("utf-8", errors="replace")
+    marker = _EXEC_OUTPUT_TRUNCATION_MARKER.encode("utf-8")
+    if len(encoded) <= _MAX_EXEC_OUTPUT:
         return text
-    available = _MAX_EXEC_OUTPUT - len(_EXEC_OUTPUT_TRUNCATION_MARKER)
+    if _MAX_EXEC_OUTPUT < len(marker):
+        return encoded[:_MAX_EXEC_OUTPUT].decode(errors="replace")
+    available = _MAX_EXEC_OUTPUT - len(marker)
     head = available // 2
     tail = available - head
-    return text[:head] + _EXEC_OUTPUT_TRUNCATION_MARKER + text[-tail:]
+    return (encoded[:head] + marker + encoded[-tail:]).decode(errors="replace")
 
 
 def _valid_port(value: object) -> bool:

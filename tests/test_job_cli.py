@@ -2,6 +2,7 @@ import hashlib
 import io
 import importlib.util
 import json
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -277,15 +278,17 @@ class JobCliTests(unittest.TestCase):
                 cmd_job_start(None, args)
 
     def test_test_matrix_accepts_flags_after_mode_and_returns_isolated_children(self):
+        suffix = secrets.token_hex(4)
+        labels = (f"cli-cell-a-{suffix}", f"cli-cell-b-{suffix}")
         result = subprocess.run([
-            str(ROOT / "sb"), "test", "matrix", "--local", "--workspace", "cli-cell-a",
-            "--workspace", "cli-cell-b", "--timeout", "60", "--json", "--",
+            str(ROOT / "sb"), "test", "matrix", "--local", "--workspace", labels[0],
+            "--workspace", labels[1], "--timeout", "60", "--json", "--",
             sys.executable, "-c", "print('cli-matrix')",
         ], cwd=ROOT, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["summary"]["submitted"], 2)
-        self.assertEqual({child["workspace"] for child in payload["children"]}, {"cli-cell-a", "cli-cell-b"})
+        self.assertEqual({child["workspace"] for child in payload["children"]}, set(labels))
 
     def test_successful_status_reports_json_and_human_target_deadline_context(self):
         state = {"job_id": "a" * 32, "lifecycle": "succeeded", "health": "terminal",

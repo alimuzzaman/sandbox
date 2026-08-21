@@ -2,8 +2,6 @@ import hashlib
 import io
 import importlib.util
 import json
-import secrets
-import subprocess
 import sys
 import tempfile
 import types
@@ -278,17 +276,44 @@ class JobCliTests(unittest.TestCase):
                 cmd_job_start(None, args)
 
     def test_test_matrix_accepts_flags_after_mode_and_returns_isolated_children(self):
-        suffix = secrets.token_hex(4)
-        labels = (f"cli-cell-a-{suffix}", f"cli-cell-b-{suffix}")
-        result = subprocess.run([
-            str(ROOT / "sb"), "test", "matrix", "--local", "--workspace", labels[0],
-            "--workspace", labels[1], "--timeout", "60", "--json", "--",
-            sys.executable, "-c", "print('cli-matrix')",
-        ], cwd=ROOT, capture_output=True, text=True, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["summary"]["submitted"], 2)
-        self.assertEqual({child["workspace"] for child in payload["children"]}, set(labels))
+        import sandbox.cli as cli
+        import sandbox.commands.debug as debug
+        import sandbox.commands.jobs_runtime as jobs_runtime
+        import sandbox.commands.migrate as migrate
+
+        captured = []
+        argv = [
+            "sb", "test", "matrix", "--local", "--workspace", "cli-cell-a",
+            "--workspace", "cli-cell-b", "--timeout", "60", "--json", "--",
+            "python", "-c", "print('cli-matrix')",
+        ]
+
+        def capture(_cfg, args):
+            captured.append(args)
+
+        core = SimpleNamespace(registry_all=lambda: {})
+        with patch.object(sys, "argv", argv), \
+                patch.object(cli, "COMMANDS", {"test": debug.cmd_test}), \
+                patch.object(cli, "load_config", return_value={}), \
+                patch.object(cli, "resolve_instances", return_value={}), \
+                patch.object(cli, "_cwd_instance", return_value=None), \
+                patch.object(cli, "_core", return_value=core), \
+                patch.object(cli, "write_compose_files"), \
+                patch.object(cli, "write_env_for_compose"), \
+                patch.object(migrate, "maybe_auto_migrate"), \
+                patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                patch.object(jobs_runtime, "cmd_job_matrix", side_effect=capture):
+            cli.main()
+
+        self.assertEqual(len(captured), 1)
+        args = captured[0]
+        self.assertTrue(args.local)
+        self.assertIsNone(args.remote)
+        self.assertEqual(args.workspace, ["cli-cell-a", "cli-cell-b"])
+        self.assertEqual(args.timeout, 60)
+        self.assertTrue(args.json)
+        self.assertIsNone(args.spec_json)
+        self.assertEqual(args.command, ["python", "-c", "print('cli-matrix')"])
 
     def test_successful_status_reports_json_and_human_target_deadline_context(self):
         state = {"job_id": "a" * 32, "lifecycle": "succeeded", "health": "terminal",

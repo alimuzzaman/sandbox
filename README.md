@@ -99,6 +99,12 @@ routing `--label`. To reconcile an existing named instance, use
 `sb apply --instance NAME`; to prepare one project, use the project-scoped
 `sb ensure --project-dir DIR`.
 
+`sb ensure` is project-scoped and refuses `--instance NAME`, which the shared
+parser cannot otherwise use safely. Select the project with `--project-dir`
+and, when it owns more than one instance, `--label LABEL` (add `--create` when
+minting that label). Reconcile an existing named instance with
+`sb apply --instance NAME`.
+
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
 opening local Sandbox documentation and read-only remote documentation folders.
@@ -620,9 +626,10 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
 directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`
-and pass `--instance NAME`. Most of the remaining commands accept
-`--instance <name>` (or `--project-dir <dir>` for `ensure`/`test`/`init`) to
-target a specific project.
+and pass `--instance NAME`. Most instance-scoped commands accept
+`--instance <name>`; project-routed `ensure`/`test`/`init` use
+`--project-dir <dir>` (and `--label` where supported). Use
+`sb apply --instance NAME` to reconcile an existing named instance.
 
 `sandbox test` / `./sb test` dispatches plugin test modes: `auto` resolves to
 `unit` or `integration`; `integration` provisions and runs the external

@@ -874,7 +874,15 @@ Per-project (each plugin carries its own sandbox.config.json):
             # subcommand, the subparser doesn't clobber a value the top-level
             # parser already set from a BEFORE-subcommand --instance. Without
             # this, `./sb --instance xx focus` silently resolved to main.
-            sp_parser.add_argument("--instance", default=argparse.SUPPRESS)
+            instance_help = None
+            if sp_name == "ensure":
+                instance_help = (
+                    "invalid for ensure; use --project-dir/--label and --create "
+                    "for a new label.\n"
+                    "Use sb apply --instance NAME for an existing named instance"
+                )
+            sp_parser.add_argument("--instance", default=argparse.SUPPRESS,
+                                   help=instance_help)
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
@@ -897,6 +905,21 @@ Per-project (each plugin carries its own sandbox.config.json):
         die(
             "setup is registry-wide; use `sb apply --instance NAME` or "
             "`sb ensure --project-dir DIR` for project-scoped setup.",
+            2,
+        )
+
+    # ``ensure`` is project-routed and derives its target from
+    # ``--project-dir``/``--label``.  A global ``--instance`` selector was
+    # accepted by the shared parser but never consumed by the ensure handler,
+    # so accepting it could boot a different project than the operator named.
+    # Reject both parser placements before migration, config loading, or any
+    # compose/environment/runtime handler can cause a side effect.
+    if args.cmd == "ensure" and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            "ensure is project-scoped and cannot target --instance NAME; use "
+            "`sb ensure --project-dir DIR` with `--label LABEL` (and "
+            "`--create` for a new label), or `sb apply --instance NAME` for "
+            "an existing named instance.",
             2,
         )
 

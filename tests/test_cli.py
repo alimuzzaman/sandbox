@@ -62,6 +62,50 @@ class TestResolutionGate(unittest.TestCase):
                 docker_preflight.assert_not_called()
                 cmd_up.assert_not_called()
 
+    def test_project_routed_ensure_rejects_instance_before_side_effects(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        invocations = [
+            ["sb", "--instance", "demo", "ensure", "--project-dir", "/tmp/project"],
+            ["sb", "ensure", "--instance", "demo", "--project-dir", "/tmp/project"],
+            ["sb", "ensure", "--instance=demo", "--project-dir", "/tmp/project"],
+        ]
+        expected = (
+            "error: ensure is project-scoped and cannot target --instance NAME; use "
+            "`sb ensure --project-dir DIR` with `--label LABEL` (and `--create` "
+            "for a new label), or `sb apply --instance NAME` for an existing "
+            "named instance.\n"
+        )
+        for argv in invocations:
+            with self.subTest(argv=argv):
+                errors = StringIO()
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                        mock.patch.object(cli, "load_config") as load_config, \
+                        mock.patch.object(cli, "write_compose_files") as compose, \
+                        mock.patch.object(cli, "write_env_for_compose") as env, \
+                        mock.patch.object(cli, "COMMANDS", {
+                            "ensure": mock.Mock(name="ensure_handler"),
+                        }) as commands, \
+                        redirect_stderr(errors):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main()
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(errors.getvalue(), expected)
+                auto_migrate.assert_not_called()
+                load_config.assert_not_called()
+                compose.assert_not_called()
+                env.assert_not_called()
+                commands["ensure"].assert_not_called()
+
+    def test_ensure_help_explains_instance_selector_boundary(self):
+        result = run_sb("ensure", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("invalid for ensure", result.stdout)
+        self.assertIn("sb apply --instance NAME", result.stdout)
+
     def test_project_routed_ensure_skips_compose_and_env_predispatch_writes(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate
@@ -81,6 +125,34 @@ class TestResolutionGate(unittest.TestCase):
             cli.main()
 
         self.assertEqual(observed, [({}, "/tmp/project")])
+        compose.assert_not_called()
+        env.assert_not_called()
+        auto_migrate.assert_not_called()
+        finalize.assert_not_called()
+
+    def test_project_routed_ensure_preserves_label_and_create(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(
+                sys, "argv",
+                ["sb", "--label", "qa", "ensure", "--local",
+                 "--project-dir", "/tmp/project", "--create"]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "ensure": lambda cfg, args: observed.append((
+                        cfg, args.project_dir, args.label, args.create)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+            cli.main()
+
+        self.assertEqual(observed, [({}, "/tmp/project", "qa", True)])
         compose.assert_not_called()
         env.assert_not_called()
         auto_migrate.assert_not_called()

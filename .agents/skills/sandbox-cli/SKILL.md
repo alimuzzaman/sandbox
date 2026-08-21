@@ -263,6 +263,11 @@ sb exec -- <argv...>            # explicit argv in the declared service
 sb deploy --remote <name> --ensure --expose
 ```
 
+`sb ensure` is project-scoped and refuses `--instance NAME`: use
+`--project-dir DIR`, plus `--label LABEL` for a labelled instance and
+`--create` when minting that label. Use `sb apply --instance NAME` to
+reconcile an existing named instance.
+
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
 test'`.

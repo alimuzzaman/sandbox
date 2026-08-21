@@ -35,6 +35,40 @@ Compose file and declares the public service and container port:
 }
 ```
 
+### `compose.nodeStore` (explicit opt-in; normalization only)
+
+Generic Compose descriptors may declare the node-store flag explicitly:
+
+```json
+{
+  "compose": {
+    "nodeStore": true
+  }
+}
+```
+
+`compose.nodeStore` is a strict boolean. An absent key and `false` both normalize to
+`node_store: false` (the default); only `true` normalizes to `node_store: true`. Strings,
+numbers, arrays, objects, and `null` are rejected with
+`compose.nodeStore must be a boolean` before Sandbox writes an overlay or invokes Docker.
+The resolver does not inspect package files, lockfiles, image names, or package scripts.
+
+The value is resolved in the selected project config home with **project → machine → label**
+precedence (later layers win when they explicitly provide the key):
+
+1. the committed `sandbox.config.json` / `.yml` / `.yaml` descriptor;
+2. the machine-local `sandbox.config.override.{json,yml,yaml}` layer;
+3. the supplied label's `sandbox.config.<label>.{json,yml,yaml}` layer.
+
+An absent key in a later layer leaves the earlier value unchanged. A later `false` is an
+explicit opt-out/rollback of an inherited `true`.
+
+At this stage the flag is only descriptor normalization: the resolved `node_store` boolean is
+returned to the adapter. It does **not** derive a family identity, create or share a named
+Docker volume, add a `/sandbox-node` mount or environment variables, or materialize a shared
+dependency tree. Those runtime overlay and identity/materialization changes are the separate
+Spec 044 T007 work and are not implemented by T006.
+
 The adapter supports `ensure`, `status`, `start`, `stop`, `logs`, bounded argv
 `exec`, `apply`, and non-destructive `destroy`. Sandbox writes only its
 loopback port overlay under `$SANDBOX_HOME/runtime/projects/<instance>/`; it

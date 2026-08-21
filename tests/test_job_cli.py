@@ -285,7 +285,7 @@ class JobCliTests(unittest.TestCase):
         argv = [
             "sb", "test", "matrix", "--local", "--workspace", "cli-cell-a",
             "--workspace", "cli-cell-b", "--timeout", "60", "--json", "--",
-            "python", "-c", "print('cli-matrix')",
+            sys.executable, "-c", "print('cli-matrix')",
         ]
 
         def capture(_cfg, args):
@@ -313,7 +313,7 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(args.timeout, 60)
         self.assertTrue(args.json)
         self.assertIsNone(args.spec_json)
-        self.assertEqual(args.command, ["python", "-c", "print('cli-matrix')"])
+        self.assertEqual(args.command, [sys.executable, "-c", "print('cli-matrix')"])
 
     def test_successful_status_reports_json_and_human_target_deadline_context(self):
         state = {"job_id": "a" * 32, "lifecycle": "succeeded", "health": "terminal",

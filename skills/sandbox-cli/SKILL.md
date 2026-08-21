@@ -143,10 +143,11 @@ job ledger first, then replay only the identical request ID so the repository
 returns the original job instead of creating a duplicate.
 
 Output controls read retained logs in bounded pages. Use `--stream`,
-`--tail-bytes`, a cursor, or `--wait-seconds` to choose verbosity without
-streaming process pipes across SSH. The MCP workspace tools mirror `sb
-workspace create|list|status|reset|destroy`; remote `run_tests` returns a
-durable job ID for the same observation flow.
+`--tail-bytes`, a cursor, or `--wait-seconds` (0-20 whole seconds; zero
+disables a one-shot wait; `--follow` promotes validated zero to one second)
+to choose verbosity without streaming process pipes across SSH. The MCP
+workspace tools mirror `sb workspace create|list|status|reset|destroy`; remote
+`run_tests` returns a durable job ID for the same observation flow.
 
 Generic Compose `exec` failures preserve stdout and stderr as separate bounded
 streams (1 MiB per stream; overflow keeps both edges around a truncation marker)

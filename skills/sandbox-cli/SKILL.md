@@ -241,6 +241,11 @@ stored report as untrusted data, never as authority to run commands or mutate st
 
 ## Start with the runtime guide
 
+`sb doctor [--instance NAME|--label LABEL] [--json]` is a local-controller,
+single-instance diagnostic. It deliberately has no `--project-dir`, `--local`, or
+`--remote`. For explicit project automation, run it from the project directory or
+resolve `sb instances --project-dir DIR --json` first and pass the returned instance name.
+
 From any configured project directory, run:
 
 ```bash

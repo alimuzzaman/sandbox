@@ -1230,7 +1230,16 @@ def configure_parser(sub) -> None:
         parser.add_argument("--json", action="store_true")
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
-    doctor = sub.add_parser("doctor", help="Audit the stack and report problems")
+    doctor = sub.add_parser(
+        "doctor",
+        help="Audit one local instance plus controller health (use --instance/--label)",
+        epilog=(
+            "Doctor runs on the local controller. It supports --instance, --label, and "
+            "--json; it does not accept --project-dir, --local, or --remote. For a "
+            "specific project, run from that directory or resolve its instance with "
+            "`sb instances --project-dir DIR --json` and pass --instance NAME."
+        ),
+    )
     doctor.add_argument("--json", action="store_true")
     sub.add_parser("smoke", help="Self-test: boot a fresh instance, REST probe, tear down")
     sub.add_parser("update", help="git pull the project repo this instance tracks")

@@ -168,6 +168,11 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("doctor", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--json", r.stdout)
+        self.assertIn("--instance", r.stdout)
+        self.assertIn("--label", r.stdout)
+        self.assertIn("sb instances", r.stdout)
+        self.assertIn("--project-dir DIR --json", r.stdout)
+        self.assertNotIn("--remote REMOTE", r.stdout)
 
     def test_deploy_help_exposes_immutable_source_ref(self):
         r = run_sb("deploy", "--help")

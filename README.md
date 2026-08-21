@@ -605,13 +605,16 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb update               # git pull the project repo this instance tracks
 ./sb xdebug on|off        # toggle step-debug (port 9003, host trigger)
 ./sb zip [--dev|--clean]  # build the distributable plugin zip (see docs/plugin-zip.md)
-./sb doctor               # audit the stack
+./sb doctor [--instance NAME|--label LABEL] [--json]  # audit one local instance + controller health
 ./sb status               # which containers + project + focus are active
 ./sb down                 # stop containers (state preserved)
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
-Run `./sb` with no args for the full list. Most of these accept
+Run `./sb` with no args for the full list. `doctor` runs on the local controller and
+intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
+directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`
+and pass `--instance NAME`. Most of the remaining commands accept
 `--instance <name>` (or `--project-dir <dir>` for `ensure`/`test`/`init`) to
 target a specific project.
 

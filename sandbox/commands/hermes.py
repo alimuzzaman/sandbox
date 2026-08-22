@@ -161,7 +161,8 @@ def cmd_hermes(cfg, args) -> None:
             if not args.repo or not args.prompt:
                 raise hermes.HermesError("hermes run requires --repo and --prompt", "missing_run_input")
             payload = hermes.run(args.remote, args.repo, args.prompt,
-                          worktree=not args.no_worktree, async_=bool(args.run_async), timeout=args.timeout)
+                          worktree=not args.no_worktree, async_=bool(args.run_async), timeout=args.timeout,
+                          workdir=args.workdir, yolo=bool(args.yolo))
         elif action == "job":
             if not args.job_id:
                 raise hermes.HermesError("Hermes job action requires --job-id", "missing_job_id")

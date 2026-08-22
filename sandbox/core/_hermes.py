@@ -3385,23 +3385,30 @@ def _worktree_setup(paths: dict, repo_name: str) -> str:
     )
 
 
-def _worktree_command(paths: dict, repo_name: str, prompt: str, *, worktree: bool, async_: bool) -> str:
+def _worktree_command(paths: dict, repo_name: str, prompt: str, *, worktree: bool, async_: bool,
+                      workdir: str | None = None, yolo: bool = False) -> str:
     repo = f"{paths['repo_root']}/{repo_name}"
+    target = workdir or repo
     prompt_b64 = base64.b64encode(prompt.encode()).decode()
     if not prompt or len(prompt) > 32_000:
         raise HermesError("prompt must be between 1 and 32000 characters", "invalid_prompt")
-    setup = f"cwd={shlex.quote(repo)}; worktree=false"
+    setup = f"cwd={shlex.quote(target)}; worktree=false"
     if worktree:
         setup = _worktree_setup(paths, repo_name)
+    session_env = f"HERMES_HOME={paths['hermes_home']} HERMES_INFERENCE_MODEL={shlex.quote(HERMES_OPENROUTER_MODEL)}"
+    session_args = f"--provider openrouter --model {shlex.quote(HERMES_OPENROUTER_MODEL)}"
+    if yolo:
+        session_env += " HERMES_YOLO_MODE=1"
+        session_args = "--yolo " + session_args
     action = (
         "prompt=$(echo " + shlex.quote(prompt_b64) + " | base64 -d); "
-        f"cd \"$cwd\"; HERMES_HOME={paths['hermes_home']} {paths['launcher']} chat -q \"$prompt\""
+        f"cd \"$cwd\"; {session_env} {paths['launcher']} {session_args} chat -q \"$prompt\""
     )
     if not async_:
-        return f"set -eu; test -d {shlex.quote(repo)}; {setup}; {action}"
+        return f"set -eu; test -d {shlex.quote(target)}; {setup}; {action}"
     child_action = f"{action}; rc=$?; echo \"$rc\" > {shlex.quote(paths['jobs'])}/\"$job\".status"
     return (
-        f"set -eu; test -d {shlex.quote(repo)}; {setup}; mkdir -p {shlex.quote(paths['jobs'])}; "
+        f"set -eu; test -d {shlex.quote(target)}; {setup}; mkdir -p {shlex.quote(paths['jobs'])}; "
         "job=$(python3 -c 'import secrets; print(secrets.token_hex(8))'); "
         f"echo \"$cwd\" > {shlex.quote(paths['jobs'])}/\"$job\".worktree; "
         f"export cwd job; setsid sh -c {shlex.quote(child_action)} > {shlex.quote(paths['jobs'])}/\"$job\".log 2>&1 & child=$!; "
@@ -3411,14 +3418,25 @@ def _worktree_command(paths: dict, repo_name: str, prompt: str, *, worktree: boo
 
 
 def run(remote_name: str, repo: str, prompt: str, *, worktree: bool = True,
-        async_: bool = True, timeout: int = 1200) -> dict:
-    entry = _require_remote(remote_name)
+        async_: bool = True, timeout: int = 1200, workdir: str | None = None,
+        yolo: bool = False) -> dict:
     repo_name = validate_repo_name(repo)
     if timeout < 1 or timeout > 3600:
         raise HermesError("timeout must be between 1 and 3600 seconds", "invalid_timeout")
+    if workdir is not None:
+        if not isinstance(workdir, str):
+            raise HermesError("run workdir must be an absolute normalized path", "invalid_run_workdir")
+        path = PurePosixPath(workdir)
+        if (not path.is_absolute() or ".." in path.parts or
+                any(char in workdir for char in "\r\n\0")):
+            raise HermesError("run workdir must be an absolute normalized path", "invalid_run_workdir")
+        if worktree:
+            raise HermesError("run workdir requires --no-worktree", "run_workdir_requires_no_worktree")
+    entry = _require_remote(remote_name)
     paths = _paths(entry)
     preflight = _resource_preflight(entry, paths)
-    command = _worktree_command(paths, repo_name, prompt, worktree=worktree, async_=async_)
+    command = _worktree_command(paths, repo_name, prompt, worktree=worktree, async_=async_,
+                                workdir=workdir, yolo=yolo)
     res = _ssh(entry, command, timeout=30 if async_ else timeout)
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or res.stdout or "Hermes run failed", entry)[:2000], "run_failed", True)
@@ -3439,7 +3457,9 @@ def run(remote_name: str, repo: str, prompt: str, *, worktree: bool = True,
         _remote_state_write(entry, paths, state)
         return result(True, "run", remote_name, status="queued", repo=repo_name, job_id=job_id,
                       data={"worktree": worktree, "worktree_path": launched_worktree if worktree else None,
-                            "preflight": preflight})
+                            "workdir": workdir, "yolo": yolo, "provider": "openrouter",
+                            "model": HERMES_OPENROUTER_MODEL,
+                            "reasoning_effort": HERMES_OPENROUTER_REASONING_EFFORT, "preflight": preflight})
     return result(True, "run", remote_name, status="completed", repo=repo_name,
                   data={"worktree": worktree, "output": _redact(res.stdout, entry)[-4000:]})
 

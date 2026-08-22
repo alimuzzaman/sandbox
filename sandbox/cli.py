@@ -686,7 +686,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--ref", default=None, help="branch, tag, or ref to clone")
     hermes_p.add_argument("--prompt", default=None, help="one-shot Hermes prompt")
     hermes_p.add_argument("--schedule", default=None, help="Hermes cron expression or interval")
-    hermes_p.add_argument("--workdir", default=None, help="absolute remote working directory for a cron job")
+    hermes_p.add_argument("--workdir", default=None,
+        help="absolute remote working directory for a cron job or one-shot run")
     hermes_p.add_argument("--profile", choices=["luna", "terra", "sol"], default="terra",
         help="validated Sandbox route for a cron job (default: terra)")
     hermes_p.add_argument("--no-worktree", action="store_true", help="run against the primary checkout")
@@ -697,6 +698,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--reason", default=None, help="non-secret authorization rationale")
     hermes_p.add_argument("--expires-in-minutes", type=int, default=1440, help="authorization request expiry (1-1440)")
     hermes_p.add_argument("--async", dest="run_async", action="store_true", help="return a detached job id")
+    hermes_p.add_argument("--yolo", action="store_true",
+        help="bypass Hermes dangerous-command approvals for this one-shot run")
     hermes_p.add_argument("--timeout", type=int, default=1200, help="one-shot timeout in seconds")
     hermes_p.add_argument("--allow", dest="allowlist", action="append", default=None,
         help="explicit gateway allowlist entry (repeatable)")

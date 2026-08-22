@@ -563,6 +563,10 @@ SSH forwarding remains the recovery route. Do not add `--insecure`, bind Hermes 
 public address, or treat optional Basic Auth as a substitute for Cloudflare Access MFA.
 
 The OpenRouter setup pins Ox Alpha with an explicit `agent.reasoning_effort: max`.
+For one bounded, detached implementation session against an existing remote checkout,
+use `./sb hermes run --no-worktree --workdir /absolute/path --yolo --async`; this
+pins Ox Alpha and Max effort for that process and bypasses Hermes approval prompts only
+for that process. It does not bypass Hermes hardline deny rules.
 Inspect an interactive review session without revealing its prompt or arguments:
 
 ```bash

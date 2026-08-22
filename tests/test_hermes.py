@@ -1974,6 +1974,24 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertNotIn("git worktree add", command)
         self.assertNotIn("ensure_instance", command)
 
+    def test_yolo_run_uses_requested_workdir_and_pinned_ox_alpha(self):
+        paths = {
+            "repo_root": "/home/ubuntu/sandbox/hermes-repos", "locks": "/home/ubuntu/sandbox/runtime/hermes-locks",
+            "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "hermes_home": "$HOME/.hermes",
+            "launcher": "$HOME/.local/bin/hermes",
+        }
+        command = hermes._worktree_command(paths, "repo", "inspect", worktree=False, async_=True,
+                                           workdir="/home/alim/git/lenzora", yolo=True)
+        self.assertIn("test -d /home/alim/git/lenzora", command)
+        self.assertIn("HERMES_YOLO_MODE=1", command)
+        self.assertIn("--yolo --provider openrouter --model stealth/ox-alpha", command)
+        self.assertNotIn("git worktree add", command)
+
+    def test_run_workdir_requires_no_worktree(self):
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.run("test", "repo", "inspect", workdir="/home/alim/git/lenzora")
+        self.assertEqual(caught.exception.code, "run_workdir_requires_no_worktree")
+
     def test_worktree_setup_uses_integration_owned_root(self):
         command = hermes._worktree_setup({
             "repo_root": "/home/ubuntu/sandbox/hermes-repos",

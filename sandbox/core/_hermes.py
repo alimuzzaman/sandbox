@@ -58,8 +58,7 @@ HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
 HERMES_OPENROUTER_REASONING_EFFORT = "max"
 _SANDBOX_SKILL_MARKERS = ("sandbox-cli", "fix", "snapshot", "secret-inspection", "speckit-refine", "wp-debug")
-_SANDBOX_AGENT_SKILL_MARKERS = ("elementor-ea", "gutenberg-eb")
-_SANDBOX_UNAVAILABLE_SKILL_MARKERS = ("design-fidelity-diff",)
+_SANDBOX_AGENT_SKILL_MARKERS = ("design-fidelity-diff", "elementor-ea", "gutenberg-eb")
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
 HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
@@ -3660,7 +3659,7 @@ def _missing_sandbox_skills(entry: dict, paths: dict) -> list[str]:
         "set -eu; "
         f"inventory=$({paths['launcher']} skills list); "
         f"for name in {names}; do "
-        "if ! printf '%s\\n' \"$inventory\" | grep -Fq \"$name\"; then printf '%s\\n' \"$name\"; fi; "
+        "if ! printf '%s\\n' \"$inventory\" | grep -Fiq \"$name\"; then printf '%s\\n' \"$name\"; fi; "
         "done"
     )
     observed = _checked(entry, command, timeout=60, what="could not verify registered Sandbox skills")
@@ -3676,8 +3675,7 @@ def skills_action(remote_name: str, action: str | None, *, confirm: bool = False
         inventory = _skills_inventory(entry, paths)
         return result(True, "skills_status", remote_name, status="ready",
                       data={"inventory": inventory, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
-                            "sandbox_agent_skill_markers": list(_SANDBOX_AGENT_SKILL_MARKERS),
-                            "unavailable_skill_markers": list(_SANDBOX_UNAVAILABLE_SKILL_MARKERS)})
+                            "sandbox_agent_skill_markers": list(_SANDBOX_AGENT_SKILL_MARKERS)})
     if selected != "enable-sandbox":
         raise HermesError("skills action must be status or enable-sandbox", "invalid_skills_action")
     if not confirm:
@@ -3739,7 +3737,6 @@ print("configured")
     return result(True, "skills_enable_sandbox", remote_name, status="enabled",
                   data={"external_dirs": list(sources), "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
                         "sandbox_agent_skill_markers": list(_SANDBOX_AGENT_SKILL_MARKERS),
-                        "unavailable_skill_markers": list(_SANDBOX_UNAVAILABLE_SKILL_MARKERS),
                         "enabled_plugins": ["security-guidance"], "inventory": inventory})
 
 

@@ -1771,6 +1771,7 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("merge_owned(root_config, integration)", command)
         self.assertIn("merge_owned(config, integration)", command)
         self.assertIn("integration_payload=", command)
+        self.assertIn("if config_path.exists() else {}", command)
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")

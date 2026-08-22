@@ -992,7 +992,11 @@ root_soul.write_text(updated)
 for worker in routing["workers"]:
     profile = root / "profiles" / worker["name"]
     config_path = profile / "config.yaml"
-    config = yaml.safe_load(config_path.read_text()) or {{}}
+    # Hermes may create a profile directory without an initial config file.
+    # Treat that fresh profile as an empty config so setup remains idempotent
+    # across supported Hermes releases.
+    config = yaml.safe_load(config_path.read_text()) if config_path.exists() else {{}}
+    config = config or {{}}
     merge_owned(config, integration)
     config["model"] = {{"provider": {HERMES_DEFAULT_PROVIDER!r}, "default": worker["model"]}}
     config.setdefault("agent", {{}})["reasoning_effort"] = worker["reasoning_effort"]

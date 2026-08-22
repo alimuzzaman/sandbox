@@ -57,6 +57,7 @@ HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
 HERMES_OPENROUTER_REASONING_EFFORT = "max"
+HERMES_AGENT_MAX_TURNS = 1_000_000
 _SANDBOX_SKILL_MARKERS = ("sandbox-cli", "fix", "snapshot", "secret-inspection", "speckit-refine", "wp-debug")
 _SANDBOX_AGENT_SKILL_MARKERS = ("design-fidelity-diff", "elementor-ea", "gutenberg-eb")
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
@@ -3396,7 +3397,14 @@ def _worktree_command(paths: dict, repo_name: str, prompt: str, *, worktree: boo
     if worktree:
         setup = _worktree_setup(paths, repo_name)
     session_env = f"HERMES_HOME={paths['hermes_home']} HERMES_INFERENCE_MODEL={shlex.quote(HERMES_OPENROUTER_MODEL)}"
-    session_args = f"--provider openrouter --model {shlex.quote(HERMES_OPENROUTER_MODEL)}"
+    # v0.18.2 accepts only a positive integer here. Pass it on every launch so
+    # a managed config overlay or stale config cannot silently restore Hermes's
+    # 60-turn default. This is finite while effectively removing the ordinary
+    # per-task iteration cap.
+    session_args = (
+        f"--max-turns {HERMES_AGENT_MAX_TURNS} --provider openrouter "
+        f"--model {shlex.quote(HERMES_OPENROUTER_MODEL)}"
+    )
     if yolo:
         session_env += " HERMES_YOLO_MODE=1"
         session_args = "--yolo " + session_args
@@ -3468,7 +3476,7 @@ def agent_max_turns(remote_name: str, max_turns: str | None) -> dict:
     """Set Hermes's non-secret per-turn iteration cap without reading config.yaml."""
     value = (max_turns or "").strip().lower()
     if value in {"none", "null", "unlimited", "inf", "infinite", "infinity", "0", "-1"}:
-        resolved = "unlimited"
+        resolved = str(HERMES_AGENT_MAX_TURNS)
     elif value.isdecimal() and 1 <= int(value) <= 1_000_000:
         resolved = str(int(value))
     else:
@@ -3484,7 +3492,7 @@ def agent_max_turns(remote_name: str, max_turns: str | None) -> dict:
         raise HermesError(_redact(res.stderr or res.stdout or "could not set Hermes max turns", entry)[:1000],
                           "agent_max_turns_failed", True)
     return result(True, "agent_max_turns", remote_name, status="configured",
-                  data={"max_turns": "unlimited" if resolved == "unlimited" else int(resolved),
+                  data={"max_turns": "unlimited" if int(resolved) == HERMES_AGENT_MAX_TURNS else int(resolved),
                         "verification": "hermes_config_set_exit"})
 
 

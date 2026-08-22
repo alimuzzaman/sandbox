@@ -1984,7 +1984,7 @@ class TestRemoteCommands(unittest.TestCase):
                                            workdir="/home/alim/git/lenzora", yolo=True)
         self.assertIn("test -d /home/alim/git/lenzora", command)
         self.assertIn("HERMES_YOLO_MODE=1", command)
-        self.assertIn("--yolo --max-turns 1000000 --provider openrouter --model stealth/ox-alpha", command)
+        self.assertIn("--yolo --provider openrouter --model stealth/ox-alpha", command)
         self.assertNotIn("git worktree add", command)
 
     def test_run_workdir_requires_no_worktree(self):
@@ -2000,7 +2000,7 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(output["data"]["max_turns"], "unlimited")
         command = ssh.call_args.args[1]
         self.assertIn("config set agent.max_turns 1000000", command)
-        self.assertNotIn("config get", command)
+        self.assertIn("config show", command)
 
     def test_worktree_setup_uses_integration_owned_root(self):
         command = hermes._worktree_setup({

@@ -565,9 +565,9 @@ public address, or treat optional Basic Auth as a substitute for Cloudflare Acce
 The OpenRouter setup pins Ox Alpha with an explicit `agent.reasoning_effort: max`.
 For long autonomous coding turns, request the supported high numeric limit with
 `./sb hermes agent max-turns --max-turns unlimited --remote <remote> --json`.
-Sandbox maps `unlimited` to `1000000` and passes that explicit numeric cap to every
-new one-shot session. Hermes continues to auto-compress context; this changes only
-the tool-call turn cap and applies to newly initialized conversation turns.
+Sandbox maps `unlimited` to `1000000`, the high numeric limit supported by the
+installed Hermes configuration. Hermes continues to auto-compress context; this
+changes only the tool-call turn cap and applies to newly initialized conversation turns.
 For one bounded, detached implementation session against an existing remote checkout,
 use `./sb hermes run --no-worktree --workdir /absolute/path --yolo --async`; this
 pins Ox Alpha and Max effort for that process and bypasses Hermes approval prompts only

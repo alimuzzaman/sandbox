@@ -3397,14 +3397,7 @@ def _worktree_command(paths: dict, repo_name: str, prompt: str, *, worktree: boo
     if worktree:
         setup = _worktree_setup(paths, repo_name)
     session_env = f"HERMES_HOME={paths['hermes_home']} HERMES_INFERENCE_MODEL={shlex.quote(HERMES_OPENROUTER_MODEL)}"
-    # v0.18.2 accepts only a positive integer here. Pass it on every launch so
-    # a managed config overlay or stale config cannot silently restore Hermes's
-    # 60-turn default. This is finite while effectively removing the ordinary
-    # per-task iteration cap.
-    session_args = (
-        f"--max-turns {HERMES_AGENT_MAX_TURNS} --provider openrouter "
-        f"--model {shlex.quote(HERMES_OPENROUTER_MODEL)}"
-    )
+    session_args = f"--provider openrouter --model {shlex.quote(HERMES_OPENROUTER_MODEL)}"
     if yolo:
         session_env += " HERMES_YOLO_MODE=1"
         session_args = "--yolo " + session_args
@@ -3485,7 +3478,10 @@ def agent_max_turns(remote_name: str, max_turns: str | None) -> dict:
     paths = _paths(entry)
     command = (
         f"set -eu; HERMES_HOME={shlex.quote(paths['hermes_home'])} {paths['launcher']} config set "
-        f"agent.max_turns {shlex.quote(resolved)} >/dev/null"
+        f"agent.max_turns {shlex.quote(resolved)} >/dev/null; "
+        f"actual=$(HERMES_HOME={shlex.quote(paths['hermes_home'])} {paths['launcher']} config show "
+        "| sed -n 's/^[[:space:]]*Max turns:[[:space:]]*//p' | head -n 1); "
+        f"test \"$actual\" = {shlex.quote(resolved)}"
     )
     res = _ssh(entry, command, timeout=30)
     if res.returncode != 0:
@@ -3493,7 +3489,7 @@ def agent_max_turns(remote_name: str, max_turns: str | None) -> dict:
                           "agent_max_turns_failed", True)
     return result(True, "agent_max_turns", remote_name, status="configured",
                   data={"max_turns": "unlimited" if int(resolved) == HERMES_AGENT_MAX_TURNS else int(resolved),
-                        "verification": "hermes_config_set_exit"})
+                        "verification": "hermes_config_show_max_turns"})
 
 
 def _valid_job_id(job_id: str) -> str:

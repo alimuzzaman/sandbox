@@ -959,6 +959,20 @@ class _Response:
 
 class TestCloudflareClient(unittest.TestCase):
     @patch("urllib.request.urlopen")
+    def test_account_scoped_discovery_lists_tunnels_and_access_apps(self, mock_open):
+        mock_open.side_effect = [
+            _Response({"success": True, "result": [{"id": "tunnel-1"}]}),
+            _Response({"success": True, "result": [{"id": "app-1"}]}),
+        ]
+        client = cloudflare.Client("token")
+        self.assertEqual(client.tunnels("account-1"), [{"id": "tunnel-1"}])
+        self.assertEqual(client.access_applications("account-1"), [{"id": "app-1"}])
+        tunnel_request, access_request = [call.args[0] for call in mock_open.call_args_list]
+        self.assertTrue(tunnel_request.full_url.endswith("/accounts/account-1/cfd_tunnel"))
+        self.assertTrue(access_request.full_url.endswith("/accounts/account-1/access/apps"))
+        self.assertNotIn("token", tunnel_request.full_url)
+
+    @patch("urllib.request.urlopen")
     def test_upsert_uses_existing_matching_record_only(self, mock_open):
         mock_open.side_effect = [
             _Response({"success": True, "result": [{"id": "rec-1", "type": "A"}]}),

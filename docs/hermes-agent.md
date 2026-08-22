@@ -527,6 +527,17 @@ Review first:
   --fqdn hermes.asb.bd --plan --json
 ```
 
+When the exact Cloudflare Access app, narrow MFA policy, tunnel ingress, and
+proxied DNS record already exist, attach them without creating or changing
+Cloudflare resources. Adoption refuses missing or ambiguous matches:
+
+```bash
+./sb hermes dashboard adopt --remote scaleway-sandbox \
+  --fqdn hermes.asb.bd --plan --json
+./sb hermes dashboard adopt --remote scaleway-sandbox \
+  --fqdn hermes.asb.bd --confirm --json
+```
+
 Only after reviewing current V2 evidence, the policy, tunnel target, secret references,
 and rollback plan, and receiving explicit authorization for the remote change:
 
@@ -543,6 +554,10 @@ access is suspected to be unsafe, remove the local connector/Caddy route first:
 ./sb hermes dashboard unexpose --remote scaleway-sandbox --plan --json
 ./sb hermes dashboard unexpose --remote scaleway-sandbox --confirm --json
 ```
+
+The remote provisioner installs Cloudflare's signed `cloudflared` package when the
+host lacks the secure `--token-file` capability. Re-run the confirmed provision once
+after updating Sandbox if this preflight reports an older connector binary.
 
 SSH forwarding remains the recovery route. Do not add `--insecure`, bind Hermes to a
 public address, or treat optional Basic Auth as a substitute for Cloudflare Access MFA.

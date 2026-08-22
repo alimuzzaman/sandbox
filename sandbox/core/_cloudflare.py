@@ -91,6 +91,20 @@ class Client:
         path = f"/zones/{zone_id}/dns_records?name={urllib.parse.quote(hostname)}"
         return list(self._request("GET", path).get("result") or [])
 
+    def tunnels(self, account_id: str) -> list[dict]:
+        """Return account tunnels for strict attach-only validation."""
+        result = self._request("GET", f"/accounts/{account_id}/cfd_tunnel").get("result")
+        if not isinstance(result, list):
+            raise CloudflareError("Cloudflare tunnel list returned an invalid response")
+        return result
+
+    def access_applications(self, account_id: str) -> list[dict]:
+        """Return Access applications for strict attach-only validation."""
+        result = self._request("GET", f"/accounts/{account_id}/access/apps").get("result")
+        if not isinstance(result, list):
+            raise CloudflareError("Cloudflare Access application list returned an invalid response")
+        return result
+
     def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True) -> dict:
         record_type = "AAAA" if ":" in address else "A"
         existing = [r for r in self.records(zone_id, hostname) if r.get("type") == record_type]

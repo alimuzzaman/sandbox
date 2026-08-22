@@ -86,6 +86,30 @@ PY
 fi
 ok "python3 + venv present"
 
+# --- cloudflared (Hermes public dashboard connector) --------------------
+# Hermes stores a tunnel connector token in an owner-only file and requires
+# cloudflared's --token-file support.  Ubuntu's bundled package can lag that
+# capability, so use Cloudflare's signed package repository when it is absent
+# or too old.  This installs the binary only; Hermes starts its own disabled-by-
+# default user service when public exposure is explicitly confirmed.
+log "checking cloudflared token-file support"
+if command -v cloudflared >/dev/null 2>&1 \
+    && cloudflared tunnel run --help 2>&1 | grep -q -- "--token-file"; then
+    ok "cloudflared supports owner-only token files"
+else
+    log "installing current cloudflared from Cloudflare's signed repository"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y ca-certificates curl gnupg
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+        | $SUDO tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+        | $SUDO tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y cloudflared
+    cloudflared tunnel run --help 2>&1 | grep -q -- "--token-file"
+    ok "cloudflared supports owner-only token files"
+fi
+
 # --- act (remote CI execution engine) -----------------------------------
 # Remote CI jobs run on this host's Docker daemon, so the provisioned runtime
 # must include the same supported engine as the local CI command. Install the

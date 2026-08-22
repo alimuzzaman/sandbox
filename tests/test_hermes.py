@@ -336,6 +336,13 @@ class TestValidation(unittest.TestCase):
         self.assertIn('root / "cron_scripts" / script', script)
         self.assertNotIn("todo_md_monitor.py", script)
 
+    def test_remote_install_upgrades_cloudflared_for_token_file_connectors(self):
+        script = (ROOT / "scripts/install-remote.sh").read_text()
+        self.assertIn('cloudflared tunnel run --help 2>&1 | grep -q -- "--token-file"', script)
+        self.assertIn("https://pkg.cloudflare.com/cloudflare-main.gpg", script)
+        self.assertIn("https://pkg.cloudflare.com/cloudflared any main", script)
+        self.assertIn("apt-get install -y cloudflared", script)
+
     def test_cron_status_prefers_provider_failure_over_false_green(self):
         job = {"last_status": "ok", "last_run_at": "now", "model_snapshot": "gpt-5.6-luna"}
         status = effective_job_status(job, "provider_bad_request")
@@ -1097,6 +1104,52 @@ class TestSchedulerReliability(unittest.TestCase):
 
 
 class TestPublicExposureLifecycle(unittest.TestCase):
+    @patch("sandbox.core._hermes.cloudflare_access.Client")
+    @patch("sandbox.core._hermes.cloudflare_tunnel.Client")
+    @patch("sandbox.core._hermes.cloudflare_zone.Client")
+    def test_public_adoption_requires_one_exact_existing_route(self, zone_client, tunnel_client, access_client):
+        zone = zone_client.return_value
+        zone.token = "test-token"
+        zone.zone.return_value = {"id": "zone-id", "account": {"id": "account-id"}}
+        zone.tunnels.return_value = [{"id": "tunnel-id"}]
+        zone.access_applications.return_value = [{"id": "app-id", "type": "self_hosted", "domain": "hermes.asb.bd"}]
+        zone.records.return_value = [{"id": "dns-id", "name": "hermes.asb.bd", "proxied": True}]
+        tunnel_client.return_value.configuration.return_value = {"config": {"ingress": [
+            {"hostname": "hermes.asb.bd", "service": "http://127.0.0.1:9120"},
+            {"service": "http_status:404"},
+        ]}}
+        access = access_client.return_value
+        access.application.return_value = {"policies": [{"id": "policy-id"}]}
+        access.policy.return_value = {
+            "id": "policy-id", "decision": "allow", "include": [{"email": {"email": "operator@example.test"}}],
+            "mfa_config": {"mfa_disabled": False},
+        }
+
+        discovered = hermes._public_adopt_existing("hermes.asb.bd")
+
+        self.assertEqual(discovered["tunnel_id"], "tunnel-id")
+        self.assertEqual(discovered["access_application_id"], "app-id")
+        self.assertEqual(discovered["access_policy_id"], "policy-id")
+        self.assertEqual(discovered["connector_token_secret"], "HERMES_CLOUDFLARE_TUNNEL_CONNECTOR_TOKEN")
+
+    def test_public_adoption_persists_only_non_secret_references(self):
+        local = {"hermes": {"existing": "kept"}}
+        discovered = {
+            "account_id": "account-id", "access_application_id": "app-id", "access_policy_id": "policy-id",
+            "tunnel_id": "tunnel-id", "zone_id": "zone-id", "dns_record_id": "dns-id",
+            "access_token_secret": "CLOUDFLARE_API_TOKEN", "tunnel_api_token_secret": "CLOUDFLARE_API_TOKEN",
+            "zone_token_secret": "CLOUDFLARE_API_TOKEN", "connector_token_secret": "HERMES_CLOUDFLARE_TUNNEL_CONNECTOR_TOKEN",
+            "route": {"hostname": "hermes.asb.bd"}, "policy": {"decision": "allow"},
+        }
+        with patch("sandbox.core._hermes._local_yaml", return_value=local), \
+             patch("sandbox.core._hermes._write_local_yaml") as write:
+            hermes._public_adopt_config(discovered)
+        saved = write.call_args.args[0]
+        self.assertEqual(saved["hermes"]["existing"], "kept")
+        self.assertNotIn("route", saved["hermes"]["public_access"])
+        self.assertNotIn("policy", saved["hermes"]["public_access"])
+        self.assertNotIn("test-token", json.dumps(saved))
+
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._public_install_connector")
     @patch("sandbox.core._hermes._public_caddy_apply")

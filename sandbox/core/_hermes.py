@@ -32,7 +32,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare_zone
 import sandbox.core._cloudflare_access as cloudflare_access
 import sandbox.core._cloudflare_tunnel as cloudflare_tunnel
-from sandbox.core._config import _local_yaml
+from sandbox.core._config import _local_yaml, _write_local_yaml
 from sandbox.core._secrets import resolve_secret
 from sandbox.hermes.scheduler import (
     SCHEDULE_GUARD,
@@ -3948,6 +3948,92 @@ def _public_config_errors(config: dict) -> list[str]:
     return [key for key in required if not config.get(key)]
 
 
+def _public_adopt_existing(fqdn: str) -> dict:
+    """Discover one existing, exact Cloudflare route without changing it."""
+    try:
+        zone_client = cloudflare_zone.Client()
+        zone = zone_client.zone("asb.bd")
+        account_id = str((zone.get("account") or {}).get("id") or "")
+        zone_id = str(zone.get("id") or "")
+        if not account_id or not zone_id:
+            raise HermesError("Cloudflare zone response lacks account ownership", "public_adoption_failed")
+        token = zone_client.token
+        tunnel_client = cloudflare_tunnel.Client(token)
+        target = f"http://127.0.0.1:{PUBLIC_PROXY_PORT}"
+        tunnels = []
+        for item in zone_client.tunnels(account_id):
+            tunnel_id = str(item.get("id") or "")
+            if not tunnel_id:
+                continue
+            try:
+                route = cloudflare_tunnel.validate_configuration(
+                    tunnel_client.configuration(account_id, tunnel_id), fqdn, target,
+                )
+            except cloudflare_tunnel.TunnelError:
+                continue
+            tunnels.append({"id": tunnel_id, **route})
+        if len(tunnels) != 1:
+            raise HermesError("existing Hermes tunnel route is missing or ambiguous", "public_adoption_conflict")
+
+        applications = []
+        for item in zone_client.access_applications(account_id):
+            try:
+                applications.append(cloudflare_access.validate_application(item, fqdn))
+            except cloudflare_access.AccessError:
+                continue
+        if len(applications) != 1:
+            raise HermesError("existing Hermes Access application is missing or ambiguous", "public_adoption_conflict")
+        application = applications[0]
+        access_client = cloudflare_access.Client(token)
+        app_detail = access_client.application(account_id, application["id"])
+        policy_ids = []
+        for item in list(app_detail.get("policies") or []):
+            candidate = item.get("id") if isinstance(item, dict) else item
+            if isinstance(candidate, str) and candidate:
+                policy_ids.append(candidate)
+        if not policy_ids:
+            raise HermesError("existing Hermes Access application has no policy references", "public_adoption_conflict")
+        policies = []
+        for policy_id in policy_ids:
+            try:
+                policies.append(cloudflare_access.validate_policy(access_client.policy(account_id, policy_id)))
+            except cloudflare_access.AccessError:
+                continue
+        if len(policies) != 1:
+            raise HermesError("existing Hermes Access policy is missing or ambiguous", "public_adoption_conflict")
+
+        records = [item for item in zone_client.records(zone_id, fqdn)
+                   if item.get("name") == fqdn and item.get("proxied") is True]
+        if len(records) != 1 or not str(records[0].get("id") or ""):
+            raise HermesError("existing Hermes DNS record is missing or ambiguous", "public_adoption_conflict")
+        return {
+            "account_id": account_id, "access_application_id": application["id"],
+            "access_policy_id": policies[0]["id"], "tunnel_id": tunnels[0]["id"],
+            "zone_id": zone_id, "dns_record_id": str(records[0]["id"]),
+            "access_token_secret": "CLOUDFLARE_API_TOKEN",
+            "tunnel_api_token_secret": "CLOUDFLARE_API_TOKEN",
+            "zone_token_secret": "CLOUDFLARE_API_TOKEN",
+            "connector_token_secret": "HERMES_CLOUDFLARE_TUNNEL_CONNECTOR_TOKEN",
+            "route": tunnels[0], "policy": policies[0],
+        }
+    except (cloudflare_zone.CloudflareError, cloudflare_access.AccessError,
+            cloudflare_tunnel.TunnelError) as exc:
+        raise HermesError(_redact(str(exc))[:500], "public_adoption_failed", True) from exc
+
+
+def _public_adopt_config(discovered: dict) -> None:
+    local = _local_yaml()
+    hermes = dict(local.get("hermes") or {})
+    hermes["public_access"] = {
+        key: discovered[key]
+        for key in ("account_id", "access_application_id", "access_policy_id", "tunnel_id", "zone_id",
+                    "dns_record_id", "access_token_secret", "tunnel_api_token_secret", "zone_token_secret",
+                    "connector_token_secret")
+    }
+    local["hermes"] = hermes
+    _write_local_yaml(local)
+
+
 def _public_caddy_fragment(fqdn: str, basic_enabled: bool) -> str:
     auth = ""
     if basic_enabled:
@@ -4180,6 +4266,21 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
         plan_data = _public_plan(entry, paths, state, exposure.get("fqdn", PUBLIC_DASHBOARD_FQDN))
         return result(True, "dashboard_exposure_status", remote_name, status=exposure.get("mode", "ssh-only"),
                       commit=gate["commit"], data=plan_data)
+    if action == "adopt":
+        host = validate_dashboard_fqdn(fqdn or "")
+        if host != PUBLIC_DASHBOARD_FQDN:
+            raise HermesError("only hermes.asb.bd is supported for public dashboard access", "invalid_dashboard_fqdn")
+        discovered = _public_adopt_existing(host)
+        data = {
+            "fqdn": host, "tunnel": discovered["route"], "policy": discovered["policy"],
+            "secret_references": {key: discovered[key] for key in (
+                "access_token_secret", "tunnel_api_token_secret", "zone_token_secret", "connector_token_secret"
+            )},
+        }
+        if plan or not confirm:
+            return result(True, "dashboard_adopt", remote_name, status="plan", commit=gate["commit"], data=data)
+        _public_adopt_config(discovered)
+        return result(True, "dashboard_adopt", remote_name, status="configured", commit=gate["commit"], data=data)
     if action == "install":
         command = (
             "set -eu; cd \"$HOME/.hermes/hermes-agent\"; "

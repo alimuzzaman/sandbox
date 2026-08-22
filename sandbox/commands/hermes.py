@@ -148,6 +148,10 @@ def cmd_hermes(cfg, args) -> None:
                 )
             payload = hermes.configure_openrouter(args.remote, api_key)
         elif action == "chat":
+            if args.subaction == "status":
+                payload = hermes.chat_status(args.remote)
+                _emit(payload, args.json)
+                return
             if not args.repo:
                 raise hermes.HermesError("hermes chat requires --repo", "missing_repo")
             payload = hermes.chat(args.remote, args.repo, worktree=not args.no_worktree)

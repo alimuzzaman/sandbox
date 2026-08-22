@@ -562,6 +562,13 @@ after updating Sandbox if this preflight reports an older connector binary.
 SSH forwarding remains the recovery route. Do not add `--insecure`, bind Hermes to a
 public address, or treat optional Basic Auth as a substitute for Cloudflare Access MFA.
 
+The OpenRouter setup pins Ox Alpha with an explicit `agent.reasoning_effort: max`.
+Inspect an interactive review session without revealing its prompt or arguments:
+
+```bash
+./sb hermes chat status --remote scaleway-sandbox --json
+```
+
 Optional Basic Auth is a second gate after Access. It is disabled by default and uses a
 secret reference, not a password argument:
 

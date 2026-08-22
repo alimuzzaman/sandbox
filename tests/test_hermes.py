@@ -1832,16 +1832,19 @@ class TestRemoteCommands(unittest.TestCase):
     def test_openrouter_setup_writes_key_only_over_stdin_and_verifies_model(self, get_remote, paths, ssh_stdin):
         get_remote.return_value = self.entry
         paths.return_value = {"launcher": "$HOME/.local/bin/hermes"}
-        ssh_stdin.return_value = _completed(stdout=b"openrouter\tstealth/ox-alpha\n")
+        ssh_stdin.return_value = _completed(stdout=b"openrouter\tstealth/ox-alpha\tmax\n")
 
         output = hermes.configure_openrouter("test", "credential-value")
 
         self.assertTrue(output["ok"])
         self.assertEqual(output["data"]["model"], "stealth/ox-alpha")
+        self.assertEqual(output["data"]["reasoning_effort"], "max")
         command = ssh_stdin.call_args.args[1]
         self.assertIn("OPENROUTER_API_KEY=", command)
         self.assertIn("read_raw_config", command)
         self.assertIn("atomic_yaml_write", command)
+        self.assertIn('agent["reasoning_effort"] =', command)
+        self.assertIn("max", command)
         self.assertEqual(ssh_stdin.call_args.args[2], b"credential-value")
 
     @patch("sandbox.core._hermes._remote_state_write")
@@ -2700,6 +2703,16 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertTrue(out["data"]["worktree"])
         self.assertIn("-tt", process.call_args.args[0])
         self.assertIn("git worktree add", ssh_run.call_args_list[1].args[1])
+
+    @patch("sandbox.core._hermes._checked", return_value=_completed(stdout='{"chats": [{"elapsed_seconds": 42, "pid": 123, "state": "Ss+"}]}'))
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_chat_status_reports_only_live_process_metadata(self, get_remote, checked):
+        get_remote.return_value = self.entry
+        out = hermes.chat_status("test")
+        self.assertEqual(out["status"], "running")
+        self.assertEqual(out["data"]["chats"], [{"elapsed_seconds": 42, "pid": 123, "state": "Ss+"}])
+        self.assertIn('ps", "-u"', checked.call_args.args[1])
+        self.assertNotIn("args\": items", checked.call_args.args[1])
 
 
 class TestLocalState(unittest.TestCase):

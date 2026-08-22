@@ -56,6 +56,7 @@ HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
+HERMES_OPENROUTER_REASONING_EFFORT = "max"
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
 HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
@@ -1674,12 +1675,18 @@ if not isinstance(model, dict):
     raise SystemExit(4)
 model["provider"] = "openrouter"
 model["default"] = __MODEL__
+agent = config.setdefault("agent", {})
+if not isinstance(agent, dict):
+    raise SystemExit(6)
+agent["reasoning_effort"] = __EFFORT__
 atomic_yaml_write(get_config_path(), config, sort_keys=False)
-if model["provider"] != "openrouter" or model["default"] != __MODEL__:
+if (model["provider"] != "openrouter" or model["default"] != __MODEL__
+        or agent["reasoning_effort"] != __EFFORT__):
     raise SystemExit(5)
-print("openrouter\t" + __MODEL__)
+print("openrouter\t" + __MODEL__ + "\t" + __EFFORT__)
 '''
     write_env = write_env.replace("__MODEL__", repr(HERMES_OPENROUTER_MODEL))
+    write_env = write_env.replace("__EFFORT__", repr(HERMES_OPENROUTER_REASONING_EFFORT))
     command = (
         "set -eu; "
         f"test -x {paths['launcher']}; "
@@ -1691,10 +1698,11 @@ print("openrouter\t" + __MODEL__)
     if completed.returncode != 0:
         raise HermesError("OpenRouter provider configuration failed", "openrouter_setup_failed", True)
     configured = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
-    if configured != f"openrouter\t{HERMES_OPENROUTER_MODEL}":
+    if configured != f"openrouter\t{HERMES_OPENROUTER_MODEL}\t{HERMES_OPENROUTER_REASONING_EFFORT}":
         raise HermesError("OpenRouter provider configuration could not be verified", "openrouter_setup_failed", True)
     return result(True, "provider_openrouter", remote_name, status="configured",
                   data={"provider": "openrouter", "model": HERMES_OPENROUTER_MODEL,
+                        "reasoning_effort": HERMES_OPENROUTER_REASONING_EFFORT,
                         "credential": "stored_owner_only"})
 
 
@@ -3589,6 +3597,41 @@ def chat(remote_name: str, repo: str, *, worktree: bool = True) -> dict:
         raise HermesError("interactive Hermes session exited unsuccessfully", "chat_failed", True)
     return result(True, "chat", remote_name, status="completed", repo=repo_name, path=cwd,
                   data={"worktree": worktree})
+
+
+def chat_status(remote_name: str) -> dict:
+    """Report live interactive Hermes chat processes without exposing arguments."""
+    entry = _require_remote(remote_name)
+    program = r'''
+import json, os, re, subprocess
+
+matcher = re.compile(r"(?:^|\s)(?:\S*/)?hermes\s+chat(?:\s|$)")
+listed = subprocess.run(["ps", "-u", str(os.getuid()), "-o", "pid=,etimes=,stat=,args="],
+                        text=True, capture_output=True)
+items = []
+for line in listed.stdout.splitlines():
+    parts = line.strip().split(None, 3)
+    if len(parts) != 4 or not matcher.search(parts[3]):
+        continue
+    try:
+        pid, elapsed = int(parts[0]), int(parts[1])
+    except ValueError:
+        continue
+    if pid != os.getpid():
+        items.append({"pid": pid, "elapsed_seconds": elapsed, "state": parts[2]})
+print(json.dumps({"chats": items}, sort_keys=True))
+'''
+    res = _checked(entry, f"python3 -c {shlex.quote(program)}", timeout=30,
+                   what="could not inspect interactive Hermes chats")
+    try:
+        payload = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("interactive Hermes chat status was invalid", "invalid_chat_status") from exc
+    chats = payload.get("chats")
+    if not isinstance(chats, list) or not all(isinstance(item, dict) for item in chats):
+        raise HermesError("interactive Hermes chat status was invalid", "invalid_chat_status")
+    return result(True, "chat_status", remote_name, status="running" if chats else "inactive",
+                  data={"chats": chats})
 
 
 def _gateway_unit(paths: dict) -> str:

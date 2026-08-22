@@ -56,23 +56,22 @@ SB_PY=""
 for sb_candidate in python3.13 python3.12 python3 .cli-venv/bin/python; do
     if [ "${sb_candidate#./}" != "$sb_candidate" ]; then
         # Repo-relative venv interpreter must exist and be executable.
-        if [ -x "$sb_candidate" ]; then SB_PY="$sb_candidate"; break; fi
+        [ -x "$sb_candidate" ] || continue
+    else
+        # A pyenv shim passes `command -v` even when the selected version does
+        # not provide that binary, so discovery alone is not sufficient.
+        command -v "$sb_candidate" >/dev/null 2>&1 || continue
+    fi
+    # Execute every candidate, including the repo-local venv, and keep the
+    # Python >= 3.12 contract at the bootstrap boundary.
+    sb_major=$("$sb_candidate" -c 'import sys;print(sys.version_info[0])' 2>/dev/null) || continue
+    sb_minor=$("$sb_candidate" -c 'import sys;print(sys.version_info[1])' 2>/dev/null) || continue
+    if [ "${sb_major:-0}" -lt 3 ] 2>/dev/null \
+        || { [ "$sb_major" -eq 3 ] 2>/dev/null && [ "${sb_minor:-0}" -lt 12 ] 2>/dev/null; }; then
         continue
     fi
-    if command -v "$sb_candidate" >/dev/null 2>&1; then
-        case "$sb_candidate" in
-        python3|.cli-venv/bin/python)
-            sb_major=$("$sb_candidate" -c 'import sys;print(sys.version_info[0])' 2>/dev/null) || continue
-            sb_minor=$("$sb_candidate" -c 'import sys;print(sys.version_info[1])' 2>/dev/null) || continue
-            if [ "${sb_major:-0}" -lt 3 ] 2>/dev/null \
-                || { [ "$sb_major" -eq 3 ] 2>/dev/null && [ "${sb_minor:-0}" -lt 12 ] 2>/dev/null; }; then
-                continue
-            fi
-        ;;
-        esac
-        SB_PY="$sb_candidate"
-        break
-    fi
+    SB_PY="$sb_candidate"
+    break
 done
 if [ -z "$SB_PY" ]; then
     echo "sandbox needs Python >= 3.12; found only older interpreters on PATH." >&2

@@ -97,6 +97,11 @@ class DiscoveryContextSyncTests(unittest.TestCase):
 
 
 class DiscoveryPhpHarnessTests(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        if shutil.which("php") is None:
+            self.skipTest("php binary unavailable")
+
     def test_discovery_contract_and_security_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)

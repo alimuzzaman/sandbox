@@ -55,6 +55,10 @@ class _BoundedEdgeCapture:
                 self._tail.extend(prefix[-self._tail_limit:])
             self._data.clear()
             self._truncated = True
+            # The split above already folded this chunk into both edges;
+            # falling through would append it a second time and corrupt the
+            # tail window with a duplicated fragment.
+            return
         if self._tail_limit:
             self._tail.extend(chunk)
             if len(self._tail) > self._tail_limit:

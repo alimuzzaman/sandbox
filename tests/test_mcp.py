@@ -18,6 +18,40 @@ ROOT = Path(__file__).resolve().parent.parent
 MCP_DIR = ROOT / "mcp" / "wp-server"
 VENV_PY = MCP_DIR / ".venv" / "bin" / "python"
 
+
+def _mcp_venv_ready() -> bool:
+    """True only when the venv interpreter can import the mcp server stack.
+
+    A venv directory can exist while its installed packages are broken or
+    partially provisioned; the historical ``VENV_PY.exists()`` guard passed in
+    that state and every child then failed on the import itself.  Probe one
+    cheap import that every server/app child depends on.
+    """
+    if not VENV_PY.exists():
+        return False
+    return subprocess.run(
+        [str(VENV_PY), "-c", "import mcp.server.fastmcp"],
+        capture_output=True, timeout=60,
+    ).returncode == 0
+
+
+_MCP_READY = None
+
+
+def mcp_venv_ready() -> bool:
+    global _MCP_READY
+    if _MCP_READY is None:
+        _MCP_READY = _mcp_venv_ready()
+    return _MCP_READY
+
+
+def require_mcp_venv(testcase) -> None:
+    """Skip the calling test unless the MCP venv is genuinely usable."""
+    if not VENV_PY.exists():
+        testcase.skipTest("MCP venv not built (run: ./sb mcp-install)")
+    elif not mcp_venv_ready():
+        testcase.skipTest("mcp package unavailable in MCP venv")
+
 _PROBE = """
 import os, asyncio, json, subprocess, tempfile
 os.environ.setdefault("SANDBOX_ROOT", os.getcwd() + "/../..")
@@ -169,6 +203,9 @@ print("MCP_SNAPSHOT_CAPABILITY_REJECTION", json.dumps(
 
 @unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
 class TestMcpServerSplit(unittest.TestCase):
+    def setUp(self):
+        require_mcp_venv(self)
+
     def test_project_instance_uses_persisted_selector_after_env_removed(self):
         """A separately launched MCP process sees the same project registry."""
         with tempfile.TemporaryDirectory(prefix="sb-mcp-home-") as td:
@@ -476,6 +513,9 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
 
 @unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
 class TestMcpDataBoundaries(unittest.TestCase):
+    def setUp(self):
+        require_mcp_venv(self)
+
     """Keep reset responses bounded at the MCP tool boundary.
 
     The child process imports the real MCP tool module, while its CLI call is

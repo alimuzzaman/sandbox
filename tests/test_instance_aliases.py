@@ -225,6 +225,11 @@ class TestAliasInstanceBlock(unittest.TestCase):
 
 
 class TestAliasCertificateSans(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        if shutil.which("mkcert") is None:
+            self.skipTest("mkcert binary unavailable")
+
     def test_secure_at_create_mints_the_alias_as_a_san(self):
         instances = {"demo": {"domain": "demo.tst", "tld": "tst",
                               "wordpress_port": 8123,

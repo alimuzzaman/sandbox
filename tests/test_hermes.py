@@ -2723,6 +2723,7 @@ class TestRemoteCommands(unittest.TestCase):
             _completed(stdout="configured\n"),
             _completed(),
             _completed(stdout="sandbox-cli\nfix\nsnapshot\nsecret-inspection\nspeckit-refine\nwp-debug\n__SANDBOX_HERMES_PLUGINS__\n"),
+            _completed(),
         ]
         out = hermes.skills_action("test", "enable-sandbox", confirm=True)
         self.assertTrue(out["ok"])

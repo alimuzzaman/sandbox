@@ -3644,7 +3644,24 @@ def _skills_inventory(entry: dict, paths: dict) -> str:
         f"{paths['launcher']} plugins list"
     )
     observed = _checked(entry, command, timeout=60, what="could not inspect Hermes skills and plugins")
-    return _redact((observed.stdout or ""), entry)[-16_000:]
+    text = _redact((observed.stdout or ""), entry)
+    if len(text) <= 16_000:
+        return text
+    return text[:8_000] + "\n...[inventory truncated]...\n" + text[-8_000:]
+
+
+def _missing_sandbox_skills(entry: dict, paths: dict) -> list[str]:
+    """Check only the required skill names without truncating a large inventory."""
+    names = " ".join(shlex.quote(name) for name in _SANDBOX_SKILL_MARKERS)
+    command = (
+        "set -eu; "
+        f"inventory=$({paths['launcher']} skills list); "
+        f"for name in {names}; do "
+        "if ! printf '%s\\n' \"$inventory\" | grep -Fq \"$name\"; then printf '%s\\n' \"$name\"; fi; "
+        "done"
+    )
+    observed = _checked(entry, command, timeout=60, what="could not verify registered Sandbox skills")
+    return [name for name in (observed.stdout or "").splitlines() if name in _SANDBOX_SKILL_MARKERS]
 
 
 def skills_action(remote_name: str, action: str | None, *, confirm: bool = False) -> dict:
@@ -3702,7 +3719,7 @@ print("configured")
         what="could not enable Hermes security guidance plugin",
     )
     inventory = _skills_inventory(entry, paths)
-    missing = [name for name in _SANDBOX_SKILL_MARKERS if name not in inventory]
+    missing = _missing_sandbox_skills(entry, paths)
     if missing:
         raise HermesError("Hermes did not discover Sandbox skills: " + ", ".join(missing), "skills_enable_failed", True)
     return result(True, "skills_enable_sandbox", remote_name, status="enabled",

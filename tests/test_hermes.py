@@ -2721,6 +2721,7 @@ class TestRemoteCommands(unittest.TestCase):
         get_remote.return_value = self.entry
         checked.side_effect = [
             _completed(stdout="configured\n"),
+            _completed(),
             _completed(stdout="sandbox-cli\nfix\nsnapshot\nsecret-inspection\nspeckit-refine\nwp-debug\n__SANDBOX_HERMES_PLUGINS__\n"),
         ]
         out = hermes.skills_action("test", "enable-sandbox", confirm=True)
@@ -2730,6 +2731,8 @@ class TestRemoteCommands(unittest.TestCase):
         setup = checked.call_args_list[0].args[1]
         self.assertIn("external_dirs", setup)
         self.assertIn("sandbox-cli", setup)
+        self.assertIn("plugins enable security-guidance", checked.call_args_list[1].args[1])
+        self.assertEqual(out["data"]["enabled_plugins"], ["security-guidance"])
 
     @patch("sandbox.core._hermes._checked", return_value=_completed(stdout="sandbox-cli\n__SANDBOX_HERMES_PLUGINS__\n"))
     @patch("sandbox.core._hermes._paths", return_value={"launcher": "$HOME/.local/bin/hermes"})

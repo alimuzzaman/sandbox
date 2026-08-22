@@ -3695,13 +3695,19 @@ print("configured")
     configured = _checked(entry, command, timeout=60, what="could not enable Sandbox skill directory")
     if (configured.stdout or "").strip() != "configured":
         raise HermesError("Sandbox skill directory could not be verified", "skills_enable_failed", True)
+    _checked(
+        entry,
+        f"{paths['launcher']} plugins enable security-guidance",
+        timeout=60,
+        what="could not enable Hermes security guidance plugin",
+    )
     inventory = _skills_inventory(entry, paths)
     missing = [name for name in _SANDBOX_SKILL_MARKERS if name not in inventory]
     if missing:
         raise HermesError("Hermes did not discover Sandbox skills: " + ", ".join(missing), "skills_enable_failed", True)
     return result(True, "skills_enable_sandbox", remote_name, status="enabled",
                   data={"external_dir": source, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
-                        "inventory": inventory})
+                        "enabled_plugins": ["security-guidance"], "inventory": inventory})
 
 
 def _gateway_unit(paths: dict) -> str:

@@ -58,6 +58,7 @@ HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
 HERMES_OPENROUTER_REASONING_EFFORT = "max"
 _SANDBOX_SKILL_MARKERS = ("sandbox-cli", "fix", "snapshot", "secret-inspection", "speckit-refine", "wp-debug")
+_SANDBOX_AGENT_SKILL_MARKERS = ("design-fidelity-diff", "elementor-ea", "gutenberg-eb")
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
 HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
@@ -3652,7 +3653,8 @@ def _skills_inventory(entry: dict, paths: dict) -> str:
 
 def _missing_sandbox_skills(entry: dict, paths: dict) -> list[str]:
     """Check only the required skill names without truncating a large inventory."""
-    names = " ".join(shlex.quote(name) for name in _SANDBOX_SKILL_MARKERS)
+    expected = (*_SANDBOX_SKILL_MARKERS, *_SANDBOX_AGENT_SKILL_MARKERS)
+    names = " ".join(shlex.quote(name) for name in expected)
     command = (
         "set -eu; "
         f"inventory=$({paths['launcher']} skills list); "
@@ -3661,7 +3663,7 @@ def _missing_sandbox_skills(entry: dict, paths: dict) -> list[str]:
         "done"
     )
     observed = _checked(entry, command, timeout=60, what="could not verify registered Sandbox skills")
-    return [name for name in (observed.stdout or "").splitlines() if name in _SANDBOX_SKILL_MARKERS]
+    return [name for name in (observed.stdout or "").splitlines() if name in expected]
 
 
 def skills_action(remote_name: str, action: str | None, *, confirm: bool = False) -> dict:
@@ -3672,12 +3674,16 @@ def skills_action(remote_name: str, action: str | None, *, confirm: bool = False
     if selected == "status":
         inventory = _skills_inventory(entry, paths)
         return result(True, "skills_status", remote_name, status="ready",
-                      data={"inventory": inventory, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS)})
+                      data={"inventory": inventory, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
+                            "sandbox_agent_skill_markers": list(_SANDBOX_AGENT_SKILL_MARKERS)})
     if selected != "enable-sandbox":
         raise HermesError("skills action must be status or enable-sandbox", "invalid_skills_action")
     if not confirm:
         raise HermesError("enabling Sandbox skills requires --confirm", "confirmation_required")
-    source = f"{paths['sandbox_home']}/sb-src/skills"
+    sources = (
+        f"{paths['sandbox_home']}/sb-src/skills",
+        f"{paths['sandbox_home']}/sb-src/.agents/skills",
+    )
     program = r'''
 import sys
 from pathlib import Path
@@ -3685,29 +3691,35 @@ from pathlib import Path
 from hermes_cli.config import get_config_path, read_raw_config
 from utils import atomic_yaml_write
 
-source = sys.argv[1]
-if not Path(source).is_dir() or not (Path(source) / "sandbox-cli" / "SKILL.md").is_file():
+sources = sys.argv[1:]
+if len(sources) != 2:
     raise SystemExit(2)
+core, shared = (Path(source) for source in sources)
+if not core.is_dir() or not (core / "sandbox-cli" / "SKILL.md").is_file():
+    raise SystemExit(3)
+if not shared.is_dir() or not (shared / "elementor-ea" / "SKILL.md").is_file():
+    raise SystemExit(4)
 config = read_raw_config()
 skills = config.setdefault("skills", {})
 if not isinstance(skills, dict):
-    raise SystemExit(3)
+    raise SystemExit(5)
 directories = skills.get("external_dirs", [])
 if not isinstance(directories, list) or not all(isinstance(item, str) for item in directories):
-    raise SystemExit(4)
-if source not in directories:
-    directories.append(source)
+    raise SystemExit(6)
+for source in sources:
+    if source not in directories:
+        directories.append(source)
 skills["external_dirs"] = directories
 atomic_yaml_write(get_config_path(), config, sort_keys=False)
-if source not in skills["external_dirs"]:
-    raise SystemExit(5)
+if not all(source in skills["external_dirs"] for source in sources):
+    raise SystemExit(7)
 print("configured")
 '''
     command = (
         "set -eu; "
         "PYTHONPATH=\"$HOME/.hermes/hermes-agent\" "
         "\"$HOME/.hermes/hermes-agent/venv/bin/python\" "
-        f"-c {shlex.quote(program)} {shlex.quote(source)}"
+        "-c " + shlex.quote(program) + " " + " ".join(shlex.quote(source) for source in sources)
     )
     configured = _checked(entry, command, timeout=60, what="could not enable Sandbox skill directory")
     if (configured.stdout or "").strip() != "configured":
@@ -3723,7 +3735,8 @@ print("configured")
     if missing:
         raise HermesError("Hermes did not discover Sandbox skills: " + ", ".join(missing), "skills_enable_failed", True)
     return result(True, "skills_enable_sandbox", remote_name, status="enabled",
-                  data={"external_dir": source, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
+                  data={"external_dirs": list(sources), "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
+                        "sandbox_agent_skill_markers": list(_SANDBOX_AGENT_SKILL_MARKERS),
                         "enabled_plugins": ["security-guidance"], "inventory": inventory})
 
 

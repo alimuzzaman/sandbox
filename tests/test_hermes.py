@@ -2728,7 +2728,7 @@ class TestRemoteCommands(unittest.TestCase):
         out = hermes.skills_action("test", "enable-sandbox", confirm=True)
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "enabled")
-        self.assertEqual(out["data"]["external_dir"], "/home/u/sandbox/sb-src/skills")
+        self.assertEqual(out["data"]["external_dirs"], ["/home/u/sandbox/sb-src/skills", "/home/u/sandbox/sb-src/.agents/skills"])
         setup = checked.call_args_list[0].args[1]
         self.assertIn("external_dirs", setup)
         self.assertIn("sandbox-cli", setup)

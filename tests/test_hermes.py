@@ -1773,6 +1773,24 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("integration_payload=", command)
         self.assertIn("if config_path.exists() else {}", command)
 
+    @patch("sandbox.core._hermes._ssh_stdin")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_openrouter_setup_writes_key_only_over_stdin_and_verifies_model(self, get_remote, paths, ssh_stdin):
+        get_remote.return_value = self.entry
+        paths.return_value = {"launcher": "$HOME/.local/bin/hermes"}
+        ssh_stdin.return_value = _completed(stdout=b"openrouter\tstealth/ox-alpha\n")
+
+        output = hermes.configure_openrouter("test", "credential-value")
+
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["data"]["model"], "stealth/ox-alpha")
+        command = ssh_stdin.call_args.args[1]
+        self.assertIn("OPENROUTER_API_KEY=", command)
+        self.assertIn("read_raw_config", command)
+        self.assertIn("atomic_yaml_write", command)
+        self.assertEqual(ssh_stdin.call_args.args[2], b"credential-value")
+
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")
     @patch("sandbox.core._hermes.remote.ssh_run")

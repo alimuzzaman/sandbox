@@ -55,6 +55,7 @@ SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
+HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
 HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
@@ -1625,6 +1626,76 @@ PY
     return result(True, "setup", remote_name, status="configured",
                   data={"mcp_server": "sandbox", "parallel_calls": False, "full_catalog": True,
                         "state_sync": state_sync_status[0] if state_sync_status else None})
+
+
+def configure_openrouter(remote_name: str, api_key: str) -> dict:
+    """Persist one OpenRouter key from stdin and pin Hermes's root model."""
+    if not isinstance(api_key, str) or not api_key or len(api_key) > 1024 or any(
+            character in api_key for character in "\r\n\x00"):
+        raise HermesError("OpenRouter key input is invalid", "invalid_openrouter_key")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    write_env = r'''
+import os
+import sys
+from pathlib import Path
+
+import yaml
+from hermes_cli.config import get_config_path, read_raw_config
+from utils import atomic_yaml_write
+
+raw = sys.stdin.buffer.read(1025)
+if not raw or len(raw) > 1024 or b"\r" in raw or b"\n" in raw or b"\0" in raw:
+    raise SystemExit(2)
+try:
+    value = raw.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(2)
+home = Path.home() / ".hermes"
+home.mkdir(mode=0o700, exist_ok=True)
+target = home / ".env"
+if target.is_symlink():
+    raise SystemExit(3)
+existing = target.read_text() if target.exists() else ""
+kept = [line for line in existing.splitlines() if not line.startswith("OPENROUTER_API_KEY=")]
+temporary = target.with_name(".env.sandbox-new")
+flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+fd = os.open(temporary, flags, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(kept).rstrip("\n"))
+    if kept:
+        stream.write("\n")
+    stream.write("OPENROUTER_API_KEY=" + value + "\n")
+os.replace(temporary, target)
+os.chmod(target, 0o600)
+config = read_raw_config()
+model = config.setdefault("model", {})
+if not isinstance(model, dict):
+    raise SystemExit(4)
+model["provider"] = "openrouter"
+model["default"] = __MODEL__
+atomic_yaml_write(get_config_path(), config, sort_keys=False)
+if model["provider"] != "openrouter" or model["default"] != __MODEL__:
+    raise SystemExit(5)
+print("openrouter\t" + __MODEL__)
+'''
+    write_env = write_env.replace("__MODEL__", repr(HERMES_OPENROUTER_MODEL))
+    command = (
+        "set -eu; "
+        f"test -x {paths['launcher']}; "
+        "PYTHONPATH=\"$HOME/.hermes/hermes-agent\" "
+        "\"$HOME/.hermes/hermes-agent/venv/bin/python\" "
+        f"-c {shlex.quote(write_env)}"
+    )
+    completed = _ssh_stdin(entry, command, api_key.encode("utf-8"), timeout=90)
+    if completed.returncode != 0:
+        raise HermesError("OpenRouter provider configuration failed", "openrouter_setup_failed", True)
+    configured = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    if configured != f"openrouter\t{HERMES_OPENROUTER_MODEL}":
+        raise HermesError("OpenRouter provider configuration could not be verified", "openrouter_setup_failed", True)
+    return result(True, "provider_openrouter", remote_name, status="configured",
+                  data={"provider": "openrouter", "model": HERMES_OPENROUTER_MODEL,
+                        "credential": "stored_owner_only"})
 
 
 def status(remote_name: str) -> dict:

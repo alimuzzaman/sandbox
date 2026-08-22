@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -136,6 +137,16 @@ def cmd_hermes(cfg, args) -> None:
             payload = hermes.doctor(args.remote)
         elif action == "status":
             payload = hermes.status(args.remote)
+        elif action == "provider":
+            if args.subaction != "openrouter":
+                raise hermes.HermesError("provider action must be openrouter", "invalid_provider_action")
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+            if not api_key:
+                raise hermes.HermesError(
+                    "OpenRouter setup requires an OPENROUTER_API_KEY supplied by the secret broker",
+                    "openrouter_key_required",
+                )
+            payload = hermes.configure_openrouter(args.remote, api_key)
         elif action == "chat":
             if not args.repo:
                 raise hermes.HermesError("hermes chat requires --repo", "missing_repo")

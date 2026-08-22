@@ -102,6 +102,17 @@ private SSH key to the remote. The broad GitHub CLI browser OAuth flow is
 intentionally rejected because its minimum scopes include account-level
 organization access.
 
+For OpenRouter, use the registered secret broker so the key is delivered only
+to the remote Hermes owner over SSH standard input; it never appears in an
+argument or command output. This sets the root Hermes provider to `openrouter`
+and its default model to `stealth/ox-alpha`:
+
+```bash
+./sb secrets run --source personal --key LENZORA_DEVELOPMENT_OPENROUTER \
+  --destination OPENROUTER_API_KEY --timeout-seconds 120 --project-dir . -- \
+  ./sb hermes provider openrouter --remote scaleway-sandbox --json
+```
+
 Hermes installation fetches the selected annotated tag into a temporary Git
 repository, verifies its SSH signature against the pinned upstream release
 signer, confirms the exact commit, and executes the installer script extracted

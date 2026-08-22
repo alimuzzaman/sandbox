@@ -1992,6 +1992,16 @@ class TestRemoteCommands(unittest.TestCase):
             hermes.run("test", "repo", "inspect", workdir="/home/alim/git/lenzora")
         self.assertEqual(caught.exception.code, "run_workdir_requires_no_worktree")
 
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={"hermes_home": "/home/alim/.hermes", "launcher": "/home/alim/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={"ssh": "u@example.test"})
+    def test_agent_max_turns_sets_and_verifies_unlimited(self, require_remote, paths, ssh):
+        output = hermes.agent_max_turns("test", "unlimited")
+        self.assertEqual(output["data"]["max_turns"], "unlimited")
+        command = ssh.call_args.args[1]
+        self.assertIn("config set agent.max_turns unlimited", command)
+        self.assertNotIn("config get", command)
+
     def test_worktree_setup_uses_integration_owned_root(self):
         command = hermes._worktree_setup({
             "repo_root": "/home/ubuntu/sandbox/hermes-repos",

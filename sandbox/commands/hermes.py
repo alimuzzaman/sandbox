@@ -290,6 +290,11 @@ def cmd_hermes(cfg, args) -> None:
                                             args.min_free_disk_mb, args.min_free_memory_mb)
             else:
                 raise hermes.HermesError("policy action must be show or set", "invalid_policy_action")
+        elif action == "agent":
+            if args.subaction == "max-turns":
+                payload = hermes.agent_max_turns(args.remote, args.max_turns)
+            else:
+                raise hermes.HermesError("agent action must be max-turns", "invalid_agent_action")
         elif action == "health":
             payload = hermes.health(args.remote)
         elif action == "acceptance":

@@ -3464,6 +3464,30 @@ def run(remote_name: str, repo: str, prompt: str, *, worktree: bool = True,
                   data={"worktree": worktree, "output": _redact(res.stdout, entry)[-4000:]})
 
 
+def agent_max_turns(remote_name: str, max_turns: str | None) -> dict:
+    """Set Hermes's non-secret per-turn iteration cap without reading config.yaml."""
+    value = (max_turns or "").strip().lower()
+    if value in {"none", "null", "unlimited", "inf", "infinite", "infinity", "0", "-1"}:
+        resolved = "unlimited"
+    elif value.isdecimal() and 1 <= int(value) <= 1_000_000:
+        resolved = str(int(value))
+    else:
+        raise HermesError("max-turns must be a positive integer or unlimited", "invalid_max_turns")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    command = (
+        f"set -eu; HERMES_HOME={shlex.quote(paths['hermes_home'])} {paths['launcher']} config set "
+        f"agent.max_turns {shlex.quote(resolved)} >/dev/null"
+    )
+    res = _ssh(entry, command, timeout=30)
+    if res.returncode != 0:
+        raise HermesError(_redact(res.stderr or res.stdout or "could not set Hermes max turns", entry)[:1000],
+                          "agent_max_turns_failed", True)
+    return result(True, "agent_max_turns", remote_name, status="configured",
+                  data={"max_turns": "unlimited" if resolved == "unlimited" else int(resolved),
+                        "verification": "hermes_config_set_exit"})
+
+
 def _valid_job_id(job_id: str) -> str:
     if not _JOB_RE.fullmatch(job_id or ""):
         raise HermesError("invalid Hermes job id", "invalid_job_id")

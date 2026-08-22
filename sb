@@ -45,7 +45,41 @@ Install it, then re-run ./sb setup:
 EOF
     exit 1
 fi
-exec python3 "$0" "$@"
+
+# The package requires Python >= 3.12 (f-string backslashes and newer stdlib
+# behavior are load-bearing). A bare `python3` can be an older interpreter —
+# e.g. a pyenv shim pinned to 3.11 — so pick the newest supported one that is
+# actually present instead of trusting PATH order. Preference: a versioned
+# binary (python3.13/3.12), then plain python3, and only then the repo's
+# .cli-venv — each versioned-less candidate must itself report >= 3.12.
+SB_PY=""
+for sb_candidate in python3.13 python3.12 python3 .cli-venv/bin/python; do
+    if [ "${sb_candidate#./}" != "$sb_candidate" ]; then
+        # Repo-relative venv interpreter must exist and be executable.
+        if [ -x "$sb_candidate" ]; then SB_PY="$sb_candidate"; break; fi
+        continue
+    fi
+    if command -v "$sb_candidate" >/dev/null 2>&1; then
+        case "$sb_candidate" in
+        python3|.cli-venv/bin/python)
+            sb_major=$("$sb_candidate" -c 'import sys;print(sys.version_info[0])' 2>/dev/null) || continue
+            sb_minor=$("$sb_candidate" -c 'import sys;print(sys.version_info[1])' 2>/dev/null) || continue
+            if [ "${sb_major:-0}" -lt 3 ] 2>/dev/null \
+                || { [ "$sb_major" -eq 3 ] 2>/dev/null && [ "${sb_minor:-0}" -lt 12 ] 2>/dev/null; }; then
+                continue
+            fi
+        ;;
+        esac
+        SB_PY="$sb_candidate"
+        break
+    fi
+done
+if [ -z "$SB_PY" ]; then
+    echo "sandbox needs Python >= 3.12; found only older interpreters on PATH." >&2
+    echo "Install Python 3.12+ (see versions above) or run ./sb setup." >&2
+    exit 1
+fi
+exec "$SB_PY" "$0" "$@"
 ":"""
 
 import sys

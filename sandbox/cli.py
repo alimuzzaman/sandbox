@@ -665,10 +665,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "provider", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "dashboard-ui", "state", "drive", "authorization"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "provider", "chat", "skills", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "dashboard-ui", "state", "drive", "authorization"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="provider: openrouter; chat: status; dashboard: status|install|setup|start|stop|restart|doctor|logs|exposure-status|adopt|expose|unexpose|basic-auth; repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|provenance|apply; backup: create|list|restore; policy: show|set; acceptance: v2; dashboard-ui: install|status|upgrade|uninstall|catalog; state: setup|sync|restore; drive: setup|backup|list|restore; authorization: sync|list|show|request|approve")
+        help="provider: openrouter; chat: status; skills: status|enable-sandbox; dashboard: status|install|setup|start|stop|restart|doctor|logs|exposure-status|adopt|expose|unexpose|basic-auth; repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|provenance|apply; backup: create|list|restore; policy: show|set; acceptance: v2; dashboard-ui: install|status|upgrade|uninstall|catalog; state: setup|sync|restore; drive: setup|backup|list|restore; authorization: sync|list|show|request|approve")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")

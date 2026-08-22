@@ -2714,6 +2714,32 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn('ps", "-u"', checked.call_args.args[1])
         self.assertNotIn("args\": items", checked.call_args.args[1])
 
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={"launcher": "$HOME/.local/bin/hermes", "sandbox_home": "/home/u/sandbox"})
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_enabling_sandbox_skills_preserves_external_dirs_and_verifies_discovery(self, get_remote, paths, checked):
+        get_remote.return_value = self.entry
+        checked.side_effect = [
+            _completed(stdout="configured\n"),
+            _completed(stdout="sandbox-cli\nfix\nsnapshot\nsecret-inspection\nspeckit-refine\nwp-debug\n__SANDBOX_HERMES_PLUGINS__\n"),
+        ]
+        out = hermes.skills_action("test", "enable-sandbox", confirm=True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "enabled")
+        self.assertEqual(out["data"]["external_dir"], "/home/u/sandbox/sb-src/skills")
+        setup = checked.call_args_list[0].args[1]
+        self.assertIn("external_dirs", setup)
+        self.assertIn("sandbox-cli", setup)
+
+    @patch("sandbox.core._hermes._checked", return_value=_completed(stdout="sandbox-cli\n__SANDBOX_HERMES_PLUGINS__\n"))
+    @patch("sandbox.core._hermes._paths", return_value={"launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_skills_status_is_read_only(self, get_remote, paths, checked):
+        get_remote.return_value = self.entry
+        out = hermes.skills_action("test", "status")
+        self.assertEqual(out["status"], "ready")
+        self.assertIn("plugins list", checked.call_args.args[1])
+
 
 class TestLocalState(unittest.TestCase):
     def test_unversioned_legacy_state_migrates_in_memory(self):

@@ -57,6 +57,7 @@ HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_OPENROUTER_MODEL = "stealth/ox-alpha"
 HERMES_OPENROUTER_REASONING_EFFORT = "max"
+_SANDBOX_SKILL_MARKERS = ("sandbox-cli", "fix", "snapshot", "secret-inspection", "speckit-refine", "wp-debug")
 HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
 HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
@@ -3632,6 +3633,75 @@ print(json.dumps({"chats": items}, sort_keys=True))
         raise HermesError("interactive Hermes chat status was invalid", "invalid_chat_status")
     return result(True, "chat_status", remote_name, status="running" if chats else "inactive",
                   data={"chats": chats})
+
+
+def _skills_inventory(entry: dict, paths: dict) -> str:
+    """Return a bounded, credential-screened skill/plugin inventory."""
+    command = (
+        "set -eu; "
+        f"{paths['launcher']} skills list; "
+        "printf '%s\\n' '__SANDBOX_HERMES_PLUGINS__'; "
+        f"{paths['launcher']} plugins list"
+    )
+    observed = _checked(entry, command, timeout=60, what="could not inspect Hermes skills and plugins")
+    return _redact((observed.stdout or ""), entry)[-16_000:]
+
+
+def skills_action(remote_name: str, action: str | None, *, confirm: bool = False) -> dict:
+    """Inspect or register Sandbox's committed skills as a Hermes external directory."""
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    selected = action or "status"
+    if selected == "status":
+        inventory = _skills_inventory(entry, paths)
+        return result(True, "skills_status", remote_name, status="ready",
+                      data={"inventory": inventory, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS)})
+    if selected != "enable-sandbox":
+        raise HermesError("skills action must be status or enable-sandbox", "invalid_skills_action")
+    if not confirm:
+        raise HermesError("enabling Sandbox skills requires --confirm", "confirmation_required")
+    source = f"{paths['sandbox_home']}/sb-src/skills"
+    program = r'''
+import sys
+from pathlib import Path
+
+from hermes_cli.config import get_config_path, read_raw_config
+from utils import atomic_yaml_write
+
+source = sys.argv[1]
+if not Path(source).is_dir() or not (Path(source) / "sandbox-cli" / "SKILL.md").is_file():
+    raise SystemExit(2)
+config = read_raw_config()
+skills = config.setdefault("skills", {})
+if not isinstance(skills, dict):
+    raise SystemExit(3)
+directories = skills.get("external_dirs", [])
+if not isinstance(directories, list) or not all(isinstance(item, str) for item in directories):
+    raise SystemExit(4)
+if source not in directories:
+    directories.append(source)
+skills["external_dirs"] = directories
+atomic_yaml_write(get_config_path(), config, sort_keys=False)
+if source not in skills["external_dirs"]:
+    raise SystemExit(5)
+print("configured")
+'''
+    command = (
+        "set -eu; "
+        "PYTHONPATH=\"$HOME/.hermes/hermes-agent\" "
+        "\"$HOME/.hermes/hermes-agent/venv/bin/python\" "
+        f"-c {shlex.quote(program)} {shlex.quote(source)}"
+    )
+    configured = _checked(entry, command, timeout=60, what="could not enable Sandbox skill directory")
+    if (configured.stdout or "").strip() != "configured":
+        raise HermesError("Sandbox skill directory could not be verified", "skills_enable_failed", True)
+    inventory = _skills_inventory(entry, paths)
+    missing = [name for name in _SANDBOX_SKILL_MARKERS if name not in inventory]
+    if missing:
+        raise HermesError("Hermes did not discover Sandbox skills: " + ", ".join(missing), "skills_enable_failed", True)
+    return result(True, "skills_enable_sandbox", remote_name, status="enabled",
+                  data={"external_dir": source, "sandbox_skill_markers": list(_SANDBOX_SKILL_MARKERS),
+                        "inventory": inventory})
 
 
 def _gateway_unit(paths: dict) -> str:

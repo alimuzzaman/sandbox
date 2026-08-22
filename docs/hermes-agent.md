@@ -569,6 +569,16 @@ Inspect an interactive review session without revealing its prompt or arguments:
 ./sb hermes chat status --remote scaleway-sandbox --json
 ```
 
+Hermes keeps its own bundled skills. Register the committed Sandbox skill directory
+as an external source instead of copying or replacing those upstream skills. This makes
+the safe operational, WordPress, and Spec-Kit workflows discoverable in new Hermes
+sessions; it does not install third-party plugins:
+
+```bash
+./sb hermes skills status --remote scaleway-sandbox --json
+./sb hermes skills enable-sandbox --remote scaleway-sandbox --confirm --json
+```
+
 Optional Basic Auth is a second gate after Access. It is disabled by default and uses a
 secret reference, not a password argument:
 

@@ -155,6 +155,8 @@ def cmd_hermes(cfg, args) -> None:
             if not args.repo:
                 raise hermes.HermesError("hermes chat requires --repo", "missing_repo")
             payload = hermes.chat(args.remote, args.repo, worktree=not args.no_worktree)
+        elif action == "skills":
+            payload = hermes.skills_action(args.remote, args.subaction, confirm=args.confirm)
         elif action == "run":
             if not args.repo or not args.prompt:
                 raise hermes.HermesError("hermes run requires --repo and --prompt", "missing_run_input")

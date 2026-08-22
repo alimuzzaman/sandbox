@@ -1,160 +1,181 @@
-# Sandbox TODO
+# Hermes execution queue (critical first)
 
-Updated: 2026-08-19. Structure: standing engineering work (§1–§3) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
+Updated: 2026-08-22. This is the handoff queue for Hermes. Feedback below is
+evidence, not execution authority: reproduce it first, preserve dirty work,
+and do not reset, destroy, clean up remote resources, deploy, release, or
+expose secrets without fresh explicit authority.
 
-Sources: `[guardian]` = 2026-08-12 product feedback + current Sandbox evidence · `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[herd-parity]` = 2026-08-11 local probes + official Herd/Laravel/Docker/Node/pnpm/MySQL research under `.ai/research/2026-08-11-herd-sandbox-parity/` · `[vercel]` = 2026-08-19 official Vercel Sandbox documentation review under `.ai/research/2026-08-19-vercel-sandbox/` · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
+## P0 — reliability and current operator blockers
 
-Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is Contabo not Scaleway). Do not re-run the provider comparison; the open questions that remain are listed in `todo/01-outbound-mail/prd.md` §11.
+- [ ] **Restore a deterministic local CLI interpreter.** The `./sb` shebang
+  currently fails because the repository selects Python 3.12 but the active
+  pyenv installation does not provide it; the existing `.cli-venv` works.
+  Make the documented bootstrap/wrapper select or provision the supported
+  interpreter without weakening the 3.12 requirement. Acceptance: `./sb
+  --help`, `./sb feedback list --project-dir . --json`, and focused tests work
+  from a clean shell. Evidence: current observation; related `aff7c116…`.
 
-## 0. Immediate operational blockers (P0; before new remote harness work)
+- [ ] **Make remote durable-job acceptance and observation reliable.** A
+  job-start can exit silently without a durable request/job record, and an
+  accepted job-status can emit no JSON. Define one replay-safe acceptance
+  envelope, request-ID lookup, and bounded output contract. Acceptance: exact
+  request lookup always distinguishes accepted, rejected, and unknown; no
+  empty-success output. Feedback: `343d1a5a…`, `8b88c87e…`.
 
-- [x] Implement network-capacity admission before remote workspace/test provisioning:
-  report usable subnet capacity (or a bounded unavailable state), fail closed before
-  staging or network allocation when a network cannot be allocated, identify the owning
-  resource class, and never infer capacity from disk space or network count alone.
-  Deterministic exhaustion/collision regressions and safe refusal envelopes are landed in
-  `6763945`, `cb90aac`, and `7d40a1b`; this is source-complete, not live-host proof.
-  `[ops → prd 00 §5 P0]`
-- [ ] Gather live network-capacity admission evidence on the installed `scaleway-sandbox`
-  revision: capture a complete read-only IPAM/pool inventory with ownership attribution
-  and usable capacity (or a bounded unavailable/ambiguous result), and retain the
-  revision and a reviewed cleanup/capacity plan. This operational gate stays open; no
-  source tests or local output authorize remote provisioning or cleanup.
-- [ ] Complete the durable workspace index on `scaleway-sandbox` without guessing
-  ownership. The current metadata-only plan exposes 32 unresolved legacy records and
-  therefore correctly refuses a complete list. Preserve every legacy record, require
-  exact job/project evidence or operator mapping, and keep migration separate from
-  reset, destroy, network release, and cleanup authority. `[ops · observability]`
+- [ ] **Re-establish trustworthy remote capacity evidence before provisioning
+  or cleanup.** Historical read-only inventories found 29–31 active managed
+  Docker networks, with incomplete attribution and no safe cleanup candidate.
+  Re-run the supported inventory on the installed revision; retain unresolved
+  records and produce a non-destructive capacity/ownership plan. Acceptance:
+  complete or explicitly bounded inventory, revision receipt, and no inferred
+  cleanup authority. Feedback: `78aaf583…`, `0fac3b07…`, `bf05eeb9…`,
+  `a813480b…`, `600d2def…`.
 
-## 1. Loose ends (hours; found while shipping, none blocking)
+- [ ] **Repair the remote evaluator flow before more benchmark runs.** The
+  T120 evaluator required manual recovery because job acceptance, retained
+  output retrieval, test bootstrap, and phase classification were unreliable.
+  Acceptance: one reproducible remote evaluation yields durable acceptance,
+  structured terminal output, phase-aware classification, and a sanitized
+  receipt. Feedback: `9bb7aea1…`.
 
-- [ ] `hermes.asb.bd` serves the Cloudflare Access 302 for `/robots.txt` — Access runs ahead of Workers, so the deny never reaches it. Accepted: the host is Access-gated, nothing is crawlable. Revisit only if the route ever goes public. `[dns]`
-- [ ] Worker route patterns don't match a query string, so `/robots.txt?x=1` falls through to the origin (523 on hostnames with no vhost). Cosmetic — crawlers request it bare. `[dns]`
-- [ ] `replay.lenzora.dev` returns 525 (TLS handshake failed at origin) — unrelated to mail, spotted during the robots sweep. `[ops]`
+- [ ] **Make remote reachability actionable.** `remote list` can report a
+  host reachable while brokered SSH times out, and there is no supported
+  secret-safe host preflight/exec surface. Acceptance: status names the usable
+  transport and failure reason, with a bounded supported host diagnostic path.
+  Feedback: `b340f98a…`, `56bf50f…`.
 
-## 2. Platform integrity (continuous)
+- [ ] **Diagnose the Hermes dashboard session mismatch.** The selected
+  “Check GitHub Repo Access” session (218 messages) rendered the old
+  self-check transcript after the dashboard restart; its event feed was
+  disconnected. Do not delete either session. Acceptance: after reconnect and
+  a fresh browser load, each session ID renders its own persisted transcript;
+  otherwise capture a minimal upstream reproduction and pin a tested fix or
+  update plan. Gateway is currently off, so do not treat this as a cron fix.
 
-- [ ] `sandbox/core/_cloudflare.py` upserts address records only — no TXT/CNAME. Blocks every DNS-automating feature, mail first. `[dns → prd 01 §4.4]`
-- [ ] Instance mail is a dead end by construction: `_write_mail_muplugin` rewrites From to an invalid no-TLD address so `wp_mail()` fails loudly. Right for a laptop, wrong for a public preview. `[mail → prd 01]`
-- [ ] One IP, one reputation, shared by every preview and every permanent site. Needs per-instance rate limiting before sending is switched on widely. `[mail → prd 01 §10]`
+## P1 — Hermes and CLI correctness
 
-## 3. Environment lifecycle primitives `[vercel]`
+- [ ] **Expose dashboard/public-readiness in Hermes status.** `hermes status`
+  can say configured while the dashboard is absent or unhealthy. Acceptance:
+  status distinguishes agent configuration, dashboard health, gateway state,
+  and public exposure. Feedback: `a3050df7…`.
 
-Four primitives from the 2026-08-19 Vercel Sandbox review that Sandbox lacks and
-that map onto queued work. Full findings, local gaps, and what is deliberately
-not adopted: `.ai/research/2026-08-19-vercel-sandbox/findings.md`. Research only
-— each item needs its own design pass before implementation.
+- [ ] **Make `hermes repo sync` work for a provisioned Sandbox runtime.** The
+  documented managed-repo route reports the repository missing. Acceptance:
+  a supported, revision-verified sync path works without raw SSH edits.
+  Feedback: `96819c8…`.
 
-- [ ] Split instance identity from the running session, and make storage-pressure
-  relief hibernate rather than reap: stop the session, snapshot the filesystem,
-  resume transparently on the next `sb wp` / `visit` / MCP call. Today `./sb`
-  offers `down` (stops, reclaims nothing durable) or `clean` (destroys data) with
-  no state in between, which is why pressure relief currently costs the user
-  their site. Feeds spec 043. `[vercel → findings §1, §3.1]`
-- [ ] Add `sb fork <instance>` — seed a new instance from another's current
-  snapshot plus config. Targets the most expensive repeated operation we have:
-  every `run_e2e` worker and every `ci_run` matrix cell installs WordPress from
-  scratch. Copy the two documented sharp edges: secrets are not carried into the
-  fork, and tag/port overrides replace rather than merge. Needs its own spec.
-  `[vercel → findings §3.2]`
-- [ ] Make snapshot retention declared policy instead of manual hygiene:
-  expiration TTL, keep-last-N, and an explicit rule for what happens to evicted
-  snapshots, enforced at capture time. `./sb snapshot` currently takes only
-  `--force`/`--db-only`, so snapshots grow unbounded inside the class spec 042's
-  tiered cleanup refuses to touch. Feeds specs 042/043. `[vercel → findings §3.3]`
-- [ ] Carry the explicit per-mount access mode (`read-write` / `read-only`) into
-  spec 044's shared node store and git dedup design. Vercel Drives — one named
-  volume, many consumers, mode declared at the mount site — is independent
-  validation of that shape and of what makes a shared store safe to attach
-  widely. `[vercel → findings §3.4]`
-- [ ] Meter per instance — active CPU excluding I/O wait, memory-hours, egress
-  bytes, snapshot bytes, last-touched — so a pressure scheduler can rank victims.
-  `sb resources status` attributes disk only, which is not enough to choose what
-  to hibernate. Feeds spec 043. `[vercel → findings §3.5]`
-- [ ] Treat an attached consumer as a lease: never reap or hibernate an instance
-  with a live shell, an open browser session, or a running job. `[vercel → findings §3.6]`
-- [ ] Probe whether an instance's `wp_remote_get()` to its own HTTPS domain
-  passes TLS verification. `NODE_EXTRA_CA_CERTS` is set on the host only
-  (`sandbox/commands/config_setup.py`); no CA-bundle variables reach instance
-  containers and no `update-ca-certificates` step exists in the Compose sources.
-  State the observed result before proposing a fix. `[vercel → findings §2]`
-- [ ] Add free-form `key=value` tags to instances, filterable in `sb instances`,
-  so retention and cleanup policy can target a set instead of matching derived
-  names. Today only a derived name and an operator-chosen `label` exist.
-  `[vercel → findings §3.8]`
-- [ ] Deferred unless the threat model changes: per-instance egress policy
-  (deny-all base, domain/CIDR allowlists). Only relevant if Sandbox ever runs
-  untrusted plugin or agent-generated code; not needed for today's trusted-code
-  workload. The trusted-code-only/shared-kernel boundary is now stated in
-  `README.md` and `docs/remote-hosting.md`; this checkbox remains open because
-  no per-instance egress isolation exists. Related: Sandbox uses Docker on a
-  shared kernel, with workspaces shared across the remote host, so documentation
-  must keep saying trusted code only. `[vercel → findings §3.9, §4]`
+- [ ] **Make recovery and diagnostics CLI contracts match their help.** Expose
+  restore confirmation flags, prevent doctor startup crashes, accept documented
+  `skill show --project-dir` placement, and document focused-test selection.
+  Acceptance: each command has a parser-level regression test and one
+  documented invocation. Feedback: `bb1f932b…`, `3727d6d…`, `05936f99…`,
+  `c7148951…`, `35ed6086…`, `6bc4c6d5…`.
 
-## Phase 0 — WordPress Plugin Release Guardian / Operations Agent `[prd 00]`
+- [ ] **Keep the dashboard authorization flow usable without hidden state.**
+  `sandbox-authorizations` v1.0.6 is enabled and the dashboard is healthy;
+  verify one manual approval request/review/reject path after the session-view
+  issue is fixed. Do not change its manual-approval policy.
 
-Make Sandbox's next 12 months one coherent WordPress release-safety product.
-Deterministic checks own the verdict; AI operates bounded tools, triages, and
-explains. Read-only is the default, mutations need revision-bound approval, and
-real adoption plus published negative evidence are release criteria.
+- [ ] **Enable long-running cron only after the gateway is intentionally
+  started.** Design one workdir-pinned job per project (serialized by Hermes),
+  choose an interval above p95 run time, and use a `wakeAgent:false` pre-check
+  for frequent polling. Acceptance: no concurrent run of the same job, bounded
+  run history, and a documented missed-run behavior. The current gateway is
+  inactive; do not create an unattended production schedule yet.
 
-### P0 — Trustworthy release decision (months 1–4)
+## P2 — test-environment and regression cleanup
 
-- [ ] Treat reliable remote harness admission as the first Guardian prerequisite: close
-  TODO §0 network-capacity and structured-observability blockers before claiming the
-  compatibility/security matrix is runnable or collecting pilot latency/reliability
-  evidence. Infrastructure failure remains a fail-closed verdict, never a skipped pass.
-  `[ops → prd 00 §5 P0]`
-- [ ] Resolve the five product decisions in `todo/00-wordpress-plugin-release-guardian/prd.md` §11 before formal specification: security scanner/ruleset, default required compatibility matrix, baseline-mutation authority, evidence retention/privacy/cost budget, and first design partner/release policy. Run `speckit-refine` and require the independent Sol High readiness review. `[guardian → prd 00 §11]`
-- [ ] Define a separately declared Guardian MCP/Abilities profile: read-only discovery by default; explicit schemas, scopes, side-effect/data classes, timeouts, and audit behavior; undeclared abilities absent. Arbitrary PHP/shell/WP-CLI/SQL/file writes and release/deploy/publish operations are not safe Guardian abilities. `[prd 00 §4.2]`
-- [ ] Add revision-bound, expiring, replay-safe approval gates for any permitted mutation and prove wrong-revision, stale, over-scoped, or unauthorized requests stop before side effects. Keep autonomous publishing, releasing, deployment, merge, tag, and production mutation out of scope. `[prd 00 §4.2, §8]`
-- [ ] Ship one immutable-revision Guardian run that composes Plugin Check, declared PHPUnit suites, isolated required WordPress/PHP matrix cells, and a pinned deterministic security scan through bounded durable jobs. Observe every detached job to terminal state. `[prd 00 §5 P0, §6]`
-- [ ] Make the deterministic verdict fail closed: any required `fail`, `partial`, `unavailable`, `timed_out`, `cancelled`, infrastructure error, stale evidence, or unevaluated cell blocks `ready`; an AI explanation or prior baseline cannot override it. `[prd 00 §2, §4.1]`
-- [ ] Record an evidence envelope from the first runnable slice: revision/policy/tool versions, normalized outcomes, artifact digests, tool traces, approvals/mutations, retry lineage, terminal lifecycle, per-step/end-to-end latency, resource use, and AI tokens/cost, with secret-safe redaction. `[prd 00 §4.3, §5 P0]`
-- [ ] Recruit pilot candidates during P0: identify at least five plausible outside users and one plugin-team candidate, then secure one design partner before expanding the gate catalog. Pilot discovery is not yet counted as adoption. `[prd 00 §5 P0, §10]`
+- [ ] **Fix plain-environment test behavior.** `tests/test_mcp.py` should
+  skip cleanly or install its declared MCP extra; discovery guidance tests
+  should skip cleanly when PHP is unavailable. Acceptance: full suite reports
+  only intentional skips on a minimal supported venv.
 
-### P1 — Explainable operations and measured quality (months 4–8)
+- [ ] **Root-cause the isolated-SANDBOX_HOME reclaim probe regression.**
+  `test_observe_emits_the_reclaim_inventory` returns zero deploy-source
+  worktrees after remote-probe changes. Acceptance: a focused regression test
+  proves correct attribution without broadening cleanup authority.
 
-- [ ] Add evidence-grounded AI triage that separates product failures from infrastructure failures, groups findings, states uncertainty, and cites immutable gate/cell/artifact/trace IDs. Unsupported claims are labeled and scored as failures; AI never changes the verdict. `[prd 00 §5 P1]`
-- [ ] Where the pilot needs bounded changes, produce a revision-bound mutation plan and require fresh human approval before creating a candidate patch or proposing a selected baseline update; rerun deterministic verification afterward. `[prd 00 §5 P1]`
-- [ ] Build a versioned evaluation set from real, reproducible plugin defects across compatibility, Plugin Check, PHPUnit, security, flaky/infrastructure, and insufficient-evidence cases. Keep reviewed expected outcomes separate from agent prompts and production release data. `[prd 00 §5 P1, §8]`
-- [ ] Publish an internal quality/operations scorecard: false-ready count, gate accuracy, triage usefulness and citation support, policy violations, completion/retry rates, p50/p95 per-gate and end-to-end latency, compute/tool use, AI tokens/cost, and human review time. Show distributions and failures, not only averages. `[prd 00 §5 P1]`
+- [ ] **Close controller-only historical test seams.** Replace the cross-realm
+  `structuredClone` fixture issue and closed-list schema ordering mismatch with
+  deterministic tests. Feedback: `32738043…`, `65d54278…`.
 
-### P2 — Adoption and public evidence (months 8–12)
+- [ ] **Add the bounded-edge-capture invariant test** and revisit non-JSON
+  Compose status only when the minimum supported Compose version changes.
 
-- [ ] Make onboarding usable by an outside maintainer without Sandbox-maintainer intervention on the happy path: configure policy, understand permissions, run Guardian, inspect evidence, and report a problem. `[prd 00 §5 P2]`
-- [ ] Achieve either five outside users each completing a real plugin release evaluation or one real plugin team integrating Guardian into its release workflow. Demos, interviews, cloned repos, and maintainer-operated runs do not count. `[prd 00 §5 P2, §8]`
-- [ ] Publish measured results covering evaluation design, supported scope, sample size, correctness, triage quality, latency/cost distributions, limitations, and reproducible methodology. `[prd 00 §5 P2]`
-- [ ] Publish one real failure/postmortem case—missed defect, near miss, unsafe AI suggestion, flaky gate, or operational incident—with impact, timeline, detection, causes, corrective actions, and changed guarantees. `[prd 00 §5 P2]`
+## Feedback ledger — all 23 records
 
-## Phase 1 — Outbound mail `[prd 01]`
+### Critical / high
 
-Direct delivery from the Sandbox host, no paid provider. The research is settled; what follows is build.
+- [ ] `9bb7aea1a679db7233e18f8fbf31c841` — T120 evaluator and remote benchmark workflow gaps.
+- [ ] `b340f98a0df25f2c7817d7cac2bd652b` — registered remote reachability disagrees with brokered SSH.
+- [ ] `600d2def1a44dde2e811a79e01b9aa25` — 31 active managed remote networks; partial inventory.
+- [ ] `343d1a5ae1c59b8f2754ee24ebf96b9d` — remote job-start silently lacks durable acceptance.
+- [ ] `a813480b2b761798b839cd4682c0649b` — 31 active managed remote networks; partial inventory.
+- [ ] `bf05eeb9362ba7e408b9315669698b60` — 31 active managed remote networks; partial inventory.
+- [ ] `0fac3b07416044a28041c2a358cf2084` — remote network count increased to 31; partial inventory.
+- [ ] `78aaf5836d63078b060336a9e306b7f5` — fast-test harness blocked by Docker network-pool exhaustion.
 
-- [ ] **Manual, blocking:** set rDNS for `212.47.72.49` and `2a02:c207:2343:3::1` to `mail.asb.bd` in the Contabo panel. Nothing else in this phase can be proven until this lands. `[prd 01 §4.2]`
-- [ ] `mail.asb.bd` A + AAAA in Cloudflare, **grey-cloud** — proxied records break forward-confirmed rDNS. `[prd 01 §4.2]`
-- [ ] TXT/CNAME upsert in the Cloudflare client, with the same backup-before-mutate discipline as the 2026-08-06 Email Routing cutover. `[prd 01 §4.4]`
-- [ ] Postfix + OpenDKIM provisioner role: send-only, Docker-network bound, `mynetworks` restricted, `smtp_address_preference = ipv4`, no public :25 listener. `[prd 01 §4.1]`
-- [ ] `sb mail setup <domain>` — generate DKIM keypair, write DKIM TXT + merged SPF (Email Routing's include must survive) + DMARC. `[prd 01 §4.4]`
-- [ ] `sb mail status <domain>` — report all eight preconditions with observed values, so a delivery failure names its own cause. Ships **before** `mode: send` is documented. `[prd 01 §5]`
-- [ ] Relax `asb.bd` DMARC to `adkim=r; aspf=r` and add `rua=`; strict alignment makes the zone reject its own subdomain senders. Owner decision 4 first: command-driven or human-only. `[prd 01 §4.2]`
-- [ ] mu-plugin modes `capture` (default) / `send` (allowlisted) / `send`, From derived from the instance domain, non-allowlisted recipients captured **and logged**, never dropped. `[prd 01 §4.3]`
-- [ ] `mail:` block in `sandbox.config.json` and `sandbox.hosting.yml`, beside the `robots:` key. `[prd 01 §4.5]`
-- [ ] Delivery proof: preview password reset reaching a Gmail **inbox** with DKIM pass + SPF pass + DMARC aligned, headers recorded in the spec ledger. `[prd 01 §9]`
-- [ ] Resolve the five owner decisions in `todo/01-outbound-mail/prd.md` §11 before `speckit-specify`. `[prd 01 §11]`
+### Medium
 
-## Phase 2 — Herd-equivalent polyglot development stacks `[prd 02]`
+- [ ] `a3050df7119b8750a6da00837951d014` — Hermes configured status hides absent dashboard.
+- [ ] `56bf50f61cf5065710dc5acd608575fa` — remote host operation lacks a brokered exec path.
+- [ ] `8b88c87e231e7eedc19d9410289688ca` — job-status returned no output after accepted remote job.
+- [ ] `96819c8e948b59b8205afb53d5383041` — Hermes repo sync cannot refresh provisioned runtime.
+- [ ] `3727d6d5ba84090a5c1a5dbbe1e408ee` — doctor crashed before remote diagnostics (verify current status).
+- [ ] `bb1f932babd2e4e0c1afebe0621456ee` — restore confirmation is missing from the CLI parser.
+- [x] `b1864a6bfe983b15f24a26f7c20a88b2` — false skill-registration failure from inventory truncation; fixed in `b2abd7c`.
+- [x] `d47f53dccc7fce3cbf314211a0932219` — false skill-discovery failure from case-sensitive matching; fixed in `431c992`.
 
-Reproduce the observable Laravel + database + Node development contract through
-Sandbox without claiming that Linux containers are Laravel Herd. Compose remains
-the supported default; the detected Herd adapter stays non-adoptable until its own
-proof gates pass.
+### Low / follow-up
 
-- [ ] Resolve the five owner decisions in `todo/02-herd-equivalent-polyglot-stacks/prd.md` §12 before `speckit-specify`: equivalence target, frontend execution strategy, MySQL 8.0.27 emulation versus a native-ARM version, application-environment delivery scope, and related-project ownership. `[herd-parity → prd 02 §12]`
-- [ ] Add a read-only parity preflight that distinguishes compatible, mismatched, unavailable, and unverified PHP/extension, Node/package-manager, database, port, environment-source, routing, and health facts. It must never print secret values or call a mismatch “exact.” `[prd 02 §5.1, §5.5]`
-- [ ] Make explicit Laravel and Node initialization useful without a pre-existing Compose file: produce reviewable proposals from inert manifests, report every inferred value and uncertainty, and execute no repository command before a separate start action. `[prd 02 §5.2]`
-- [ ] Support a project-owned relation between backend and frontend instances with stable service discovery, ordered health, bounded diagnostics, and cleanup that cannot delete a sibling project or its persistent database. `[prd 02 §5.3]`
-- [ ] Define a secret-safe application environment handoff for registered `.env*` sources. Preserve the broker's no-raw-read policy, grant only declared consumers/keys, keep values out of argv/logs/registry/committed config, and do not mistake Compose interpolation for container environment delivery. `[prd 02 §5.4]`
-- [ ] Make requested-port conflicts actionable: identify only safe process metadata, refuse implicit takeover, and require a fresh explicit stop/replace decision before claiming ports such as 3000 or 8000. `[prd 02 §5.6]`
-- [ ] Prove the selected product contract on representative Laravel 12 + MySQL and Next.js + pnpm projects on Apple Silicon, including edit/reload behavior, backend calls from browser and server components, database persistence, repeated lifecycle operations, test commands, secret non-disclosure, and a measured comparison with the prior host-native baseline. `[prd 02 §8]`
-- [ ] Keep generic incumbent-Herd execution outside this phase unless the owner explicitly selects native equivalence. If selected later, it needs a separate PRD and must remain labeled trusted shared-host/lower-isolation; it may not weaken Compose defaults or reuse the WordPress-only unproven adoption claim. `[prd 02 §6, §12]`
+- [ ] `05936f990e374823e61c0ceb5f25e5c7` — `skill show` rejects documented project-dir placement.
+- [ ] `c7148951984491f103e0d106d190b7d5` — focused test-file selection is not discoverable from `sb test`.
+- [ ] `aff7c116c78be838405d39bdc6f8e502` — focused Python tests selected an unsupported system interpreter.
+- [ ] `3273804376c6c8d41b079a9fe6b3e15c` — T118 cross-realm `structuredClone` fixture incompatibility.
+- [ ] `65d5427835e56f60a2cd0637a40cc2e3` — T118 schema closed-list ordering mismatch.
+- [ ] `35ed60860c8c1d2d034c8d5489d456d8` — feedback list rejects over-limit request (document/enforce bound).
+- [ ] `6bc4c6d5e0a70e0a048030d694ad76f9` — compact active-job parser failed on null data.
+
+---
+
+# Review findings: 6119333..HEAD (2026-08-22)
+
+Scope: 122 commits, 210 files (+24,154/-1,056; ~10k production lines).
+Method: full read of every production diff plus targeted execution.
+Execution evidence: tests/test_remote.py 150/150 green on Python 3.12;
+full suite 3,044 passed / 11 failed / 14 skipped (see open items).
+
+## Verdict
+
+No security vulnerabilities found. Secrets, redaction, fail-closed
+admission, lock hardening, and output bounding are consistently correct.
+Docs landed with code and tests landed with code throughout the range.
+
+## Findings
+
+- [x] FIXED - Python version pin. `sandbox/core/_hermes.py` uses an
+  f-string backslash expression (legal only on 3.12+). With no
+  `requires-python` pin, uv defaults to 3.11 and the whole suite dies at
+  import with SyntaxError. Fix: add `.python-version` = 3.12. Follow-up:
+  declare `requires-python = ">=3.12"` when a pyproject.toml lands.
+- [ ] OPEN - `tests/test_resource_reclaim_service.py::ProbeCase::
+  test_observe_emits_the_reclaim_inventory` fails on 3.12: probe returns
+  zero deploy-src worktree entries for an isolated SANDBOX_HOME
+  (status=partial, engine_complete=true, index_available=true). The test
+  predates this range but `sandbox/resources/remote.py` (+222) changed
+  the probe program. Needs root cause; do not guess-fix.
+- [ ] OPEN - `tests/test_mcp.py` (7 failures): child interpreters import
+  `mcp.server.fastmcp`, which is absent unless the mcp extra is installed.
+  The module docstring claims tests skip cleanly when the venv is not
+  built; they fail instead. Add a pytest.importorskip guard or a test
+  extra so the suite stays green on plain environments.
+- [ ] OPEN - `tests/test_spec003_discovery_guidance.py` (2 failures) and
+  one alias SAN test require a `php` binary on PATH. Skip cleanly when
+  php is unavailable instead of failing.
+- [ ] NOTE - `_BoundedEdgeCapture` first-overflow fall-through (both
+  branches append the chunk) was verified correct by analysis: the final
+  trim always leaves the true last `tail_limit` bytes. Worth adding a
+  property-style unit test to lock the invariant.
+- [ ] NOTE - `compose status` keeps `ready` for non-JSON Compose output
+  (older implementations). Deliberate and commented; revisit if the
+  minimum supported Compose version rises.

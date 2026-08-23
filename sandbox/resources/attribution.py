@@ -901,6 +901,12 @@ def _managed_path(value: Any) -> Path | None:
         return None
 
 
+def _inside_path(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 def _mount_for_system(
     path: Path,
     rows: list[dict],
@@ -2018,10 +2024,17 @@ class DeepAttributionCollector:
         ))
 
         # The bounded root walk proves capacity ownership, but its depth is
-        # intentionally limited.  Measure every known managed root in one
-        # multi-path open-source ``du`` call so worktrees, runtime entries,
-        # and Docker volume mountpoints can be reconciled to their logical
-        # resource records without issuing one probe per record.
+        # intentionally limited. Measure logical resource roots by shallow
+        # parent batches so one inaccessible volume or stale path cannot abort
+        # the rest of the domain inventory.
+        measurement_kinds = frozenset({
+            "worktree", "runtime", "download_cache", "backup", "snapshot",
+            "volume",
+        })
+        measurement_roots = tuple(
+            item for item in managed_roots
+            if str(item.get("kind") or "") in measurement_kinds
+        )
         managed_sizes: dict[str, int] = {}
         managed_source = "cache"
         managed_stale = False
@@ -2030,37 +2043,59 @@ class DeepAttributionCollector:
             cached_sizes = _managed_root_sizes(
                 self._cached_directory_output(cached_rows),
                 multiplier=1,
-                managed_roots=managed_roots,
+                managed_roots=measurement_roots,
             )
             managed_sizes.update(cached_sizes)
             managed_stale = managed_stale or bool(entry.get("stale"))
         managed_state = "complete" if managed_sizes else "not_measured"
-        if managed_roots and cache_mode != "cache_only" and self.monotonic() < deadline:
-            paths = tuple(dict.fromkeys(
-                str(_managed_path(item))
-                for item in managed_roots
-                if _managed_path(item) is not None
-            ))
-            if paths:
+        batch_results: list[int] = []
+        if measurement_roots and cache_mode != "cache_only" and self.monotonic() < deadline:
+            batches: dict[tuple[str, int], list[dict]] = {}
+            deploy_root = self.sandbox_home / "deploy-src"
+            runtime_root = self.sandbox_home / "runtime"
+            for item in measurement_roots:
+                path = _managed_path(item)
+                if path is None:
+                    continue
+                kind = str(item.get("kind") or "")
+                group = None
+                if kind == "worktree" and _inside_path(path, deploy_root):
+                    group = (str(deploy_root), 1)
+                elif kind in {"runtime", "download_cache", "backup", "snapshot"} \
+                        and _inside_path(path, runtime_root):
+                    group = (str(runtime_root), 1)
+                elif kind == "volume":
+                    group = (str(path.parent.parent), 2)
+                if group is None:
+                    group = (str(path), 0)
+                batches.setdefault(group, []).append(item)
+            for (root, depth), batch in batches.items():
+                if self.monotonic() >= deadline:
+                    break
                 remaining = deadline - self.monotonic()
-                result = self._run(
-                    (*prefix, "du", "-k", "-s", *paths),
-                    deadline,
-                    min(60.0, max(1.0, remaining)),
+                argv = (
+                    (*prefix, "du", "-k", "-s", root)
+                    if depth == 0 else
+                    (*prefix, "du", "-x", "-k", "-d", str(depth), root)
                 )
+                result = self._run(argv, deadline, min(90.0, max(1.0, remaining)))
                 measured = _managed_root_sizes(
                     result.stdout,
                     multiplier=1024,
-                    managed_roots=managed_roots,
+                    managed_roots=batch,
                 )
                 managed_sizes.update(measured)
-                managed_source = "scan"
-                managed_state = (
-                    "complete" if result.returncode == 0
-                    else "partial" if measured else self._state(result.returncode)
-                )
+                batch_results.append(result.returncode)
+            managed_source = "scan"
+            managed_state = (
+                "complete"
+                if batch_results and all(code == 0 for code in batch_results)
+                else "partial" if managed_sizes
+                else "timed_out" if any(code == 124 for code in batch_results)
+                else "unavailable"
+            )
         if managed_source == "scan" and managed_sizes:
-            for item in managed_roots:
+            for item in measurement_roots:
                 owner_id = item.get("owner_id")
                 path = _managed_path(item)
                 size = managed_sizes.get(owner_id)
@@ -2097,7 +2132,7 @@ class DeepAttributionCollector:
                 self._directory_cache_store(
                     mount, rows=entry["rows"], complete=True, now=cache_now,
                 )
-        for item in managed_roots:
+        for item in measurement_roots:
             owner_id = item.get("owner_id")
             if not isinstance(owner_id, str) or not owner_id:
                 continue

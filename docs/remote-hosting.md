@@ -326,6 +326,26 @@ Permanent projects may declare public values plus required/generated secret mapp
 reports names only; `--generate` creates declared generated values and `--set KEY`
 stores a required value through a hidden prompt.
 
+A clean-tree deployment may derive non-secret runtime values from the exact source
+selected by `host apply`:
+
+```yaml
+deploy:
+  allowed_branches: [main]
+  require_clean: true
+  derived_environment:
+    APP_SOURCE_REVISION: pushed_commit_sha
+```
+
+`pushed_commit_sha` is the only provider. Sandbox resolves it from the full lowercase
+40-hex SHA returned by the authoritative push operation, including nested-source
+deployments; it never reads local `HEAD`, caller environment variables, or a secret.
+The mapping key cannot overlap `secrets.values`, `secrets.required`, or
+`secrets.generated`. Plan output reports only the key, provider, and
+`resolved_at_apply: true`. Successful apply evidence reports the selected commit and
+the same mapping metadata, never the rendered environment or secret values. An invalid
+push result fails before the remote checkout is reset or Compose is started.
+
 Use `compose.background_services` for declared long-lived workers that must be built,
 recreated, and started with the web service. Keep one-shot migration/setup jobs in
 `compose.init_services`; each service name must be unique across the three fields.

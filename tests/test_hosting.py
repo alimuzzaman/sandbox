@@ -65,6 +65,15 @@ def _manifest_with_environments(names):
     return prefix + "".join(f"  {name}:\n{block}" for name in names)
 
 
+def _manifest_with_derived_revision():
+    return _manifest().replace(
+        "      require_clean: true\n",
+        "      require_clean: true\n"
+        "      derived_environment:\n"
+        "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+    )
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -83,6 +92,53 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(_manifest()) as directory:
             result = hosting.validate_manifest(directory)
         self.assertEqual(result["environment"], "production")
+
+    def test_validates_deploy_derived_environment(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(
+            result["deploy"]["derived_environment"],
+            {"LENZORA_SOURCE_REVISION": "pushed_commit_sha"},
+        )
+
+    def test_rejects_invalid_deploy_derived_environment(self):
+        cases = {
+            "mapping": _manifest().replace(
+                "      require_clean: true\n",
+                "      require_clean: true\n      derived_environment: value\n",
+            ),
+            "environment key": _manifest().replace(
+                "      require_clean: true\n",
+                "      require_clean: true\n"
+                "      derived_environment:\n        bad-key: pushed_commit_sha\n",
+            ),
+            "providers": _manifest().replace(
+                "      require_clean: true\n",
+                "      require_clean: true\n"
+                "      derived_environment:\n        SOURCE_REVISION: local_head\n",
+            ),
+            "require_clean": _manifest_with_derived_revision().replace(
+                "      require_clean: true\n", "      require_clean: false\n",
+            ),
+        }
+        for message, manifest in cases.items():
+            with self.subTest(message=message), self._write(manifest) as directory:
+                with self.assertRaisesRegex(hosting.HostingError, message):
+                    hosting.validate_manifest(directory)
+
+    def test_rejects_derived_environment_secret_collisions(self):
+        secret_blocks = (
+            "      values:\n        LENZORA_SOURCE_REVISION: static\n",
+            "      required:\n        LENZORA_SOURCE_REVISION: REVISION_SECRET\n",
+            "      generated:\n        LENZORA_SOURCE_REVISION: REVISION_SECRET\n",
+        )
+        for secret_block in secret_blocks:
+            manifest = _manifest_with_derived_revision().replace(
+                "    cloudflare:\n", f"    secrets:\n{secret_block}    cloudflare:\n",
+            )
+            with self.subTest(secret_block=secret_block), self._write(manifest) as directory:
+                with self.assertRaisesRegex(hosting.HostingError, "must not overlap"):
+                    hosting.validate_manifest(directory)
 
     def test_missing_environment_lists_sorted_escaped_choices(self):
         manifest = _manifest_with_environments([
@@ -501,6 +557,18 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(runtime["compose_project"], "sandbox-host-example-site-production")
         self.assertIn('127.0.0.1:', runtime["compose_override"])
         self.assertIn(f"reverse_proxy 127.0.0.1:{runtime['loopback_port']}", runtime["caddyfile"])
+        self.assertNotIn("derived_environment", runtime)
+
+    def test_runtime_plan_defers_derived_environment_resolution_to_apply(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        self.assertEqual(runtime["derived_environment"], [{
+            "key": "LENZORA_SOURCE_REVISION",
+            "provider": "pushed_commit_sha",
+            "resolved_at_apply": True,
+        }])
+        self.assertNotIn("environment", runtime)
 
     def test_runtime_plan_reports_basic_auth_without_a_hash(self):
         manifest = _manifest().replace(
@@ -787,6 +855,178 @@ class TestHostingManifest(unittest.TestCase):
                 hosting_cmd.cmd_host(None, args)
 
         get_remote.assert_not_called()
+
+    def test_apply_rejects_dirty_source_before_remote_push_for_derived_environment(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        dirty = subprocess.CompletedProcess(
+            ["git", "status", "--porcelain"], 0,
+            stdout=" M sandbox.hosting.yml\n", stderr="",
+        )
+        with patch.object(hosting_cmd.remote, "current_branch", return_value="main"), \
+             patch.object(hosting_cmd.subprocess, "run", return_value=dirty), \
+             patch.object(hosting_cmd.remote, "push_commits") as push:
+            with self.assertRaisesRegex(hosting.HostingError, "requires a clean working tree"):
+                hosting_cmd._validate_apply_source(validated)
+        push.assert_not_called()
+
+    def test_host_plan_reports_only_unresolved_derived_environment_metadata(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        args = types.SimpleNamespace(
+            action="plan", project_dir=directory, environment=None,
+            remote="myvps", confirm=False, json=True,
+            allow_zone_ssl_change=False,
+        )
+        entry = {"provisioned": True, "origin_ipv4": "203.0.113.10", "origin_ipv6": None}
+        with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
+             patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
+             patch.object(hosting_cmd.hosting, "load_host_state", return_value={"version": 1, "hosts": {}}), \
+             patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_declared_secret_sources", return_value=set()), \
+             patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False}), \
+             patch("builtins.print") as printed:
+            hosting_cmd.cmd_host(None, args)
+        plan = json.loads(printed.call_args.args[0])
+        self.assertEqual(plan["runtime"]["derived_environment"], [{
+            "key": "LENZORA_SOURCE_REVISION",
+            "provider": "pushed_commit_sha",
+            "resolved_at_apply": True,
+        }])
+        self.assertNotIn("commit", plan["runtime"])
+        self.assertNotIn("value", plan["runtime"]["derived_environment"][0])
+
+    def test_host_apply_json_returns_sanitized_revision_evidence(self):
+        revision = "d" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        args = types.SimpleNamespace(
+            action="apply", project_dir=directory, environment=None,
+            remote="myvps", confirm=True, json=True,
+            allow_zone_ssl_change=False,
+        )
+        entry = {"provisioned": True, "origin_ipv4": "203.0.113.10", "origin_ipv6": None}
+        apply_result = {
+            "commit": revision,
+            "derived_environment": [{
+                "key": "LENZORA_SOURCE_REVISION",
+                "provider": "pushed_commit_sha",
+                "resolved_at_apply": True,
+            }],
+        }
+        with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
+             patch.object(hosting_cmd, "_validate_apply_source", return_value="main"), \
+             patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
+             patch.object(hosting_cmd.hosting, "load_host_state", return_value={"version": 1, "hosts": {}}), \
+             patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_declared_secret_sources", return_value=set()), \
+             patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False}), \
+             patch.object(hosting_cmd, "_apply_host", return_value=apply_result), \
+             patch("builtins.print") as printed:
+            hosting_cmd.cmd_host(None, args)
+        evidence = json.loads(printed.call_args.args[0])
+        self.assertEqual(evidence, {
+            "ok": True,
+            "project": "example-site",
+            "environment": "production",
+            "remote": "myvps",
+            "remote_selection": "explicit",
+            **apply_result,
+        })
+        self.assertNotIn("runtime", evidence)
+        self.assertNotIn("environment.env", json.dumps(evidence))
+
+    def test_apply_derives_revision_from_nested_push_result_before_reset_and_compose(self):
+        revision = "c" * 40
+        events = []
+        with self._write(_public_acme_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(_public_acme_manifest().replace(
+                "      require_clean: true\n",
+                "      require_clean: true\n"
+                "      derived_environment:\n"
+                "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+            ))
+            validated = hosting.validate_manifest(directory)
+        validated["source_root_nested"] = True
+        validated["source_root"] = "/checkout/nested-source"
+        validated["manifest_root"] = "/checkout"
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(
+            validated, "203.0.113.10",
+        )["records"]
+        state = {"version": 1, "hosts": {}}
+        client = MagicMock()
+        client.records.return_value = []
+        client.upsert_address.return_value = {"id": "record-1"}
+        original_render = hosting.render_env_file
+
+        def push(*_args, **_kwargs):
+            events.append("push")
+            return revision
+
+        def render(*args, **kwargs):
+            events.append("render")
+            return original_render(*args, **kwargs)
+
+        def resolve_secrets(*_args):
+            events.append("secrets")
+            return {}, []
+
+        with patch.object(hosting_cmd, "_secret_status", side_effect=resolve_secrets), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", side_effect=push) as pushed, \
+             patch.object(hosting_cmd.hosting, "render_env_file", side_effect=render), \
+             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
+             patch.object(hosting_cmd.remote, "reset_target_to", side_effect=lambda *_: events.append("reset")), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "apply_uncommitted"), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_run_compose", side_effect=lambda *_: events.append("compose")) as compose, \
+             patch.object(hosting_cmd, "_verify_remote_health"), \
+             patch.object(hosting_cmd, "_configure_host_caddy"), \
+             patch.object(hosting_cmd, "_verify_edge"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            result = hosting_cmd._apply_host(
+                validated, {}, "myvps", runtime, state, False, "main",
+            )
+
+        self.assertEqual(events[:5], ["secrets", "push", "render", "reset", "compose"])
+        self.assertEqual(
+            pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
+        )
+        self.assertIn(f"LENZORA_SOURCE_REVISION={revision}\n", compose.call_args.args[4]["environment"])
+        self.assertEqual(result, {
+            "commit": revision,
+            "derived_environment": [{
+                "key": "LENZORA_SOURCE_REVISION",
+                "provider": "pushed_commit_sha",
+                "resolved_at_apply": True,
+            }],
+        })
+        self.assertNotIn("environment", result)
+
+    def test_invalid_derived_push_sha_fails_before_reset_compose_or_state(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        state = {"version": 1, "hosts": {}}
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value="abc123"), \
+             patch.object(hosting_cmd.remote, "reset_target_to") as reset, \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
+            with self.assertRaisesRegex(hosting.HostingError, "lowercase 40-hex"):
+                hosting_cmd._apply_host(
+                    validated, {}, "myvps", runtime, state, False, "main",
+                )
+        reset.assert_not_called()
+        compose.assert_not_called()
+        save_state.assert_not_called()
+        self.assertEqual(state, {"version": 1, "hosts": {}})
 
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.urllib.request.build_opener")
@@ -1180,6 +1420,35 @@ class TestHostingSecrets(unittest.TestCase):
             rendered = hosting.render_env_file(validated, {"TEST_SECRET": "hidden value"})
             self.assertIn("PUBLIC_VALUE=fixed", rendered)
             self.assertIn("PRIVATE_VALUE='hidden value'", rendered)
+
+    def test_renders_exact_pushed_revision_and_ignores_hostile_process_environment(self):
+        revision = "a" * 40
+        with TestHostingManifest()._write(_manifest_with_derived_revision()) as project:
+            validated = hosting.validate_manifest(project)
+        with patch.dict("os.environ", {"LENZORA_SOURCE_REVISION": "b" * 40}):
+            rendered = hosting.render_env_file(
+                validated, {}, pushed_commit_sha=revision,
+            )
+        self.assertIn(f"LENZORA_SOURCE_REVISION={revision}\n", rendered)
+        self.assertNotIn("b" * 40, rendered)
+
+    def test_rejects_missing_malformed_or_noncanonical_pushed_revision(self):
+        with TestHostingManifest()._write(_manifest_with_derived_revision()) as project:
+            validated = hosting.validate_manifest(project)
+        for revision in (None, "abc123", "A" * 40, "a" * 39, "a" * 41):
+            with self.subTest(revision=revision):
+                with self.assertRaisesRegex(hosting.HostingError, "lowercase 40-hex"):
+                    hosting.render_env_file(
+                        validated, {}, pushed_commit_sha=revision,
+                    )
+
+    def test_manifest_without_derived_environment_keeps_rendering_behavior(self):
+        with TestHostingManifest()._write(_manifest()) as project:
+            validated = hosting.validate_manifest(project)
+        self.assertEqual(
+            hosting.render_env_file(validated, {}, pushed_commit_sha="not-a-sha"),
+            "",
+        )
 
     def test_basic_auth_secret_is_not_rendered_into_compose_environment(self):
         manifest = _manifest().replace(

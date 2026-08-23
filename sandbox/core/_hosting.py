@@ -253,6 +253,34 @@ def _secrets(env: dict) -> dict:
     return {"values": values, "required": required, "generated": generated}
 
 
+def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str]:
+    raw = deploy.get("derived_environment")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HostingError("deploy.derived_environment must be a mapping")
+    if not deploy.get("require_clean"):
+        raise HostingError("deploy.derived_environment requires deploy.require_clean: true")
+    collisions = set(raw) & {
+        *secrets["values"], *secrets["required"], *secrets["generated"],
+    }
+    if collisions:
+        raise HostingError(
+            "deploy.derived_environment keys must not overlap secret environment keys: "
+            + ", ".join(sorted(str(key) for key in collisions))
+        )
+    result: dict[str, str] = {}
+    for key, provider in raw.items():
+        if not isinstance(key, str) or not _ENV_RE.fullmatch(key):
+            raise HostingError("deploy.derived_environment contains an invalid environment key")
+        if provider != "pushed_commit_sha":
+            raise HostingError(
+                "deploy.derived_environment providers must be pushed_commit_sha"
+            )
+        result[key] = provider
+    return result
+
+
 def _autologin(env: dict) -> dict | None:
     """Validate an opt-in one-time WordPress login-link integration."""
     raw = env.get("autologin")
@@ -496,6 +524,11 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     deploy = env.get("deploy") or {}
     if not isinstance(deploy.get("allowed_branches") or [], list) or not deploy["allowed_branches"] or not isinstance(deploy.get("require_clean"), bool):
         raise HostingError("deploy.allowed_branches and deploy.require_clean are required")
+    secrets = _secrets(env)
+    deploy = {
+        **deploy,
+        "derived_environment": _derived_environment(deploy, secrets),
+    }
     cf = env.get("cloudflare") or {}
     proxied_origin_ca = (
         cf.get("proxied") is True
@@ -531,7 +564,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "manifest_path": manifest.get("_manifest_path", str(root / "sandbox.hosting.yml")),
             "project": project, "environment": env_name,
             "compose": normalized_compose, "healthcheck": healthcheck, "routes": routes,
-            "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env),
+            "deploy": deploy, "cloudflare": cf, "secrets": secrets,
             "autologin": _autologin(env), "basic_auth": basic_auth,
             "robots": robots}
 
@@ -616,7 +649,8 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     )
 
 
-def render_env_file(validated: dict, source_values: dict[str, str]) -> str:
+def render_env_file(validated: dict, source_values: dict[str, str],
+                    pushed_commit_sha: str | None = None) -> str:
     """Render the exact environment passed to Compose, without persisting secrets locally."""
     values = dict(validated["secrets"]["values"])
     for container_key, source_key in {**validated["secrets"]["required"],
@@ -625,6 +659,13 @@ def render_env_file(validated: dict, source_values: dict[str, str]) -> str:
         if not value:
             raise HostingError(f"required hosting secret is missing: {source_key}")
         values[container_key] = value
+    derived = validated["deploy"].get("derived_environment", {})
+    if derived:
+        if not isinstance(pushed_commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", pushed_commit_sha):
+            raise HostingError("pushed_commit_sha must be an exact lowercase 40-hex commit SHA")
+        for container_key, provider in derived.items():
+            if provider == "pushed_commit_sha":
+                values[container_key] = pushed_commit_sha
     return "".join(f"{key}={shlex.quote(value)}\n" for key, value in sorted(values.items()))
 
 
@@ -702,7 +743,7 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
     state = state or {"version": 1, "hosts": {}}
     key = state_key(remote_name, validated)
     port = allocate_loopback_port(state, key)
-    return {
+    runtime = {
         "key": key,
         "compose_project": compose_project_name(validated),
         "loopback_port": port,
@@ -714,6 +755,13 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
         "certificate_hostnames": [route["hostname"] for route in validated["routes"]],
         "healthcheck": validated["healthcheck"],
     }
+    derived = validated["deploy"].get("derived_environment", {})
+    if derived:
+        runtime["derived_environment"] = [
+            {"key": key, "provider": provider, "resolved_at_apply": True}
+            for key, provider in sorted(derived.items())
+        ]
+    return runtime
 
 
 def apply_with_rollback(apply, rollback) -> None:

@@ -16,11 +16,18 @@ and reports desired state; with a configured token it reports Cloudflare drift.
 
 Manifest fields: `compose.files`, `compose.service`, `compose.container_port`, optional
 `compose.init_services` and `compose.background_services`, `healthcheck.path`, `deploy.allowed_branches`,
-`deploy.require_clean`, `host.primary`, `host.aliases`, optional
+`deploy.require_clean`, optional `deploy.derived_environment`, `host.primary`, `host.aliases`, optional
 `basic_auth.username`, `basic_auth.password_secret`, and `cloudflare` policy.
 Optional `secrets.values`, `secrets.required`, and `secrets.generated` map container
 environment keys to public values or names in `~/.zshrc.secrets`; secret values never
 appear in the manifest.
+
+`deploy.derived_environment` maps a container environment key to the sole supported
+provider `pushed_commit_sha`. It requires `deploy.require_clean: true`, cannot collide
+with any declared public/required/generated environment key, and resolves only during
+apply from the exact full lowercase 40-hex SHA returned by the source push. Plan output
+contains unresolved key/provider metadata; successful apply output contains that
+metadata plus the selected SHA, not the rendered environment.
 
 Each redirect alias target is an HTTPS hostname with no path, query, or fragment. Its
 hostname is canonicalized to ASCII IDNA before rendering, DNS planning, or persistence;

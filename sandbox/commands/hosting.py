@@ -551,12 +551,10 @@ def _validate_apply_source(validated: dict) -> str:
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
-                state: dict, allow_zone_ssl_change: bool, branch: str) -> None:
+                state: dict, allow_zone_ssl_change: bool, branch: str) -> dict:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
-    runtime["environment"] = hosting.render_env_file(validated, secret_values)
-    client = cloudflare.Client()
     home = remote.resolve_sandbox_home(entry)
     target = _ensure_host_source(entry, home, validated["project"])
     manifest_root = validated.get("manifest_root")
@@ -572,6 +570,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         entry, validated["project_root"], target, branch,
         source_root=source_root if nested_source else None,
     )
+    runtime["environment"] = hosting.render_env_file(
+        validated, secret_values, pushed_commit_sha=sha,
+    )
+    client = cloudflare.Client()
     remote.reset_target_to(entry, target, sha)
     diff, untracked = remote.capture_uncommitted(validated["project_root"])
     remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
@@ -672,6 +674,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         hosting.save_host_state(state)
 
     hosting.apply_with_rollback(apply, rollback)
+    return {
+        "commit": sha,
+        "derived_environment": runtime.get("derived_environment", []),
+    }
 
 
 def cmd_host(cfg, args) -> None:
@@ -753,12 +759,27 @@ def cmd_host(cfg, args) -> None:
         if non_strict:
             die("these zones require --allow-zone-ssl-change: " + ", ".join(non_strict))
     try:
-        _apply_host(validated, entry, args.remote, plan["runtime"], state,
-                    bool(getattr(args, "allow_zone_ssl_change", False)), branch)
+        result = _apply_host(validated, entry, args.remote, plan["runtime"], state,
+                             bool(getattr(args, "allow_zone_ssl_change", False)), branch)
     except (hosting.HostingError, cloudflare.CloudflareError, RuntimeError,
             subprocess.SubprocessError, OSError) as exc:
         die(str(exc))
-    ok(f"applied {validated['project']} / {validated['environment']} to {args.remote} (remote_selection=explicit)")
+    evidence = {
+        "ok": True,
+        "project": validated["project"],
+        "environment": validated["environment"],
+        "remote": args.remote,
+        "remote_selection": "explicit",
+        "commit": result["commit"],
+        "derived_environment": result["derived_environment"],
+    }
+    if args.json:
+        print(json.dumps(evidence))
+    else:
+        ok(
+            f"applied {validated['project']} / {validated['environment']} to {args.remote} "
+            f"at {result['commit']} (remote_selection=explicit)"
+        )
 
 
 register({"host": cmd_host})

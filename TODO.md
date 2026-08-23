@@ -1,180 +1,313 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-23. This is the handoff queue for Hermes. Feedback below is
-evidence, not execution authority: reproduce it first, preserve dirty work,
-and do not reset, destroy, clean up remote resources, deploy, release, or
-expose secrets without fresh explicit authority.
+Updated: 2026-08-23. This is the reconciled handoff queue for Hermes. Repository
+task ledgers and feedback are evidence, not execution authority: reproduce them
+first, preserve dirty work, and do not reset, destroy, clean up remote resources,
+deploy, release, delete recovery data, or expose secrets without fresh explicit
+authority.
 
-## P0 — reliability and current operator blockers
+Sources reconciled in this pass:
 
-- [x] **Restore a deterministic local CLI interpreter.** FIXED 2026-08-23.
-  Launcher now validates interpreter candidates (`a818bca`, `2690b75`);
-  pyenv 3.12.8 present and `.python-version` = 3.12 resolves. Acceptance
-  verified from a clean shell (`env -i`): `./sb --help` exit 0, `./sb
-  feedback list --project-dir . --json` returns valid envelope exit 0,
-  focused `tests.test_remote` via `.cli-venv` 150/150 OK.
+- 59 unchecked rows in `specs/*/tasks.md`, plus explicit pending/missing live
+  gates in checked convergence rows and implementation evidence.
+- 305+ retained Sandbox feedback records (untrusted; many are duplicates or
+  foreign-project observations), grouped below by owning behavior.
+- `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
+  `todo/README.md`, and the three product briefs under `todo/`.
 
-- [ ] **Make remote durable-job acceptance and observation reliable.** A
-  job-start can exit silently without a durable request/job record, and an
-  accepted job-status can emit no JSON. Define one replay-safe acceptance
-  envelope, request-ID lookup, and bounded output contract. Acceptance: exact
-  request lookup always distinguishes accepted, rejected, and unknown; no
-  empty-success output. Feedback: `343d1a5a…`, `8b88c87e…`.
+## P0 — reliability, safety, and current operator blockers
 
-- [ ] **Re-establish trustworthy remote capacity evidence before provisioning
-  or cleanup.** Historical read-only inventories found 29–31 active managed
-  Docker networks, with incomplete attribution and no safe cleanup candidate.
-  Re-run the supported inventory on the installed revision; retain unresolved
-  records and produce a non-destructive capacity/ownership plan. Acceptance:
-  complete or explicitly bounded inventory, revision receipt, and no inferred
-  cleanup authority. Feedback: `78aaf583…`, `0fac3b07…`, `bf05eeb9…`,
-  `a813480b…`, `600d2def…`.
+- [ ] **Make remote durable-job acceptance and observation one replay-safe
+  contract.** Persist the durable row before acknowledgement; return a
+  non-empty canonical request/job ID; make request-ID lookup distinguish
+  accepted, rejected, and unknown; make status/output/list/artifact paths use
+  the same registry; retain complete bounded stdout/stderr and truthful
+  `output_bytes`; never return empty-success or false-empty pages. Include the
+  100 disconnect/reconnect proof in `specs/032-remote-job-runtime/tasks.md:T156`.
+  Feedback: `343d1a5a`, `8b88c87e`, `2d168956`, `2e3b4d35`, `0384ab`,
+  `3c4f9059`, `38efeba5`, `d7e6cba`, `dc88af80`, `1a7dde8b`, `00984500`,
+  `00be19fe`, `25a58f04`.
 
-- [ ] **Repair the remote evaluator flow before more benchmark runs.** The
-  T120 evaluator required manual recovery because job acceptance, retained
-  output retrieval, test bootstrap, and phase classification were unreliable.
-  Acceptance: one reproducible remote evaluation yields durable acceptance,
-  structured terminal output, phase-aware classification, and a sanitized
-  receipt. Feedback: `9bb7aea1…`.
+- [ ] **Re-establish trustworthy remote capacity, ownership, and workspace-index
+  evidence before provisioning or cleanup.** Re-run the supported inventory on
+  the installed revision; retain unresolved/conflicting/foreign records;
+  report complete versus bounded/partial coverage; include the Docker-pool
+  rollback safety check (no stopped live containers); and keep
+  `workspace_index_incomplete` fail-closed. Do not infer cleanup from names,
+  age, or an incomplete scan. Feedback: `78aaf583`, `0fac3b07`, `bf05eeb9`,
+  `a813480b`, `600d2def`, `0ed665d0`, `84585e00`, `01df389c`, `fc79f41e`,
+  `088652d4`, `cd84b75d`, `b5ea1432`, `6a1cca01`, `3a6e8c1a`, `822262fe`.
 
-- [ ] **Make remote reachability actionable.** `remote list` can report a
-  host reachable while brokered SSH times out, and there is no supported
-  secret-safe host preflight/exec surface. Acceptance: status names the usable
-  transport and failure reason, with a bounded supported host diagnostic path.
-  Feedback: `b340f98a…`, `56bf50f…`.
+- [ ] **Make target, transport, revision, and deployment truth actionable.**
+  Separate registered reachability from brokered SSH/MCP usability; expose a
+  bounded secret-safe host diagnostic/exec path; provide read-only hosted status
+  with applied revision, lifecycle, health, and rollback state; preserve a
+  durable deploy receipt after SSH/control loss; never exit 0 after a failed
+  apply or silent rollback; refuse wrong-target/foreign-instance inference.
+  Feedback: `b340f98a`, `834d2253`, `30a6c1d1`, `b8fcedf1`, `cc723c15`,
+  `1ef4334d`, `b41513e9`, `ac945dff`, `b4323966`, `71be9430`, `0b420c9b`,
+  `ccd9e5e2`, `7acb4245`, `e25a8491`, `4ad5d660`, `5e440951`, `f528a472`.
 
-- [ ] **Diagnose the Hermes dashboard session mismatch.** The selected
-  “Check GitHub Repo Access” session (218 messages) rendered the old
-  self-check transcript after the dashboard restart; its event feed was
-  disconnected. Do not delete either session. Acceptance: after reconnect and
-  a fresh browser load, each session ID renders its own persisted transcript;
-  otherwise capture a minimal upstream reproduction and pin a tested fix or
-  update plan. Gateway is currently off, so do not treat this as a cron fix.
+- [ ] **Prevent unsafe target and credential disclosure.** Prove explicit local
+  selectors cannot route to a configured remote or an unrelated project; ensure
+  status/ensure never emits autologin credentials; classify remote apply,
+  rollback, and host reachability failures before mutation. Feedback:
+  `19fe2251` (credential-bearing status JSON), `e8ab7717`, `0b420c9b`,
+  `8371d7f7`, `a1fc66d4`, `1f094d2f`, `9f0122e7`, `d43d5bc4`, `ccd9e5e2`.
 
-## P1 — Hermes and CLI correctness
+- [ ] **Repair the remote evaluator/bootstrap flow before benchmark claims.** A
+  reproducible T120/T126-style run must show deterministic bootstrap, durable
+  acceptance, retained terminal output, phase-aware classification, resource/
+  OOM evidence, and a sanitized receipt. Feedback: `9bb7aea1`, `72022a6a`,
+  `5978c11e`, `0eab73b8`, `6687abd9`, `74d503ab`.
 
-- [ ] **Expose dashboard/public-readiness in Hermes status.** `hermes status`
-  can say configured while the dashboard is absent or unhealthy. Acceptance:
-  status distinguishes agent configuration, dashboard health, gateway state,
-  and public exposure. Feedback: `a3050df7…`.
+- [ ] **Keep the launcher and execution environment deterministic.** The CLI
+  must select a verified supported interpreter/venv on every invocation, and
+  remote/deploy hooks must honor the repository Node pin before running package
+  commands. Add regression coverage for the intermittent shell fall-through
+  and missing-pyenv cases. Feedback: `2aa8e472`, `1ff68cf2`, `fdd88ab7`,
+  `fb212649`, `1440ad3d`, `5fec1a2a`, `2c76137a`, `56b29b36`.
 
-- [ ] **Make `hermes repo sync` work for a provisioned Sandbox runtime.** The
-  documented managed-repo route reports the repository missing. Acceptance:
-  a supported, revision-verified sync path works without raw SSH edits.
-  Feedback: `96819c8…`.
+## P1 — active implementation and convergence work
 
-- [ ] **Make recovery and diagnostics CLI contracts match their help.** Expose
-  restore confirmation flags, prevent doctor startup crashes, accept documented
-  `skill show --project-dir` placement, and document focused-test selection.
-  Acceptance: each command has a parser-level regression test and one
-  documented invocation. Feedback: `bb1f932b…`, `3727d6d…`, `05936f99…`,
-  `c7148951…`, `35ed6086…`, `6bc4c6d5…`.
+### Remote/runtime and migration evidence
 
-- [ ] **Keep the dashboard authorization flow usable without hidden state.**
-  `sandbox-authorizations` v1.0.6 is enabled and the dashboard is healthy;
-  verify one manual approval request/review/reject path after the session-view
-  issue is fixed. Do not change its manual-approval policy.
+- [ ] **Async WP-CLI acceptance under 2 seconds** — redesign or document the
+  Docker start path to satisfy `specs/004-async-wp-cli-jobs/tasks.md:T021`.
 
-- [ ] **Enable long-running cron only after the gateway is intentionally
-  started.** Design one workdir-pinned job per project (serialized by Hermes),
-  choose an interval above p95 run time, and use a `wakeAgent:false` pre-check
-  for frequent polling. Acceptance: no concurrent run of the same job, bounded
-  run history, and a documented missed-run behavior. The current gateway is
-  inactive; do not create an unattended production schedule yet.
+- [ ] **Workspace relocation/migration proof** — complete
+  `specs/009-runtime-user-dir/tasks.md:T042,T045` and
+  `specs/035-resource-monitoring-cleanup/tasks.md:T056`: prove metadata/index
+  transfer and base relocation preserve legacy bytes, locators, and all
+  network/container/job/volume/upload/snapshot counts; keep conflicts visible.
+  Also close the checked-but-missing runtime-user-dir obligations `T029–T034`
+  (config-only migration, artifact regeneration, persisted home selection,
+  guarded first-command migration, fixture/docs, and dry-run/force semantics).
 
-## P2 — test-environment and regression cleanup
+- [ ] **Remote metadata/index acceptance** — record the read-only migration,
+  relocation, checkout-independent controls, and unchanged job/container/network
+  counts for `specs/032-remote-job-runtime/tasks.md:T170`; no cleanup proof may
+  be inferred from partial evidence.
 
-- [ ] **Fix plain-environment test behavior.** `tests/test_mcp.py` should
-  skip cleanly or install its declared MCP extra; discovery guidance tests
-  should skip cleanly when PHP is unavailable. Acceptance: full suite reports
-  only intentional skips on a minimal supported venv.
+- [ ] **Dashboard DB reset/baseline live proof** — finish
+  `specs/008-db-snapshots-reset/tasks.md:T016,T019`: capture new-instance
+  `@install`/`install-baseline` only after final plugin/theme/seed onboarding,
+  restart the supported bridge, and verify wp-admin reset plus polling. The
+  pending bridge restart in `T013` and the live dashboard/seed evidence in
+  `T021` remain open.
 
-- [ ] **Root-cause the isolated-SANDBOX_HOME reclaim probe regression.**
-  `test_observe_emits_the_reclaim_inventory` returns zero deploy-source
-  worktrees after remote-probe changes. Acceptance: a focused regression test
-  proves correct attribution without broadening cleanup authority.
+- [ ] **Full modular-boundary acceptance** — run the Hermes gateway/public route
+  checks (`specs/022-sandbox-modular-boundaries/tasks.md:T086`), every
+  remote/Hermes quickstart scenario without destructive restore/deletion
+  (`specs/022-sandbox-modular-boundaries/tasks.md:T099`), and the
+  focused/full suite, `./sb selftest`, `git diff --check`, and quickstart record
+  (`specs/022-sandbox-modular-boundaries/tasks.md:T108`).
 
-- [ ] **Close controller-only historical test seams.** Replace the cross-realm
-  `structuredClone` fixture issue and closed-list schema ordering mismatch with
-  deterministic tests. Feedback: `32738043…`, `65d54278…`.
+### Storage and workspace features
 
-- [ ] **Add the bounded-edge-capture invariant test** and revisit non-JSON
-  Compose status only when the minimum supported Compose version changes.
+- [ ] **Finish scheduled storage-pressure monitor** — implement schedule
+  rendering/activation with confirmation and fixed argv
+  (`specs/043-storage-pressure-scheduler/tasks.md:T008,T009`),
+  add `resources monitor|schedule` CLI flags and truthful renderers
+  (`specs/043-storage-pressure-scheduler/tasks.md:T012,T013`), add schedule
+  tests (`specs/043-storage-pressure-scheduler/tasks.md:T018`), update
+  docs/README/CLAUDE/skill (`specs/043-storage-pressure-scheduler/tasks.md:T021,T022`),
+  and run remote read-only dry-run/refusal evidence
+  (`specs/043-storage-pressure-scheduler/tasks.md:T023`).
+  Schedules remain disabled by default; no timer activation is implied.
 
-## Feedback ledger — all 23 records
+- [ ] **Implement shared Git checkout materialization and opt-in node store** —
+  complete `specs/044-shared-node-store-and-git-dedup/tasks.md:T001–T005` (safe plan,
+  staged hard-link/copy fallback, remote rendering, reset integration, real
+  filesystem tests), `specs/044-shared-node-store-and-git-dedup/tasks.md:T007–T008`
+  (family derivation/overlay/tests),
+  `specs/044-shared-node-store-and-git-dedup/tasks.md:T009–T012`
+  (legacy/rollback/docs),
+  `specs/044-shared-node-store-and-git-dedup/tasks.md:T013–T015`
+  (bounded evidence and named reclaim contract),
+  `specs/044-shared-node-store-and-git-dedup/tasks.md:T016–T018`
+  (remote gates and confirmation-gated plan), and
+  `specs/044-shared-node-store-and-git-dedup/tasks.md:T019`
+  (focused suite/diff check). `T006` only normalizes the boolean; it does not
+  prove the feature.
 
-### Critical / high
+### Linux/native adoption proof
 
-- [ ] `9bb7aea1a679db7233e18f8fbf31c841` — T120 evaluator and remote benchmark workflow gaps.
-- [ ] `b340f98a0df25f2c7817d7cac2bd652b` — registered remote reachability disagrees with brokered SSH.
-- [ ] `600d2def1a44dde2e811a79e01b9aa25` — 31 active managed remote networks; partial inventory.
-- [ ] `343d1a5ae1c59b8f2754ee24ebf96b9d` — remote job-start silently lacks durable acceptance.
-- [ ] `a813480b2b761798b839cd4682c0649b` — 31 active managed remote networks; partial inventory.
-- [ ] `bf05eeb9362ba7e408b9315669698b60` — 31 active managed remote networks; partial inventory.
-- [ ] `0fac3b07416044a28041c2a358cf2084` — remote network count increased to 31; partial inventory.
-- [ ] `78aaf5836d63078b060336a9e306b7f5` — fast-test harness blocked by Docker network-pool exhaustion.
+- [ ] **Ingress qualification and host proof** — complete
+  `specs/037-host-ingress-adoption/tasks.md:T078–T080`: non-forgeable production
+  qualification, default Docker/Caddy proof on Linux with free 80/443, and the
+  listener/IPv6/failure/cleanup matrix.
 
-### Medium
+- [ ] **Resolver qualification and host proof** — complete
+  `specs/038-tld-dns-adoption/tasks.md:T067–T070`: non-forgeable systemd-resolved
+  qualification, a supported Sandbox-owned default path (or approved scope
+  change), plain-resolv.conf HTTP/DNS repeatability, and owner-change,
+  wildcard-owner, and exact-name negative gates.
 
-- [ ] `a3050df7119b8750a6da00837951d014` — Hermes configured status hides absent dashboard.
-- [ ] `56bf50f61cf5065710dc5acd608575fa` — remote host operation lacks a brokered exec path.
-- [ ] `8b88c87e231e7eedc19d9410289688ca` — job-status returned no output after accepted remote job.
-- [ ] `96819c8e948b59b8205afb53d5383041` — Hermes repo sync cannot refresh provisioned runtime.
-- [ ] `3727d6d5ba84090a5c1a5dbbe1e408ee` — doctor crashed before remote diagnostics (verify current status).
-- [ ] `bb1f932babd2e4e0c1afebe0621456ee` — restore confirmation is missing from the CLI parser.
-- [x] `b1864a6bfe983b15f24a26f7c20a88b2` — false skill-registration failure from inventory truncation; fixed in `b2abd7c`.
-- [x] `d47f53dccc7fce3cbf314211a0932219` — false skill-discovery failure from case-sensitive matching; fixed in `431c992`.
+- [ ] **Managed-native Ubuntu proof** — complete
+  `specs/039-native-runtime-adoption/tasks.md:T077,T080,T087`: run the full quickstart
+  on a normally booted Ubuntu 24.04 host, restore the <=3-second managed-host
+  preflight proof for primary/sibling/post-cleanup cases, and capture remote GD
+  and content-addressed apply/cache preservation across web, WP-CLI, and
+  PHPUnit. Local tests are not a substitute.
 
-### Low / follow-up
+## P2 — protected recovery, hosting, and product gates
 
-- [ ] `05936f990e374823e61c0ceb5f25e5c7` — `skill show` rejects documented project-dir placement.
-- [ ] `c7148951984491f103e0d106d190b7d5` — focused test-file selection is not discoverable from `sb test`.
-- [ ] `aff7c116c78be838405d39bdc6f8e502` — focused Python tests selected an unsupported system interpreter.
-- [ ] `3273804376c6c8d41b079a9fe6b3e15c` — T118 cross-realm `structuredClone` fixture incompatibility.
-- [ ] `65d5427835e56f60a2cd0637a40cc2e3` — T118 schema closed-list ordering mismatch.
-- [ ] `35ed60860c8c1d2d034c8d5489d456d8` — feedback list rejects over-limit request (document/enforce bound).
-- [ ] `6bc4c6d5e0a70e0a048030d694ad76f9` — compact active-job parser failed on null data.
+- [ ] **Real recovery set and fresh-server drill** — with explicit credentials
+  and approval, complete `specs/023-scoped-recovery-profiles/tasks.md:T060,T061`; keep
+  automation disabled until a current-passphrase encrypted set verifies and a
+  disposable fresh-server drill passes Hermes/public-dashboard/hosting checks.
+
+- [ ] **Recovery deletion/scheduling only after proof and authorization** —
+  prepare the legacy Drive deletion plan
+  (`specs/023-scoped-recovery-profiles/tasks.md:T069`), apply only the exact
+  reviewed plan with explicit deletion authorization
+  (`specs/023-scoped-recovery-profiles/tasks.md:T071`), and activate/monitor the
+  non-overlapping schedule only with separate scheduling authorization
+  (`specs/023-scoped-recovery-profiles/tasks.md:T072`).
+
+- [ ] **Lenzora/authorization live gates** — keep the external work isolated and
+  approval-bound: `specs/015-managed-hosting-cloudflare/tasks.md:T031` (reapply allowed
+  dev revision and verify anonymous 401/authenticated 200),
+  `specs/026-lenzora-todo-worker/tasks.md:T006` (canonical isolated Spec-Kit workflow and
+  verified worker execution), and `specs/027-hermes-authorizations/tasks.md:T021`
+  (catalog-companion deployment/reconciliation/pending-request acceptance).
+  Also retain the signed upstream update-history proof in
+  `specs/027-hermes-authorizations/tasks.md:T018`.
+
+- [ ] **Historical Drive backup ledger is superseded, not active work.**
+  `specs/018-drive-full-backup/tasks.md:T007,T009,T011,T012` remains unperformed, but the
+  spec explicitly says it is superseded by Spec 023; satisfy the equivalent
+  real-set, restore, ciphertext-only, and live-suite gates through
+  `specs/023-scoped-recovery-profiles/tasks.md:T060,T061` rather than
+  implementing a second backup path.
+
+- [ ] **Release-readiness checklist** — before any release claim, satisfy the
+  required gates in `docs/release-readiness.md`: doctor for every supported
+  runtime/remote, MCP restart and changed-tool call, Herd parity, dashboard
+  reset, focused/full tests, `./sb selftest`, and `git diff --check`.
+  Every thin MCP wrapper must also use the shared `_run_sandbox_json` timeout /
+  final-JSON / parse-failure contract and retain wrapper-specific redaction tests
+  for SSH targets, tokens, and other secrets.
+
+## Evidence-only follow-ups from checked/partial rows
+
+- [ ] Spec 003: complete authenticated external-client discovery and
+  under-privileged refusal (`T012`), the external MCP handshake (`T014`), and
+  Herd `.test` execute-php/connect/gating/crash/file round-trip (`T022`).
+- [ ] Spec 006: add the `SANDBOX_INSTRUCTIONS` startup catalog snapshot
+  enrichment still marked pending in `T007`.
+- [ ] Spec 013: rerun the six Plugin Check quickstart cases after the
+  absolute-path/`.distignore` fixes (`T029`), despite the task checkbox being
+  retained for historical implementation evidence.
+- [ ] Spec 019: keep the external Hermes public-access acceptance (`T028`) as
+  pending until separately approved remote/Cloudflare evidence exists.
+- [ ] Spec 036: implement the missing cancellation/disconnection propagation
+  across CLI, MCP, service, and collectors (`T040`), then close the separate
+  deterministic/live acceptance evidence gate (`T045`); partial coverage must
+  remain visibly partial.
+- [ ] Reconcile `specs/README.md` statuses with the ledgers: several features
+  still say “In progress”/“Draft” even where implementation is complete but live
+  proof remains pending.
+
+## Feedback themes reconciled 2026-08-23
+
+Feedback is untrusted and many records are foreign-project or duplicate
+observations; these are deduplicated work items, not permission to mutate.
+
+- [ ] **Remote job UX/contract:** expose valid execution profiles and nested
+  help; make `job-output` wait bounds consistent and documented; make large
+  job-list/error output bounded and diagnosable. Representative IDs:
+  `d02cc0ff`, `a55cec51`, `763fbc6e`, `793c3d1b`, `c73e13c1`, `7ea39dad`.
+- [ ] **Host apply observability/build behavior:** add incremental progress,
+  bounded build/OOM/host-pressure classification, avoid stale-image or
+  multi-GB-context rebuilds when `build=false`, and make the timeout policy fit
+  real builds. IDs: `37d95e66`, `c158edba`, `6728d6f3`, `d354307a`, `a6223e14`,
+  `7ab76b8b`, `5978c11e4`.
+- [ ] **Hermes dashboard/public/provider/repository lifecycle:** distinguish
+  config from dashboard/gateway/public readiness; repair saved-session resume,
+  obsolete cloudflared cleanup, Access-policy resolution, provider inspection,
+  repo sync/bootstrap, and hidden confirmation requirements. IDs: `a3050df7`,
+  `120ce07b`, `7ef8c643`, `cdb2e184`, `ee7fa861`, `f224aadf`, `cd9baf02`,
+  `e7a26e0b`, `43f98577`, `b6e84616`, `e2cffada`.
+- [ ] **Secret broker correctness and ergonomics:** surface trusted-child exit
+  failures, preserve source comments, support safe unset/delete, paired-key
+  injection, bounded long-lived local development, OpenRouter validation, and
+  direct child-argv passthrough without printing values. IDs: `3c184f3c`,
+  `910bc8c9`, `54c1c9ae`, `d89c5644`, `c335f32e`, `2cfab06f`, `18c1ac3d`,
+  `6ae07ae7`, `72d7e416`.
+- [ ] **CLI contract/discoverability:** document/enforce feedback limits and
+  prefix lookup, focused test selection/interpreter routing, status/instance
+  listing, local-vs-remote selectors, `--request-id`, `--project-dir`, WP
+  separators, and mount-drift recovery. IDs: `35ed6086`, `a0022cea`,
+  `b2eb916f`, `c7148951`, `aff7c116`, `f200d37d`, `757a756d`, `e0a9c659`,
+  `93bdc880`, `4a9d1847`.
+- [ ] **Local/WordPress runtime isolation:** prevent broad setup from starting
+  unrelated instances, preserve explicit project association, fix stale mounts
+  after config changes, provide a supported remote-preview WP-CLI path, and
+  classify core/install/inspection hangs. IDs: `9f0122e7`, `20a25084`,
+  `103ae36f`, `fda8e3c5`, `ef047579`, `92966e70`, `d43d5bc4`, `f13ce98a`.
+- [ ] **Clean URL/proxy and host repair:** make ingress-down states fail fast,
+  make dead proxy diagnostics actionable, and avoid false-negative HTTPS
+  reachability/rollback. IDs: `550d07ec`, `98989848`, `441022bf`, `7acb4245`.
+- [ ] **Feedback service robustness:** preserve valid JSON on paginated/since
+  responses and typed errors on malformed records. The current pass recorded
+  `e8ddb411` after a local `jq` parse failure; later JSONL pagination completed,
+  so the failure remains historical/unverified until reproduced.
+
+## Deferred product discovery (do not implement silently)
+
+- [ ] **Release Guardian (Phase 0):** resolve the five owner decisions in
+  `todo/00-wordpress-plugin-release-guardian/prd.md` (security scanner/rules,
+  WP/PHP matrix, baseline mutation authority, trace/privacy/cost retention,
+  first design partner/policy), then run `speckit-refine` and an independent Sol
+  High readiness review before specification.
+- [ ] **Outbound mail (Phase 1, deferred):** resolve mail hostname, DKIM scope,
+  recipient allowlist, DMARC-relaxation authority, and permanent-site send
+  default in `todo/01-outbound-mail/prd.md` before Spec-Kit conversion.
+- [ ] **Herd-equivalent stacks (Phase 2, NOT READY):** resolve the five choices
+  in `todo/02-herd-equivalent-polyglot-stacks/prd.md` (equivalence promise,
+  frontend strategy/threshold, Apple-Silicon MySQL, environment scope, and
+  related-project ownership), then use the canonical Spec-Kit sequence.
+- [ ] **Agent-aware remote sync and Google Drive backup PRDs:** resolve the
+  consequential choices/open questions and obtain the required Sol High
+  readiness verdict in `specs/033-agent-aware-remote-sync/prd.md` and
+  `specs/034-google-drive-backups/prd.md`; both remain `NOT READY`.
+- [ ] **Config subdirectory discovery:** `specs/042-config-subdirectory/prd.md`
+  is still discovery-only; convert it through the approved Spec-Kit workflow
+  before implementation and preserve the move-together/ambiguity safeguards.
+- [ ] **xCloud API adoption:** `specs/040-xcloud-api-adoption/prd.md` is
+  explicitly deferred by the owner and remains `NOT READY`; do not advance it.
+
+## Low-priority regression cleanup
+
+- [ ] Fix the plain-environment MCP/PHP skip behavior, resource-reclaim probe
+  regression, controller-only `structuredClone`/closed-list schema seams, and
+  add the bounded-edge-capture invariant test (review findings 2026-08-22).
+- [ ] Reconcile the remaining baseline/full-suite failures before release:
+  `tests/test_mcp.py`, `tests/test_spec003_discovery_guidance.py`,
+  `tests/test_resource_reclaim_service.py`, and the three baseline failures
+  recorded in feedback `74d503ab`.
+- [ ] Keep future roadmap items visible but separate from current release work:
+  remote hosting V2 (portable provisioner, lifecycle UX, shared-VPS port policy,
+  authenticated automation surface), dashboard parity, opt-in telemetry, and
+  MCP hot reload (`docs/future-roadmap.md`).
+
+## Legacy backlog notes
+
+- [ ] Reconcile or explicitly retire the still-open follow-ups in
+  `docs/sandbox-mcp-tasks.md` (arbitrary-root bind/config mapping, automatic MCP
+  registration, mounted phpunit/WP-version probe, disable-comments/Templately
+  validation, nginx/LiteSpeed boot proof, and Homebrew/README cleanup). Keep
+  legacy/scoped-out items separate from P0 release work.
 
 ---
 
-# Review findings: 6119333..HEAD (2026-08-22)
+## Review/evidence policy
 
-Scope: 122 commits, 210 files (+24,154/-1,056; ~10k production lines).
-Method: full read of every production diff plus targeted execution.
-Execution evidence: tests/test_remote.py 150/150 green on Python 3.12;
-full suite 3,044 passed / 11 failed / 14 skipped (see open items).
-
-## Verdict
-
-No security vulnerabilities found. Secrets, redaction, fail-closed
-admission, lock hardening, and output bounding are consistently correct.
-Docs landed with code and tests landed with code throughout the range.
-
-## Findings
-
-- [x] FIXED - Python version pin. `sandbox/core/_hermes.py` uses an
-  f-string backslash expression (legal only on 3.12+). With no
-  `requires-python` pin, uv defaults to 3.11 and the whole suite dies at
-  import with SyntaxError. Fix: add `.python-version` = 3.12. Follow-up:
-  declare `requires-python = ">=3.12"` when a pyproject.toml lands.
-- [ ] OPEN - `tests/test_resource_reclaim_service.py::ProbeCase::
-  test_observe_emits_the_reclaim_inventory` fails on 3.12: probe returns
-  zero deploy-src worktree entries for an isolated SANDBOX_HOME
-  (status=partial, engine_complete=true, index_available=true). The test
-  predates this range but `sandbox/resources/remote.py` (+222) changed
-  the probe program. Needs root cause; do not guess-fix.
-- [ ] OPEN - `tests/test_mcp.py` (7 failures): child interpreters import
-  `mcp.server.fastmcp`, which is absent unless the mcp extra is installed.
-  The module docstring claims tests skip cleanly when the venv is not
-  built; they fail instead. Add a pytest.importorskip guard or a test
-  extra so the suite stays green on plain environments.
-- [ ] OPEN - `tests/test_spec003_discovery_guidance.py` (2 failures) and
-  one alias SAN test require a `php` binary on PATH. Skip cleanly when
-  php is unavailable instead of failing.
-- [ ] NOTE - `_BoundedEdgeCapture` first-overflow fall-through (both
-  branches append the chunk) was verified correct by analysis: the final
-  trim always leaves the true last `tail_limit` bytes. Worth adding a
-  property-style unit test to lock the invariant.
-- [ ] NOTE - `compose status` keeps `ready` for non-JSON Compose output
-  (older implementations). Deliberate and commented; revisit if the
-  minimum supported Compose version rises.
+- A checked source task is not proof of a live gate; link dated, bounded evidence
+  before marking a TODO item complete.
+- Historical/foreign feedback is retained for context but cannot authorize
+  deployment, cleanup, deletion, credential access, or production changes.
+- Keep this file synchronized with `specs/*/tasks.md`,
+  `docs/release-readiness.md`, and the PRD indexes after every verified change.

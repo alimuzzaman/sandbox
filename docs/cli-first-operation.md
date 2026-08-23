@@ -55,7 +55,19 @@ HTTPS control plane responds, use the authenticated, log-free host snapshot:
 ./sb remote service diagnostics scaleway-sandbox --json
 # direct SSH metrics: total/used/available RAM plus usage percentage
 ./sb remote service diagnostics scaleway-sandbox --ssh --json
+# opt-in bounded process/app view plus optional non-sudo Docker stats
+./sb remote service diagnostics scaleway-sandbox --ssh --processes --json
 ```
+
+The process view uses only PID, PPID, CPU percentage, memory percentage, RSS,
+and `comm`; it never reads command lines, arguments, environments, working
+directories, Docker inspect/top, or sudo. Names and row counts are bounded and
+unsafe/path-like names are redacted. CPU is the lifetime average reported by
+`ps`, not an instantaneous sample. RSS may double-count shared memory, the
+snapshot can drift immediately, and Docker rows overlap host processes and are
+therefore never added to process totals. Grouping by `comm` is heuristic and
+group CPU can exceed 100% on multicore hosts. Docker memory parsing supports only B,
+KiB, MiB, GiB, and TiB. `--processes` is valid only with SSH diagnostics.
 
 Output observation is control-plane only: `job-output` reads durable files in
 bounded cursor pages, including a selected stream, a tail, or a bounded

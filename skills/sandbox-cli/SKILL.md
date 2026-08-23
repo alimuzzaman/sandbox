@@ -36,11 +36,19 @@ For direct host health evidence over the registered SSH transport, use:
 
 ```sh
 sb remote service diagnostics scaleway-sandbox --ssh --json
+sb remote service diagnostics scaleway-sandbox --ssh --processes --json
 ```
 
 The SSH probe is read-only and reports aggregate total, used, available, and
 percentage RAM, plus load and free disk. Use the default diagnostics command
 for the authenticated HTTPS snapshot when SSH is unavailable.
+
+`--processes` opts into a second independently bounded, read-only SSH probe.
+It groups sanitized `comm` identities, exposes no command lines, arguments,
+environment, paths, or sudo data, and optionally includes non-sudo Docker stats.
+CPU is a `ps` lifetime average; RSS/shared pages, snapshot drift, and overlapping
+host/container rows prevent these values from being additive accounting totals.
+Grouping by `comm` is heuristic and grouped CPU can exceed 100% on multicore hosts.
 
 Status and planning are read-only. Treat unavailable or timed-out bytes as
 unknown. Ordinary cache plans never contain named persistent volumes or

@@ -459,6 +459,74 @@ class TestRemoteDiagnostics(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "command failed"):
             sr.remote_ssh_diagnostics({"ssh": "registered-target"})
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ssh_process_view_is_bounded_grouped_and_privacy_safe(self, ssh_run):
+        aggregate = (
+            "memory_total_mb=1000\nmemory_used_mb=500\nmemory_available_mb=500\n"
+            "memory_used_percent=50\nload_1m=1\ndisk_free_mb=100\n"
+        )
+        process = "\n".join((
+            "__SANDBOX_PS_BEGIN__",
+            "20 1 1.5 2.0 100 worker",
+            "10 1 3.0 2.0 200 /private/token",
+            "30 1 2.0 2.0 300 worker",
+            "__SANDBOX_PS_END__",
+            "__SANDBOX_DOCKER_BEGIN__",
+            "__SANDBOX_DOCKER_AVAILABLE__",
+            '{"Name":"web","CPUPerc":"4.5%","MemUsage":"2MiB / 4MiB","MemPerc":"50%","PIDs":"3"}',
+            "__SANDBOX_DOCKER_END__",
+        ))
+        ssh_run.side_effect = [_completed(stdout=aggregate), _completed(stdout=process)]
+        result = sr.remote_ssh_diagnostics({"ssh": "registered-target"}, include_processes=True)
+        self.assertEqual(result["process_view"]["status"], "complete")
+        self.assertEqual(result["process_view"]["apps"][0]["name"], "worker")
+        self.assertEqual(result["process_view"]["apps"][0]["process_count"], 2)
+        self.assertEqual(result["process_view"]["processes"][0]["name"], "redacted")
+        self.assertEqual(result["containers"]["rows"][0]["memory_used_bytes"], 2 * 1024 * 1024)
+        command = ssh_run.call_args_list[1].args[1]
+        self.assertIn("LC_ALL=C ps", command)
+        self.assertIn("docker stats --no-stream", command)
+        for forbidden in ("/proc/cmdline", "docker inspect", "docker top", "sudo", " args=", " cmd=", " command="):
+            self.assertNotIn(forbidden, command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_process_subprobe_failure_preserves_aggregate(self, ssh_run):
+        ssh_run.side_effect = [
+            _completed(stdout=("memory_total_mb=1000\nmemory_used_mb=500\n"
+                               "memory_available_mb=500\nmemory_used_percent=50\n"
+                               "load_1m=1\ndisk_free_mb=100\n")),
+            subprocess.TimeoutExpired(cmd="ssh", timeout=10),
+        ]
+        result = sr.remote_ssh_diagnostics({"ssh": "registered-target"}, include_processes=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["process_view"]["status"], "unavailable")
+        self.assertEqual(result["containers"]["status"], "unavailable")
+
+    def test_process_parser_marks_bounds_and_optional_docker_fallback(self):
+        rows = [f"{pid} 1 0.1 0.1 1 worker" for pid in range(1, 102)]
+        payload = "\n".join([
+            "__SANDBOX_PS_BEGIN__", *rows, "__SANDBOX_PS_END__",
+            "__SANDBOX_DOCKER_BEGIN__", "__SANDBOX_DOCKER_END__",
+        ])
+        process_view, containers = sr._parse_ssh_process_view(payload)
+        self.assertEqual(process_view["status"], "partial")
+        self.assertEqual(process_view["observed_count"], 101)
+        self.assertTrue(process_view["truncated"])
+        self.assertEqual(len(process_view["processes"]), 100)
+        self.assertEqual(containers["status"], "unavailable")
+
+        invalid = payload.replace("1 1 0.1 0.1 1 worker", "1 1 nan 0.1 1 worker", 1)
+        invalid_view, _ = sr._parse_ssh_process_view(invalid)
+        self.assertEqual(invalid_view["status"], "partial")
+
+    def test_empty_ps_section_is_unavailable_not_an_empty_complete_host(self):
+        process_view, _ = sr._parse_ssh_process_view(
+            "__SANDBOX_PS_BEGIN__\n__SANDBOX_PS_END__\n"
+            "__SANDBOX_DOCKER_BEGIN__\n__SANDBOX_DOCKER_END__\n"
+        )
+        self.assertEqual(process_view["status"], "unavailable")
+
     @patch("sandbox.core._remote.urllib.request.urlopen")
     def test_verify_remote_returns_safe_authenticated_envelope(self, urlopen):
         response = MagicMock(status=400)
@@ -2056,6 +2124,20 @@ class TestRemoteServiceCommand(unittest.TestCase):
             remote_cmd._cmd_service(args, as_json=True)
         probe.assert_called_once_with({"ssh": "registered-target"})
         self.assertEqual(json.loads(output.getvalue())["data"], diagnostics)
+
+    def test_diagnostics_processes_dispatches_only_with_ssh(self):
+        args = types.SimpleNamespace(name="diagnostics", ssh_url="myvps", confirm=False,
+                                     ssh=True, processes=True)
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
+                patch.object(remote_cmd.sr, "remote_ssh_diagnostics", return_value={}) as probe, \
+                redirect_stdout(StringIO()):
+            remote_cmd._cmd_service(args, as_json=True)
+        probe.assert_called_once_with({"ssh": "registered-target"}, include_processes=True)
+
+        args.ssh = False
+        with redirect_stderr(StringIO()) as error, self.assertRaises(SystemExit):
+            remote_cmd._cmd_service(args, as_json=True)
+        self.assertIn("--processes requires", error.getvalue())
 
     def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
         with tempfile.TemporaryDirectory() as d:

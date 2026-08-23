@@ -40,6 +40,7 @@ import json
 import hashlib
 import ipaddress
 import math
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 import subprocess
@@ -1726,7 +1727,187 @@ def _parse_ssh_diagnostics(stdout: str) -> dict:
     return values
 
 
-def remote_ssh_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
+_SSH_PROCESS_LIMIT = 100
+_SSH_PROCESS_NAME_LIMIT = 64
+_SSH_PROCESS_COMMAND = "\n".join((
+    "set -u",
+    "printf '%s\\n' __SANDBOX_PS_BEGIN__",
+    "if command -v ps >/dev/null 2>&1; then",
+    "  LC_ALL=C ps -eo pid=,ppid=,pcpu=,pmem=,rss=,comm= 2>/dev/null | head -n 101",
+    "fi",
+    "printf '%s\\n' __SANDBOX_PS_END__",
+    "printf '%s\\n' __SANDBOX_DOCKER_BEGIN__",
+    "if docker version >/dev/null 2>&1; then",
+    "  printf '%s\\n' __SANDBOX_DOCKER_AVAILABLE__",
+    "  docker stats --no-stream --format '{{json .}}' 2>/dev/null | head -n 101 || true",
+    "fi",
+    "printf '%s\\n' __SANDBOX_DOCKER_END__",
+    "",
+))
+
+
+def _safe_observed_name(value: str) -> str:
+    """Return a bounded process identity without exposing paths or secret-like text."""
+    value = value.strip()
+    lowered = value.lower()
+    if (
+        not value
+        or len(value) > _SSH_PROCESS_NAME_LIMIT
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+", value)
+        or any(part in lowered for part in ("secret", "token", "password", "passwd", "private-key", "apikey", "api_key"))
+    ):
+        return "redacted"
+    return value
+
+
+def _bounded_number(raw: str, *, maximum: float, integer: bool = False):
+    try:
+        value = int(raw) if integer else float(raw.rstrip("%"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid numeric value") from None
+    if value < 0 or value > maximum or (not integer and not math.isfinite(value)):
+        raise ValueError("invalid numeric value")
+    return value
+
+
+def _parse_memory_bytes(raw: str) -> int:
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|TiB)", raw.strip())
+    if not match:
+        raise ValueError("unsupported memory unit")
+    value = float(match.group(1))
+    multiplier = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}[match.group(2)]
+    result = value * multiplier
+    if not math.isfinite(result) or result < 0 or result > (1 << 63) - 1:
+        raise ValueError("invalid memory value")
+    return int(result)
+
+
+def _extract_probe_section(stdout: str, begin: str, end: str) -> list[str] | None:
+    lines = (stdout or "").splitlines()
+    try:
+        start = lines.index(begin) + 1
+        stop = lines.index(end, start)
+    except ValueError:
+        return None
+    return lines[start:stop]
+
+
+def _parse_ssh_process_view(stdout: str) -> tuple[dict, dict]:
+    limitations = [
+        "Point-in-time samples can drift immediately after observation.",
+        "CPU is the ps lifetime average, not an instantaneous utilization sample.",
+        "Grouped CPU can exceed 100 percent on multicore hosts, and grouping by comm is heuristic.",
+        "RSS includes resident pages and can double-count shared memory across processes.",
+    ]
+    base = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "snapshot": "point_in_time",
+        "cpu_semantics": "ps_lifetime_average",
+        "limits": {"max_rows": _SSH_PROCESS_LIMIT, "name_chars": _SSH_PROCESS_NAME_LIMIT},
+        "observed_count": 0,
+        "truncated": False,
+        "processes": [],
+        "apps": [],
+        "limitations": limitations,
+    }
+    ps_lines = _extract_probe_section(stdout, "__SANDBOX_PS_BEGIN__", "__SANDBOX_PS_END__")
+    if not ps_lines:
+        return ({**base, "status": "unavailable"}, _unavailable_container_view())
+
+    processes = []
+    malformed = 0
+    for line in ps_lines[:_SSH_PROCESS_LIMIT + 1]:
+        parts = line.strip().split(None, 5)
+        if len(parts) != 6:
+            malformed += 1
+            continue
+        try:
+            pid = _bounded_number(parts[0], maximum=(1 << 31) - 1, integer=True)
+            _bounded_number(parts[1], maximum=(1 << 31) - 1, integer=True)
+            cpu = _bounded_number(parts[2], maximum=1_000_000)
+            _bounded_number(parts[3], maximum=100)
+            # Reserve headroom for the bounded per-app sum as well as each row.
+            rss_kib = _bounded_number(
+                parts[4], maximum=((1 << 63) - 1) // 1024 // _SSH_PROCESS_LIMIT,
+                integer=True,
+            )
+        except ValueError:
+            malformed += 1
+            continue
+        processes.append({
+            "pid": pid,
+            "name": _safe_observed_name(parts[5]),
+            "cpu_percent": cpu,
+            "rss_bytes": rss_kib * 1024,
+        })
+    observed_count = len(processes) + malformed
+    truncated = len(ps_lines) > _SSH_PROCESS_LIMIT
+    processes = processes[:_SSH_PROCESS_LIMIT]
+    processes.sort(key=lambda row: (-row["cpu_percent"], -row["rss_bytes"], row["name"], row["pid"]))
+    grouped = {}
+    for row in processes:
+        app = grouped.setdefault(row["name"], {"name": row["name"], "process_count": 0, "cpu_percent": 0.0, "rss_bytes": 0})
+        app["process_count"] += 1
+        app["cpu_percent"] += row["cpu_percent"]
+        app["rss_bytes"] += row["rss_bytes"]
+    apps = sorted(grouped.values(), key=lambda row: (-row["cpu_percent"], -row["rss_bytes"], row["name"]))
+    for app in apps:
+        app["cpu_percent"] = round(app["cpu_percent"], 4)
+    process_view = {
+        **base,
+        "status": "partial" if malformed or truncated else "complete",
+        "grouping_key": "comm",
+        "observed_count": observed_count,
+        "truncated": truncated,
+        "processes": processes,
+        "apps": apps,
+    }
+    return process_view, _parse_container_view(stdout)
+
+
+def _unavailable_container_view() -> dict:
+    return {
+        "status": "unavailable", "source": "docker_stats_no_stream",
+        "overlaps_host_processes": True, "observed_count": 0, "truncated": False,
+        "rows": [], "limitations": ["Docker is optional and is queried only without sudo."],
+    }
+
+
+def _parse_container_view(stdout: str) -> dict:
+    lines = _extract_probe_section(stdout, "__SANDBOX_DOCKER_BEGIN__", "__SANDBOX_DOCKER_END__")
+    if not lines or lines[0] != "__SANDBOX_DOCKER_AVAILABLE__":
+        return _unavailable_container_view()
+    lines = lines[1:]
+    rows = []
+    malformed = 0
+    for line in lines[:_SSH_PROCESS_LIMIT + 1]:
+        try:
+            item = json.loads(line)
+            usage = str(item["MemUsage"]).split("/", 1)[0].strip()
+            rows.append({
+                "name": _safe_observed_name(str(item["Name"])),
+                "cpu_percent": _bounded_number(str(item["CPUPerc"]), maximum=1_000_000),
+                "memory_used_bytes": _parse_memory_bytes(usage),
+                "memory_percent": _bounded_number(str(item["MemPerc"]), maximum=100),
+                "pids": _bounded_number(str(item["PIDs"]), maximum=(1 << 31) - 1, integer=True),
+            })
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            malformed += 1
+    truncated = len(lines) > _SSH_PROCESS_LIMIT
+    rows = rows[:_SSH_PROCESS_LIMIT]
+    rows.sort(key=lambda row: (-row["cpu_percent"], -row["memory_used_bytes"], row["name"]))
+    return {
+        "status": "partial" if malformed or truncated else "complete",
+        "source": "docker_stats_no_stream", "overlaps_host_processes": True,
+        "observed_count": len(rows) + malformed, "truncated": truncated, "rows": rows,
+        "limitations": [
+            "Container rows overlap host processes and are never added to process totals.",
+            "Memory units are limited to B, KiB, MiB, GiB, and TiB.",
+        ],
+    }
+
+
+def remote_ssh_diagnostics(remote: dict, *, timeout: int = 10, include_processes: bool = False) -> dict:
     """Read aggregate host metrics directly over the registered SSH transport."""
     if not isinstance(remote.get("ssh"), str) or not remote["ssh"].strip():
         raise RuntimeError("remote SSH diagnostics require a registered SSH target")
@@ -1742,6 +1923,21 @@ def remote_ssh_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
         "runtime_revision": service.get("runtime_revision", "unknown"),
         "jobs": {"active": None, "queued": None},
     })
+    if include_processes:
+        try:
+            process_result = ssh_run(remote, _SSH_PROCESS_COMMAND, timeout=timeout)
+            if process_result.returncode != 0:
+                raise RuntimeError("process probe failed")
+            values["process_view"], values["containers"] = _parse_ssh_process_view(process_result.stdout)
+        except (RuntimeError, subprocess.SubprocessError, OSError):
+            values["process_view"] = {
+                "status": "unavailable", "observed_at": datetime.now(timezone.utc).isoformat(),
+                "snapshot": "point_in_time", "cpu_semantics": "ps_lifetime_average",
+                "limits": {"max_rows": _SSH_PROCESS_LIMIT, "name_chars": _SSH_PROCESS_NAME_LIMIT},
+                "observed_count": 0, "truncated": False, "processes": [], "apps": [],
+                "limitations": ["The independently bounded process probe was unavailable."],
+            }
+            values["containers"] = _unavailable_container_view()
     return values
 
 

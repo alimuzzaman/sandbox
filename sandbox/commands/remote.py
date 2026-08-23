@@ -256,6 +256,8 @@ def _cmd_service(args, as_json: bool) -> None:
     name = getattr(args, "ssh_url", None)
     if operation not in {"status", "diagnostics", "migrate", "stop"} or not name:
         die("usage: ./sb remote service <status|diagnostics|migrate|stop> <name> [--plan|--confirm]")
+    if _arg_true(args, "processes") and (operation != "diagnostics" or not _arg_true(args, "ssh")):
+        die("--processes requires `remote service diagnostics <name> --ssh`")
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
@@ -265,9 +267,12 @@ def _cmd_service(args, as_json: bool) -> None:
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": sr.remote_mcp_service_status(entry), "error": None}
         elif operation == "diagnostics":
-            diagnostics = (sr.remote_ssh_diagnostics(entry)
-                           if bool(getattr(args, "ssh", False))
-                           else sr.remote_diagnostics(entry))
+            if bool(getattr(args, "ssh", False)):
+                diagnostics = (sr.remote_ssh_diagnostics(entry, include_processes=True)
+                               if _arg_true(args, "processes")
+                               else sr.remote_ssh_diagnostics(entry))
+            else:
+                diagnostics = sr.remote_diagnostics(entry)
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": diagnostics, "error": None}
         elif operation == "migrate":

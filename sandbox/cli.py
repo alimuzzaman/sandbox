@@ -605,6 +605,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the result as JSON (for the MCP server)")
     remote_p.add_argument("--ssh", action="store_true",
         help="for `remote service diagnostics`: collect metrics over SSH")
+    remote_p.add_argument("--processes", action="store_true",
+        help="with SSH diagnostics, include a bounded read-only process/app snapshot")
 
     deploy_p = sub.add_parser("deploy",
         help="Deploy local project state (committed + uncommitted) to a remote "

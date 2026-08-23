@@ -911,3 +911,18 @@ class TestApplyProjectInference(unittest.TestCase):
         core.find_project_root.side_effect = ValueError("not a project")
         with mock.patch.object(cli, "_core", return_value=core):
             self.assertEqual(cli._implied_project_dir(None, None), (None, None))
+
+
+class TestSkillProjectDirContract(unittest.TestCase):
+    """`skill` accepts --project-dir after the subcommand (feedback 05936f99)."""
+
+    def test_parser_accepts_project_dir_after_the_skill_name(self):
+        r = run_sb("skill", "show", "sandbox-cli", "--project-dir", str(ROOT),
+                   cwd="/tmp")
+        self.assertNotIn("unrecognized arguments", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_documented_invocation_shows_a_skill_from_any_cwd(self):
+        r = run_sb("skill", "show", "sandbox-cli", "--project-dir", str(ROOT),
+                   cwd="/tmp")
+        self.assertIn("Operate Sandbox", r.stdout)

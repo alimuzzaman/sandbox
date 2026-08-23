@@ -126,8 +126,9 @@ def _enabled_slug_exists(slug: str,
 
 def cmd_skill(cfg, args) -> None:
     action = args.action
+    project_dir = getattr(args, "project_dir", None)
     if action == "list":
-        recs = _resolve()
+        recs = _resolve(project_dir=project_dir)
         if not recs:
             info("no skills found")
             return
@@ -139,7 +140,7 @@ def cmd_skill(cfg, args) -> None:
     if action == "show":
         if not args.slug:
             die("usage: ./sb skill show <slug>")
-        r = _resolve().get(args.slug)
+        r = _resolve(project_dir=project_dir).get(args.slug)
         if not r:
             die(f"no skill '{args.slug}'")
         print(r["path"].read_text())
@@ -151,13 +152,13 @@ def cmd_skill(cfg, args) -> None:
         slug = _slugify(args.title)
         if not slug:
             die(f"could not derive a slug from title {args.title!r}")
-        scope = args.scope or ("project" if _project_skills_dir() else "sandbox")
-        root = _scope_root(scope)
+        scope = args.scope or ("project" if _project_skills_dir(project_dir) else "sandbox")
+        root = _scope_root(scope, project_dir)
         if not root:
             die(f"scope '{scope}' unavailable here (no project root for cwd?)")
         source_collision = next((
             rec for source in ("project", "personal", "sandbox")
-            for rec in _iter_source(source)
+            for rec in _iter_source(source, project_dir)
             if rec["slug"] == slug and rec["enable"] and rec["scope"] != scope
         ), None)
         # Project/personal skills must never shadow a built-in silently.
@@ -174,14 +175,14 @@ def cmd_skill(cfg, args) -> None:
             if args.on_conflict == "fail" or not args.on_conflict:
                 n = 2
                 while ((root / f"{slug}-{n}").exists()
-                       or _enabled_slug_exists(f"{slug}-{n}")):
+                       or _enabled_slug_exists(f"{slug}-{n}", project_dir)):
                     n += 1
                 die(f"skill '{slug}' exists in {scope} — pass --on-conflict replace|rename "
                     f"(free slug: {slug}-{n})")
             if args.on_conflict == "rename":
                 n = 2
                 while ((root / f"{slug}-{n}").exists()
-                       or _enabled_slug_exists(f"{slug}-{n}")):
+                       or _enabled_slug_exists(f"{slug}-{n}", project_dir)):
                     n += 1
                 slug = f"{slug}-{n}"
                 dest = root / slug
@@ -203,9 +204,11 @@ def cmd_skill(cfg, args) -> None:
         if not args.slug:
             die("usage: ./sb skill edit <slug> [--desc D] [--file body.md|-]")
         if args.scope:
-            r = next((x for x in _iter_source(args.scope) if x["slug"] == args.slug), None)
+            r = next((x for x in _iter_source(args.scope, project_dir)
+                      if x["slug"] == args.slug), None)
         else:
-            r = _resolve(include_disabled=True).get(args.slug)
+            r = _resolve(include_disabled=True,
+                         project_dir=project_dir).get(args.slug)
         if not r:
             die(f"no skill '{args.slug}'")
         meta = _parse_frontmatter(r["path"])
@@ -228,12 +231,13 @@ def cmd_skill(cfg, args) -> None:
         if not args.slug:
             die("usage: ./sb skill delete <slug> [--scope …]")
         scope = args.scope
-        recs = list(_iter_source(scope)) if scope else None
+        recs = list(_iter_source(scope, project_dir)) if scope else None
         r = None
         if scope:
             r = next((x for x in recs if x["slug"] == args.slug), None)
         else:
-            r = _resolve(include_disabled=True).get(args.slug)
+            r = _resolve(include_disabled=True,
+                         project_dir=project_dir).get(args.slug)
         if not r:
             die(f"no skill '{args.slug}'" + (f" in {scope}" if scope else ""))
         if r["scope"] == "sandbox" and scope != "sandbox":

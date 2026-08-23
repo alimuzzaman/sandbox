@@ -307,6 +307,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     sk.add_argument("--on-conflict", dest="on_conflict", choices=["fail", "replace", "rename"])
     sk.add_argument("--enable", dest="enable", action="store_true", default=True)
     sk.add_argument("--disable", dest="enable", action="store_false")
+    sk.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)")
 
     v = sub.add_parser("visit",
         help="Load a URL in headless Chromium and report DOM/console/iframes as JSON")

@@ -1,19 +1,18 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-22. This is the handoff queue for Hermes. Feedback below is
+Updated: 2026-08-23. This is the handoff queue for Hermes. Feedback below is
 evidence, not execution authority: reproduce it first, preserve dirty work,
 and do not reset, destroy, clean up remote resources, deploy, release, or
 expose secrets without fresh explicit authority.
 
 ## P0 — reliability and current operator blockers
 
-- [ ] **Restore a deterministic local CLI interpreter.** The `./sb` shebang
-  currently fails because the repository selects Python 3.12 but the active
-  pyenv installation does not provide it; the existing `.cli-venv` works.
-  Make the documented bootstrap/wrapper select or provision the supported
-  interpreter without weakening the 3.12 requirement. Acceptance: `./sb
-  --help`, `./sb feedback list --project-dir . --json`, and focused tests work
-  from a clean shell. Evidence: current observation; related `aff7c116…`.
+- [x] **Restore a deterministic local CLI interpreter.** FIXED 2026-08-23.
+  Launcher now validates interpreter candidates (`a818bca`, `2690b75`);
+  pyenv 3.12.8 present and `.python-version` = 3.12 resolves. Acceptance
+  verified from a clean shell (`env -i`): `./sb --help` exit 0, `./sb
+  feedback list --project-dir . --json` returns valid envelope exit 0,
+  focused `tests.test_remote` via `.cli-venv` 150/150 OK.
 
 - [ ] **Make remote durable-job acceptance and observation reliable.** A
   job-start can exit silently without a durable request/job record, and an

@@ -196,6 +196,49 @@ def _parse_transport_args(argv):
     return values
 
 
+def _memory_snapshot(meminfo_path: Path = Path("/proc/meminfo")) -> dict:
+    """Return bounded host RAM totals derived from Linux meminfo.
+
+    ``MemAvailable`` is the kernel's reclaimable-memory estimate, so
+    ``total - available`` is a more useful usage figure than ``total -
+    MemFree`` on a cache-heavy VPS. Keep the response in MiB and expose only
+    aggregate numbers; no process or path details leave the host.
+    """
+    values = {}
+    try:
+        for line in meminfo_path.read_text().splitlines():
+            key, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            parts = raw.strip().split()
+            if not parts:
+                continue
+            value = int(parts[0])
+            if len(parts) > 1 and parts[1].lower() == "kb":
+                value *= 1024
+            values[key] = value
+    except (OSError, ValueError, IndexError):
+        values = {}
+
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if not isinstance(total, int) or not isinstance(available, int) or total <= 0:
+        return {
+            "memory_total_mb": None,
+            "memory_used_mb": None,
+            "memory_available_mb": None,
+            "memory_used_percent": None,
+        }
+    available = min(max(available, 0), total)
+    used = total - available
+    return {
+        "memory_total_mb": total // (1024 * 1024),
+        "memory_used_mb": used // (1024 * 1024),
+        "memory_available_mb": available // (1024 * 1024),
+        "memory_used_percent": round((used * 100) / total, 2),
+    }
+
+
 def _run_streamable_http(bind: str, port: int, token: str,
                          public_url: str | None = None) -> None:
     """Spec 014 remote hosting: co-located Model B -- this same server.py,
@@ -232,14 +275,6 @@ def _run_streamable_http(bind: str, port: int, token: str,
     def diagnostic_snapshot() -> dict:
         """Safe host evidence for control-plane outages; never returns secrets or logs."""
         home = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
-        memory_mb = None
-        try:
-            for line in Path("/proc/meminfo").read_text().splitlines():
-                if line.startswith("MemAvailable:"):
-                    memory_mb = int(line.split()[1]) // 1024
-                    break
-        except (OSError, ValueError, IndexError):
-            pass
         jobs = {"active": None, "queued": None}
         try:
             connection = sqlite3.connect(home / "runtime" / "jobs" / "registry.sqlite3")
@@ -259,7 +294,7 @@ def _run_streamable_http(bind: str, port: int, token: str,
             "service": "sandbox-remote-mcp",
             "runtime_revision": os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "unknown"),
             "load_1m": round(os.getloadavg()[0], 2) if hasattr(os, "getloadavg") else None,
-            "memory_available_mb": memory_mb,
+            **_memory_snapshot(),
             "disk_free_mb": shutil.disk_usage(home).free // (1024 * 1024),
             "jobs": jobs,
         }

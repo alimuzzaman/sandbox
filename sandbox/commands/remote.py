@@ -265,8 +265,11 @@ def _cmd_service(args, as_json: bool) -> None:
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": sr.remote_mcp_service_status(entry), "error": None}
         elif operation == "diagnostics":
+            diagnostics = (sr.remote_ssh_diagnostics(entry)
+                           if bool(getattr(args, "ssh", False))
+                           else sr.remote_diagnostics(entry))
             payload = {"ok": True, "name": name, "status": "observed",
-                       "data": sr.remote_diagnostics(entry), "error": None}
+                       "data": diagnostics, "error": None}
         elif operation == "migrate":
             transport = entry.get("control_transport") or "https"
             bind = (entry.get("tailscale_host") if transport == "tailscale" else "127.0.0.1")

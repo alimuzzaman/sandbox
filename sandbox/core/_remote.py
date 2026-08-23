@@ -1652,6 +1652,75 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
     return sanitized
 
 
+_SSH_DIAGNOSTICS_COMMAND = "\n".join((
+    "set -eu",
+    "awk '",
+    '$1 == "MemTotal:" { total=$2 }',
+    '$1 == "MemAvailable:" { available=$2 }',
+    "END {",
+    "  if (total > 0 && available >= 0) {",
+    "    if (available > total) available=total",
+    "    used=total-available",
+    '    printf "memory_total_mb=%d\\n", int(total/1024)',
+    '    printf "memory_used_mb=%d\\n", int(used/1024)',
+    '    printf "memory_available_mb=%d\\n", int(available/1024)',
+    '    printf "memory_used_percent=%.2f\\n", (used*100/total)',
+    "  }",
+    "}' /proc/meminfo",
+    "awk '{print \"load_1m=\"$1}' /proc/loadavg",
+    'df -Pk "$HOME" | awk \'NR == 2 {print "disk_free_mb=" int($4/1024)}\'',
+    "",
+))
+
+
+def _parse_ssh_diagnostics(stdout: str) -> dict:
+    """Parse only the fixed aggregate fields emitted by the SSH probe."""
+    integer_fields = {
+        "memory_total_mb", "memory_used_mb", "memory_available_mb", "disk_free_mb",
+    }
+    float_fields = {"memory_used_percent", "load_1m"}
+    values = {}
+    for line in (stdout or "").splitlines():
+        key, separator, raw = line.partition("=")
+        if not separator or key not in integer_fields | float_fields:
+            continue
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            values[key] = float(raw) if key in float_fields else int(raw)
+        except ValueError:
+            continue
+    if "memory_total_mb" not in values or "memory_available_mb" not in values:
+        raise RuntimeError("remote SSH diagnostics returned an invalid payload")
+    total = values["memory_total_mb"]
+    available = min(max(values["memory_available_mb"], 0), total)
+    used = max(total - available, 0)
+    values["memory_available_mb"] = available
+    values["memory_used_mb"] = used
+    values["memory_used_percent"] = round((used * 100) / total, 2) if total else None
+    return values
+
+
+def remote_ssh_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
+    """Read aggregate host metrics directly over the registered SSH transport."""
+    if not isinstance(remote.get("ssh"), str) or not remote["ssh"].strip():
+        raise RuntimeError("remote SSH diagnostics require a registered SSH target")
+    result = ssh_run(remote, _SSH_DIAGNOSTICS_COMMAND, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError("remote SSH diagnostics command failed")
+    values = _parse_ssh_diagnostics(result.stdout)
+    service = remote.get("mcp_service") or {}
+    values.update({
+        "ok": True,
+        "service": "sandbox-remote-mcp",
+        "transport": "ssh",
+        "runtime_revision": service.get("runtime_revision", "unknown"),
+        "jobs": {"active": None, "queued": None},
+    })
+    return values
+
+
 REMOTE_DOCKER_ADDRESS_POOLS = (
     # The /12 must use its canonical network boundary. Docker's built-in pools
     # begin at 172.17/16, but the enclosing configurable pool is 172.16/12.

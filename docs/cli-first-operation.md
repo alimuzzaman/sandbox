@@ -53,6 +53,8 @@ HTTPS control plane responds, use the authenticated, log-free host snapshot:
 
 ```sh
 ./sb remote service diagnostics scaleway-sandbox --json
+# direct SSH metrics: total/used/available RAM plus usage percentage
+./sb remote service diagnostics scaleway-sandbox --ssh --json
 ```
 
 Output observation is control-plane only: `job-output` reads durable files in

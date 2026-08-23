@@ -603,6 +603,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="for `remote plugins`: report what would be mirrored, transfer nothing")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
+    remote_p.add_argument("--ssh", action="store_true",
+        help="for `remote service diagnostics`: collect metrics over SSH")
 
     deploy_p = sub.add_parser("deploy",
         help="Deploy local project state (committed + uncommitted) to a remote "

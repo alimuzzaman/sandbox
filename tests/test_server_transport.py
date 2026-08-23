@@ -82,6 +82,17 @@ class TestParseTransportArgs(unittest.TestCase):
 
 
 class TestStreamableHttpSafetyGates(unittest.TestCase):
+    def test_memory_snapshot_reports_total_used_available_and_percent(self):
+        class Meminfo:
+            def read_text(self):
+                return "MemTotal:       4194304 kB\nMemAvailable:   440320 kB\n"
+
+        snapshot = server._memory_snapshot(Meminfo())
+        self.assertEqual(snapshot["memory_total_mb"], 4096)
+        self.assertEqual(snapshot["memory_available_mb"], 430)
+        self.assertEqual(snapshot["memory_used_mb"], 3666)
+        self.assertEqual(snapshot["memory_used_percent"], 89.5)
+
     def test_refuses_0_0_0_0_bind(self):
         with self.assertRaises(SystemExit):
             server._run_streamable_http("0.0.0.0", 9174, "sekrit")

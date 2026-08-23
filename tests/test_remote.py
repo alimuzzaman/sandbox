@@ -380,6 +380,36 @@ class TestRemoteDiagnostics(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "bearer token"):
             sr.remote_diagnostics({"control_url": "https://control.example.test"})
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ssh_diagnostics_reports_total_used_available_and_percent(self, ssh_run):
+        ssh_run.return_value = _completed(stdout=(
+            "memory_total_mb=4096\n"
+            "memory_used_mb=3667\n"
+            "memory_available_mb=429\n"
+            "memory_used_percent=89.53\n"
+            "load_1m=2.5\n"
+            "disk_free_mb=23564\n"
+        ))
+        result = sr.remote_ssh_diagnostics({
+            "ssh": "registered-target",
+            "mcp_service": {"runtime_revision": "revision-1"},
+        })
+        self.assertEqual(result["transport"], "ssh")
+        self.assertEqual(result["memory_total_mb"], 4096)
+        self.assertEqual(result["memory_available_mb"], 429)
+        self.assertEqual(result["memory_used_mb"], 3667)
+        self.assertEqual(result["memory_used_percent"], 89.53)
+        command = ssh_run.call_args.args[1]
+        self.assertIn("/proc/meminfo", command)
+        self.assertIn("MemAvailable:", command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ssh_diagnostics_rejects_failed_probe(self, ssh_run):
+        ssh_run.return_value = _completed(returncode=1)
+        with self.assertRaisesRegex(RuntimeError, "command failed"):
+            sr.remote_ssh_diagnostics({"ssh": "registered-target"})
+
     @patch("sandbox.core._remote.urllib.request.urlopen")
     def test_verify_remote_returns_safe_authenticated_envelope(self, urlopen):
         response = MagicMock(status=400)
@@ -1967,6 +1997,16 @@ class TestRemoteServiceCommand(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["data"], status)
         self.assertNotIn("secret-token", output.getvalue())
+
+    def test_diagnostics_can_explicitly_use_ssh(self):
+        args = types.SimpleNamespace(name="diagnostics", ssh_url="myvps", confirm=False, ssh=True)
+        diagnostics = {"transport": "ssh", "memory_used_percent": 89.53}
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
+                patch.object(remote_cmd.sr, "remote_ssh_diagnostics", return_value=diagnostics) as probe, \
+                redirect_stdout(StringIO()) as output:
+            remote_cmd._cmd_service(args, as_json=True)
+        probe.assert_called_once_with({"ssh": "registered-target"})
+        self.assertEqual(json.loads(output.getvalue())["data"], diagnostics)
 
     def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
         with tempfile.TemporaryDirectory() as d:

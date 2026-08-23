@@ -32,6 +32,16 @@ sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox --json
 sb workspace reap --remote scaleway-sandbox --dry-run --json
 ```
 
+For direct host health evidence over the registered SSH transport, use:
+
+```sh
+sb remote service diagnostics scaleway-sandbox --ssh --json
+```
+
+The SSH probe is read-only and reports aggregate total, used, available, and
+percentage RAM, plus load and free disk. Use the default diagnostics command
+for the authenticated HTTPS snapshot when SSH is unavailable.
+
 Status and planning are read-only. Treat unavailable or timed-out bytes as
 unknown. Ordinary cache plans never contain named persistent volumes or
 worktrees; those require the separate stale scope and complete positive

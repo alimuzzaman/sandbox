@@ -493,6 +493,8 @@ and 512 PIDs. The remote durable scheduler admits at most two jobs and checks
 free memory/disk before starting another. If SSH is unavailable, retrieve the
 authenticated, log-free HTTPS host snapshot with
 `./sb remote service diagnostics <remote> --json`.
+For a direct SSH probe with total, used, available, and percentage RAM, use
+`./sb remote service diagnostics <remote> --ssh --json`.
 
 Projects whose service startup bootstraps dependencies can declare a bounded
 `compose.startupTimeoutSeconds`; persistent workspaces can additionally opt

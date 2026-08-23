@@ -5,6 +5,7 @@ read happen before any container work), so they exercise the actual bootstrap,
 package import, registry dispatch, and the no-`main` resolution behavior.
 """
 import os
+import io
 import json
 import subprocess
 import sys
@@ -454,6 +455,68 @@ class TestResolutionGate(unittest.TestCase):
         import sandbox.cli as cli
         self.assertEqual(cli._global_label_before_subcommand(
             ["--label", "qa", "status", "--json"]), "qa")
+
+    def test_ensure_pyyaml_never_execs_a_foreign_entry_point(self):
+        # Regression: under unittest discovery the historical unconditional
+        # re-exec replayed `sb discover -s tests` via os.execv, silently
+        # replacing the whole test-runner process (no summary, exit 2).
+        import sandbox.core._config as config
+
+        execed = []
+
+        def _trap(*argv, **kwargs):
+            execed.append(argv)
+            raise AssertionError("os.execv must not run for foreign callers")
+
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory) / ".cli-venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("#!/bin/sh\n")
+            with mock.patch.dict(sys.modules, {"yaml": None}), \
+                    mock.patch.object(config.sys, "prefix", "/nonexistent-prefix"), \
+                    mock.patch.object(config.sys, "argv",
+                                      ["/usr/bin/python", "discover", "-s", "tests"]), \
+                    mock.patch.object(config.os, "execv", side_effect=_trap), \
+                    mock.patch.object(config, "CLI_VENV", venv), \
+                    redirect_stderr(err), \
+                    self.assertRaises(SystemExit) as raised:
+                config.ensure_pyyaml()
+
+        self.assertEqual(execed, [])
+        self.assertIn("PyYAML", err.getvalue())
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_ensure_pyyaml_still_replays_a_genuine_cli_invocation(self):
+        import sandbox.core._config as config
+
+        replayed = []
+
+        def _fake_execv(path, argv):
+            replayed.append((path, argv))
+            raise SystemExit(51)
+
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory) / "sb"
+            entry.write_text("#!/bin/sh\n")
+            with mock.patch.dict(sys.modules, {"yaml": None}), \
+                    mock.patch.object(config.sys, "prefix", "/nonexistent-prefix"), \
+                    mock.patch.object(config.sys, "argv",
+                                      [str(entry), "status", "--json"]), \
+                    mock.patch.object(config.os, "execv", side_effect=_fake_execv), \
+                    mock.patch.object(config, "ENTRY", entry), \
+                    mock.patch.object(config, "CLI_VENV",
+                                      Path(directory) / ".cli-venv"), \
+                    mock.patch.object(config, "die",
+                                      lambda *a, **k: (_ for _ in ()).throw(
+                                          AssertionError("must exec, not die"))):
+                with self.assertRaises(SystemExit) as raised:
+                    config.ensure_pyyaml()
+
+        self.assertEqual(raised.exception.code, 51)
+        path, argv = replayed[0]
+        self.assertTrue(path.endswith("python"))
+        self.assertEqual(argv[1:], [str(entry), "status", "--json"])
 
     def test_restore_help_exposes_explicit_noninteractive_confirmation(self):
         r = run_sb("restore", "--help")

@@ -23,6 +23,10 @@ The module and class forms are useful while iterating on one area; `discover -p`
 selects test files by their filename pattern. These commands run Sandbox's stdlib
 `unittest` suite from this checkout and do not provision a WordPress instance.
 
+Any interpreter may run the suite, but it must have PyYAML (the `.cli-venv`
+already does). A bare interpreter without PyYAML fails fast with guidance; the
+CLI never re-execs a foreign process to bootstrap it.
+
 `sb test` is a different command. Its `auto` plugin mode resolves to `unit` or
 `integration`; `integration` provisions and runs the external WordPress/PHPUnit
 harness, while `unit` runs plugin unit PHPUnit with the runner tools. Declared Compose modes and `matrix` are separate

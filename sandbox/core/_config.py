@@ -50,7 +50,21 @@ def ensure_pyyaml() -> None:
     # Compare sys.prefix (not sys.executable, which resolves to the underlying
     # interpreter binary that the venv symlinks to).
     if Path(sys.prefix).resolve() != CLI_VENV.resolve():
-        os.execv(str(cli_py), [str(cli_py), str(ENTRY), *sys.argv[1:]])
+        # Replay the original argv only when this process genuinely is the
+        # Sandbox CLI entry point. A foreign caller (unittest discovery, an
+        # embedded interpreter, another tool importing this package) cannot be
+        # replaced by an argv replay it never expressed: os.execv would swap
+        # the whole process for a bogus `sb <foreign argv>` invocation and
+        # silently kill the host process.
+        try:
+            invoked_as_cli = Path(sys.argv[0] or "").resolve() == ENTRY.resolve()
+        except OSError:
+            invoked_as_cli = False
+        if invoked_as_cli:
+            os.execv(str(cli_py), [str(cli_py), str(ENTRY), *sys.argv[1:]])
+        die("PyYAML is required but unavailable outside the Sandbox CLI venv; "
+            "run commands through ./sb (or .cli-venv/bin/python), or install "
+            "pyyaml into the current interpreter.")
 
 
 def expand(value, vars_: dict) -> object:

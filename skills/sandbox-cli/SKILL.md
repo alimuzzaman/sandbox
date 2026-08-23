@@ -87,8 +87,10 @@ sb job-output JOB_ID --remote scaleway-sandbox --stream combined \
 
 The host-local worker honors the same directory-index mode as the direct
 remote adapter. `--refresh` reserves the budget for the indexed filesystem
-walk instead of repeating per-worktree `du` probes; `--fast` reads the saved
-index only and reports `cache_missing` when no index exists.
+walk instead of repeating per-worktree `du` probes, then resolves managed
+worktree, runtime, and Docker-volume records with one bounded multi-path
+`du -s` pass; `--fast` reads the saved index only and reports `cache_missing`
+when no index exists.
 
 `--detach` returns only after the durable row is accepted. Retain the job ID,
 poll until a terminal lifecycle, and inspect the retained JSONL progress/result

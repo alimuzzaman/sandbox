@@ -68,7 +68,7 @@ on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`
 ./sb resources status --remote scaleway-sandbox --fast
 ```
 
-- `--refresh` walks each selected filesystem to depth 6, keeping every row at
+- `--refresh` walks each selected filesystem to depth 4, keeping every row at
   or above 32 MiB plus every row under a managed root (`$SANDBOX_HOME`,
   `deploy-src`, `runtime`, the containerd store) at any size, then stores the
   result. Default budget 900s, of which the walk keeps 90%. A large or busy
@@ -82,7 +82,9 @@ on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`
 - Detached host-local workers honor the same `--refresh`/`--fast` cache mode.
   A refresh does not spend its budget repeating one `du` per managed path
   before the filesystem walk; the completed or partial frontier is persisted
-  atomically and subsequent cache reads report its provenance.
+  atomically. After the walk, one bounded multi-path `du -s` pass resolves
+  worktree, runtime, and Docker-volume resource IDs; subsequent cache reads
+  replay those measurements with their provenance.
 - Plain `--deep` reuses a cached index younger than 6 hours and otherwise walks
   within its own budget, writing whatever it completed. A truncated walk is
   never allowed to replace a complete one.
@@ -117,10 +119,10 @@ and result publication. Treat `partial`, `timed_out`, `failed`, or missing
 output as incomplete evidence and inspect the retained category coverage before
 interpreting any residual.
 
-Because the index already knows the size of every managed path, deep mode also
-reports host filesystem roots, Docker storage roots, the **containerd content
-store** (`/var/lib/containerd`, which `docker system df` never reports), and
-per-workspace `deploy-src` sizes without paying for one `du` per path.
+The indexed result reports host filesystem roots, Docker storage roots, and
+per-resource worktree, runtime, and Docker-volume sizes. The resource rows
+carry `directory_index` evidence so a later cache-only read can reproduce the
+same logical domain totals without another full inode walk.
 
 Sandbox-managed directories are named by their path relative to the managed
 root (`Sandbox home/deploy-src/<workspace>`); directories outside a managed root

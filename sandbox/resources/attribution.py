@@ -630,6 +630,7 @@ class DeepAttribution:
     reconciliation: AttributionReconciliation
     capacity_scope_id: str | None = None
     directory_index: dict | None = None
+    managed_root_measurements: tuple[dict, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in DEEP_STATES:
@@ -642,6 +643,24 @@ class DeepAttribution:
             not isinstance(self.capacity_scope_id, str) or not self.capacity_scope_id
         ):
             raise ValueError("capacity_scope_id must be a non-empty string or null")
+        for item in self.managed_root_measurements:
+            if not isinstance(item, dict):
+                raise ValueError("managed_root_measurements must contain objects")
+            if not isinstance(item.get("owner_id"), str) or not item["owner_id"]:
+                raise ValueError("managed root measurements require owner_id")
+            if item.get("size_state") not in {
+                "measured", "not_measured", "timed_out", "unavailable",
+            }:
+                raise ValueError("invalid managed root measurement state")
+            size = item.get("size_bytes")
+            if size is not None and (
+                isinstance(size, bool) or not isinstance(size, int) or size < 0
+            ):
+                raise ValueError("managed root size must be a non-negative integer")
+            if item.get("size_state") == "measured" and size is None:
+                raise ValueError("measured managed roots require size_bytes")
+            if item.get("size_state") != "measured" and size is not None:
+                raise ValueError("unmeasured managed roots cannot have size_bytes")
 
     def to_dict(self) -> dict:
         return redact({
@@ -653,6 +672,7 @@ class DeepAttribution:
             "reconciliation": self.reconciliation.to_dict(),
             "capacity_scope_id": self.capacity_scope_id,
             "directory_index": self.directory_index,
+            "managed_root_measurements": list(self.managed_root_measurements),
         })
 
     @classmethod
@@ -684,6 +704,10 @@ class DeepAttribution:
             directory_index=(
                 value.get("directory_index")
                 if isinstance(value.get("directory_index"), dict) else None
+            ),
+            managed_root_measurements=tuple(
+                item for item in value.get("managed_root_measurements") or ()
+                if isinstance(item, dict)
             ),
         )
 
@@ -1390,6 +1414,36 @@ def _directory_cache_rows(
     return rows
 
 
+def _managed_root_sizes(
+    output: str,
+    *,
+    multiplier: int,
+    managed_roots: Iterable[Any],
+) -> dict[str, int]:
+    """Extract exact root rows from one bounded multi-path ``du`` call."""
+    paths: dict[str, str] = {}
+    for record in managed_roots:
+        path = _managed_path(record)
+        owner_id = record.get("owner_id") if isinstance(record, dict) else None
+        if path is None or not isinstance(owner_id, str) or not owner_id:
+            continue
+        paths[os.path.normpath(str(path))] = owner_id
+    sizes: dict[str, int] = {}
+    for line in str(output or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            size = int(parts[0]) * int(multiplier)
+        except (TypeError, ValueError):
+            continue
+        path = os.path.normpath(parts[1].strip())
+        owner_id = paths.get(path)
+        if owner_id is not None and size >= 0:
+            sizes[owner_id] = size
+    return sizes
+
+
 def _directory_cache_payload(path: Path) -> dict | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1550,6 +1604,10 @@ class DeepAttributionCollector:
     ) -> DeepAttribution:
         started = self.monotonic()
         deadline = started + max(float(budget_seconds), 0.0)
+        managed_roots = tuple(
+            item for item in managed_roots
+            if isinstance(item, dict) and _managed_path(item) is not None
+        )
         # Interactive deep scans historically capped one directory command at
         # 120 seconds. That cap made a detached scan with a larger explicit
         # budget time out its primary host walk early, even though the durable
@@ -1622,6 +1680,7 @@ class DeepAttributionCollector:
         has_attributed_baseline = False
         attribution_rechecks: list[tuple[str, Any, int, tuple[str, ...]]] = []
         directory_indexes: dict[str, dict] = {}
+        managed_root_measurements: list[dict] = []
         cache_mode = str(directory_cache or "auto")
         cache_now = time.time()
 
@@ -1862,6 +1921,11 @@ class DeepAttributionCollector:
                             str(self.sandbox_home / "runtime"),
                             str(self.sandbox_home / "deploy-src"),
                             str(self.sandbox_home / "sb-src"),
+                            *tuple(
+                                str(_managed_path(item))
+                                for item in managed_roots
+                                if _managed_path(item) is not None
+                            ),
                         ),
                     )
                     directory_indexes[mount] = {
@@ -1952,6 +2016,104 @@ class DeepAttributionCollector:
                 *(("preferred_scanner_failed",) if preferred_scanner_failed else ()),
             ),
         ))
+
+        # The bounded root walk proves capacity ownership, but its depth is
+        # intentionally limited.  Measure every known managed root in one
+        # multi-path open-source ``du`` call so worktrees, runtime entries,
+        # and Docker volume mountpoints can be reconciled to their logical
+        # resource records without issuing one probe per record.
+        managed_sizes: dict[str, int] = {}
+        managed_source = "cache"
+        managed_stale = False
+        for entry in directory_indexes.values():
+            cached_rows = entry.get("rows") or ()
+            cached_sizes = _managed_root_sizes(
+                self._cached_directory_output(cached_rows),
+                multiplier=1,
+                managed_roots=managed_roots,
+            )
+            managed_sizes.update(cached_sizes)
+            managed_stale = managed_stale or bool(entry.get("stale"))
+        managed_state = "complete" if managed_sizes else "not_measured"
+        if managed_roots and cache_mode != "cache_only" and self.monotonic() < deadline:
+            paths = tuple(dict.fromkeys(
+                str(_managed_path(item))
+                for item in managed_roots
+                if _managed_path(item) is not None
+            ))
+            if paths:
+                remaining = deadline - self.monotonic()
+                result = self._run(
+                    (*prefix, "du", "-k", "-s", *paths),
+                    deadline,
+                    min(60.0, max(1.0, remaining)),
+                )
+                measured = _managed_root_sizes(
+                    result.stdout,
+                    multiplier=1024,
+                    managed_roots=managed_roots,
+                )
+                managed_sizes.update(measured)
+                managed_source = "scan"
+                managed_state = (
+                    "complete" if result.returncode == 0
+                    else "partial" if measured else self._state(result.returncode)
+                )
+        if managed_source == "scan" and managed_sizes:
+            for item in managed_roots:
+                owner_id = item.get("owner_id")
+                path = _managed_path(item)
+                size = managed_sizes.get(owner_id)
+                if not isinstance(owner_id, str) or path is None or size is None:
+                    continue
+                mount = _mount_for(path, rows)
+                if mount is None:
+                    normalized_path = os.path.normpath(os.path.realpath(str(path)))
+                    matches = [
+                        candidate for candidate in directory_indexes
+                        if normalized_path == os.path.normpath(os.path.realpath(candidate))
+                        or normalized_path.startswith(
+                            os.path.normpath(os.path.realpath(candidate)).rstrip(os.sep)
+                            + os.sep
+                        )
+                    ]
+                    mount = max(matches, key=len, default=None)
+                entry = directory_indexes.get(mount)
+                if entry is None or not entry.get("complete"):
+                    continue
+                cached_rows = [
+                    [int(row[0]), str(row[1])]
+                    for row in entry.get("rows") or ()
+                    if isinstance(row, (list, tuple)) and len(row) == 2
+                ]
+                normalized = os.path.normpath(str(path))
+                cached_rows = [
+                    row for row in cached_rows
+                    if os.path.normpath(str(row[1])) != normalized
+                ]
+                cached_rows.append([int(size), str(path)])
+                cached_rows.sort(key=lambda row: (int(row[0]), str(row[1])), reverse=True)
+                entry["rows"] = cached_rows[:_DIRECTORY_CACHE_MAX_ROWS]
+                self._directory_cache_store(
+                    mount, rows=entry["rows"], complete=True, now=cache_now,
+                )
+        for item in managed_roots:
+            owner_id = item.get("owner_id")
+            if not isinstance(owner_id, str) or not owner_id:
+                continue
+            size = managed_sizes.get(owner_id)
+            managed_root_measurements.append({
+                "owner_id": owner_id,
+                "kind": str(item.get("kind") or "managed_root"),
+                "size_state": "measured" if size is not None else (
+                    "timed_out" if managed_state == "timed_out" else
+                    "unavailable"
+                ),
+                "size_bytes": size,
+                "source": managed_source,
+                "stale": managed_stale,
+                "status": managed_state,
+            })
 
         if progress:
             progress("deep_deleted_open")
@@ -2205,4 +2367,5 @@ class DeepAttributionCollector:
                 *sorted(item.filesystem_id for item in filesystems if item.selected),
             ),
             directory_index=directory_index,
+            managed_root_measurements=tuple(managed_root_measurements),
         )

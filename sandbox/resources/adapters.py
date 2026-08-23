@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -471,6 +471,46 @@ class LocalResourceAdapter:
                 directory_allocated_bytes=0,
             ),
         )
+
+    @staticmethod
+    def _apply_deep_measurements(
+        resources: Iterable[ResourceObservation],
+        deep_attribution: DeepAttribution,
+    ) -> list[ResourceObservation]:
+        measurements = {
+            item.get("owner_id"): item
+            for item in deep_attribution.managed_root_measurements
+            if isinstance(item, dict) and isinstance(item.get("owner_id"), str)
+        }
+        updated = []
+        for resource in resources:
+            measurement = measurements.get(resource.resource_id)
+            if not measurement or measurement.get("size_state") != "measured":
+                updated.append(resource)
+                continue
+            size = measurement.get("size_bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                updated.append(resource)
+                continue
+            updated.append(replace(
+                resource,
+                size_state="measured",
+                size_bytes=size,
+                reclaimable_bytes=(
+                    size if resource.classification in {
+                        "disposable_cache", "stale_candidate",
+                    } else 0
+                ),
+                evidence=tuple(dict.fromkeys(
+                    resource.evidence + (
+                        "deep_directory_du",
+                        "stale_directory_index"
+                        if measurement.get("stale") else "directory_index",
+                    )
+                )),
+                errors=(),
+            ))
+        return updated
 
     def _run(self, argv, timeout: float):
         command = tuple(str(item) for item in argv)
@@ -1321,6 +1361,18 @@ class LocalResourceAdapter:
         deep_attribution = None
         deep_outcomes = []
         if deep:
+            managed_roots = list(self._deep_managed_roots())
+            managed_roots.extend({
+                "path": item.locator,
+                "kind": item.kind,
+                "owner_id": item.resource_id,
+            } for item in path_resources)
+            managed_roots.extend({
+                "path": str(volume.get("Mountpoint") or ""),
+                "kind": "volume",
+                "owner_id": _resource_id("volume", str(volume.get("Name"))),
+            } for volume in inventory.get("volumes", ())
+                if volume.get("Name") and volume.get("Mountpoint"))
             try:
                 capacity_snapshots = self._deep_capacity_snapshots(deadline)
             except Exception:
@@ -1349,7 +1401,7 @@ class LocalResourceAdapter:
                         capacity=capacity,
                         budget_seconds=remaining,
                         progress=progress,
-                        managed_roots=self._deep_managed_roots(),
+                        managed_roots=tuple(managed_roots),
                         capacity_snapshots=capacity_snapshots,
                         cancelled=cancelled,
                         directory_cache=directory_cache,
@@ -1365,6 +1417,10 @@ class LocalResourceAdapter:
                         "status": "partial",
                         "reason": "deep_collector_failed",
                     })
+            if deep_attribution is not None:
+                resources = self._apply_deep_measurements(
+                    resources, deep_attribution,
+                )
         capacity_scope_id = getattr(
             deep_attribution, "capacity_scope_id", None,
         )

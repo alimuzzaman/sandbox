@@ -17,6 +17,7 @@ from sandbox.resources.attribution import (
     DeepAttribution,
     FilesystemObservation,
     apply_cleanup_guidance,
+    _managed_root_sizes,
     parse_df_output,
     parse_docker_disk_usage,
     parse_du_output,
@@ -46,6 +47,17 @@ class FakeRunner:
 
 
 class TestDeepAttributionModels(unittest.TestCase):
+    def test_managed_root_sizes_parse_one_du_batch(self):
+        sizes = _managed_root_sizes(
+            "12 /srv/worktree\n7 /srv/runtime\n",
+            multiplier=1024,
+            managed_roots=(
+                {"path": "/srv/worktree", "kind": "worktree", "owner_id": "worktree-1"},
+                {"path": "/srv/runtime", "kind": "runtime", "owner_id": "runtime-1"},
+            ),
+        )
+        self.assertEqual(sizes, {"worktree-1": 12 * 1024, "runtime-1": 7 * 1024})
+
     def test_network_capacity_pressure_thresholds_and_safe_recovery(self):
         def network(index, classification="active", owner_kind="project"):
             return SimpleNamespace(
@@ -1027,10 +1039,49 @@ class TestDeepAttributionCollector(unittest.TestCase):
         self.assertEqual(root.status, "partial")
         self.assertEqual(root.hardlink_deduplication, "partial")
 
+    def test_collector_measures_managed_roots_in_one_batch(self):
+        runner = FakeRunner([
+            (('df', '-Pk'), (0,
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/root 1000000 800000 200000 80% /fixture\n", "")),
+            (('docker', 'info'), (127, "", "unavailable")),
+            (('du', '-x'), (0, "800000\t/fixture\n", "")),
+            (('du', '-k', '-s'), (0,
+                "120\t/fixture/worktree\n80\t/fixture/runtime\n", "")),
+            (('docker', 'system', 'df'), (127, "", "unavailable")),
+        ])
+        deep = DeepAttributionCollector(
+            runner, host_root=Path('/fixture'), sandbox_home=Path('/fixture/sandbox'),
+            which=lambda _name: None,
+        ).collect(
+            capacity={
+                "total_bytes": 1000000 * 1024,
+                "used_bytes": 800000 * 1024,
+                "available_bytes": 200000 * 1024,
+            },
+            budget_seconds=30,
+            managed_roots=(
+                {"path": "/fixture/worktree", "kind": "worktree", "owner_id": "worktree-1"},
+                {"path": "/fixture/runtime", "kind": "runtime", "owner_id": "runtime-1"},
+            ),
+        )
+        self.assertEqual(
+            {
+                item["owner_id"]: item["size_bytes"]
+                for item in deep.managed_root_measurements
+            },
+            {"worktree-1": 120 * 1024, "runtime-1": 80 * 1024},
+        )
+
     def test_directory_refresh_persists_and_cache_only_replays_without_walk(self):
         with tempfile.TemporaryDirectory() as root:
             home = Path(root)
             mount = str(home)
+            managed = {
+                "path": str((home / "managed-worktree").resolve()),
+                "kind": "worktree",
+                "owner_id": "worktree-1",
+            }
 
             def runner_for(*, include_du):
                 responses = [
@@ -1044,6 +1095,8 @@ class TestDeepAttributionCollector(unittest.TestCase):
                     responses.insert(2, (('du', '-x'), (0,
                         f"800000\t{mount}\n"
                         f"400000\t{mount}/deploy-src\n", "")))
+                    responses.insert(3, (('du', '-k', '-s'), (0,
+                        f"120\t{managed['path']}\n", "")))
                 return FakeRunner(responses)
 
             first_runner = runner_for(include_du=True)
@@ -1055,6 +1108,7 @@ class TestDeepAttributionCollector(unittest.TestCase):
                           "used_bytes": 800000 * 1024,
                           "available_bytes": 200000 * 1024},
                 budget_seconds=10, directory_cache="refresh",
+                managed_roots=(managed,),
             )
             self.assertEqual(first.directory_index["source"], "scan")
             self.assertTrue(first.directory_index["complete"])
@@ -1068,6 +1122,7 @@ class TestDeepAttributionCollector(unittest.TestCase):
                           "used_bytes": 800000 * 1024,
                           "available_bytes": 200000 * 1024},
                 budget_seconds=10, directory_cache="cache_only",
+                managed_roots=(managed,),
             )
             self.assertEqual(second.directory_index["source"], "cache")
             self.assertTrue(second.directory_index["complete"])
@@ -1075,6 +1130,10 @@ class TestDeepAttributionCollector(unittest.TestCase):
                 command[:2] == ('du', '-x')
                 for command, _timeout in second_runner.calls
             ))
+            self.assertEqual(
+                second.managed_root_measurements[0]["size_bytes"],
+                120 * 1024,
+            )
 
     def test_nonzero_du_with_rows_is_retained_as_partial_directory_evidence(self):
         runner = FakeRunner([

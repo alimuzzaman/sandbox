@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from sandbox.resources.models import (
 from sandbox.resources.plans import PlanStore
 from sandbox.resources.service import ResourceService
 from sandbox.services.process import ProcessResult
-from tests.resource_fixtures import NOW, deep_attribution
+from tests.resource_fixtures import NOW, deep_attribution, observation
 
 
 class FakeRunner:
@@ -276,12 +277,13 @@ class TestLocalResourceAdapter(unittest.TestCase):
             "used_bytes": 80 * 1024,
             "available_bytes": 20 * 1024,
         })
-        self.assertEqual(
-            {item["kind"] for item in received["managed_roots"]},
-            {"registry_root", "job_root"},
+        self.assertTrue(
+            {"registry_root", "job_root"} <= {
+                item["kind"] for item in received["managed_roots"]
+            },
         )
         self.assertTrue(all(
-            item["owner_id"].startswith("managed_root-")
+            item["owner_id"].startswith(("managed_root-", "worktree-", "download_cache-"))
             for item in received["managed_roots"]
         ))
 
@@ -315,6 +317,24 @@ class TestLocalResourceAdapter(unittest.TestCase):
             command[:2] == ("du", "-sk") and str(self.home) in command
             for command, _timeout in runner.calls
         ))
+
+    def test_deep_measurements_fill_logical_resource_sizes(self):
+        resource = observation(
+            resource_id="worktree-1", kind="worktree",
+            classification="unverified", size_bytes=None,
+            locator="/managed/worktree",
+        )
+        deep = replace(deep_attribution(), managed_root_measurements=(
+            {
+                "owner_id": "worktree-1", "kind": "worktree",
+                "size_state": "measured", "size_bytes": 1234,
+                "source": "scan", "stale": False, "status": "complete",
+            },
+        ))
+        updated = LocalResourceAdapter._apply_deep_measurements([resource], deep)
+        self.assertEqual(updated[0].size_state, "measured")
+        self.assertEqual(updated[0].size_bytes, 1234)
+        self.assertIn("deep_directory_du", updated[0].evidence)
 
     def test_pre_snapshot_failure_does_not_discard_collector_evidence(self):
         received = {}

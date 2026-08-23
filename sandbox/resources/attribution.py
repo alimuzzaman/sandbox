@@ -763,6 +763,9 @@ _REMOTE_FILESYSTEMS = frozenset({
     "9p", "afpfs", "cifs", "fuse.sshfs", "nfs", "nfs4", "smbfs", "sshfs",
 })
 _SAFE_MOUNT_FLAGS = frozenset({"nodev", "noexec", "nosuid"})
+_DIRECTORY_CACHE_TTL = 6 * 60 * 60
+_DIRECTORY_CACHE_MIN_BYTES = 32 * 1024 * 1024
+_DIRECTORY_CACHE_MAX_ROWS = 20_000
 
 
 def _capacity_scope_identity(source: str, filesystem_type: str) -> str:
@@ -1125,7 +1128,11 @@ def parse_lsof_fields(
             owner_kind="process",
             owner_id=pid,
             observed_bytes=size,
-            capacity_accounted=mapped_filesystem is not None,
+            # Apparent size is useful diagnostic evidence but is not physical
+            # allocation. Only allocated-block evidence may reduce residual.
+            capacity_accounted=(
+                mapped_filesystem is not None and all_allocated
+            ),
             overlap="none",
             activity="active",
             guidance="manual",
@@ -1345,6 +1352,67 @@ def _mount_for(path: Path, rows: list[dict]) -> str | None:
     return max(matches, key=len) if matches else None
 
 
+def _directory_cache_rows(
+    output: str,
+    *,
+    multiplier: int,
+    keep_prefixes: Iterable[str] = (),
+) -> list[list[object]]:
+    """Keep a bounded, path-ranked directory index from du/gdu output.
+
+    The cache is an observation aid, not cleanup authority.  Retaining only
+    material rows plus managed prefixes keeps the host-local durable result
+    small while preserving enough evidence to answer the next status request
+    without another full inode walk.
+    """
+    prefixes = tuple(
+        str(item).rstrip(os.sep) for item in keep_prefixes if str(item)
+    )
+    rows: list[list[object]] = []
+    for line in str(output or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            measured = int(parts[0]) * int(multiplier)
+        except (TypeError, ValueError):
+            continue
+        path = parts[1].strip()
+        if measured < _DIRECTORY_CACHE_MIN_BYTES and not any(
+            path == prefix or path.startswith(prefix + os.sep)
+            for prefix in prefixes
+        ):
+            continue
+        rows.append([max(measured, 0), path])
+        if len(rows) >= _DIRECTORY_CACHE_MAX_ROWS:
+            break
+    rows.sort(key=lambda item: (int(item[0]), str(item[1])), reverse=True)
+    return rows
+
+
+def _directory_cache_payload(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) and isinstance(
+        payload.get("mounts"), dict,
+    ) else None
+
+
+def _write_directory_cache(path: Path, payload: dict) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        staging = path.with_name(path.name + ".staging")
+        staging.write_text(
+            json.dumps(payload, separators=(",", ":")), encoding="utf-8",
+        )
+        os.replace(staging, path)
+        return True
+    except (OSError, UnicodeError, ValueError, AttributeError, RuntimeError):
+        return False
+
+
 class DeepAttributionCollector:
     """Bounded host collector; command selection is read-only and explicit."""
 
@@ -1377,6 +1445,76 @@ class DeepAttributionCollector:
     def _state(returncode: int) -> str:
         return "timed_out" if returncode == 124 else "unavailable"
 
+    def _directory_cache_path(self) -> Path:
+        return self.sandbox_home / "runtime" / "resources" / "directory-index.json"
+
+    def _directory_cache_read(self) -> dict | None:
+        return _directory_cache_payload(self._directory_cache_path())
+
+    def _directory_cache_lookup(
+        self, mount: str, *, mode: str, now: float,
+    ) -> dict | None:
+        if mode == "refresh":
+            return None
+        payload = self._directory_cache_read()
+        entry = (payload or {}).get("mounts", {}).get(mount)
+        if not isinstance(entry, dict) or not isinstance(entry.get("rows"), list):
+            return {
+                "source": "cache_missing", "complete": False, "stale": True,
+                "age_seconds": None, "rows": [],
+            } if mode == "cache_only" else None
+        try:
+            created = float(entry.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created = 0
+        age = max(now - created, 0)
+        fresh = age <= _DIRECTORY_CACHE_TTL
+        if mode == "cache_only" or fresh:
+            rows = [
+                [int(item[0]), str(item[1])]
+                for item in entry["rows"]
+                if isinstance(item, (list, tuple)) and len(item) == 2
+                and isinstance(item[0], int) and item[0] >= 0
+                and isinstance(item[1], str) and item[1]
+            ]
+            return {
+                "source": "cache", "complete": bool(entry.get("complete")),
+                "stale": not fresh, "age_seconds": int(age), "rows": rows,
+            }
+        return None
+
+    def _directory_cache_store(
+        self, mount: str, *, rows: list[list[object]], complete: bool,
+        now: float,
+    ) -> bool:
+        path = self._directory_cache_path()
+        payload = self._directory_cache_read() or {
+            "schema_version": 1, "mounts": {},
+        }
+        mounts = payload.setdefault("mounts", {})
+        previous = mounts.get(mount)
+        if (
+            isinstance(previous, dict) and previous.get("complete")
+            and not complete
+        ):
+            return False
+        mounts[mount] = {
+            "created_at": now, "complete": bool(complete), "rows": rows,
+        }
+        payload["schema_version"] = 1
+        return _write_directory_cache(path, payload)
+
+    @staticmethod
+    def _cached_directory_output(rows: Iterable[list[object]]) -> str:
+        # Cached rows are normalized to allocated bytes, which is the gdu
+        # parser's unit. This keeps cache and fresh-scan reconciliation paths
+        # identical without exposing paths outside the existing finding model.
+        return "\n".join(
+            f"{int(item[0])} {item[1]}"
+            for item in rows
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        )
+
     def _inventory(self, deadline: float, capacity: dict) -> tuple[list[dict], str]:
         result = self._run(("df", "-Pk"), deadline, 5)
         rows = parse_df_output(result.stdout) if result.returncode == 0 else []
@@ -1408,6 +1546,7 @@ class DeepAttributionCollector:
         managed_roots: Iterable[Any] = (),
         capacity_snapshots: dict[str, dict] | None = None,
         cancelled=False,
+        directory_cache: str | None = None,
     ) -> DeepAttribution:
         started = self.monotonic()
         deadline = started + max(float(budget_seconds), 0.0)
@@ -1482,6 +1621,9 @@ class DeepAttributionCollector:
         attributed_baseline = 0
         has_attributed_baseline = False
         attribution_rechecks: list[tuple[str, Any, int, tuple[str, ...]]] = []
+        directory_indexes: dict[str, dict] = {}
+        cache_mode = str(directory_cache or "auto")
+        cache_now = time.time()
 
         def is_cancelled() -> bool:
             return bool(cancelled() if callable(cancelled) else cancelled)
@@ -1537,11 +1679,57 @@ class DeepAttributionCollector:
             category_started = self.monotonic()
             reason = None
             nested_mounts: tuple[str, ...] = ()
+            cache_entry = self._directory_cache_lookup(
+                mount, mode=cache_mode, now=cache_now,
+            ) if selected else None
             if selected and is_cancelled():
                 status, reason = "cancelled", "request_cancelled"
             elif selected and filesystem_scope_id in scanned_filesystems:
                 status = "not_selected"
                 reason = "duplicate_filesystem_mount"
+            elif selected and cache_entry is not None:
+                scanned_filesystems.add(filesystem_scope_id)
+                directory_indexes[mount] = cache_entry
+                if cache_entry["source"] == "cache":
+                    if progress:
+                        progress("deep_directory_cache")
+                    try:
+                        parsed, observed = parse_gdu_output(
+                            self._cached_directory_output(cache_entry["rows"]),
+                            filesystem_id=filesystem_id,
+                            root=mount,
+                            limit=100,
+                            safe_labels={
+                                str(self.sandbox_home): "Sandbox home",
+                                str(self.sandbox_home.parent):
+                                    "Sandbox host account",
+                                str(self.sandbox_home / "runtime"):
+                                    "Sandbox runtime data",
+                                str(self.sandbox_home / "deploy-src"):
+                                    "Sandbox deployment sources",
+                                str(self.sandbox_home / "sb-src"):
+                                    "Sandbox tool source",
+                            },
+                        )
+                    except Exception:
+                        parsed, observed = (), None
+                    if observed is None:
+                        status, reason = "unavailable", "directory_index_parse_failed"
+                    else:
+                        findings.extend(parsed)
+                        status = "complete" if (
+                            cache_entry["complete"] and not cache_entry["stale"]
+                        ) else "partial"
+                        reason = (
+                            None if status == "complete" else
+                            "directory_index_cache_stale"
+                            if cache_entry["stale"] else
+                            "directory_index_cache_partial"
+                        )
+                        hardlinks = "confirmed" if status == "complete" else "partial"
+                        if filesystem_scope_id not in accounted_filesystems:
+                            directory_allocated += observed
+                            accounted_filesystems.add(filesystem_scope_id)
             elif selected and self.monotonic() < deadline:
                 scanned_filesystems.add(filesystem_scope_id)
                 if progress:
@@ -1606,45 +1794,57 @@ class DeepAttributionCollector:
                     result = self._run(argv, deadline, directory_max)
                     parser = parse_du_output
                     hardlinks = "confirmed"
-                if result.returncode == 0 or (
-                    result.returncode == 124 and result.stdout.strip()
-                ):
-                    parsed, observed = parser(
-                        result.stdout,
-                        filesystem_id=filesystem_id,
-                        root=scan_root,
-                        limit=100,
-                        safe_labels={
-                            str(self.sandbox_home): "Sandbox home",
-                            str(self.sandbox_home.parent):
-                                "Sandbox host account",
-                            str(self.sandbox_home / "runtime"):
-                                "Sandbox runtime data",
-                            str(self.sandbox_home / "deploy-src"):
-                                "Sandbox deployment sources",
-                            str(self.sandbox_home / "sb-src"):
-                                "Sandbox tool source",
-                            **({
-                                str(docker_root): "Docker data root",
-                                str(docker_root / "overlay2"):
-                                    "Docker image and container layers",
-                                str(docker_root / "volumes"):
-                                    "Docker volume data",
-                                str(docker_root / "buildkit"):
-                                    "Docker build cache data",
-                                str(docker_root / "containers"):
-                                    "Docker container metadata and logs",
-                                str(docker_root / "image"):
-                                    "Docker image metadata",
-                            } if docker_root else {}),
-                        },
-                    )
+                parsed, observed = parser(
+                    result.stdout,
+                    filesystem_id=filesystem_id,
+                    root=scan_root,
+                    limit=100,
+                    safe_labels={
+                        str(self.sandbox_home): "Sandbox home",
+                        str(self.sandbox_home.parent):
+                            "Sandbox host account",
+                        str(self.sandbox_home / "runtime"):
+                            "Sandbox runtime data",
+                        str(self.sandbox_home / "deploy-src"):
+                            "Sandbox deployment sources",
+                        str(self.sandbox_home / "sb-src"):
+                            "Sandbox tool source",
+                        **({
+                            str(docker_root): "Docker data root",
+                            str(docker_root / "overlay2"):
+                                "Docker image and container layers",
+                            str(docker_root / "volumes"):
+                                "Docker volume data",
+                            str(docker_root / "buildkit"):
+                                "Docker build cache data",
+                            str(docker_root / "containers"):
+                                "Docker container metadata and logs",
+                            str(docker_root / "image"):
+                                "Docker image metadata",
+                        } if docker_root else {}),
+                    },
+                )
+                # ``du`` can finish with a non-zero status after reporting
+                # useful rows (for example, one unreadable pseudo-tree or a
+                # transient inode disappearing during the walk).  Throwing
+                # that output away was the reason a multi-hundred-gigabyte
+                # host appeared wholly UNKNOWN.  Preserve parseable output as
+                # partial evidence; only an empty/unparseable stream remains
+                # unavailable.
+                usable_output = bool(result.stdout.strip()) and (
+                    observed > 0 or bool(parsed)
+                )
+                if result.returncode == 0 or usable_output:
                     findings.extend(parsed)
                     status = (
                         "complete" if result.returncode == 0 else "partial"
                     )
                     if status == "partial":
-                        reason = "directory_measurement_timed_out_with_partial"
+                        reason = (
+                            "directory_measurement_timed_out_with_partial"
+                            if result.returncode == 124
+                            else "directory_measurement_failed_with_partial"
+                        )
                         hardlinks = "partial"
                     if filesystem_scope_id not in accounted_filesystems:
                         directory_allocated += observed
@@ -1653,6 +1853,25 @@ class DeepAttributionCollector:
                             attribution_rechecks.append((
                                 scan_root, parser, observed, nested_mounts,
                             ))
+                    cache_rows = _directory_cache_rows(
+                        result.stdout,
+                        multiplier=1 if parser is parse_gdu_output else 1024,
+                        keep_prefixes=(
+                            str(self.sandbox_home),
+                            str(self.sandbox_home.parent),
+                            str(self.sandbox_home / "runtime"),
+                            str(self.sandbox_home / "deploy-src"),
+                            str(self.sandbox_home / "sb-src"),
+                        ),
+                    )
+                    directory_indexes[mount] = {
+                        "source": "scan", "complete": status == "complete",
+                        "stale": False, "age_seconds": 0, "rows": cache_rows,
+                    }
+                    self._directory_cache_store(
+                        mount, rows=cache_rows, complete=status == "complete",
+                        now=cache_now,
+                    )
                 else:
                     status = self._state(result.returncode)
                     reason = (
@@ -1824,8 +2043,18 @@ class DeepAttributionCollector:
         if progress:
             progress("deep_docker")
         docker_started = self.monotonic()
+        # Engine accounting is a diagnostic phase, not a reason to discard
+        # the directory evidence.  Give the open-source Docker CLI a bounded
+        # share of a large explicit budget (capped for predictable latency),
+        # while retaining the historical 30-second floor for interactive
+        # requests.
+        docker_max = min(
+            max(30.0, float(budget_seconds) * 0.2),
+            300.0,
+        )
         docker_result = None if is_cancelled() else self._run(
-            ("docker", "system", "df", "-v", "--format", "json"), deadline, 30,
+            ("docker", "system", "df", "-v", "--format", "json"),
+            deadline, docker_max,
         )
         if docker_result is None:
             logical_bytes = 0
@@ -1933,6 +2162,33 @@ class DeepAttributionCollector:
             capacity_drift_bytes=capacity_drift,
             attributed_drift_bytes=attributed_drift,
         )
+        index_entries = tuple(directory_indexes.values())
+        if not index_entries:
+            directory_index = {
+                "source": "not_measured", "complete": False, "stale": True,
+                "age_seconds": None, "row_count": 0,
+            }
+        else:
+            sources = {str(item.get("source")) for item in index_entries}
+            source = next(iter(sources)) if len(sources) == 1 else "mixed"
+            ages = [
+                int(item["age_seconds"])
+                for item in index_entries
+                if isinstance(item.get("age_seconds"), int)
+            ]
+            directory_index = {
+                "source": source,
+                "complete": all(bool(item.get("complete")) for item in index_entries),
+                "stale": any(bool(item.get("stale")) for item in index_entries),
+                "age_seconds": max(ages) if ages else None,
+                "row_count": sum(len(item.get("rows") or ()) for item in index_entries),
+            }
+        directory_index.update({
+            "depth": 4,
+            "minimum_row_bytes": _DIRECTORY_CACHE_MIN_BYTES,
+            "ttl_seconds": _DIRECTORY_CACHE_TTL,
+            "mode": cache_mode,
+        })
         incomplete = any(
             item.status not in {"complete", "not_selected"}
             for item in coverage
@@ -1948,4 +2204,5 @@ class DeepAttributionCollector:
                 "capacity-scope-set",
                 *sorted(item.filesystem_id for item in filesystems if item.selected),
             ),
+            directory_index=directory_index,
         )

@@ -79,6 +79,10 @@ on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`
 - `--fast` never walks and never inventories the engine. It answers from the
   cache, or says `directory_index.source = cache_missing` and tells the
   operator to run `--refresh`. Default budget 10s.
+- Detached host-local workers honor the same `--refresh`/`--fast` cache mode.
+  A refresh does not spend its budget repeating one `du` per managed path
+  before the filesystem walk; the completed or partial frontier is persisted
+  atomically and subsequent cache reads report its provenance.
 - Plain `--deep` reuses a cached index younger than 6 hours and otherwise walks
   within its own budget, writing whatever it completed. A truncated walk is
   never allowed to replace a complete one.

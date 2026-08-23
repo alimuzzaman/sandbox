@@ -285,6 +285,37 @@ class TestLocalResourceAdapter(unittest.TestCase):
             for item in received["managed_roots"]
         ))
 
+    def test_deep_refresh_reaches_local_collector_and_skips_duplicate_path_walks(self):
+        received = {}
+
+        class CapturingCollector:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def collect(self, **kwargs):
+                received.update(kwargs)
+                return deep_attribution()
+
+        runner = FakeRunner({
+            ("df", "-Pk"): response(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                f"/dev/fixture 100 80 20 80% {self.home}\n",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW,
+            host_root=self.home, deep_collector_factory=CapturingCollector,
+        )
+        adapter.observe(
+            thorough=True, deep=True, budget_seconds=30,
+            directory_cache="refresh",
+        )
+        self.assertEqual(received["directory_cache"], "refresh")
+        self.assertFalse(any(
+            command[:2] == ("du", "-sk") and str(self.home) in command
+            for command, _timeout in runner.calls
+        ))
+
     def test_pre_snapshot_failure_does_not_discard_collector_evidence(self):
         received = {}
 

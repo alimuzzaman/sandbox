@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -409,6 +410,7 @@ class TestDeepAttributionParsers(unittest.TestCase):
         self.assertNotIn("token=abc", rendered)
         self.assertNotIn("secret", rendered)
         self.assertIn("process 123", rendered)
+        self.assertTrue(all(not item.capacity_accounted for item in findings))
 
     def test_lsof_uses_allocated_blocks_and_groups_by_filesystem_process(self):
         output = "\n".join((
@@ -1024,6 +1026,83 @@ class TestDeepAttributionCollector(unittest.TestCase):
         root = next(item for item in deep.filesystems if item.selected)
         self.assertEqual(root.status, "partial")
         self.assertEqual(root.hardlink_deduplication, "partial")
+
+    def test_directory_refresh_persists_and_cache_only_replays_without_walk(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            mount = str(home)
+
+            def runner_for(*, include_du):
+                responses = [
+                    (('df', '-Pk'), (0,
+                        "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        f"/dev/root 1000000 800000 200000 80% {mount}\n", "")),
+                    (('docker', 'info'), (127, "", "unavailable")),
+                    (('docker', 'system', 'df'), (127, "", "unavailable")),
+                ]
+                if include_du:
+                    responses.insert(2, (('du', '-x'), (0,
+                        f"800000\t{mount}\n"
+                        f"400000\t{mount}/deploy-src\n", "")))
+                return FakeRunner(responses)
+
+            first_runner = runner_for(include_du=True)
+            first = DeepAttributionCollector(
+                first_runner, host_root=home, sandbox_home=home,
+                which=lambda _name: None,
+            ).collect(
+                capacity={"total_bytes": 1000000 * 1024,
+                          "used_bytes": 800000 * 1024,
+                          "available_bytes": 200000 * 1024},
+                budget_seconds=10, directory_cache="refresh",
+            )
+            self.assertEqual(first.directory_index["source"], "scan")
+            self.assertTrue(first.directory_index["complete"])
+
+            second_runner = runner_for(include_du=False)
+            second = DeepAttributionCollector(
+                second_runner, host_root=home, sandbox_home=home,
+                which=lambda _name: None,
+            ).collect(
+                capacity={"total_bytes": 1000000 * 1024,
+                          "used_bytes": 800000 * 1024,
+                          "available_bytes": 200000 * 1024},
+                budget_seconds=10, directory_cache="cache_only",
+            )
+            self.assertEqual(second.directory_index["source"], "cache")
+            self.assertTrue(second.directory_index["complete"])
+            self.assertFalse(any(
+                command[:2] == ('du', '-x')
+                for command, _timeout in second_runner.calls
+            ))
+
+    def test_nonzero_du_with_rows_is_retained_as_partial_directory_evidence(self):
+        runner = FakeRunner([
+            (('df', '-Pk'), (0,
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/root 1000000 800000 200000 80% /fixture\n", "")),
+            (('docker', 'info'), (127, "", "unavailable")),
+            (('du', '-x'), (1,
+                "500000\t/fixture\n200000\t/fixture/large\n",
+                "du: cannot read transient entry\n")),
+            (('docker', 'system', 'df'), (127, "", "unavailable")),
+        ])
+        deep = DeepAttributionCollector(
+            runner, host_root=Path('/fixture'), sandbox_home=Path('/fixture/sandbox'),
+            which=lambda _name: None,
+        ).collect(
+            capacity={"total_bytes": 1000000 * 1024,
+                      "used_bytes": 800000 * 1024,
+                      "available_bytes": 200000 * 1024},
+            budget_seconds=10,
+        )
+        root = next(item for item in deep.filesystems if item.selected)
+        self.assertEqual(root.status, "partial")
+        self.assertEqual(root.observed_allocated_bytes, 500000 * 1024)
+        self.assertEqual(
+            next(item for item in deep.coverage if item.category == "directory").reason,
+            "directory_measurement_failed_with_partial",
+        )
 
 
 if __name__ == "__main__":

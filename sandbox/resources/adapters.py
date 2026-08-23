@@ -285,7 +285,7 @@ class ResourceAdapter(Protocol):
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
-        cancelled=False,
+        cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot: ...
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None: ...
@@ -513,13 +513,39 @@ class LocalResourceAdapter:
         def remaining(limit: float) -> float:
             return min(deadline - time.monotonic(), limit)
 
+        def inspect_batches(prefix, identifiers, *, batch_size=32):
+            """Inspect bounded batches and retain successful batches on failure."""
+            values = list(identifiers)
+            if not values:
+                return [], "complete"
+            collected = []
+            states = []
+            for start in range(0, len(values), batch_size):
+                if deadline - time.monotonic() <= 0:
+                    states.append("timed_out")
+                    break
+                payload, state = self._docker_json(
+                    (*prefix, *values[start:start + batch_size]),
+                    remaining(5),
+                )
+                states.append(state)
+                if isinstance(payload, list):
+                    collected.extend(payload)
+                if state != "complete":
+                    break
+            if states and all(item == "complete" for item in states):
+                return collected, "complete"
+            if collected:
+                return collected, "partial"
+            return collected, states[-1] if states else "unavailable"
+
         container_ids_result = self._run(("docker", "ps", "-aq"), remaining(3))
         containers = []
         if container_ids_result.returncode == 0:
             ids = container_ids_result.stdout.split()
             if ids:
-                containers, state = self._docker_json(
-                    ("inspect", "--size", *ids), remaining(5),
+                containers, state = inspect_batches(
+                    ("inspect", "--size"), ids,
                 )
                 outcomes.append({"category": "docker_containers", "status": state})
             else:
@@ -534,8 +560,8 @@ class LocalResourceAdapter:
         if volume_ids_result.returncode == 0:
             names = volume_ids_result.stdout.split()
             if names:
-                volumes, state = self._docker_json(
-                    ("volume", "inspect", *names), remaining(5),
+                volumes, state = inspect_batches(
+                    ("volume", "inspect"), names,
                 )
                 outcomes.append({"category": "docker_volumes", "status": state})
             else:
@@ -550,8 +576,8 @@ class LocalResourceAdapter:
         if network_ids_result.returncode == 0:
             ids = network_ids_result.stdout.split()
             if ids:
-                networks, state = self._docker_json(
-                    ("network", "inspect", *ids), remaining(5),
+                networks, state = inspect_batches(
+                    ("network", "inspect"), ids,
                 )
                 outcomes.append({"category": "docker_networks", "status": state})
             else:
@@ -566,8 +592,8 @@ class LocalResourceAdapter:
         if image_ids_result.returncode == 0:
             ids = sorted(set(image_ids_result.stdout.split()))
             if ids:
-                images, state = self._docker_json(
-                    ("image", "inspect", *ids), remaining(5),
+                images, state = inspect_batches(
+                    ("image", "inspect"), ids,
                 )
                 outcomes.append({"category": "docker_images", "status": state})
             else:
@@ -1223,7 +1249,7 @@ class LocalResourceAdapter:
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
-        cancelled=False,
+        cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         request = ResourceRequest(float(budget_seconds), cancelled)
         if request.is_cancelled():
@@ -1254,8 +1280,17 @@ class LocalResourceAdapter:
         }
         if progress:
             progress("sandbox_paths")
+        # A deep refresh owns the expensive host walk. Avoid spending the
+        # same budget on one ``du`` per managed path before that walk starts;
+        # the collector will persist the ranked rows and the next cache-only
+        # read can answer those sizes without another traversal.
         path_resources, path_outcomes = self._path_resources(
-            thorough=thorough, deadline=deadline, active_sources=active_sources,
+            thorough=(
+                thorough and not (deep and directory_cache in {
+                    "refresh", "cache_only",
+                })
+            ),
+            deadline=deadline, active_sources=active_sources,
             protected_paths=protected_paths,
             workspace_ownership=workspace_ownership,
         )
@@ -1317,6 +1352,7 @@ class LocalResourceAdapter:
                         managed_roots=self._deep_managed_roots(),
                         capacity_snapshots=capacity_snapshots,
                         cancelled=cancelled,
+                        directory_cache=directory_cache,
                     )
                     deep_outcomes.append({
                         "category": "deep_attribution",

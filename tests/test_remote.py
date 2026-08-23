@@ -641,23 +641,23 @@ class TestPushCommits(unittest.TestCase):
 
     @patch("subprocess.run")
     def test_pushes_head_to_the_correct_branch_and_url(self, mock_run):
-        # first call: git push; second call: git rev-parse HEAD
+        revision = "a" * 40
         mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
             _completed(returncode=0),
-            _completed(returncode=0, stdout="abc1234\n"),
         ]
         with tempfile.TemporaryDirectory() as runtime:
             with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
                  patch.dict(os.environ, {"PRESERVE_ME": "value"}):
                 sha = sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
                                        "/home/ubuntu/sandbox/deploy-src/proj", "main")
-        self.assertEqual(sha, "abc1234")
-        push_args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(sha, revision)
+        push_args = mock_run.call_args_list[1][0][0]
         self.assertEqual(push_args[0], "git")
         self.assertEqual(push_args[1], "push")
         self.assertIn("ssh://ubuntu@1.2.3.4/home/ubuntu/sandbox/deploy-src/proj", push_args)
-        self.assertIn("HEAD:refs/heads/main", push_args)
-        push_env = mock_run.call_args_list[0][1]["env"]
+        self.assertIn(f"{revision}:refs/heads/main", push_args)
+        push_env = mock_run.call_args_list[1][1]["env"]
         git_ssh = push_env["GIT_SSH_COMMAND"]
         self.assertEqual(push_env["PRESERVE_ME"], "value")
         self.assertIn("BatchMode=yes", git_ssh)
@@ -670,45 +670,50 @@ class TestPushCommits(unittest.TestCase):
 
     @patch("subprocess.run")
     def test_push_url_preserves_custom_ssh_port(self, mock_run):
+        revision = "a" * 40
         mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
             _completed(returncode=0),
-            _completed(returncode=0, stdout="abc1234\n"),
         ]
         with tempfile.TemporaryDirectory() as runtime:
             with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
                 sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
                                  "/home/ubuntu/sandbox/deploy-src/proj", "main")
-        push_args = mock_run.call_args_list[0][0][0]
+        push_args = mock_run.call_args_list[1][0][0]
         self.assertIn("ssh://ubuntu@1.2.3.4:2222/home/ubuntu/sandbox/deploy-src/proj",
                       push_args)
         self.assertEqual(
-            shlex.split(mock_run.call_args_list[0][1]["env"]["GIT_SSH_COMMAND"])[-2:],
+            shlex.split(mock_run.call_args_list[1][1]["env"]["GIT_SSH_COMMAND"])[-2:],
             ["-p", "2222"],
         )
 
     @patch("subprocess.run")
     def test_push_failure_is_not_replayed(self, mock_run):
-        mock_run.return_value = _completed(returncode=255, stderr="ControlPath too long")
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="a" * 40 + "\n"),
+            _completed(returncode=255, stderr="ControlPath too long"),
+        ]
         with tempfile.TemporaryDirectory() as runtime:
             with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
                 with self.assertRaises(RuntimeError):
                     sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
                                      "/home/ubuntu/sandbox/deploy-src/proj", "main")
-        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
 
     @patch("subprocess.run")
     @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=PermissionError("denied"))
     def test_push_uses_direct_ssh_when_control_directory_preparation_fails(
-            self, mock_ensure, mock_run):
+        self, mock_ensure, mock_run):
+        revision = "a" * 40
         mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
             _completed(returncode=0),
-            _completed(returncode=0, stdout="abc1234\n"),
         ]
         sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
                         "/home/ubuntu/sandbox/deploy-src/proj", "main")
         mock_ensure.assert_called_once()
-        self.assertEqual(mock_run.call_count, 2)  # push, then local rev-parse
-        git_ssh = mock_run.call_args_list[0][1]["env"]["GIT_SSH_COMMAND"]
+        self.assertEqual(mock_run.call_count, 2)  # resolve once, then push pinned SHA
+        git_ssh = mock_run.call_args_list[1][1]["env"]["GIT_SSH_COMMAND"]
         self.assertIn("BatchMode=yes", git_ssh)
         self.assertIn("ConnectTimeout=10", git_ssh)
         self.assertEqual(shlex.split(git_ssh)[-2:], ["-p", "2222"])
@@ -721,14 +726,43 @@ class TestPushCommits(unittest.TestCase):
         # GitHub/origin. Guards against a future change accidentally routing
         # through the project's OWN git remotes instead of pushing straight
         # to the VPS's deploy-target path.
+        revision = "a" * 40
         mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
             _completed(returncode=0),
-            _completed(returncode=0, stdout="abc1234\n"),
         ]
         sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
                          "/home/ubuntu/sandbox/deploy-src/proj", "wip-branch")
-        push_args = mock_run.call_args_list[0][0][0]
+        push_args = mock_run.call_args_list[1][0][0]
         self.assertNotIn("origin", push_args)
+
+    @patch("subprocess.run")
+    def test_head_movement_after_resolution_cannot_change_pushed_or_returned_sha(self, mock_run):
+        selected = "a" * 40
+        moved = "b" * 40
+        rev_parse_count = 0
+
+        def run(args, **_kwargs):
+            nonlocal rev_parse_count
+            if args[:3] == ["git", "rev-parse", "HEAD"]:
+                rev_parse_count += 1
+                revision = selected if rev_parse_count == 1 else moved
+                return _completed(returncode=0, stdout=revision + "\n")
+            return _completed(returncode=0)
+
+        mock_run.side_effect = run
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                    "/home/ubuntu/sandbox/deploy-src/proj", "main",
+                )
+
+        self.assertEqual(pushed, selected)
+        self.assertEqual(rev_parse_count, 1)
+        push_args = mock_run.call_args_list[1].args[0]
+        self.assertIn(f"{selected}:refs/heads/main", push_args)
+        self.assertNotIn(moved, push_args)
 
     @patch("subprocess.run")
     def test_source_ref_resolves_full_sha_and_rejects_dirty_tree(self, mock_run):

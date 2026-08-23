@@ -1228,7 +1228,8 @@ def push_commits(
 ) -> str:
     """Push the committed source artifact to the deploy-target repo.
 
-    A normal project pushes ``HEAD`` directly.  When ``source_root`` is a
+    A normal project resolves ``HEAD`` once and pushes that literal commit.
+    When ``source_root`` is a
     nested checkout path, Git subtree creates a commit whose root is exactly
     that directory before the push; dirty files are applied separately by the
     caller.  Both paths use the same registered SSH transport and never route
@@ -1237,28 +1238,27 @@ def push_commits(
     push_url = git_ssh_url(remote, target_path)
     source_commit = resolved_sha
     push_cwd = Path(project_root)
-    if source_root is not None and source_commit is None:
+    if source_ref is not None:
+        source_commit = resolved_sha or resolve_source_ref(project_root, source_ref)
+    elif source_commit is None:
         head_res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
         source_commit = (head_res.stdout or "").strip().lower()
-        if head_res.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        if head_res.returncode != 0:
             raise RuntimeError("could not resolve the committed source tree")
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("deployment source did not resolve to a full lowercase commit")
     if source_ref is not None:
-        commit = resolved_sha or resolve_source_ref(project_root, source_ref)
-        if not re.fullmatch(r"[0-9a-f]{40}", commit):
-            raise ValueError("source_ref did not resolve to a full commit")
         # A SHA-derived ref is immutable by construction: repeated deploys
         # address the same object and never move a user-named branch.
-        destination = f"refs/heads/sandbox-source-{commit}"
-        source_spec = f"{commit}:{destination}"
-        source_commit = commit
-        resolved_sha = commit
+        destination = f"refs/heads/sandbox-source-{source_commit}"
+        source_spec = f"{source_commit}:{destination}"
     else:
         if not isinstance(branch, str) or not branch.strip():
             raise ValueError("deploy branch is required for a working-tree source")
-        source_spec = f"HEAD:refs/heads/{branch}"
+        source_spec = f"{source_commit}:refs/heads/{branch}"
     if source_root is not None:
         tree_commit, push_cwd = _source_tree_commit(project_root, source_root, source_commit or "")
         # A subtree commit cannot update a branch previously seeded with the
@@ -1288,15 +1288,9 @@ def push_commits(
             f"git push to remote failed: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
-    if source_ref is not None:
-        return tree_commit if source_root is not None else resolved_sha  # already validated as a full SHA above
     if source_root is not None:
         return tree_commit
-    sha_res = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(project_root), capture_output=True, text=True, check=False,
-    )
-    return (sha_res.stdout or "").strip().lower()
+    return source_commit
 
 
 def reset_target_to(remote: dict, target_path: str, sha: str) -> None:

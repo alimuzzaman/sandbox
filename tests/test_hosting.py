@@ -980,8 +980,8 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.hosting, "render_env_file", side_effect=render), \
              patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
              patch.object(hosting_cmd.remote, "reset_target_to", side_effect=lambda *_: events.append("reset")), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "apply_uncommitted"), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", side_effect=lambda *_: (events.append("capture") or ("", []))), \
+             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose", side_effect=lambda *_: events.append("compose")) as compose, \
              patch.object(hosting_cmd, "_verify_remote_health"), \
@@ -992,7 +992,8 @@ class TestHostingManifest(unittest.TestCase):
                 validated, {}, "myvps", runtime, state, False, "main",
             )
 
-        self.assertEqual(events[:5], ["secrets", "push", "render", "reset", "compose"])
+        self.assertEqual(events[:6], ["secrets", "push", "capture", "render", "reset", "compose"])
+        apply_overlay.assert_not_called()
         self.assertEqual(
             pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
         )
@@ -1016,6 +1017,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value="abc123"), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
              patch.object(hosting_cmd.remote, "reset_target_to") as reset, \
              patch.object(hosting_cmd, "_run_compose") as compose, \
              patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
@@ -1027,6 +1029,72 @@ class TestHostingManifest(unittest.TestCase):
         compose.assert_not_called()
         save_state.assert_not_called()
         self.assertEqual(state, {"version": 1, "hosts": {}})
+
+    def test_post_push_dirty_clean_source_fails_before_remote_mutation_or_state(self):
+        revision = "d" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        state = {"version": 1, "hosts": {}}
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("diff --git a/x b/x\n", ["new.txt"])), \
+             patch.object(hosting_cmd.hosting, "render_env_file") as render, \
+             patch.object(hosting_cmd.remote, "reset_target_to") as reset, \
+             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
+            with self.assertRaisesRegex(hosting.HostingError, "changed while the source was being pushed"):
+                hosting_cmd._apply_host(
+                    validated, {}, "myvps", runtime, state, False, "main",
+                )
+
+        render.assert_not_called()
+        reset.assert_not_called()
+        apply_overlay.assert_not_called()
+        compose.assert_not_called()
+        save_state.assert_not_called()
+        self.assertEqual(state, {"version": 1, "hosts": {}})
+
+    def test_dirty_allowed_source_preserves_post_push_overlay(self):
+        revision = "e" * 40
+        with self._write(_public_acme_manifest().replace(
+            "      require_clean: true\n", "      require_clean: false\n",
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(
+            validated, "203.0.113.10",
+        )["records"]
+        state = {"version": 1, "hosts": {}}
+        client = MagicMock()
+        client.records.return_value = []
+        client.upsert_address.return_value = {"id": "record-1"}
+        overlay = ("diff --git a/x b/x\n", ["new.txt"])
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=overlay), \
+             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
+             patch.object(hosting_cmd.remote, "reset_target_to"), \
+             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_run_compose"), \
+             patch.object(hosting_cmd, "_verify_remote_health"), \
+             patch.object(hosting_cmd, "_configure_host_caddy"), \
+             patch.object(hosting_cmd, "_verify_edge"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            hosting_cmd._apply_host(
+                validated, {}, "myvps", runtime, state, False, "main",
+            )
+
+        apply_overlay.assert_called_once_with(
+            {}, "/srv/source", validated["project_root"], overlay[0], overlay[1],
+        )
 
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.urllib.request.build_opener")

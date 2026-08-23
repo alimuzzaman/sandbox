@@ -570,13 +570,19 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         entry, validated["project_root"], target, branch,
         source_root=source_root if nested_source else None,
     )
+    diff, untracked = remote.capture_uncommitted(validated["project_root"])
+    require_clean = validated["deploy"]["require_clean"]
+    if require_clean and (diff or untracked):
+        raise hosting.HostingError(
+            f"{validated['environment']} working tree changed while the source was being pushed"
+        )
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
     client = cloudflare.Client()
     remote.reset_target_to(entry, target, sha)
-    diff, untracked = remote.capture_uncommitted(validated["project_root"])
-    remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
+    if not require_clean:
+        remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})

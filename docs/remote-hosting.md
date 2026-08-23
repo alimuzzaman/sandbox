@@ -337,9 +337,12 @@ deploy:
     APP_SOURCE_REVISION: pushed_commit_sha
 ```
 
-`pushed_commit_sha` is the only provider. Sandbox resolves it from the full lowercase
-40-hex SHA returned by the authoritative push operation, including nested-source
-deployments; it never reads local `HEAD`, caller environment variables, or a secret.
+`pushed_commit_sha` is the only provider. Sandbox resolves the full lowercase 40-hex
+source SHA before transfer, pushes that literal commit, and returns the same value,
+including for nested-source deployments; it never trusts a later `HEAD` read, caller
+environment variables, or a secret. A clean-tree deployment checks the source again
+after the push and aborts before reset or Compose if a local overlay appeared in the
+meantime. Local overlays are transferred only when `require_clean` is explicitly false.
 The mapping key cannot overlap `secrets.values`, `secrets.required`, or
 `secrets.generated`. Plan output reports only the key, provider, and
 `resolved_at_apply: true`. Successful apply evidence reports the selected commit and

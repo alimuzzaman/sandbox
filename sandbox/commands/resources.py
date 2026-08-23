@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import time
@@ -196,6 +197,22 @@ def configure_parser(parser) -> None:
         action="store_true",
         help="express a pre-cancelled status request (for non-interactive callers)",
     )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "accept a durable host-level scan and return a job id for polling"
+        ),
+    )
+    parser.add_argument(
+        "--request-id",
+        default=None,
+        help="replay-safe idempotency key required with --detach",
+    )
+    # Internal worker entrypoint used by the durable detached resource scan.
+    # It is intentionally hidden: users submit with --detach and observe with
+    # job-status/job-output rather than invoking the worker directly.
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-id", default=None)
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument(
@@ -397,6 +414,19 @@ def _emit(payload: dict, as_json: bool) -> None:
     if payload.get("error"):
         error = payload["error"]
         print(f"  {error.get('code')}: {error.get('message')}")
+        return
+    if payload.get("status") == "accepted" and payload.get("kind") == "resource-scan":
+        probe = payload.get("probe") or {}
+        poll = payload.get("poll") or {}
+        print(
+            f"  detached scan accepted: job {payload.get('job_id', 'unknown')} "
+            f"(budget {probe.get('budget_seconds', 'unknown')}s; "
+            f"worker {probe.get('worker_mode', 'unknown')})"
+        )
+        if poll.get("status"):
+            print(f"  status: {poll['status']}")
+        if poll.get("output"):
+            print(f"  output: {poll['output']}")
         return
     data = payload.get("data") or {}
     if payload.get("action") == "status":
@@ -801,6 +831,32 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if action == "status" and bool(getattr(args, "worker", False)):
+        from sandbox.resources.detached import run_worker
+        worker_status = run_worker(args)
+        if worker_status:
+            raise SystemExit(worker_status)
+        return
+    if bool(getattr(args, "detach", False)) and action != "status":
+        from sandbox.resources.service import ResourceError, result
+        payload = result(
+            False, action, status="failed",
+            error=ResourceError(
+                "--detach is valid only for resources status", "invalid_mode",
+            ),
+        )
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
+    if getattr(args, "request_id", None) and not bool(getattr(args, "detach", False)):
+        from sandbox.resources.service import ResourceError, result
+        payload = result(
+            False, action, status="failed",
+            error=ResourceError(
+                "--request-id requires --detach", "invalid_mode",
+            ),
+        )
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
     if action == "monitor":
         payload = _run_monitor(args)
         _emit(payload, bool(args.json))
@@ -858,6 +914,13 @@ def cmd_resources(_cfg, args) -> None:
             )
             _emit(payload, bool(args.json))
             raise SystemExit(1)
+        if getattr(args, "detach", False):
+            from sandbox.resources.detached import start
+            payload = start(args)
+            _emit(payload, bool(args.json))
+            if not payload.get("ok"):
+                raise SystemExit(1)
+            return
         default_budget = 10 if fast else 900 if refresh else 15
         requested_budget = (
             args.budget if args.budget is not None else default_budget

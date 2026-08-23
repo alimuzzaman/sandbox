@@ -73,6 +73,24 @@ partial and cannot be combined with the outer capacity summary. Use
 `resource_status(deep=true, cancelled=true)` only as non-mutating
 pre-cancellation test seams.
 
+For a deep scan that must continue after the terminal session closes, use the
+durable resource-scan helper. It executes the worker with the selected host's
+local adapter (a remote worker does not recursively SSH to the same host):
+
+```sh
+sb resources status --remote scaleway-sandbox --deep --refresh --budget 1800 \
+  --detach --request-id storage-refresh-20260823 --json
+sb job-status JOB_ID --remote scaleway-sandbox --json
+sb job-output JOB_ID --remote scaleway-sandbox --stream combined \
+  --wait-seconds 20 --json
+```
+
+`--detach` returns only after the durable row is accepted. Retain the job ID,
+poll until a terminal lifecycle, and inspect the retained JSONL progress/result
+events. Reuse the identical request ID if submission output is lost; never
+launch a second request identity. A completed `partial` result is still
+incomplete attribution evidence, not permission to reclaim bytes.
+
 `sb resources monitor` is a cache-only pressure pass with a 900-second default
 budget. `--scheduled` labels the trigger and adds no authority. `--dry-run`
 prevents automatic cleanup and real reaping from deleting anything, although

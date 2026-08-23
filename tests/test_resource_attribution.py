@@ -525,6 +525,31 @@ class TestDeepAttributionCollector(unittest.TestCase):
         self.assertEqual(runner.calls, [])
         self.assertEqual(deep.filesystems[0].status, "timed_out")
 
+    def test_large_budget_allows_directory_walk_beyond_interactive_cap(self):
+        runner = FakeRunner([
+            (('df', '-Pk'), (0,
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/root 100 80 20 80% /fixture\n", "")),
+            (('du', '-x'), (0, "60\t/fixture\n", "")),
+            (('docker', 'system', 'df'), (127, "", "unavailable")),
+        ])
+        DeepAttributionCollector(
+            runner,
+            host_root=Path('/fixture'),
+            sandbox_home=Path('/fixture/sandbox'),
+            which=lambda _name: None,
+        ).collect(
+            capacity={'total_bytes': 100 * 1024, 'used_bytes': 80 * 1024,
+                      'available_bytes': 20 * 1024},
+            budget_seconds=300,
+        )
+        directory_call = next(
+            timeout for command, timeout in runner.calls
+            if command[:2] == ('du', '-x')
+        )
+        self.assertGreater(directory_call, 120)
+        self.assertLessEqual(directory_call, 270)
+
     def test_df_evidence_survives_failed_mount_topology_as_partial(self):
         runner = FakeRunner([
             (("df", "-Pk"), (0,

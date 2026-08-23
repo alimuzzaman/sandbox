@@ -239,6 +239,11 @@ class TestResourceInterfaces(unittest.TestCase):
         self.assertTrue(deep.deep)
         self.assertTrue(deep.action == "status")
         self.assertFalse(deep.cancelled)
+        detached = self.parser().parse_args([
+            "status", "--deep", "--detach", "--request-id", "storage-refresh-1",
+        ])
+        self.assertTrue(detached.detach)
+        self.assertEqual(detached.request_id, "storage-refresh-1")
         cancelled = self.parser().parse_args(["status", "--cancelled"])
         self.assertTrue(cancelled.cancelled)
         monitor = self.parser().parse_args([

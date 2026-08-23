@@ -86,6 +86,33 @@ on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`
   `cache_missing`, `not_measured`), `complete`, `stale`, `age_seconds`,
   `depth`, and `minimum_row_bytes`.
 
+## Run a detached deep scan
+
+For a scan that can outlive the interactive command, submit it to the durable
+job supervisor. The worker runs the host-local resource adapter on the selected
+machine, so a remote scan does not open a second SSH probe back to itself:
+
+```sh
+./sb resources status --remote scaleway-sandbox --deep --refresh --budget 1800 \
+  --detach --request-id storage-refresh-20260823 --json
+```
+
+The response is an acceptance receipt, not a completed measurement. Keep the
+returned `job_id` and poll the retained status and JSONL progress/result output:
+
+```sh
+./sb job-status JOB_ID --remote scaleway-sandbox --json
+./sb job-output JOB_ID --remote scaleway-sandbox --stream combined \
+  --wait-seconds 20 --json
+```
+
+Use the same request ID to replay an uncertain acceptance; it returns the
+original durable job instead of starting a duplicate. The probe budget remains
+finite, while the durable supervisor adds a bounded grace period for startup
+and result publication. Treat `partial`, `timed_out`, `failed`, or missing
+output as incomplete evidence and inspect the retained category coverage before
+interpreting any residual.
+
 Because the index already knows the size of every managed path, deep mode also
 reports host filesystem roots, Docker storage roots, the **containerd content
 store** (`/var/lib/containerd`, which `docker system df` never reports), and

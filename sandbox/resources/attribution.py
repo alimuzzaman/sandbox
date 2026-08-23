@@ -1411,6 +1411,13 @@ class DeepAttributionCollector:
     ) -> DeepAttribution:
         started = self.monotonic()
         deadline = started + max(float(budget_seconds), 0.0)
+        # Interactive deep scans historically capped one directory command at
+        # 120 seconds. That cap made a detached scan with a larger explicit
+        # budget time out its primary host walk early, even though the durable
+        # supervisor was still healthy. Reserve ten percent for deleted-open,
+        # engine, and reconciliation phases while allowing the directory walk
+        # to consume the rest of the caller's finite budget.
+        directory_max = max(float(budget_seconds) * 0.9, 120.0)
         if progress:
             progress("deep_mounts")
         rows, mount_state = self._inventory(deadline, capacity)
@@ -1575,7 +1582,7 @@ class DeepAttributionCollector:
                         "--depth", "4", "-x", "--no-delete", "--no-spawn-shell",
                         "--no-view-file", *gdu_exclusions, scan_root,
                     )
-                    result = self._run(argv, deadline, 120)
+                    result = self._run(argv, deadline, directory_max)
                     parser = parse_gdu_output
                     hardlinks = "confirmed"
                     if (
@@ -1589,14 +1596,14 @@ class DeepAttributionCollector:
                             *prefix, "du", "-x", "-k", "-d", "4",
                             *du_exclusions, scan_root,
                         )
-                        result = self._run(argv, deadline, 120)
+                        result = self._run(argv, deadline, directory_max)
                         parser = parse_du_output
                 else:
                     argv = (
                         *prefix, "du", "-x", "-k", "-d", "4",
                         *du_exclusions, scan_root,
                     )
-                    result = self._run(argv, deadline, 120)
+                    result = self._run(argv, deadline, directory_max)
                     parser = parse_du_output
                     hardlinks = "confirmed"
                 if result.returncode == 0 or (

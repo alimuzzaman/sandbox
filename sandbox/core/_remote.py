@@ -39,6 +39,7 @@ import posixpath
 import json
 import hashlib
 import ipaddress
+import math
 import urllib.error
 import urllib.request
 import subprocess
@@ -1655,17 +1656,21 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
 _SSH_DIAGNOSTICS_COMMAND = "\n".join((
     "set -eu",
     "awk '",
-    '$1 == "MemTotal:" { total=$2 }',
-    '$1 == "MemAvailable:" { available=$2 }',
+    '$1 == "MemTotal:" {',
+    "  saw_total=1",
+    '  if ($2 ~ /^[0-9]+$/ && $2 > 0) { total=$2; valid_total=1 }',
+    "}",
+    '$1 == "MemAvailable:" {',
+    "  saw_available=1",
+    '  if ($2 ~ /^[0-9]+$/) { available=$2; valid_available=1 }',
+    "}",
     "END {",
-    "  if (total > 0 && available >= 0) {",
-    "    if (available > total) available=total",
-    "    used=total-available",
-    '    printf "memory_total_mb=%d\\n", int(total/1024)',
-    '    printf "memory_used_mb=%d\\n", int(used/1024)',
-    '    printf "memory_available_mb=%d\\n", int(available/1024)',
-    '    printf "memory_used_percent=%.2f\\n", (used*100/total)',
-    "  }",
+    "  if (!saw_total || !valid_total || !saw_available || !valid_available || available > total) exit 1",
+    "  used=total-available",
+    '  printf "memory_total_mb=%d\\n", int(total/1024)',
+    '  printf "memory_used_mb=%d\\n", int(used/1024)',
+    '  printf "memory_available_mb=%d\\n", int(available/1024)',
+    '  printf "memory_used_percent=%.2f\\n", (used*100/total)',
     "}' /proc/meminfo",
     "awk '{print \"load_1m=\"$1}' /proc/loadavg",
     'df -Pk "$HOME" | awk \'NR == 2 {print "disk_free_mb=" int($4/1024)}\'',
@@ -1679,26 +1684,45 @@ def _parse_ssh_diagnostics(stdout: str) -> dict:
         "memory_total_mb", "memory_used_mb", "memory_available_mb", "disk_free_mb",
     }
     float_fields = {"memory_used_percent", "load_1m"}
+    fields = integer_fields | float_fields
     values = {}
     for line in (stdout or "").splitlines():
         key, separator, raw = line.partition("=")
-        if not separator or key not in integer_fields | float_fields:
+        if not separator or key not in fields:
             continue
         raw = raw.strip()
-        if not raw:
-            continue
+        if key in values or not raw:
+            raise RuntimeError("remote SSH diagnostics returned an invalid payload")
         try:
             values[key] = float(raw) if key in float_fields else int(raw)
         except ValueError:
-            continue
-    if "memory_total_mb" not in values or "memory_available_mb" not in values:
+            raise RuntimeError("remote SSH diagnostics returned an invalid payload") from None
+    if values.keys() != fields:
         raise RuntimeError("remote SSH diagnostics returned an invalid payload")
+
     total = values["memory_total_mb"]
-    available = min(max(values["memory_available_mb"], 0), total)
-    used = max(total - available, 0)
-    values["memory_available_mb"] = available
-    values["memory_used_mb"] = used
-    values["memory_used_percent"] = round((used * 100) / total, 2) if total else None
+    used = values["memory_used_mb"]
+    available = values["memory_available_mb"]
+    disk_free = values["disk_free_mb"]
+    integer_limit = (1 << 63) - 1
+    if (
+        total <= 0
+        or any(value < 0 or value > integer_limit for value in (total, used, available, disk_free))
+        or used > total
+        or available > total
+        or abs(total - available - used) > 1
+    ):
+        raise RuntimeError("remote SSH diagnostics returned an invalid payload")
+
+    used_percent = values["memory_used_percent"]
+    load_1m = values["load_1m"]
+    if (
+        not math.isfinite(used_percent)
+        or not 0 <= used_percent <= 100
+        or not math.isfinite(load_1m)
+        or load_1m < 0
+    ):
+        raise RuntimeError("remote SSH diagnostics returned an invalid payload")
     return values
 
 

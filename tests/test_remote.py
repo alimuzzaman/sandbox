@@ -383,10 +383,10 @@ class TestRemoteDiagnostics(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_ssh_diagnostics_reports_total_used_available_and_percent(self, ssh_run):
         ssh_run.return_value = _completed(stdout=(
-            "memory_total_mb=4096\n"
-            "memory_used_mb=3667\n"
-            "memory_available_mb=429\n"
-            "memory_used_percent=89.53\n"
+            "memory_total_mb=11960\n"
+            "memory_used_mb=11500\n"
+            "memory_available_mb=459\n"
+            "memory_used_percent=96.16\n"
             "load_1m=2.5\n"
             "disk_free_mb=23564\n"
         ))
@@ -395,14 +395,63 @@ class TestRemoteDiagnostics(unittest.TestCase):
             "mcp_service": {"runtime_revision": "revision-1"},
         })
         self.assertEqual(result["transport"], "ssh")
-        self.assertEqual(result["memory_total_mb"], 4096)
-        self.assertEqual(result["memory_available_mb"], 429)
-        self.assertEqual(result["memory_used_mb"], 3667)
-        self.assertEqual(result["memory_used_percent"], 89.53)
+        self.assertEqual(result["memory_total_mb"], 11960)
+        self.assertEqual(result["memory_available_mb"], 459)
+        self.assertEqual(result["memory_used_mb"], 11500)
+        self.assertEqual(result["memory_used_percent"], 96.16)
         command = ssh_run.call_args.args[1]
         self.assertIn("/proc/meminfo", command)
         self.assertIn("MemAvailable:", command)
         self.assertNotIn("registered-target", command)
+
+    def test_ssh_diagnostics_probe_fails_when_meminfo_field_is_missing_or_invalid(self):
+        awk_program = sr._SSH_DIAGNOSTICS_COMMAND.split("' /proc/meminfo", 1)[0].split("awk '", 1)[1]
+        invalid_meminfo = (
+            "MemTotal: 12247040 kB\n",
+            "MemAvailable: 470016 kB\n",
+            "MemTotal: invalid kB\nMemAvailable: 470016 kB\n",
+            "MemTotal: 12247040 kB\nMemAvailable: invalid kB\n",
+            "MemTotal: 0 kB\nMemAvailable: 0 kB\n",
+        )
+        for meminfo in invalid_meminfo:
+            with self.subTest(meminfo=meminfo):
+                result = subprocess.run(
+                    ["awk", awk_program], input=meminfo, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
+    def test_parse_ssh_diagnostics_rejects_incomplete_or_invalid_payloads(self):
+        valid = {
+            "memory_total_mb": "11960",
+            "memory_used_mb": "11500",
+            "memory_available_mb": "459",
+            "memory_used_percent": "96.16",
+            "load_1m": "2.5",
+            "disk_free_mb": "23564",
+        }
+        invalid_overrides = (
+            {"memory_total_mb": None},
+            {"memory_used_mb": "invalid"},
+            {"memory_total_mb": "0", "memory_used_mb": "0", "memory_available_mb": "0"},
+            {"memory_used_mb": "-1"},
+            {"disk_free_mb": str(1 << 63)},
+            {"memory_used_percent": "nan"},
+            {"memory_used_percent": "inf"},
+            {"memory_used_percent": "100.01"},
+            {"load_1m": "-0.1"},
+            {"load_1m": "inf"},
+            {"memory_used_mb": "11490"},
+            {"memory_available_mb": "11961", "memory_used_mb": "0"},
+        )
+        for overrides in invalid_overrides:
+            payload = valid | overrides
+            stdout = "\n".join(
+                f"{key}={value}" for key, value in payload.items() if value is not None
+            )
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(RuntimeError, "invalid payload"):
+                sr._parse_ssh_diagnostics(stdout)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_ssh_diagnostics_rejects_failed_probe(self, ssh_run):

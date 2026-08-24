@@ -3,10 +3,10 @@
 
 import { $, esc } from "./dom";
 import { store } from "./state";
-import { currentRoute, instancePath, remotePath, type Route } from "./router";
+import { currentRoute, instancePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
-import { hostsView, hostRail } from "./pages/hosts";
+import { hostsView, sidebarHostSelector } from "./pages/hosts";
 import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
@@ -70,16 +70,20 @@ function listItem(r: Instance): string {
      ${tail}</a>`;
 }
 
-export function renderSidebar(): void {
+export function renderSidebar(forceHost = false): void {
   // Don't rewrite the list out from under an open row menu (the 5s poll would
   // otherwise close it mid-interaction). Action clicks call rowMenuClose()
   // before re-rendering, so this only ever skips a passive poll tick.
   if (document.querySelector("[data-rowmenu-pop]:not(.hidden)")) return;
+  // Keep an open keyboard/mouse host menu stable during passive polling. Full
+  // route renders pass forceHost so back/forward navigation stays accurate.
+  if (!forceHost && document.querySelector("#hostSelector[open]")) return;
   const items = store.data.instances;
-  $("list").innerHTML = items.map(listItem).join("");
   const active = currentRoute();
-  $("remoteList").innerHTML = store.data.remotes.map(remote =>
-    `<a href="${remotePath(remote.name)}" data-link class="w-full px-3 py-2 rounded flex items-center gap-2 text-[13px] ${active.page === "remote" && active.name === remote.name ? "bg-white dark:bg-neutral-800 shadow-sm font-medium" : "hover:bg-neutral-100 dark:hover:bg-neutral-800/60"}"><span class="w-2 h-2 rounded-full ${remote.control_ready ? "bg-blue-500" : "bg-neutral-400"}"></span><span class="truncate">${esc(remote.name)}</span></a>`).join("");
+  const activeHost = active.page === "instance" || active.page === "create" ? "local"
+    : active.page === "remote" || active.page === "remote-instance" ? active.name : "all";
+  $("hostSelectorSlot").innerHTML = sidebarHostSelector(activeHost);
+  $("list").innerHTML = items.map(listItem).join("");
   const running = items.filter((i) => i.running).length;
   $("runcount").textContent = running + "/" + items.length;
   $("footstat").textContent = items.length
@@ -110,15 +114,14 @@ function userIsInteracting(): boolean {
 }
 
 function viewForRoute(route: Route): string {
-  const localHostView = (content: string): string => `<div class="min-h-full bg-neutral-50 dark:bg-neutral-950"><div class="max-w-7xl mx-auto px-4 pt-5 sm:px-6 lg:px-8">${hostRail("local")}</div>${content}</div>`;
   switch (route.page) {
-    case "create": return localHostView(createView());
+    case "create": return createView();
     case "usage": return usageView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
     case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);
     case "instance": {
       const r = store.data.instances.find((i) => i.name === route.name) || null;
-      return localHostView(instanceView(r));
+      return instanceView(r);
     }
     case "home": return hostsView();
     default: return hostsView();
@@ -135,4 +138,4 @@ export function renderDetail(force: boolean): void {
 }
 
 // Full render (on navigation / explicit action).
-export function render(): void { renderSidebar(); renderDetail(true); }
+export function render(): void { renderSidebar(true); renderDetail(true); }

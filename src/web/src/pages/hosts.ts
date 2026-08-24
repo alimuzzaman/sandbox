@@ -3,6 +3,55 @@ import { store } from "../state";
 import { instancePath, remotePath } from "../router";
 import { theme } from "../theme";
 
+type HostKind = "all" | "local" | "remote";
+
+function hostIcon(kind: HostKind, ready = true): string {
+  const dot = kind === "all" ? "bg-blue-500" : ready ? "bg-emerald-500" : "bg-amber-400";
+  const color = kind === "all" ? "text-blue-600 dark:text-blue-400"
+    : kind === "local" ? "text-emerald-600 dark:text-emerald-400"
+    : "text-blue-700 dark:text-blue-300";
+  const shape = kind === "all"
+    ? `<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>`
+    : kind === "local"
+      ? `<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>`
+      : `<rect x="4" y="3" width="16" height="8" rx="2"/><rect x="4" y="13" width="16" height="8" rx="2"/><path d="M8 7h.01M8 17h.01"/>`;
+  return `<span class="host-icon relative flex shrink-0 items-center justify-center rounded-lg bg-white dark:bg-neutral-800 ${color}">
+    <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 24 24" fill="${kind === "all" ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${shape}</svg>
+    <span aria-hidden="true" class="host-dot absolute rounded-full border-neutral-100 dark:border-neutral-950 ${dot}"></span>
+  </span>`;
+}
+
+export function sidebarHostSelector(active = "all"): string {
+  const localHref = store.data.instances[0] ? instancePath(store.data.instances[0].name) : "/create";
+  const activeRemote = store.data.remotes.find(remote => remote.name === active);
+  const currentKind: HostKind = active === "local" ? "local" : activeRemote ? "remote" : "all";
+  const currentName = currentKind === "local" ? "Local host" : activeRemote?.name || "All hosts";
+  const currentReady = currentKind !== "remote" || !!activeRemote?.control_ready;
+  const currentStatus = currentKind === "all" ? "Host overview"
+    : currentKind === "local" ? "This machine"
+    : currentReady ? "Remote available" : "Remote unavailable";
+  const optionClass = "flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-[13px] hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:hover:bg-neutral-800";
+  const option = (href: string, name: string, kind: HostKind, ready: boolean, status: string, selected: boolean): string =>
+    `<a href="${href}" data-link ${selected ? 'aria-current="page"' : ""} class="${optionClass} ${selected ? "bg-blue-50 text-blue-800 dark:bg-blue-950 dark:text-blue-100" : "text-neutral-700 dark:text-neutral-200"}">
+      ${hostIcon(kind, ready)}<span class="min-w-0 flex-1"><span class="block truncate font-medium">${esc(name)}</span><span class="block truncate text-[10px] text-neutral-400">${esc(status)}</span></span>
+    </a>`;
+  const remotes = store.data.remotes.map(remote => option(
+    remotePath(remote.name), remote.name, "remote", remote.control_ready,
+    remote.control_ready ? "Remote available" : "Remote unavailable", active === remote.name,
+  )).join("");
+  return `<details class="group relative" id="hostSelector">
+    <summary aria-label="Choose host. Current host: ${esc(currentName)}" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-neutral-200/60 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:hover:bg-neutral-900">
+      ${hostIcon(currentKind, currentReady)}
+      <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-semibold text-neutral-900 dark:text-neutral-50">${esc(currentName)}</span><span class="block truncate text-[10px] text-neutral-400">${esc(currentStatus)}</span></span>
+      <svg aria-hidden="true" class="h-4 w-4 shrink-0 text-neutral-400" viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </summary>
+    <nav aria-label="Hosts" class="absolute left-0 right-0 z-50 mt-1 max-h-64 space-y-0.5 overflow-auto rounded-lg border border-neutral-200 bg-white p-2 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
+      ${option("/", "All hosts", "all", true, "Host overview", active === "all")}
+      ${option(localHref, "Local host", "local", true, "This machine", active === "local")}${remotes}
+    </nav>
+  </details>`;
+}
+
 function hostCard(name: string, href: string, kind: string, ready: boolean,
                   total: string, running: string, memory: string, note: string): string {
   return `<a href="${href}" data-link class="${theme.panel} group block p-5 hover:border-blue-300 dark:hover:border-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -21,15 +70,9 @@ function hostCard(name: string, href: string, kind: string, ready: boolean,
   </a>`;
 }
 
-export function hostRail(active = "all"): string {
-  const remotes = store.data.remotes.map(remote =>
-    `<a href="${remotePath(remote.name)}" data-link class="shrink-0 rounded-lg border px-3 py-2 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 ${active === remote.name ? "border-blue-600 bg-blue-50 text-blue-800 dark:border-blue-500 dark:bg-blue-950 dark:text-blue-100" : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200"}"><span class="mr-2 inline-block h-2 w-2 rounded-full ${remote.control_ready ? "bg-emerald-500" : "bg-amber-400"}"></span>${esc(remote.name)}</a>`).join("");
-  const localHref = store.data.instances[0] ? instancePath(store.data.instances[0].name) : "/create";
-  return `<nav aria-label="Host selector" class="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
-    <a href="/" data-link class="shrink-0 rounded-lg border px-3 py-2 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 ${active === "all" ? "border-blue-600 bg-blue-50 text-blue-800 dark:border-blue-500 dark:bg-blue-950 dark:text-blue-100" : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200"}"><span class="mr-2 inline-block h-2 w-2 rounded-full bg-blue-500"></span>All hosts</a>
-    <a href="${localHref}" data-link class="shrink-0 rounded-lg border px-3 py-2 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 ${active === "local" ? "border-blue-600 bg-blue-50 text-blue-800 dark:border-blue-500 dark:bg-blue-950 dark:text-blue-100" : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200"}"><span class="mr-2 inline-block h-2 w-2 rounded-full bg-emerald-500"></span>Local host</a>${remotes}
-  </nav>`;
-}
+// Kept as a compatibility shim for the remote page while host navigation lives
+// in the persistent sidebar. Returning no markup prevents duplicate selectors.
+export function hostRail(_active = "all"): string { return ""; }
 
 export function hostsView(): string {
   const localTotal = store.data.instances.length;
@@ -57,7 +100,7 @@ export function hostsView(): string {
       <div><div class="${theme.label}">Host control</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">All Sandbox hosts</h1>
       <p class="mt-1 text-[13px] ${theme.muted}">One view of local and remote WordPress capacity.</p></div>
       <div class="flex flex-wrap items-center justify-end gap-3"><div role="status" class="text-[12px] ${store.sync.error ? "text-red-700 dark:text-red-300" : theme.quiet}">${esc(store.sync.error || status)}</div><button class="${theme.button}" onclick="sb.refreshHosts()">Refresh remote hosts</button></div>
-    </div>${hostRail("all")}</header>
+    </div></header>
     <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 sm:grid-cols-4">
       ${[["Hosts", knownHosts], ["Known instances", localTotal + remoteInstances], ["Local running", localRunning], ["Remote hosts", store.data.remotes.length]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
     </section>

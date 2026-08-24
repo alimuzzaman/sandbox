@@ -560,6 +560,12 @@ _WEB_PAGE = """<!doctype html>
 
   /* sidebar rows: tighter, app-like selection */
   #list button { border-radius: 7px; }
+  summary::-webkit-details-marker { display: none; }
+  .host-icon { width: 1.75rem; height: 1.75rem; }
+  .host-dot { right: -0.125rem; bottom: -0.125rem; width: .625rem; height: .625rem;
+    border-width: 2px; }
+  #hostSelector summary:focus-visible, #hostSelector nav a:focus-visible {
+    outline: 2px solid #3b82f6; outline-offset: 1px; }
 
   /* console drawer: terminal vibe */
   #conBody { background:
@@ -586,20 +592,10 @@ _WEB_PAGE = """<!doctype html>
   <!-- Sidebar: instance list (Local-style) -->
   <aside class="w-60 shrink-0 border-r border-brd dark:border-brd-dark
                 bg-neutral-100/60 dark:bg-neutral-950 flex flex-col">
-    <button onclick="goHome()" title="What is this?"
-      class="h-12 px-3.5 flex items-center gap-2 border-b border-brd dark:border-brd-dark
-             w-full hover:bg-neutral-200/50 dark:hover:bg-neutral-900 text-left">
-      <div class="w-5 h-5 rounded-md bg-accent flex items-center justify-center
-                  text-white text-[12px] font-bold">S</div>
-      <span class="font-semibold text-[13px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
-      <span id="runcount" class="ml-auto text-[11px] text-neutral-400"></span>
-    </button>
-    <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
-                text-neutral-400">Instances</div>
+    <div id="hostSelectorSlot" class="border-b border-brd px-2 py-1.5 dark:border-brd-dark"></div>
+    <div class="flex items-center px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
+                text-neutral-400"><span>Instances</span><span id="runcount" class="ml-auto"></span></div>
     <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
-    <div class="px-3 pt-2 pb-1 text-[11px] font-medium uppercase tracking-wide
-                text-neutral-400">Remotes</div>
-    <nav id="remoteList" class="max-h-40 overflow-auto px-2 pb-2 space-y-0.5"></nav>
     <div class="p-2 border-t border-brd dark:border-brd-dark space-y-0.5">
       <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded
         text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800

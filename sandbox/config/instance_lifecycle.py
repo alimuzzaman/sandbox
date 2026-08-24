@@ -13,6 +13,7 @@ import copy
 
 DEFAULTS = {
     "mode": "always_on",
+    "wakeOnRequest": False,
     "idleAfterSeconds": 900,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
@@ -66,8 +67,14 @@ def normalize_instance_lifecycle(raw: Mapping[str, object] | None = None) -> dic
             "instanceLifecycle mode must be always_on or idle_stop", "invalid_mode"
         )
     result = copy.deepcopy(DEFAULTS)
+    wake_on_request = source.get("wakeOnRequest", DEFAULTS["wakeOnRequest"])
+    if not isinstance(wake_on_request, bool):
+        raise InstanceLifecycleConfigError(
+            "instanceLifecycle wakeOnRequest must be a boolean", "invalid_wake_on_request"
+        )
     result.update({
         "mode": mode,
+        "wakeOnRequest": wake_on_request,
         "idleAfterSeconds": _bounded_integer(
             "idleAfterSeconds", source.get("idleAfterSeconds", DEFAULTS["idleAfterSeconds"]),
             60, 604800,

@@ -89,6 +89,7 @@ explicit `null` or an unknown field is rejected.
 {
   "instanceLifecycle": {
     "mode": "idle_stop",
+    "wakeOnRequest": false,
     "idleAfterSeconds": 900,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
@@ -105,6 +106,16 @@ instance and waits for its declared health surface. Suspend uses graceful
 Compose `stop` and resume uses Compose `start`, preserving containers, volumes,
 ports, and registry identity. These commands provide the lifecycle foundation;
 automatic request-triggered wake routing is a separate gateway feature.
+
+`wakeOnRequest` is a strict boolean and defaults to `false`. When enabled,
+only a provisioned Docker route with an opaque registry-owned identity may be
+placed behind the loopback activation authority and Caddy `forward_auth`.
+Cron-enabled WordPress, Herd/native runtimes, aliases, malformed hosts/ports,
+and identity collisions fail closed. The authority never receives or replays
+the original request; after readiness succeeds, Caddy's existing
+`reverse_proxy` sends the original method and body exactly once. Automatic
+idle scanning, remote activation, and function/FaaS adapters remain future
+gates.
 
 `startupTimeoutSeconds` is the bounded time Sandbox waits for the declared
 health endpoint after `ensure` (30–3600 seconds; default 120). Set

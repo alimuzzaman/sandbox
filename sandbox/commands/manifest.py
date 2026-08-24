@@ -29,6 +29,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.ui_dash",
     "sandbox.commands.cache",
     "sandbox.commands.resources",
+    "sandbox.commands.activation",
     "sandbox.commands.feedback",
     "sandbox.commands.license",
     "sandbox.commands.migrate",

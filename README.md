@@ -624,6 +624,14 @@ view and drive instances with:
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)
 ```
 
+Request wake is separately opt-in with
+`instanceLifecycle.wakeOnRequest: true` and remains off by default.
+`./sb activation serve` runs its loopback-only authority; eligible Caddy routes
+authorize readiness through stock `forward_auth`, then proxy the untouched
+original request. Invalid catalogs or an unhealthy authority retain the
+previous Caddyfile. Automatic idle scanning, remote wake, WebSocket draining,
+and function/FaaS adapters are not implemented in this phase.
+
 Each instance can run a different **web server**, and you can switch in place
 without re-importing content:
 

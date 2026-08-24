@@ -5,10 +5,13 @@ from .coordinator import (
     ActivationPolicy,
     ActivityLease,
     ActivationState,
+    ActivationClaim,
+    DrainClaim,
 )
 from .service import ActivationResult, ActivationService
 
 __all__ = [
     "ActivationCoordinator", "ActivationPolicy", "ActivityLease", "ActivationState",
+    "ActivationClaim", "DrainClaim",
     "ActivationResult", "ActivationService",
 ]

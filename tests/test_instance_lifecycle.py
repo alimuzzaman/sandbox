@@ -12,6 +12,7 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
 
         self.assertEqual(normalize_instance_lifecycle(), {
             "mode": "always_on",
+            "wakeOnRequest": False,
             "idleAfterSeconds": 900,
             "wakeTimeoutSeconds": 60,
             "stopGraceSeconds": 30,
@@ -35,6 +36,7 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
             {"mode": "idle_stop", "idleAfterSeconds": 1},
             {"maxPendingRequests": True},
             {"unknown": 1},
+            {"wakeOnRequest": 1},
         ):
             with self.subTest(raw=raw), self.assertRaises(InstanceLifecycleConfigError):
                 normalize_instance_lifecycle(raw)

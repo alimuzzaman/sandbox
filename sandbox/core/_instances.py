@@ -741,6 +741,18 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # not perturb legacy instance blocks.
     if "instanceLifecycle" in pconf and pconf.get("instanceLifecycle") is not None:
         block["instance_lifecycle"] = dict(pconf["instanceLifecycle"])
+        lifecycle = block["instance_lifecycle"]
+        if lifecycle.get("mode") == "idle_stop" and lifecycle.get("wakeOnRequest") is True:
+            import secrets
+            previous_route = (_local_yaml().get("instances", {}).get(name, {})
+                              .get("activation_route"))
+            if isinstance(previous_route, dict) and previous_route.get("id") and previous_route.get("token"):
+                block["activation_route"] = dict(previous_route)
+            else:
+                block["activation_route"] = {
+                    "id": f"ar_{secrets.token_hex(16)}",
+                    "token": secrets.token_urlsafe(32),
+                }
     # Re-use only the previous adapter-produced identities.  These are not
     # project inputs and are never invented here; retaining them lets an
     # explicitly materialized child-image plan survive a later apply while a

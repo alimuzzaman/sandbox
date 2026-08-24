@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { desktopChannels, type SandboxDesktopApi } from "./contracts";
+import type { SandboxDesktopApi } from "./contracts";
+
+// Sandboxed Electron preloads cannot require local CommonJS modules. Keep these
+// runtime constants inline while checking them against the shared contract.
+const desktopChannels = {
+  chooseProjectDirectory: "sandbox:choose-project-directory",
+  retryBackend: "sandbox:retry-backend",
+} as const satisfies typeof import("./contracts").desktopChannels;
 
 const api: SandboxDesktopApi = Object.freeze({
   platform: "darwin",

@@ -22,6 +22,14 @@ function configuredBackend(): URL {
   return parseDashboardUrl(process.env.SANDBOX_DESKTOP_DEV_URL || process.env.SANDBOX_DESKTOP_URL || DEFAULT_DASHBOARD_URL);
 }
 
+function configuredBackendOrigin(): string | null {
+  try {
+    return configuredBackend().origin;
+  } catch {
+    return null;
+  }
+}
+
 function installSecurityBoundary(): void {
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
@@ -76,17 +84,21 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
-async function showRecovery(reason: string): Promise<void> {
+async function showRecovery(reason: string, backendOrigin = configuredBackendOrigin()): Promise<void> {
   dashboardOrigin = null;
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  await mainWindow.loadURL(`${RECOVERY_URL}?reason=${encodeURIComponent(reason.slice(0, 160))}`);
+  const recoveryUrl = new URL(RECOVERY_URL);
+  recoveryUrl.searchParams.set("reason", reason.slice(0, 160));
+  if (backendOrigin) recoveryUrl.searchParams.set("endpoint", backendOrigin);
+  await mainWindow.loadURL(recoveryUrl.toString());
 }
 
 async function connectDashboard(): Promise<void> {
   if (connecting || !mainWindow) return;
   connecting = true;
+  let target: URL | null = null;
   try {
-    const target = configuredBackend();
+    target = configuredBackend();
     await handshakeBackend(target);
     if (!proxy) proxy = await createAuthenticatedProxy(target);
     await session.defaultSession.cookies.set({
@@ -96,7 +108,7 @@ async function connectDashboard(): Promise<void> {
     dashboardOrigin = proxy.origin;
     await mainWindow.loadURL(proxy.origin.toString());
   } catch (error) {
-    await showRecovery(error instanceof Error ? error.message : "Backend unavailable");
+    await showRecovery(error instanceof Error ? error.message : "Backend unavailable", target?.origin ?? configuredBackendOrigin());
   } finally {
     connecting = false;
   }

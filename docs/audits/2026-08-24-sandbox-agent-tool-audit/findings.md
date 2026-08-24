@@ -477,3 +477,344 @@ paths, and 9 interrupted subagents.
 Use aggregate thread waits, explicit lane stop criteria, and bounded status
 snapshots. This is not a Sandbox command change, but it is the largest observed
 non-Sandbox source of coordination overhead.
+
+## ATO-017 — Make `secrets run` fail closed on child failure
+
+Priority: P1/P2
+Classification: product/contract bug plus security-workflow safety
+Confidence: high
+
+### Evidence
+
+The Hermes setup transcript `01a027e9-9d13-7b20-aa49-cef6c5e847b0` recorded a
+trusted child exiting with code 11 while `sb secrets run` reported success and
+returned a zero shell status. The current command path always emits the broker
+result with `as_json=False` and does not translate the child result into the
+process exit status in [`sandbox/commands/secrets.py`](../../../sandbox/commands/secrets.py:202).
+The runner does retain `exit_code` and `termination` in
+[`sandbox/secrets/runner.py`](../../../sandbox/secrets/runner.py:135), and the
+model exposes those fields in [`sandbox/secrets/models.py`](../../../sandbox/secrets/models.py:70).
+
+### Recommendation
+
+Return nonzero for a nonzero child exit, timeout, or failed start, while keeping
+redacted output and a stable `--json` result available to automation. Distinguish
+child failure from broker failure and timeout; never print secret values or raw
+child environment data.
+
+### Acceptance criteria
+
+- Exit 0 is possible only when the child exits 0 and the broker result is valid.
+- Child exit, timeout, startup failure, and malformed result have distinct codes.
+- JSON mode is one bounded envelope with `exit_code`, `termination`, and
+  redaction metadata; human mode communicates the same state.
+- Tests prove a failing trusted child cannot be mistaken for a successful secret
+  operation.
+
+## ATO-018 — Restore CLI/MCP job-follow parity
+
+Priority: P2
+Classification: product/contract drift
+Confidence: high
+
+### Evidence
+
+The Spec 032 CLI contract declares `sb job follow JOB_ID` with cursor, polling,
+and output-profile options in [`specs/032-remote-job-runtime/contracts/cli.md`](../../../specs/032-remote-job-runtime/contracts/cli.md:60).
+The current CLI only adds `--follow` to `job-output` in
+[`sandbox/commands/jobs_runtime.py`](../../../sandbox/commands/jobs_runtime.py:201)
+and registers no `job-follow` command in its manifest at line 928. MCP does
+expose a bounded `job_follow` in [`mcp/wp-server/tools/jobs.py`](../../../mcp/wp-server/tools/jobs.py:291).
+The CLI/MCP surface-sweep transcript `019fc242-d2cd-7500-b4b9-84f184f1324e`
+recorded the mismatch while checking the documented interface.
+
+### Recommendation
+
+Either implement the declared CLI command using the same bounded follow service
+as MCP, or revise the contract and add an explicit parity test. Prefer one
+shared implementation so cursor, reconnect, terminal-state, and output-profile
+semantics do not diverge.
+
+### Acceptance criteria
+
+- The documented CLI command exists with the documented options, or the contract
+  is intentionally revised in the same change.
+- CLI and MCP return equivalent event, cursor, bound, and terminal semantics.
+- Follow is finite by default and never silently submits, retries, or cancels.
+- Help, specs, skill examples, and parity fixtures agree.
+
+## ATO-019 — Normalize malformed job-ID errors
+
+Priority: P2
+Classification: product/contract ergonomics
+Confidence: high
+
+### Evidence
+
+The same surface-sweep transcript recorded Python `ValueError: job id is
+invalid` tracebacks for `job-status`, `job-cancel`, `job-retry`, and
+`job-output`, while sibling entry points rejected malformed IDs with structured
+errors. The current command handlers call transports/services directly in
+[`sandbox/commands/jobs_runtime.py`](../../../sandbox/commands/jobs_runtime.py:398)
+and the shared validator already exists in [`sandbox/jobs/models.py`](../../../sandbox/jobs/models.py:118).
+MCP wrappers catch validation inconsistently; the transcript also recorded a
+malformed `job-list` limit escaping as a raw error.
+
+### Recommendation
+
+Validate job IDs and numeric bounds at every CLI/MCP boundary, then emit the same
+`ok:false`, stable code, safe message, and nonzero status in human and JSON
+modes. Keep internal `ValueError` details out of caller-facing output.
+
+### Acceptance criteria
+
+- Every job verb handles malformed IDs and bounds without a traceback.
+- Local and remote CLI paths and every MCP job tool use one error schema.
+- Human output and JSON output preserve the same error code and retryability.
+- Tests cover malformed IDs, missing jobs, invalid limits, and valid IDs for all
+  status/output/cancel/retry/list verbs.
+
+## ATO-020 — Put a confirmation gate on job-retention deletion
+
+Priority: P1/P2
+Classification: safety/product contract gap
+Confidence: high
+
+### Evidence
+
+The retention transcript `019fc1f7-ec2d-7d81-95dc-195376f44fe7` recorded
+`./sb job-retention --json` removing logs and metrics for many historical jobs;
+the command had no `--dry-run` or `--confirm`. Current
+[`configure_retention_parser`](../../../sandbox/commands/jobs_runtime.py:304)
+and [`cmd_job_retention`](../../../sandbox/commands/jobs_runtime.py:790)
+directly invoke the cleanup sweep. A later bounded call in the same transcript
+returned no candidates, confirming the side effect was persistent.
+
+### Recommendation
+
+Make the default command a read-only retention plan/preview. Require an explicit
+`--confirm` for deletion and return candidate IDs, age, target, and estimated
+bytes in dry-run output. Keep any scheduled internal sweeper as a separate,
+reviewed service path with its own policy and receipt; MCP must use the same gate.
+
+### Acceptance criteria
+
+- A bare or `--json` retention command cannot delete data.
+- Deletion requires explicit confirmation and identifies the target and policy.
+- Preview and apply return stable, bounded receipts and are replay-safe.
+- Tests prove malformed, remote, repeated, and interrupted retention requests do
+  not broaden the deletion set.
+
+## ATO-021 — Apply remote-service preflight to resource reclamation
+
+Priority: P1/P2
+Classification: product/safety boundary gap
+Confidence: high
+
+### Evidence
+
+Workspace mutations call `_assert_remote_service_ready` before dispatch in
+[`sandbox/application/workspace_service.py`](../../../sandbox/application/workspace_service.py:404),
+but [`reclaim_service`](../../../sandbox/resources/context.py:53) constructs a
+`RemoteResourceAdapter` directly. Its `_entry` checks only configured and
+`provisioned` state in [`sandbox/resources/remote.py`](../../../sandbox/resources/remote.py:3259),
+then sends `/resources` requests without an ownership or runtime-revision
+probe. Spec 035 requires equivalent remote safety semantics. The remote storage
+transcript `01a0068a-ee37-7260-9aff-888a5fd36c89` supplied the partial-inventory
+and unavailable-measurement scenario where cleanup authority must remain
+fail-closed.
+
+### Recommendation
+
+Centralize the remote-service readiness receipt in the resource adapter or make
+the `/resources` endpoint self-verifying. `workspace release`, TTL, and reap
+must refuse stale, ambiguous, or mismatched services before any remote mutation,
+and the result must retain target, ownership, revision, and completeness state.
+
+### Acceptance criteria
+
+- Resource observe, lease, release, TTL, reap, and revalidation share the
+  workspace-grade ownership/revision preflight.
+- A stale or misattributed service cannot receive a resource mutation request.
+- Unavailable, partial, mismatched, and complete evidence are distinct states.
+- CLI/MCP tests cover local, healthy remote, stale remote, and transport failure.
+
+## ATO-022 — Distinguish expected Hermes absence from doctor failure
+
+Priority: P2
+Classification: product/status contract gap
+Confidence: medium-high
+
+### Evidence
+
+The Hermes transcript found a reachable, provisioned remote whose Hermes binary
+and MCP catalog were not installed. `hermes doctor` returned a degraded
+`doctor_failed` result rather than a typed install-needed state, interrupting a
+normal setup decision. The current doctor implementation collapses all missing
+prerequisites into one result in [`sandbox/core/_hermes.py`](../../../sandbox/core/_hermes.py:2521).
+
+### Recommendation
+
+Return explicit states such as `not_installed` or `install_needed` for an
+expected pre-install probe, with exit 0 only for an observational probe that
+completed successfully. Keep `--require-ready` or the setup command strict and
+nonzero when the caller needs a usable Hermes installation.
+
+### Acceptance criteria
+
+- Missing Hermes, missing MCP registration, broken prerequisites, and transport
+  failure are distinct machine-readable states.
+- Setup can branch from `install_needed` without parsing a generic failure.
+- A ready check remains strict and cannot be satisfied by an absent installation.
+
+## ATO-023 — Add component-scoped Hermes readiness
+
+Priority: P2
+Classification: product/status ergonomics
+Confidence: medium-high
+
+### Evidence
+
+`hermes health` computes separate component objects but extends one global
+`degraded_reasons` list for remote MCP, gateway, scheduler, cron, sessions, and
+worktrees in [`sandbox/core/_hermes.py`](../../../sandbox/core/_hermes.py:2761).
+The Hermes transcript observed remote MCP as healthy/revision-matched while an
+unrelated legacy gateway or cron drift made the overall command nonzero, which
+blocked a capability-specific host decision. The docs explicitly describe this
+aggregate behavior in [`docs/hermes-agent.md`](../../../docs/hermes-agent.md:289).
+
+### Recommendation
+
+Add a capability-scoped readiness query (for example
+`hermes health --component remote_mcp` or `hermes remote readiness`) with its
+own status and exit policy. Preserve aggregate health for operations that truly
+need the whole installation, but do not force callers to treat unrelated drift
+as a blocker for a proven capability.
+
+### Acceptance criteria
+
+- Component and aggregate results expose the same bounded evidence and reason
+  codes.
+- A caller can decide whether remote MCP, gateway, scheduler, or dashboard is
+  ready without scraping the aggregate text.
+- Overall health remains conservative and no component-scoped command performs
+  repair implicitly.
+
+## ATO-024 — Separate Hermes host operations from repository runs
+
+Priority: P2
+Classification: product boundary/guidance gap
+Confidence: medium-high
+
+### Evidence
+
+The Hermes CLI rejects `run` unless both `--repo` and `--prompt` are present in
+[`sandbox/commands/hermes.py`](../../../sandbox/commands/hermes.py:160). In the
+Hermes setup transcript, a host-only service-maintenance attempt therefore
+failed with `missing_run_input` even though no repository operation was needed.
+The current interface models every one-shot run as a managed-repository session.
+
+### Recommendation
+
+Make the boundary explicit: either document that host maintenance is not a
+supported Hermes capability, or add a separate allowlisted `hermes host-run`/
+operator workflow for bounded diagnostics and service setup that does not accept
+arbitrary shell. It must have its own authorization, target, revision, and audit
+receipt rather than inventing a fake repository.
+
+### Acceptance criteria
+
+- A supported host operation does not require unrelated repository/GitHub state.
+- Host operations are allowlisted, bounded, and non-arbitrary by default.
+- Repository runs retain their existing worktree and authorization safeguards.
+- Unsupported host requests fail with a discoverable capability error.
+
+## ATO-025 — Make remote repository cloning durable and resumable
+
+Priority: P2
+Classification: product/reliability gap
+Confidence: medium-high
+
+### Evidence
+
+`clone_repo` creates a random temporary path, runs clone/submodule/LFS work in one
+blocking SSH request with a 900-second timeout, and raises `clone_failed` on any
+nonzero result in [`sandbox/core/_hermes.py`](../../../sandbox/core/_hermes.py:3268).
+The Hermes transcript recorded a large public clone progressing substantially
+before failing, with no durable job ID, retained progress receipt, or safe resume
+handle. A lost SSH response leaves the caller unable to tell whether the partial
+clone can be reused.
+
+### Recommendation
+
+Submit cloning as a durable, request-identified job with bounded progress and a
+terminal receipt. Use a stable destination/request identity, explicitly retain
+and resume a verified partial clone, or remove it deterministically before a
+fresh retry. Never launch a second clone when the first response is uncertain.
+
+### Acceptance criteria
+
+- Lost transport output can be reconciled by request ID and destination.
+- Partial clone, submodule, and LFS states are explicit and safe to resume.
+- A retry is idempotent and cannot overwrite a matching or unrelated repository.
+- Progress and terminal failure are bounded and redacted.
+
+## ATO-026 — Add a durable dashboard session-attachment receipt
+
+Priority: P2
+Classification: product/reliability gap
+Confidence: medium
+
+### Evidence
+
+The Hermes dashboard/TUI transcript found a stored session with a substantial
+message history that reopened blank and remained in a connecting state; the PTY
+attach path reported a WebSocket disconnect. The same run had empty one-shot
+model responses without a safe resume action. Spec 016 requires the dashboard to
+share Hermes session state in [`specs/016-remote-hermes-agent/spec.md`](../../../specs/016-remote-hermes-agent/spec.md:87).
+
+### Recommendation
+
+Add a bounded `hermes session attach|verify` receipt that distinguishes snapshot
+availability, cursor/reconnect state, PTY transport, and resumability. Give the
+one-shot controller a safe resume action keyed by session/job ID, rather than
+claiming a session is usable from HTTP readiness alone.
+
+### Acceptance criteria
+
+- A reconnect reports `snapshot_available`, `transport_state`, and
+  `resumable` separately.
+- A failed attach cannot discard or overwrite the stored transcript.
+- Resume is request/session identified and safe after a lost response.
+- CLI and dashboard expose the same bounded evidence.
+
+## ATO-027 — Make delegated validation evidence composable and root-verifiable
+
+Priority: P1/P2
+Classification: agent misuse plus product/validation gap
+Confidence: medium-high
+
+### Evidence
+
+In the delegated-validation transcript
+`019ff4f9-d326-7b21-86ff-d757086fae61`, a Luna slice reported a compile pass, but
+the integrated root run later found a real `SyntaxError` in
+`sandbox/resources/remote.py` from the slice. The report did not bind its pass
+to a commit, exact file set, or reusable machine-readable receipt, so the root
+agent could not safely compose it with concurrent changes.
+
+### Recommendation
+
+Make delegated validation provisional and bind it to the exact revision, file
+set, commands, environment, and outcomes. The root integration gate must rerun
+imports/compile and the relevant tests on the merged result; any source change
+invalidates the child receipt. Keep model identity and effort in the audit trail
+when delegation materially affects confidence.
+
+### Acceptance criteria
+
+- A validation receipt names the exact SHA/tree, files, commands, and exit status.
+- Receipts are automatically stale after the bound tree changes.
+- Root verification is required before a delegated pass becomes acceptance
+  evidence.
+- A failed or contradictory receipt is visible and cannot be summarized as pass.

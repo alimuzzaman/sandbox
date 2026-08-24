@@ -144,6 +144,33 @@ manual cursor and JSON/JSONL handling. The current CLI already has `feedback
 export`; the improvement is to make that the documented audit path, not to create
 a second feedback store.
 
+### Follow-up Luna Max expansion
+
+The follow-up passes were read-only and used `gpt-5.6-luna` at Max reasoning
+effort. They reviewed additional transcript families and then checked each
+candidate against the current source/spec surface before it was added.
+
+| Transcript/session ID | Evidence used | Findings |
+|---|---|---|
+| `01a027e9-9d13-7b20-aa49-cef6c5e847b0` | Hermes setup rollout `rollout-2026-08-22T11-20-16-01a027e9-9d13-7b20-aa49-cef6c5e847b0.jsonl`; repeated `hermes status`, `health`, dashboard, remote-service, and secret-broker actions | ATO-017, ATO-022–ATO-026 |
+| `019fc242-d2cd-7500-b4b9-84f184f1324e` | CLI/MCP surface sweep summary and raw rollout; documented job-follow surface, malformed-ID traces, and bounded command checks | ATO-018, ATO-019 |
+| `019fc1f7-ec2d-7d81-95dc-195376f44fe7` | Remote job/retention gap sweep; raw retention invocation and persistent cleanup result | ATO-020 |
+| `01a0068a-ee37-7260-9aff-888a5fd36c89` | Remote storage/operator transcript plus current resource adapter and workspace preflight source | ATO-021 and ATO-006 corroboration |
+| `019ff4f9-d326-7b21-86ff-d757086fae61` | Delegated validation rollout where root integration contradicted a Luna compile-pass report | ATO-027 |
+
+The Hermes rollout also exposed agent-call overhead that is useful for product
+design: 19 Hermes job-status calls, 14 Hermes status calls, 14 dashboard calls,
+8 skill calls, 6 remote-provision calls, 7 remote-service calls, and 8 sleeps.
+These are transcript counts, not production telemetry; they indicate where a
+single bounded receipt or a capability-specific readiness query could replace
+manual retries and state interpretation.
+
+The CLI/MCP sweep's source check confirmed that Spec 032 declares `sb job follow`
+while the CLI manifest exposes only `job-output --follow`; the same pass found a
+shared `validate_job_id` helper that is not applied consistently at all command
+and MCP boundaries. The retention sweep is a separate safety finding because
+its default operation mutates historical data without a caller confirmation.
+
 ## Current contract checks
 
 The current checkout's help/source inspection confirmed:
@@ -180,6 +207,23 @@ The expanded source-contract review also found:
 - Confirmed remote provisioning mints a new bearer token and rewrites the local
   record on every run instead of converging safely when the remote is already
   healthy; this can invalidate existing MCP clients during a retry.
+- `sb secrets run` preserves child exit metadata internally but the public command
+  emits an unconditional success presentation, so a trusted child failure can
+  return shell success.
+- Spec 032's CLI `job follow` surface is not registered; MCP has a separate
+  bounded implementation, creating a documented parity gap.
+- Job-ID and limit validation is distributed across handlers and MCP wrappers;
+  malformed inputs can still escape as raw `ValueError` output.
+- `job-retention` has no confirmation or dry-run parser option and invokes the
+  deletion sweep directly.
+- Resource reclamation constructs its remote adapter without the workspace
+  ownership/runtime-revision preflight.
+- Hermes `doctor` collapses expected missing-installation state into
+  `doctor_failed`, while `health` aggregates component failures into one global
+  exit decision.
+- Hermes one-shot `run` requires a repository, remote cloning is synchronous and
+  random-temp based, and the dashboard/session contract has no durable attach
+  receipt or safe resume path.
 
 ## Existing strengths to preserve
 

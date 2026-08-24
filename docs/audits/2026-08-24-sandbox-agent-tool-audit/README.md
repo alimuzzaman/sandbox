@@ -35,10 +35,12 @@ can therefore create another parent and another set of matrix cells.
 
 Other findings cover machine-readable output consistency, remote readiness and
 revision receipts, bootstrap/context repetition, explicit remote-only intent,
-feedback-export ergonomics, and test/orchestration overhead. Existing safety
-features such as detached resource scans, bounded retained output, feedback
-export, and revision mismatch refusal are recorded as strengths rather than
-duplicated as new proposals.
+feedback-export ergonomics, and test/orchestration overhead. The follow-up
+expansion also found fail-open secret-child status, CLI/MCP job-follow drift,
+destructive retention defaults, inconsistent job-ID errors, and remote Hermes
+and resource-control readiness gaps. Existing safety features such as detached
+resource scans, bounded retained output, feedback export, and revision mismatch
+refusal are recorded as strengths rather than duplicated as new proposals.
 
 ## Finding index
 
@@ -60,6 +62,17 @@ duplicated as new proposals.
 | ATO-014 | resource docs/spec drift | P3 |
 | ATO-015 | Spec 036 cache wording | P3 |
 | ATO-016 | convergent remote provisioning | P2 |
+| ATO-017 | secret child exit status | P1/P2 |
+| ATO-018 | CLI/MCP job-follow parity | P2 |
+| ATO-019 | normalized job-ID errors | P2 |
+| ATO-020 | retention confirmation gate | P1/P2 |
+| ATO-021 | resource remote preflight | P1/P2 |
+| ATO-022 | Hermes absence state | P2 |
+| ATO-023 | component-scoped Hermes health | P2 |
+| ATO-024 | Hermes host-only operations | P2 |
+| ATO-025 | resumable remote clone | P2 |
+| ATO-026 | dashboard session resume | P2 |
+| ATO-027 | delegated validation receipt | P1/P2 |
 
 ## Scope and limits
 
@@ -76,11 +89,12 @@ The evidence combines:
   accessible Codex thread transcripts and rollout records.
 - Read-only inspection of the current CLI help, source, tests, and documentation.
 
-Two independent Luna Max passes expanded the work: one normalized rollout
-events and anchored repeated polling to actual job IDs; the other reviewed the
-current CLI/MCP/source contracts for gaps and documentation drift. Their
-findings are included below as ATO-010 through ATO-016 and as corroborating
-evidence for the earlier findings.
+The initial two Luna Max passes normalized rollout events and reviewed the
+current CLI/MCP/source contracts. A follow-up pair of bounded `gpt-5.6-luna`
+Max passes focused on Hermes, job-control, retention, and remote-resource
+contracts. Their source-backed additions are included as ATO-017 through
+ATO-027; historical reports are labeled as such where current source behavior
+may have moved on.
 
 Corpus-wide pattern counts are lower-bound indicators extracted from recorded
 tool-call inputs, not production telemetry; embedded examples can cause a small

@@ -84,6 +84,43 @@ only after measuring continued repetition post-Slice 1–4.
 Validation: docs examples run as read-only commands; no new storage or mutation
 authority is introduced.
 
+## Slice 6 — Fail-closed command and retention contracts
+
+Make `secrets run` propagate trusted-child exit state, normalize malformed
+job-input errors, and put `job-retention` behind a preview/confirmation gate.
+Keep redaction, bounded output, and scheduled internal sweep policy intact.
+
+Validation: child exit 0/11/timeout, malformed IDs and limits across every job
+verb, retention preview/apply/replay/interruption, and CLI/MCP envelope parity.
+
+## Slice 7 — Resource and remote capability readiness
+
+Reuse the workspace-grade ownership/revision preflight for remote resource
+observe and reclamation. Add capability-scoped Hermes readiness and typed
+`install_needed` versus broken/transport states without weakening aggregate
+health or mutation confirmation.
+
+Validation: healthy, absent, stale, ambiguous, mismatched, unavailable, and
+partial remote states; verify no resource mutation is dispatched before proof.
+
+## Slice 8 — Durable Hermes operations and session recovery
+
+Separate bounded host maintenance from repository runs, then give remote clone
+and dashboard/session attachment request IDs, progress/terminal receipts, and
+safe resume semantics. Do not introduce an arbitrary-shell escape hatch.
+
+Validation: lost SSH response, partial clone, duplicate retry, blank dashboard,
+PTY disconnect, snapshot-only session, and successful reconnect.
+
+## Slice 9 — Delegated validation receipts
+
+Make child-agent validation reports provisional, tree-bound, and machine-readable.
+Require the root integration gate to rerun relevant imports/compile/tests after
+composition and mark receipts stale after any bound file changes.
+
+Validation: matching SHA, changed tree, contradictory child/root result, failed
+receipt, and concurrent worktree edits.
+
 ## Definition of done
 
 - Each accepted change has source, tests, and matching docs/skill updates.
@@ -92,3 +129,5 @@ authority is introduced.
 - Replay, timeout, partial evidence, and revision mismatch remain explicit.
 - Remote mutation, cleanup, deployment, publishing, and feedback submission still
   require their existing authority/confirmation gates.
+- Secret-child failures, destructive retention, resource preflight, and delegated
+  validation remain fail-closed and source-verifiable.

@@ -34,10 +34,11 @@ The start sequence is fail closed:
    reachability.
 6. Inject instance-only credentials out of band.
 7. Start MariaDB on its private Unix socket and bootstrap only the owned databases.
-8. Start PHP-FPM, the selected private web backend, and cron, then verify health.
+8. Start PHP-FPM, the selected private web backend, and the inert cron service; an
+   isolated WordPress runner is installed only when `wpCron.enabled` is true.
 9. Persist ready ownership only after all previous gates pass.
 
-Every web, cron, WP-CLI/eval, arbitrary exec, Composer, activation, PHPUnit, and durable-job
+Every web, optional WordPress cron, WP-CLI/eval, arbitrary exec, Composer, activation, PHPUnit, and durable-job
 path goes through the same policy-digest gateway. If the gateway or an effective observation
 is unavailable, Sandbox does not run the payload on the host or fall back to Compose.
 

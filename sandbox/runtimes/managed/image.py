@@ -70,7 +70,9 @@ class ManagedRootfs:
                 services = plan["services"]
                 result = self.process.run(("sudo", "-n", self.helper, "image-configure",
                                            plan["machine_id"], plan["policy_digest"],
-                                           plan["web_server"], services["digest"]), timeout=300)
+                                           plan["web_server"], services["digest"],
+                                           str(bool(services.get("wp_cron_enabled"))).lower()),
+                                      timeout=300)
         finally:
             path.unlink(missing_ok=True)
         if result.returncode != 0:

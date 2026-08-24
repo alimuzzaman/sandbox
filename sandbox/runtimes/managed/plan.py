@@ -395,6 +395,16 @@ class ManagedPlanBuilder:
             ))
         web_server = request.arguments.get("web_server", runtime.get("webServer") or self.web_server)
 
+        # WordPress traffic must not spawn scheduled work by default.  The
+        # legacy WordPress descriptor already owns the opt-in constant, so use
+        # its explicit false value as the single source of truth for the
+        # managed guest's five-minute scheduler as well.
+        wp_cron = descriptor.get("wpCron", {"enabled": False}) \
+            if isinstance(descriptor, dict) else {"enabled": False}
+        if not isinstance(wp_cron, dict) or not isinstance(wp_cron.get("enabled"), bool):
+            raise ValueError("WordPress cron policy is invalid")
+        wp_cron_enabled = wp_cron["enabled"]
+
         # Preflight every descriptor-derived, resource, extension, and package
         # value before reserving a network.  ``reserve_network`` persists an
         # ownership record, so a malformed PHP extension request must fail
@@ -442,10 +452,13 @@ class ManagedPlanBuilder:
         )
         grant_set = EgressGrantSet(machine_id, policy.digest, tuple(grants))
         if extension_plan is None:
-            service_plan = self.services.compile(policy, web_server=web_server)
+            service_plan = self.services.compile(
+                policy, web_server=web_server, wp_cron_enabled=wp_cron_enabled,
+            )
         else:
             service_plan = self.services.compile(
                 policy, web_server=web_server, php_extensions=extension_plan,
+                wp_cron_enabled=wp_cron_enabled,
             )
         database_plan = {**database, "policy_digest": policy.digest}
         record = {

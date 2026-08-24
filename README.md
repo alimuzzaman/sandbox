@@ -509,6 +509,12 @@ RAM/load/disk, and storage evidence. The quick view is cache-only and may be par
 service. Unknown and overlapping values are shown as unknown/non-additive rather than
 treated as safe cleanup candidates.
 
+The dashboard uses a loopback HTTP BFF with one in-flight refresh per resource and
+completion-based polling (30 seconds after the previous refresh finishes). It does not
+open a WebSocket: the expensive operation is the host inventory itself, so a push
+channel would not make that scan cheaper. A future event stream can be added behind
+the same single-flight cache if remote services begin emitting incremental changes.
+
 For the exceptional case where an operator must run a command directly on a host,
 use the explicit CLI escape hatch. It is never used internally and is not exposed as
 an MCP tool:
@@ -604,8 +610,10 @@ You can also invoke skills as slash commands, e.g.
 
 ## Managing instances
 
-Instances are created per-project by `init`/`ensure` — there's no
-`instance create`. But you can view and drive them:
+Instances are created per-project by `init`/`ensure`; the browser dashboard also offers
+a local **Create an instance** form backed by the same `ensure` operation. Remote
+creation remains unavailable until the remote lifecycle service exposes it. You can
+view and drive instances with:
 
 ```bash
 ./sb instances            # list every per-project instance + status + URL

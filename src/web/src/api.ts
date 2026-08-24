@@ -4,7 +4,9 @@ import type { AppData, ActionResult, JobSnapshot, Usage, RemoteInventory } from 
 
 async function getJSON<T>(path: string): Promise<T> {
   const r = await fetch(path);
-  return r.json() as Promise<T>;
+  const body = await r.json() as T & { error?: string };
+  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  return body;
 }
 
 export const fetchData = () => getJSON<AppData>("/api/instances");
@@ -17,12 +19,14 @@ export const fetchSnapshots = (name: string) =>
   getJSON<{ snapshots: string[] }>(`/api/snapshots/${name}`);
 
 export async function postAction(
-  body: Record<string, unknown>,
+  payload: Record<string, unknown>,
 ): Promise<ActionResult> {
   const r = await fetch("/api/action", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
-  return r.json() as Promise<ActionResult>;
+  const body = await r.json() as ActionResult;
+  if (!r.ok && !body.output) throw new Error(`Request failed (${r.status})`);
+  return body;
 }

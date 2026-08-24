@@ -67,7 +67,7 @@ class TestManagedImage(unittest.TestCase):
         self.assertEqual(bootstrap[1], 1900)
         self.assertEqual(configure[0][:4],
                          ("sudo", "-n", "/fixed/helper", "image-configure"))
-        self.assertEqual(configure[0][-2:], ("nginx", "c" * 64))
+        self.assertEqual(configure[0][-3:], ("nginx", "c" * 64, "false"))
         self.assertEqual(configure[1], 300)
 
 

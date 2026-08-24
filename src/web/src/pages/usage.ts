@@ -10,7 +10,7 @@ export function usageView(): string {
   const u = store.usage;
   if (!u || !u.available)
     return `<div class="px-6 py-12 text-center text-neutral-400 text-[14px]">
-      No Claude session data found.</div>`;
+      No supported agent-usage data found.</div>`;
   const t = u.total || {};
   const statCard = (label: string, val: string, sub?: string): string =>
     `<div class="rounded-lg border border-brd dark:border-brd-dark p-4">
@@ -37,8 +37,8 @@ export function usageView(): string {
       <span class="text-neutral-500">${fmtN(s.tokens)}</span>
       <span class="w-16 text-right text-neutral-700 dark:text-neutral-200">${fmt$(s.cost)}</span></div>`).join("");
   return `<div class="px-6 py-6 max-w-3xl">
-    <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50">Claude usage</h1>
-    <p class="mt-1 text-[12.5px] text-neutral-400">Across all sandbox Claude sessions. Cost is <b>estimated</b> from public per-token prices.</p>
+    <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50">Agent usage</h1>
+    <p class="mt-1 text-[12.5px] text-neutral-400">Currently collected from Claude session telemetry; this collector does not yet include Codex. Cost is <b>estimated</b> from public per-token prices.</p>
     <div class="mt-5 grid grid-cols-3 gap-3">
       ${statCard("Total tokens", fmtN(u.tokens))}
       ${statCard("Estimated cost", fmt$(u.cost))}

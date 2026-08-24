@@ -40,7 +40,10 @@ def _persistent_payload(command, writable_targets):
 
 
 def compile_service_files(guest, connections, runtime_seconds, *, web_server, backend_port,
-                          writable_targets=(), guest_machine=None):
+                          writable_targets=(), guest_machine=None,
+                          wp_cron_enabled=False):
+    if type(wp_cron_enabled) is not bool:
+        raise ValueError("managed WordPress cron setting is invalid")
     guest_machine = guest_machine or os.uname().machine
     php_children = max(2, min(32, connections // 4))
     common_php = (
@@ -127,7 +130,9 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
         "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
              "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
-             "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n",
+             ("*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n"
+              if wp_cron_enabled else
+              "# WordPress cron disabled by Sandbox; opt in with DISABLE_WP_CRON=false.\n"),
              # Declared writable targets under /run must exist from boot, not
              # from the moment their service happens to start. /run is a tmpfs,
              # so without this the isolation probe -- and any command run before
@@ -245,8 +250,10 @@ class ManagedServiceCompiler:
         }
 
     def compile(self, policy, *, web_server="nginx", backend_port=8080,
-                php_extensions=None):
+                php_extensions=None, wp_cron_enabled=False):
         if web_server not in {"nginx", "apache"}: raise ValueError("managed web server is invalid")
+        if type(wp_cron_enabled) is not bool:
+            raise ValueError("managed WordPress cron setting is invalid")
         port = int(backend_port)
         if not 1024 <= port <= 65535: raise ValueError("managed backend port is invalid")
         guest = str(policy.network.get("guest_address", "")).split("/", 1)[0]
@@ -256,6 +263,7 @@ class ManagedServiceCompiler:
         files, units = compile_service_files(guest, connections, runtime_seconds,
                                              web_server=web_server,
                                              backend_port=port,
+                                             wp_cron_enabled=wp_cron_enabled,
                                              writable_targets=tuple(item["target"]
                                                                     for item in getattr(
                                                                         policy, "writable_mounts", ())))
@@ -272,6 +280,7 @@ class ManagedServiceCompiler:
             )
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "web_server": web_server, "backend": {"address": guest, "port": port},
+                "wp_cron_enabled": wp_cron_enabled,
                 "files": files, "file_digests": {path: hashlib.sha256(content.encode()).hexdigest()
                                                   for path, content in files.items()},
                 "units": units, "digest": canonical_digest(files),
@@ -311,6 +320,9 @@ class ManagedServiceSupervisor:
         web_server = plan.get("web_server")
         if web_server not in {"nginx", "apache"}:
             raise ValueError("managed web server is invalid")
+        wp_cron_enabled = plan.get("wp_cron_enabled", False)
+        if not isinstance(wp_cron_enabled, bool):
+            raise ValueError("managed WordPress cron setting is invalid")
         files = plan.get("files")
         file_digests = plan.get("file_digests")
         if not isinstance(files, Mapping) or not isinstance(file_digests, Mapping):
@@ -343,6 +355,11 @@ class ManagedServiceSupervisor:
                           "cron.service")
         if tuple(plan.get("units", ())) != expected_units:
             raise ValueError("managed service units changed")
+        cron_file = files.get("/etc/cron.d/sandbox-wordpress", "")
+        if wp_cron_enabled and "*/5 * * * *" not in cron_file:
+            raise ValueError("managed WordPress cron schedule is missing")
+        if not wp_cron_enabled and "*/5 * * * *" in cron_file:
+            raise ValueError("managed WordPress cron is unexpectedly enabled")
 
     def _run(self, verb, plan):
         self._validate(plan)

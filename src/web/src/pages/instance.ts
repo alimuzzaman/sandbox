@@ -32,16 +32,16 @@ function domainCell(r: Instance): string {
     <span class="text-[11px] text-neutral-400 ml-1">http (no cert)</span>${tip}`;
 }
 
-// Per-instance Claude usage summary (best-effort, cached).
+// Per-instance agent usage summary (best-effort, cached).
 function instUsageLine(name: string): string {
   const u = store.usage;
   if (!u || !u.available)
     return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1">
-      <button onclick="sb.loadUsageThenRender()" class="text-accent dark:text-blue-400 hover:underline">Show Claude token usage →</button></div>`;
+      <button onclick="sb.loadUsageThenRender()" class="text-accent dark:text-blue-400 hover:underline">Show agent token usage →</button></div>`;
   const v = u.per_instance?.[name];
-  if (!v) return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1 text-neutral-400">No Claude usage attributed to this instance yet.</div>`;
+  if (!v) return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1 text-neutral-400">No agent usage attributed to this instance yet.</div>`;
   return `<div class="pt-2 border-t border-brd dark:border-brd-dark/60 mt-1 flex items-center gap-3">
-    <span class="text-neutral-600 dark:text-neutral-300">Claude usage (est.):</span>
+    <span class="text-neutral-600 dark:text-neutral-300">Agent usage (est.):</span>
     <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmtN(usageTokenSum(v))} tokens</span>
     <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmt$(v.cost)}</span>
     <button onclick="sb.showUsage()" class="ml-auto text-accent dark:text-blue-400 hover:underline">details →</button></div>`;
@@ -155,9 +155,9 @@ export function instanceView(r: Instance | null): string {
   </div>
 
   <div class="px-6 pb-8">
-    ${sectionHead("Use with Claude", "Connect a Claude session to this exact site")}
+    ${sectionHead("Use with Codex or Claude", "Connect a coding-agent session to this exact site")}
     <div class="rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-3.5 text-[12.5px] space-y-2">
-      <div class="text-neutral-600 dark:text-neutral-300">Tell Claude in chat (simplest):</div>
+      <div class="text-neutral-600 dark:text-neutral-300">Tell Codex or Claude in chat (simplest):</div>
       ${snippet("focus " + (r.focus && r.focus !== "—" ? r.focus : "<plugin>"))}
       <div class="text-neutral-600 dark:text-neutral-300">Or call this site's tools directly in a session:</div>
       ${snippet("mcp__" + r.mcp_server + "__*")}

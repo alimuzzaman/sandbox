@@ -3,7 +3,7 @@
 #
 # The web UI inlines a pre-built Tailwind stylesheet so it works offline with
 # no CDN and no node_modules. Run this after changing Tailwind classes in the
-# _WEB_PAGE markup inside `sb`. Uses the Tailwind *standalone* CLI (a single
+# _WEB_PAGE markup inside sandbox/core/_paths.py. Uses the Tailwind *standalone* CLI (a single
 # binary — no npm install), downloaded to .cache/ on first run.
 #
 # Usage:  ./scripts/build-web-css.sh
@@ -32,17 +32,18 @@ if [ ! -x "$BIN" ]; then
   chmod +x "$BIN"
 fi
 
-# 2. Extract the page shell (_WEB_PAGE) from sb so Tailwind can scan its classes.
-#    The dashboard's classes mostly live in src/web/src/*.ts now (post-TS
-#    migration) and are scanned directly via the content globs below.
+# 2. Extract the page shell (_WEB_PAGE) from the canonical core paths module so
+#    Tailwind can scan its classes. The old monolithic `sb` entrypoint no longer
+#    owns this template; keeping the extraction here prevents dev/production
+#    shell drift from breaking CSS builds.
 python3 - "$ROOT" <<'PY'
-import sys, types, os
+import sys, os
 root = sys.argv[1]
-m = types.ModuleType('m'); m.__dict__['__file__'] = os.path.join(root, 'sb')
-src = open(os.path.join(root, 'sb')).read()
-src = src[src.index('from __future__'):].replace('\nif __name__', '\nif False and __name__')
-exec(compile(src, 'sb', 'exec'), m.__dict__)
-open(os.path.join(root, '.cache', 'page.html'), 'w').write(m._WEB_PAGE)
+src = open(os.path.join(root, 'sandbox', 'core', '_paths.py')).read()
+marker = '_WEB_PAGE = """'
+start = src.index(marker) + len(marker)
+end = src.index('"""', start)
+open(os.path.join(root, '.cache', 'page.html'), 'w').write(src[start:end])
 PY
 
 # 3. Config mirrors xSpeed DESIGN.md §2 tokens + §5 radius.

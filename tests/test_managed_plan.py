@@ -22,9 +22,10 @@ class Database:
 
 
 class Services:
-    def compile(self, policy, *, web_server):
+    def compile(self, policy, *, web_server, wp_cron_enabled=False):
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "web_server": web_server, "backend": {"address": "10.203.0.2", "port": 8080},
+                "wp_cron_enabled": wp_cron_enabled,
                 "files": {}, "file_digests": {}, "units": (), "digest": "a" * 64}
 
 

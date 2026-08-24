@@ -496,7 +496,7 @@ def claude_usage(known_instances: list[str]) -> dict:
 
 def _web_do_action(payload: dict) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor
-    from sandbox.commands.instances_cmd import cmd_focus, cmd_instance
+    from sandbox.commands.instances_cmd import cmd_focus, cmd_instance, cmd_ensure
     from sandbox.commands.debug import cmd_introspect, cmd_xdebug
     from sandbox.commands.data import (
         _is_reserved_baseline_name, cmd_reset, cmd_restore, cmd_snapshot,
@@ -702,11 +702,36 @@ def _web_do_action(payload: dict) -> dict:
         return {"ok": True, "job_id": _start_job(label, do_server)}
 
     if action == "create":
-        # Per-project model: instances are created by `./sb init` / `./sb ensure`
-        # inside a plugin repo (keyed to the project dir), not by name here.
-        return {"ok": False, "output":
-                "Create an instance by running `./sb init` (or `./sb ensure`) "
-                "inside a plugin repo — not from the dashboard."}
+        # The web dashboard is loopback-only, but still validate the input
+        # before starting a mutating job.  Creation is project-scoped: the
+        # project directory is the identity and an optional label selects an
+        # additional instance for that project.
+        raw_project = payload.get("project_dir")
+        if not isinstance(raw_project, str) or not raw_project.strip():
+            return {"ok": False, "output": "project_dir is required"}
+        project_dir = Path(raw_project).expanduser()
+        try:
+            project_dir = project_dir.resolve()
+        except OSError:
+            return {"ok": False, "output": "project_dir could not be resolved"}
+        if not project_dir.is_dir():
+            return {"ok": False, "output": "project_dir must be an existing directory"}
+        raw_label = payload.get("label")
+        label = raw_label.strip().lower() if isinstance(raw_label, str) else ""
+        if label and not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", label):
+            return {"ok": False, "output":
+                    "label must start with a letter/number and use only a-z, 0-9, _ or -"}
+
+        def do_create():
+            with _web_lock:
+                cmd_ensure(load_config(), _types.SimpleNamespace(
+                    project_dir=str(project_dir), label=label or None,
+                    create=True, local=True, json=False,
+                    reveal_login=False, workspace=None,
+                ))
+
+        return {"ok": True, "job_id": _start_job(
+            f"Creating {label or 'default'} instance", do_create)}
 
     if action == "delete":
         if payload.get("confirm") != name:

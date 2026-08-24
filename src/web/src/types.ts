@@ -26,7 +26,7 @@ export interface AppData {
 }
 
 export interface RemoteSummary { name: string; provisioned: boolean; control_ready: boolean }
-export interface ResourceRow { name?: string; pid?: number; cpu_percent?: number; rss_bytes?: number; memory_used_bytes?: number; memory_percent?: number; pids?: number; process_count?: number; attribution_status?: string }
+export interface ResourceRow { name?: string; pid?: number; cpu_percent?: number; rss_bytes?: number; memory_used_bytes?: number; memory_percent?: number; pids?: number; process_count?: number; container_count?: number; attribution_status?: string }
 export interface RemoteInventory {
   ok: boolean; name?: string; inventory_schema: number; transport: "control";
   evidence_status: "complete" | "partial" | "unavailable";
@@ -97,6 +97,8 @@ export interface SbApi {
   selectInstance(name: string): void;
   selectRemote(name: string): void;
   refreshRemote(name: string, deep?: boolean): void;
+  refreshHosts(): void;
+  submitCreate(): void;
   showUsage(): void;
   showHelp(): void;
   openTerminal(name: string): void;

@@ -256,6 +256,10 @@ _BASE_WP_CONFIG = {
     "WP_DEBUG_DISPLAY": False,
     "SCRIPT_DEBUG": True,
     "WP_ENVIRONMENT_TYPE": "local",
+    # Disposable instances should not schedule work on every front-end
+    # request. Projects that exercise scheduled jobs opt in through the
+    # normalized `wpCron.enabled` policy (or its legacy config alias).
+    "DISABLE_WP_CRON": True,
 }
 
 
@@ -605,14 +609,14 @@ _WEB_PAGE = """<!doctype html>
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
         <span class="text-[13px] leading-none font-mono">›_</span> Terminal</button>
-      <button id="usageBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+      <a id="usageBtn" href="/usage" data-link class="w-full text-[13px] px-3 py-2 rounded text-left
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
-        <span class="text-[13px] leading-none">◴</span> Claude usage</button>
+        <span class="text-[13px] leading-none">◴</span> Agent usage</a>
       <button id="helpBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
-        <span class="text-[14px] leading-none">?</span> Using Claude</button>
+        <span class="text-[14px] leading-none">?</span> Using AI agents</button>
     </div>
   </aside>
 

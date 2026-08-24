@@ -8,6 +8,8 @@ export const store: {
   busy: Record<string, string>;   // instance name -> in-flight action
   usage: Usage | null;
   remote: Record<string, RemoteInventory>;
+  remoteBusy: Record<string, boolean>;
+  sync: { refreshing: boolean; lastCompleted: number | null; error: string | null };
   paused: boolean;                // pause the refresh tick while a job streams
 } = {
   data: {
@@ -17,5 +19,7 @@ export const store: {
   busy: {},
   usage: null,
   remote: {},
+  remoteBusy: {},
+  sync: { refreshing: false, lastCompleted: null, error: null },
   paused: false,
 };

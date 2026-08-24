@@ -274,6 +274,11 @@ file path.
   // null). See "wp-config constants" below.
   "config": { "WP_DEBUG": true },
 
+  // Scheduled WordPress events are opt-in. Web-triggered cron is disabled for
+  // every runtime by default; managed-native uses an isolated five-minute
+  // runner when enabled.
+  "wpCron": { "enabled": false },
+
   // Preferred WordPress port. null → auto-assigned from the free range.
   "port": null,
 
@@ -608,14 +613,22 @@ the wp-cli service, so `wp eval`/tests see the same constants the site runs
 with. Because the constants live in the generated compose file (not in
 `wp-config.php`, which the official image's entrypoint regenerates from env on
 every container start), they survive `sb down` / `sb up`. Sandbox defaults
-(`WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY`, `SCRIPT_DEBUG`, `WP_ENVIRONMENT_TYPE:
-"local"`) apply first; project entries override them key-by-key.
+(`WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY`, `SCRIPT_DEBUG`,
+`WP_ENVIRONMENT_TYPE: "local"`, and `DISABLE_WP_CRON: true`) apply first;
+project entries override them key-by-key.
 
 Two special cases:
 
 - `WP_DEBUG` maps to the `WORDPRESS_DEBUG` env var (the image defines the
   constant from it before the extra block runs). It defaults to **true** in
   the sandbox; set `"WP_DEBUG": false` to turn it off.
+- `DISABLE_WP_CRON` defaults to **true** so an idle instance does not schedule
+  work on ordinary page requests. Prefer `wpCron: {"enabled": true}` for a
+  project that needs scheduled events. The older
+  `config.DISABLE_WP_CRON: false` spelling remains a compatibility alias when
+  `wpCron` is omitted; if both spellings are present, they must describe the
+  same effective setting. Managed-native uses the same policy for its isolated
+  five-minute scheduler and never enables both triggers.
 - On a **litespeed** instance the constants are additionally written as
   literals via `wp config set` (lsphp runs via suExec and can't read the
   container env; the OLS image doesn't regenerate `wp-config.php`, so the

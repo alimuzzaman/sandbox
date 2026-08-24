@@ -97,6 +97,7 @@ DEFAULTS: dict = {
     "server": "nginx",         # apache | nginx | litespeed  (herd: backlog)
     "tld": "tst",              # local domain TLD for the proxy: <name>.<tld>
     "config": {},              # wp-config constants -> WORDPRESS_CONFIG_EXTRA
+    "wpCron": {"enabled": False},  # scheduled WP events are opt-in
     "port": None,              # preferred port; None = auto-assign
     "tests": {"suite": "auto"},  # auto | unit | integration
     "pluginCheck": {           # ./sb plugin-check (spec 013) — opt-in
@@ -114,6 +115,34 @@ DEFAULTS: dict = {
 
 class ConfigError(Exception):
     """Raised for an unreadable, malformed, or disallowed project config."""
+
+
+def _normalize_wp_cron(data: dict, merged: dict) -> dict:
+    """Resolve the explicit WordPress scheduler policy.
+
+    ``config.DISABLE_WP_CRON`` remains a compatibility alias for existing
+    projects, but a first-class ``wpCron.enabled`` setting wins and conflicting
+    declarations fail closed instead of silently enabling two schedulers.
+    """
+    declared = data.get("wpCron") if isinstance(data, dict) and "wpCron" in data else None
+    has_declared = isinstance(data, dict) and "wpCron" in data
+    config = data.get("config", {}) if isinstance(data, dict) else {}
+    alias = config.get("DISABLE_WP_CRON") if isinstance(config, dict) else None
+    if alias is not None and not isinstance(alias, bool):
+        raise ConfigError("config.DISABLE_WP_CRON must be boolean")
+    if has_declared:
+        if not isinstance(declared, dict) or set(declared) != {"enabled"} \
+                or not isinstance(declared.get("enabled"), bool):
+            raise ConfigError("wpCron must be an object containing boolean enabled")
+        enabled = declared["enabled"]
+        if alias is not None and enabled == alias:
+            raise ConfigError("wpCron.enabled conflicts with config.DISABLE_WP_CRON")
+    elif alias is not None:
+        enabled = not alias
+    else:
+        enabled = False
+    merged["wpCron"] = {"enabled": enabled}
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +621,7 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
         data = _merge_layers(user_doc, data)
         source = f"user+{source}"
     merged = _deep_merge(DEFAULTS, data)
+    _normalize_wp_cron(data, merged)
     merged["root"] = str(root)
     merged["source"] = source
 

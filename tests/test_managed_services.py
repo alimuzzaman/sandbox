@@ -74,12 +74,19 @@ class TestManagedServices(unittest.TestCase):
         self.assertIn("php_admin_value[post_max_size] = 1024M", php_pool)
         self.assertIn("/usr/bin/timeout --signal=TERM --kill-after=5s 900s", cron)
         self.assertIn("/usr/local/bin/wp cron event run", cron)
-        self.assertIn("root /usr/local/libexec/sandbox-wordpress-cron",
+        self.assertIn("WordPress cron disabled by Sandbox",
                       result["files"]["/etc/cron.d/sandbox-wordpress"])
         self.assertEqual(
             result["files"]["/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf"],
             "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
         )
+
+    def test_wordpress_cron_requires_explicit_opt_in(self):
+        from sandbox.runtimes.managed.services import ManagedServiceCompiler
+        result = ManagedServiceCompiler().compile(Policy(), wp_cron_enabled=True)
+        self.assertIn("root /usr/local/libexec/sandbox-wordpress-cron",
+                      result["files"]["/etc/cron.d/sandbox-wordpress"])
+        self.assertTrue(result["wp_cron_enabled"])
 
     def test_apache_variant_uses_same_php_database_and_backend_contract(self):
         from sandbox.runtimes.managed.services import ManagedServiceCompiler

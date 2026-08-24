@@ -4,7 +4,7 @@
 //   /                        -> home (welcome, or auto-first instance)
 //   /instance/<name>         -> instance detail
 //   /instance/<name>/console -> instance detail + console drawer open
-//   /usage                   -> Claude usage page
+//   /usage                   -> agent usage page
 //
 // On hard-refresh/deep-link the Python server serves the app for any non-/api
 // path (SPA fallback), then this router renders the right view.
@@ -15,6 +15,7 @@ export type Route =
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
   | { page: "remote"; name: string }
+  | { page: "remote-instance"; name: string; instance: string }
   | { page: "notfound" };
 
 export function parse(pathname: string): Route {
@@ -24,6 +25,8 @@ export function parse(pathname: string): Route {
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
   if (parts[0] === "remote" && parts[1] && parts.length === 2)
     return { page: "remote", name: decodeURIComponent(parts[1]) };
+  if (parts[0] === "remote" && parts[1] && parts[2] === "instance" && parts[3] && parts.length === 4)
+    return { page: "remote-instance", name: decodeURIComponent(parts[1]), instance: decodeURIComponent(parts[3]) };
   if (parts[0] === "instance" && parts[1]) {
     return { page: "instance", name: decodeURIComponent(parts[1]),
              console: parts[2] === "console" };
@@ -50,6 +53,8 @@ export function instancePath(name: string, console = false): string {
   return console ? `${base}/console` : base;
 }
 export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
+export const remoteInstancePath = (name: string, instance: string): string =>
+  `${remotePath(name)}/instance/${encodeURIComponent(instance)}`;
 
 export function initRouter(): void {
   window.addEventListener("popstate", () => onChange(currentRoute()));

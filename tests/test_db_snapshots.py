@@ -647,3 +647,42 @@ class TestDashboardResetDispatch(unittest.TestCase):
 
         start.assert_not_called()
         restore.assert_not_called()
+
+    def test_dashboard_create_rejects_missing_project_before_job(self):
+        import sandbox.core._dash as dashboard
+
+        with mock.patch.object(dashboard, "_start_job") as start:
+            result = dashboard._web_do_action({
+                "action": "create", "project_dir": "/definitely/not/a/project",
+            })
+
+        self.assertFalse(result["ok"])
+        self.assertIn("existing directory", result["output"])
+        start.assert_not_called()
+
+    def test_dashboard_create_dispatches_validated_local_ensure(self):
+        import sandbox.core._dash as dashboard
+
+        root = Path.home() / ".sandbox-test-web-create"
+        root.mkdir(exist_ok=True)
+        self.addCleanup(root.rmdir)
+        called = []
+
+        def inline_job(_label, operation):
+            operation()
+            return "job-create"
+
+        with mock.patch.object(dashboard, "_start_job", side_effect=inline_job), \
+                mock.patch.object(dashboard, "load_config", return_value={}), \
+                mock.patch("sandbox.commands.instances_cmd.cmd_ensure",
+                           side_effect=lambda cfg, args: called.append((cfg, args))):
+            result = dashboard._web_do_action({
+                "action": "create", "project_dir": str(root), "label": "Review",
+            })
+
+        self.assertEqual(result, {"ok": True, "job_id": "job-create"})
+        self.assertEqual(len(called), 1)
+        self.assertEqual(called[0][1].project_dir, str(root.resolve()))
+        self.assertEqual(called[0][1].label, "review")
+        self.assertTrue(called[0][1].create)
+        self.assertTrue(called[0][1].local)

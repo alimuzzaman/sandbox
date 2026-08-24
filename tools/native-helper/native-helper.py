@@ -705,7 +705,10 @@ def _persistent_payload(command, writable_targets):
 
 
 def compile_service_files(guest, connections, runtime_seconds, web_server, backend_port,
-                          writable_targets=(), guest_machine=None):
+                          writable_targets=(), guest_machine=None,
+                          wp_cron_enabled=False):
+    if type(wp_cron_enabled) is not bool:
+        raise ValueError("native WordPress cron setting is invalid")
     guest_machine = guest_machine or os.uname().machine
     php_children = max(2, min(32, connections // 4))
     common_php = (
@@ -792,7 +795,9 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
              "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
              "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
-             "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n",
+             ("*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n"
+              if wp_cron_enabled else
+              "# WordPress cron disabled by Sandbox; opt in with DISABLE_WP_CRON=false.\n"),
              # Declared writable targets under /run must exist from boot, not
              # from the moment their service happens to start. /run is a tmpfs,
              # so without this the isolation probe -- and any command run before
@@ -871,7 +876,10 @@ def _namespaced_config_test(mountpoint, *command):
     return ("unshare", "--net", "--", "/bin/sh", "-c", script)
 
 
-def image_configure(machine_id, policy_digest, web_server, service_digest):
+def image_configure(machine_id, policy_digest, web_server, service_digest,
+                    wp_cron_enabled=False):
+    if type(wp_cron_enabled) is not bool:
+        fail("native WordPress cron setting is invalid")
     _policy_path, policy = applied_policy(machine_id, policy_digest)
     if web_server not in {"nginx", "apache"}: fail("native web server is invalid")
     _instance, image, mountpoint = image_paths(machine_id)
@@ -890,11 +898,13 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
     files, units = compile_service_files(guest, policy["resources"]["connections"],
                                          policy["resources"]["runtime_seconds"],
                                          web_server, policy["network"]["ingress_port"],
-                                         tuple(item["target"] for item in policy["writable_mounts"]))
+                                         tuple(item["target"] for item in policy["writable_mounts"]),
+                                         wp_cron_enabled=wp_cron_enabled)
     observed_digest = canonical_digest(files)
     if service_digest != observed_digest: fail("native service configuration digest mismatch")
     marker_value = {"machine_id": machine_id, "policy_digest": policy_digest,
                     "service_digest": service_digest, "web_server": web_server,
+                    "wp_cron_enabled": wp_cron_enabled,
                     "units": list(units)}
     marker = mountpoint / "etc/sandbox-native/services.json"
     if marker.exists():
@@ -983,6 +993,7 @@ fi
 if ! /usr/local/bin/wp core is-installed --path=/var/www/html --quiet; then
   cat "$credential" | /usr/local/bin/wp core install --path=/var/www/html --url=http://sandbox.invalid --title=Sandbox --admin_user=admin --admin_email=admin@example.invalid --prompt=admin_password --skip-email --quiet
 fi
+/usr/local/bin/wp config set DISABLE_WP_CRON __DISABLE_WP_CRON__ --path=/var/www/html --raw --quiet
 /usr/local/bin/wp config set WP_PROXY_HOST "$3" --path=/var/www/html --quiet
 /usr/local/bin/wp config set WP_PROXY_PORT "$4" --path=/var/www/html --raw --quiet
 /usr/local/bin/wp config set WP_PROXY_BYPASS_HOSTS 'localhost,127.0.0.1' --path=/var/www/html --quiet
@@ -994,7 +1005,7 @@ if /usr/local/bin/wp plugin list --path=/var/www/html --field=name 2>/dev/null \
      | grep -qx sandbox-project; then
   /usr/local/bin/wp plugin activate sandbox-project --path=/var/www/html --quiet
 fi
-"""
+""".replace("__DISABLE_WP_CRON__", "true")
     write_rootfs(mountpoint, "/usr/local/libexec/sandbox-wordpress-bootstrap",
                  wordpress_script, 0o755)
 
@@ -4550,6 +4561,7 @@ def main(argv=None):
     configure.add_argument("machine"); configure.add_argument("policy_digest")
     configure.add_argument("web_server", choices=("nginx", "apache"))
     configure.add_argument("service_digest")
+    configure.add_argument("wp_cron_enabled", nargs="?", choices=("true", "false"), default="false")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     grants = sub.add_parser("grant-reconcile")
     grants.add_argument("machine"); grants.add_argument("base_policy_digest")
@@ -4643,7 +4655,8 @@ def main(argv=None):
                                         args.plan_path, args.plan_digest, args.web_server)
     elif args.verb == "image-configure":
         require_root(); image_configure(machine(args.machine), digest_value(args.policy_digest),
-                                        args.web_server, digest_value(args.service_digest))
+                                        args.web_server, digest_value(args.service_digest),
+                                        args.wp_cron_enabled == "true")
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
         _source, value, payload = _read_checked_policy(args.path, identity)

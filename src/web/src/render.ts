@@ -6,7 +6,7 @@ import { store } from "./state";
 import { currentRoute, instancePath, remotePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
-import { welcome } from "./pages/welcome";
+import { hostsView, hostRail } from "./pages/hosts";
 import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
@@ -97,7 +97,8 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
-  if (route.page === "remote") return "remote:" + route.name + ":" + JSON.stringify(store.remote[route.name] || null);
+  if (route.page === "remote" || route.page === "remote-instance") return route.page + ":" + route.name + ":" + (route.page === "remote-instance" ? route.instance : "") + ":" + !!store.remoteBusy[route.name] + ":" + JSON.stringify(store.remote[route.name] || null);
+  if (route.page === "home") return "home:" + store.sync.refreshing + ":" + store.sync.lastCompleted + ":" + store.sync.error + ":" + JSON.stringify(store.data.remotes) + ":" + JSON.stringify(store.remote);
   return route.page;
 }
 
@@ -109,20 +110,18 @@ function userIsInteracting(): boolean {
 }
 
 function viewForRoute(route: Route): string {
+  const localHostView = (content: string): string => `<div class="min-h-full bg-neutral-50 dark:bg-neutral-950"><div class="max-w-7xl mx-auto px-4 pt-5 sm:px-6 lg:px-8">${hostRail("local")}</div>${content}</div>`;
   switch (route.page) {
-    case "create": return createView();
+    case "create": return localHostView(createView());
     case "usage": return usageView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
+    case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);
     case "instance": {
       const r = store.data.instances.find((i) => i.name === route.name) || null;
-      return instanceView(r);
+      return localHostView(instanceView(r));
     }
-    case "home": {
-      // Auto-show the first instance if any exist; else the welcome.
-      const first = store.data.instances[0];
-      return first ? instanceView(first) : welcome();
-    }
-    default: return welcome();
+    case "home": return hostsView();
+    default: return hostsView();
   }
 }
 

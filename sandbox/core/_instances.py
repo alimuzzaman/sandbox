@@ -746,8 +746,14 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # Project wp-config constants + multisite flag live in the instance
     # block so compose regeneration (every `sb` invocation) keeps rendering
     # them into WORDPRESS_CONFIG_EXTRA — that's what survives down/up.
-    if pconf.get("config"):
-        block["wp_config"] = pconf["config"]
+    wp_config = dict(pconf.get("config") or {})
+    wp_cron = pconf.get("wpCron") or {"enabled": False}
+    block["wp_config"] = {
+        **wp_config,
+        # Persist the normalized policy as the runtime constant so every
+        # generated compose file and OLS/Herd literal pin stays in sync.
+        "DISABLE_WP_CRON": not bool(wp_cron.get("enabled")),
+    }
     if pconf.get("multisite"):
         block["multisite"] = pconf["multisite"]
     # Local proxy TLD (sandbox.config.json `tld`, default tst). Persisted so the

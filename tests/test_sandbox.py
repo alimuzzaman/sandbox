@@ -579,6 +579,59 @@ class TestWpConfigRendering(unittest.TestCase):
         base = core._merged_wp_config({})
         self.assertIsInstance(base, dict)
         self.assertNotIn("WP_DEBUG", base)
+        self.assertIs(base["DISABLE_WP_CRON"], True)
+
+    def test_project_can_explicitly_enable_wp_cron(self):
+        self.assertIs(core._merged_wp_config({"wp_config": {
+            "DISABLE_WP_CRON": False,
+        }})["DISABLE_WP_CRON"], False)
+
+    def test_wp_cron_policy_defaults_to_disabled_and_supports_first_class_opt_in(self):
+        td = tempfile.mkdtemp(prefix="sb-wp-cron-", dir=str(Path.home()))
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        root = Path(td) / "wp-cron-policy"
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(
+            json.dumps({"wpCron": {"enabled": True}}))
+        old = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(root / "missing-user.json")
+        self.addCleanup(lambda: (
+            os.environ.pop("SANDBOX_USER_CONFIG", None) if old is None
+            else os.environ.__setitem__("SANDBOX_USER_CONFIG", old)))
+        config = sandbox_core.load_project_config(root)
+        self.assertEqual(config["wpCron"], {"enabled": True})
+
+    def test_wp_cron_legacy_alias_maps_to_scheduler_policy(self):
+        td = tempfile.mkdtemp(prefix="sb-wp-cron-", dir=str(Path.home()))
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        root = Path(td) / "wp-cron-alias"
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(
+            json.dumps({"config": {"DISABLE_WP_CRON": False}}))
+        old = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(root / "missing-user.json")
+        self.addCleanup(lambda: (
+            os.environ.pop("SANDBOX_USER_CONFIG", None) if old is None
+            else os.environ.__setitem__("SANDBOX_USER_CONFIG", old)))
+        config = sandbox_core.load_project_config(root)
+        self.assertEqual(config["wpCron"], {"enabled": True})
+
+    def test_wp_cron_conflicting_declarations_fail_closed(self):
+        td = tempfile.mkdtemp(prefix="sb-wp-cron-", dir=str(Path.home()))
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        root = Path(td) / "wp-cron-conflict"
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(json.dumps({
+            "wpCron": {"enabled": True},
+            "config": {"DISABLE_WP_CRON": True},
+        }))
+        old = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(root / "missing-user.json")
+        self.addCleanup(lambda: (
+            os.environ.pop("SANDBOX_USER_CONFIG", None) if old is None
+            else os.environ.__setitem__("SANDBOX_USER_CONFIG", old)))
+        with self.assertRaises(sandbox_core.ConfigError):
+            sandbox_core.load_project_config(root)
 
     def test_wp_debug_env(self):
         self.assertEqual(core._wp_debug_env({}), "1")                       # default on

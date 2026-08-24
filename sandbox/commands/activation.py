@@ -20,7 +20,7 @@ def cmd_activation(cfg, args) -> None:
         print(json.dumps(result, sort_keys=True))
         return
     import sandbox_core as sc
-    from sandbox.activation.catalog import build_catalog
+    from sandbox.activation.catalog import ActivationCatalogError, build_catalog
     from sandbox.activation.http import ActivationHTTPApplication
     from sandbox.activation.server import serve
     from sandbox.activation.scheduler import ActivationScheduler, TcpActivityObserver
@@ -29,7 +29,26 @@ def cmd_activation(cfg, args) -> None:
     from sandbox.core import resolve_instances
     from sandbox.runtimes.base import OperationRequest, OperationResult
 
-    catalog = build_catalog(sc.registry_all(), resolve_instances(cfg))
+    try:
+        catalog = build_catalog(sc.registry_all(), resolve_instances(cfg))
+    except ActivationCatalogError as exc:
+        # Catalog construction is deliberately fail-closed: an invalid opted-in
+        # route must never be silently skipped or reach the scheduler.  Keep
+        # diagnostics machine-readable so a malformed legacy row is actionable
+        # without exposing a traceback or starting the authority.
+        import json
+        payload = {
+            "ok": False,
+            "action": args.action,
+            "error": {
+                "code": "activation_catalog_invalid",
+                "message": str(exc)[:240] or "activation catalog is invalid",
+            },
+        }
+        if args.action == "scan":
+            payload["results"] = []
+        print(json.dumps(payload, sort_keys=True))
+        raise SystemExit(2)
     generic = runtime_service(cfg)
     wordpress = wordpress_runtime_service(cfg)
 

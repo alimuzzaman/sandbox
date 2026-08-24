@@ -24,7 +24,10 @@ class ActivationState(str, Enum):
 class ActivationPolicy:
     mode: str = "always_on"
     wake_on_request: bool = False
-    idle_after_seconds: int = 900
+    # Keep the host-side coordinator aligned with the config provider's
+    # default: newly materialized local instances become eligible after
+    # thirty inactive minutes unless an explicit policy overrides it.
+    idle_after_seconds: int = 1800
     wake_timeout_seconds: int = 60
     stop_grace_seconds: int = 30
     max_pending_requests: int = 32

@@ -82,15 +82,22 @@ their side effects with a capability error.
 ### Default idle-stop lifecycle
 
 Newly resolved Docker-backed WordPress and generic Compose instances default to
-an idle-stop policy with request wake enabled. An explicit `null` or unknown
-field is rejected. Use `mode: "always_on"` to pin an instance on.
+an idle-stop policy after 30 inactive minutes, with request wake enabled. An
+explicit `null` or unknown field is rejected. Use `mode: "always_on"` to pin an
+instance on.
+
+This default is materialized when an instance is newly ensured or explicitly
+reconciled; loading an older registry row never silently opts it into stopping.
+The local activation authority also remains fail-closed until every opted-in
+route has valid credentials and activity evidence. This prevents a malformed
+legacy row or an unavailable checkout from authorizing a stop.
 
 ```json
 {
   "instanceLifecycle": {
     "mode": "idle_stop",
     "wakeOnRequest": true,
-    "idleAfterSeconds": 900,
+    "idleAfterSeconds": 1800,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
     "maxPendingRequests": 32

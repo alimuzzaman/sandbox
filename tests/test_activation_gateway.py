@@ -1,9 +1,12 @@
+import json
 import threading
 import time
 import unittest
 from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from contextlib import redirect_stdout
+from io import StringIO
 
 
 def _records(*, mode="idle_stop", wake=True, kind="wordpress", host="site.tst",
@@ -110,6 +113,34 @@ class ActivationCatalogTests(unittest.TestCase):
         with self.assertRaises(ActivationCatalogError):
             build_catalog(records, wp)
 
+    def test_scan_reports_invalid_catalog_without_traceback_or_scheduler(self):
+        from sandbox.commands.activation import cmd_activation
+
+        output = StringIO()
+        malformed = {
+            "bad": {
+                "instance": "site", "root": "/opaque/project", "label": "default",
+                "kind": "wordpress", "domain": "site.tst", "http_port": 8080,
+                "instanceLifecycle": {"mode": "idle_stop", "wakeOnRequest": True},
+            },
+        }
+        with mock.patch("sandbox_core.registry_all", return_value=malformed), \
+             mock.patch("sandbox.core.resolve_instances", return_value={
+                 "site": {
+                     "domain": "site.tst", "wordpress_port": 8080,
+                     "instance_lifecycle": {"mode": "idle_stop", "wakeOnRequest": True},
+                     "wp_config": {"DISABLE_WP_CRON": True},
+                 },
+             }), \
+             redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                cmd_activation({}, type("Args", (), {"action": "scan", "dry_run": True})())
+        self.assertEqual(raised.exception.code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "activation_catalog_invalid")
+        self.assertEqual(payload["results"], [])
+
 
 class ActivationHTTPTests(unittest.TestCase):
     def setUp(self):
@@ -204,12 +235,12 @@ class ActivationSchedulerTests(unittest.TestCase):
     def test_dry_run_and_active_evidence_never_stop(self):
         scheduler, route, calls = self.make_scheduler()
         snapshot = scheduler.service.coordinator.snapshot(route.route_id)
-        due = float(snapshot["last_activity"]) + 901
+        due = float(snapshot["last_activity"]) + 1801
         self.assertEqual(scheduler.scan(now=due, dry_run=True)[0].action, "would_suspend")
         self.assertEqual(calls, [])
         scheduler, route, calls = self.make_scheduler(safe=(False, "active_job"))
         snapshot = scheduler.service.coordinator.snapshot(route.route_id)
-        self.assertEqual(scheduler.scan(now=float(snapshot["last_activity"]) + 901)[0].reason,
+        self.assertEqual(scheduler.scan(now=float(snapshot["last_activity"]) + 1801)[0].reason,
                          "active_job")
         self.assertEqual(calls, [])
 

@@ -13,7 +13,7 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
         self.assertEqual(normalize_instance_lifecycle(), {
             "mode": "idle_stop",
             "wakeOnRequest": True,
-            "idleAfterSeconds": 900,
+            "idleAfterSeconds": 1800,
             "wakeTimeoutSeconds": 60,
             "stopGraceSeconds": 30,
             "maxPendingRequests": 32,
@@ -25,6 +25,7 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
         resolved = apply_common_config({})
         self.assertEqual(resolved["instanceLifecycle"]["mode"], "idle_stop")
         self.assertIs(resolved["instanceLifecycle"]["wakeOnRequest"], True)
+        self.assertEqual(resolved["instanceLifecycle"]["idleAfterSeconds"], 1800)
         opted_out = apply_common_config({"instanceLifecycle": {"mode": "always_on"}})
         self.assertEqual(opted_out["instanceLifecycle"]["mode"], "always_on")
 
@@ -94,6 +95,12 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
 
 
 class TestActivationCoordinator(unittest.TestCase):
+    def test_default_activation_policy_waits_thirty_minutes(self):
+        from sandbox.activation.coordinator import ActivationPolicy
+
+        policy = ActivationPolicy()
+        self.assertEqual(policy.idle_after_seconds, 1800)
+
     def test_single_flight_pending_bound_and_idle_due(self):
         from sandbox.activation.coordinator import ActivationCoordinator, ActivationPolicy, ActivationState
 

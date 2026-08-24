@@ -14,7 +14,7 @@ import copy
 DEFAULTS = {
     "mode": "idle_stop",
     "wakeOnRequest": True,
-    "idleAfterSeconds": 900,
+    "idleAfterSeconds": 1800,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
     "maxPendingRequests": 32,

@@ -97,6 +97,7 @@ The guide detects the runtime and emits only its useful commands.
 ./sb init --type compose
 ./sb ensure
 ./sb status
+./sb status --instance <name> --stats --json
 ./sb logs
 ./sb exec -- sh -lc 'npm test'
 ./sb deploy --remote <name> --ensure --expose
@@ -104,6 +105,12 @@ The guide detects the runtime and emits only its useful commands.
 
 `sb exec` accepts an explicit argv list and runs it in the configured public
 Compose service. It does not invent a shell, service, or package command.
+`status --stats` is an opt-in, bounded local Docker snapshot for the selected
+instance. It reports per-container CPU percentage, memory used and percentage,
+and PID count. The snapshot can drift immediately, and a zero-CPU sample does
+not prove that an instance is unused or safe to stop. Docker timeouts or
+unavailability are represented by a typed, non-fatal `container_resources`
+result. For remote hosts use `remote service diagnostics --processes`.
 For durable submissions, pass a stable `--request-id` so an uncertain caller
 can replay the same request without creating a duplicate. A request ID cannot
 turn a direct local or internal `--in-instance` invocation into a durable job;

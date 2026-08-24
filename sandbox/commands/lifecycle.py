@@ -163,6 +163,9 @@ def cmd_down(cfg, args) -> None:
     compose("down", instance=args.resolved_instance)
 
 def cmd_status(cfg, args) -> None:
+    include_stats = bool(getattr(args, "stats", False))
+    if include_stats and getattr(args, "remote", None) and not getattr(args, "local", False):
+        die("status --stats is local-only; use remote service diagnostics --processes for a remote host")
     remote_result = _remote_lifecycle(cfg, args, "status")
     if remote_result is not None:
         remote_exit = _status_exit_code(remote_result)
@@ -186,7 +189,8 @@ def cmd_status(cfg, args) -> None:
     inst = args.resolved_instance
     if getattr(args, "json", False):
         payload = _status_json_payload(
-            cfg, inst, refresh=bool(getattr(args, "refresh", False)))
+            cfg, inst, refresh=bool(getattr(args, "refresh", False)),
+            include_stats=include_stats)
         print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))
         if _status_exit_code(payload):
             raise SystemExit(_status_exit_code(payload))
@@ -205,6 +209,8 @@ def cmd_status(cfg, args) -> None:
         ok(f"Generic Compose instance: {inst} ({data.get('status')}) at {data.get('url', '')}")
         for line in runtime_health_lines(runtime_data):
             (info if line.startswith("Optional runtime gaps:") else ok)(line)
+        if include_stats:
+            _render_container_stats(inst)
         return
     if owner and owner.get("root"):
         result = runtime_service(cfg).invoke(OperationRequest(
@@ -223,6 +229,8 @@ def cmd_status(cfg, args) -> None:
            f"{'reachable' if up else 'NOT reachable'} at {entry.get('url')})")
     else:
         compose("ps", instance=inst)
+    if include_stats:
+        _render_container_stats(inst)
     apf = active_project_file(inst)
     ff = focus_file(inst)
     srv = mcp_server_name(inst)
@@ -331,7 +339,8 @@ def _render_php_extension_text(report: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _status_json_payload(cfg, inst: str, *, refresh: bool = False) -> dict:
+def _status_json_payload(cfg, inst: str, *, refresh: bool = False,
+                         include_stats: bool = False) -> dict:
     """Return one bounded, machine-readable status document.
 
     The human status path intentionally has progress output and health hints.
@@ -347,20 +356,33 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False) -> dict:
         if isinstance(result, OperationError):
             return {"ok": False, "instance": inst,
                     "error": {"code": result.code, "message": result.message}}
-        return {"ok": bool(result.ok), "instance": inst, "kind": "compose",
-                **dict(result.data)}
+        payload = {"ok": bool(result.ok), "instance": inst, "kind": "compose",
+                   **dict(result.data)}
+        if include_stats:
+            from sandbox.services.container_stats import local_container_stats
+            payload["container_resources"] = local_container_stats(inst)
+        return payload
 
     runtime_data = None
     runtime_error = None
     if owner.get("root"):
-        result = runtime_service(cfg).invoke(OperationRequest(
-            owner["root"], "status", label=owner.get("label", "default"),
-            arguments={"refresh": refresh},
-        ))
-        if isinstance(result, OperationError):
-            runtime_error = {"code": result.code, "message": result.message}
-        else:
-            runtime_data = dict(result.data)
+        try:
+            result = runtime_service(cfg).invoke(OperationRequest(
+                owner["root"], "status", label=owner.get("label", "default"),
+                arguments={"refresh": refresh},
+            ))
+            if isinstance(result, OperationError):
+                runtime_error = {"code": result.code, "message": result.message}
+            else:
+                runtime_data = dict(result.data)
+        except Exception as exc:
+            # A stale registry row must remain observable as a typed, partial
+            # result. Status is diagnostic and must not turn a missing checkout
+            # into a traceback (or prevent an independent resource snapshot).
+            runtime_error = {
+                "code": "project_observation_unavailable",
+                "message": str(exc).replace("\n", " ")[:240],
+            }
 
     instance_cfg = (resolve_instances(cfg).get(inst) or {})
     containers = []
@@ -389,12 +411,33 @@ def _status_json_payload(cfg, inst: str, *, refresh: bool = False) -> dict:
         payload["runtime"] = runtime_data
     if runtime_error is not None:
         payload["error"] = runtime_error
+    if include_stats and not _is_herd_instance(inst):
+        from sandbox.services.container_stats import local_container_stats
+        payload["container_resources"] = local_container_stats(inst)
     extension_data = php_extension_status(instance_cfg, instance=inst)
     if extension_data is not None:
         payload["php_extensions"] = extension_data
         payload["ok"] = bool(payload["ok"] and extension_data.get("ok"))
         payload["exit_code"] = 0 if payload["ok"] else 1
     return payload
+
+
+def _render_container_stats(instance: str) -> None:
+    from sandbox.services.container_stats import local_container_stats
+
+    snapshot = local_container_stats(instance)
+    if snapshot["status"] == "unavailable":
+        code = (snapshot.get("error") or {}).get("code", "unavailable")
+        info(f"Container resources: unavailable ({code})")
+        return
+    print("\nContainer resources (point-in-time):")
+    if not snapshot["rows"]:
+        print("  no running containers")
+        return
+    for row in snapshot["rows"]:
+        print(f"  {row['name']}: CPU {row['cpu_percent']:.2f}%  "
+              f"memory {row['memory_used_bytes']} bytes ({row['memory_percent']:.2f}%)  "
+              f"PIDs {row['pids']}")
 
 def cmd_logs(cfg, args) -> None:
     remote_result = _remote_lifecycle(cfg, args, "logs")
@@ -1225,6 +1268,10 @@ def configure_parser(sub) -> None:
     status.add_argument(
         "--refresh", action="store_true",
         help="force a fresh runtime observation (never use a cached snapshot)",
+    )
+    status.add_argument(
+        "--stats", action="store_true",
+        help="include a bounded point-in-time CPU, memory, and PID snapshot (local only)",
     )
     logs = sub.add_parser("logs", help="Tail WP + DB logs")
     for parser in (status, logs):

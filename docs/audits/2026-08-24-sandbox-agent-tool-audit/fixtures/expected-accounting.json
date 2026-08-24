@@ -1,0 +1,71 @@
+{
+  "accounting_schema": "audit-accounting-v1",
+  "fixture_schema": "audit-fixture-v1",
+  "normalized_schema": "audit-normalized-v1",
+  "fixture_file": "synthetic-events.jsonl",
+  "input_records": 19,
+  "parsed_records": 18,
+  "malformed": 1,
+  "duplicate": 2,
+  "excluded": 1,
+  "emitted": 15,
+  "identities": {
+    "input": "19 = 1 + 2 + 1 + 15",
+    "parsed": "18 = 2 + 1 + 15"
+  },
+  "by_source": [
+    {
+      "source_label": "CODEX-LOCAL-EXACT-CWD",
+      "input_records": 12,
+      "parsed_records": 12,
+      "malformed": 0,
+      "duplicate": 1,
+      "excluded": 1,
+      "emitted": 10,
+      "identity": "12 = 0 + 1 + 1 + 10"
+    },
+    {
+      "source_label": "CLAUDE-SANDBOX",
+      "input_records": 6,
+      "parsed_records": 6,
+      "malformed": 0,
+      "duplicate": 1,
+      "excluded": 0,
+      "emitted": 5,
+      "identity": "6 = 0 + 1 + 0 + 5"
+    },
+    {
+      "source_label": "unknown",
+      "input_records": 1,
+      "parsed_records": 0,
+      "malformed": 1,
+      "duplicate": 0,
+      "excluded": 0,
+      "emitted": 0,
+      "identity": "1 = 1 + 0 + 0 + 0",
+      "reason": "line-only malformed trace has no trusted source label"
+    }
+  ],
+  "terminal_states": [
+    "malformed",
+    "duplicate",
+    "excluded",
+    "emitted"
+  ],
+  "status_layers": [
+    "transport_status",
+    "tool_call_status",
+    "command_exit_status",
+    "task_outcome"
+  ],
+  "ordering": {
+    "preserve_file_order": true,
+    "global_timestamp_sort": false,
+    "missing_timestamp_is_unknown": true,
+    "timestamp_inversion_is_unknown": true
+  },
+  "relations": {
+    "missing_join_ids_are_non_joinable": true,
+    "unverified_parent_child_signals_remain_unknown": true
+  }
+}

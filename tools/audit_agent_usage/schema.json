@@ -1,0 +1,61 @@
+{
+  "schema_bundle": "audit-schema-bundle-v1",
+  "input": {
+    "schema": "audit-fixture-v1",
+    "record_kinds": ["tool_event", "assistant_message"],
+    "required_fields": ["fixture_schema", "record_kind", "event_index"],
+    "record_shapes": {
+      "tool_event": ["event"],
+      "assistant_message": ["content_blocks"]
+    }
+  },
+  "normalized": {
+    "schema": "audit-normalized-v1",
+    "terminal_state": "emitted",
+    "status_layers": [
+      "transport_status",
+      "tool_call_status",
+      "command_exit_status",
+      "task_outcome"
+    ],
+    "ordering_basis": "file_order",
+    "required_fields": [
+      "normalized_schema",
+      "fixture_file",
+      "source_label",
+      "source_ref",
+      "line_index",
+      "event_index",
+      "event_type",
+      "tool_namespace",
+      "tool_name",
+      "argument_signature",
+      "timestamp",
+      "timestamp_state",
+      "ordering_basis",
+      "relation_signal",
+      "relation_state",
+      "transport_status",
+      "tool_call_status",
+      "command_exit_status",
+      "task_outcome",
+      "terminal_state"
+    ],
+    "optional_fields": {
+      "formula_safe_values": {
+        "keys": ["equals", "plus", "minus", "at"],
+        "values": ["present", "formula_candidate"]
+      },
+      "relation_join": ["unverified", "unknown"]
+    }
+  },
+  "exclusion": {
+    "schema": "audit-normalized-v1",
+    "terminal_states": ["malformed", "duplicate", "excluded"]
+  },
+  "accounting": {
+    "schema": "audit-accounting-v1",
+    "identity": "input_records = malformed + duplicate + excluded + emitted",
+    "parsed_identity": "parsed_records = duplicate + excluded + emitted"
+  }
+}

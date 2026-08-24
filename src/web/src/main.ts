@@ -4,7 +4,7 @@
 import { $ } from "./dom";
 import { store } from "./state";
 import { fetchData, fetchUsage, fetchRemote } from "./api";
-import { navigate, initRouter, onRoute, currentRoute, instancePath, remotePath } from "./router";
+import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
@@ -34,11 +34,13 @@ function loadRemote(name: string, mode: "fast" | "deep" = "fast"): Promise<void>
   const run = async (): Promise<void> => {
     if (active) await active;
     store.remoteBusy[name] = true;
+    renderSidebar(false);
     renderDetail(false);
     try {
       store.remote[name] = await fetchRemote(name, mode);
     } finally {
       delete store.remoteBusy[name];
+      renderSidebar(false);
     }
   };
   const request = run().finally(() => {
@@ -86,6 +88,10 @@ function refresh(queueAfterCurrent = false): Promise<void> {
 
 // ---- page-level handlers ----
 async function showUsage(): Promise<void> {
+  if (hostContext().kind !== "local") {
+    toast("Agent usage is available only for the local host", "err");
+    return;
+  }
   navigate("/usage");
   $("detail").innerHTML = `<div class="px-6 py-12 text-center text-neutral-400 text-[13px]">Loading agent usage…</div>`;
   try { store.usage = await fetchUsage(); } catch { store.usage = { available: false }; }
@@ -95,6 +101,11 @@ async function showUsage(): Promise<void> {
 function goHome(): void { navigate("/"); }
 function selectInstance(name: string): void { navigate(instancePath(name)); }
 function selectRemote(name: string): void { navigate(remotePath(name)); }
+function requireLocal(action: string): boolean {
+  if (hostContext().kind === "local") return true;
+  toast(`${action} is available only for the local host`, "err");
+  return false;
+}
 async function refreshRemote(name: string, deep = false): Promise<void> {
   try {
     await loadRemote(name, deep ? "deep" : "fast");
@@ -156,10 +167,16 @@ function boot(): void {
 
   // Static sidebar buttons (not data-link).
   ($("newBtn") as HTMLButtonElement).onclick = doCreate;
-  ($("startAll") as HTMLButtonElement).onclick = () => act("*", "start-all");
-  ($("stopAll") as HTMLButtonElement).onclick = () => act("*", "stop-all");
+  ($("startAll") as HTMLButtonElement).onclick = () => { if (requireLocal("Start all")) act("*", "start-all"); };
+  ($("stopAll") as HTMLButtonElement).onclick = () => { if (requireLocal("Stop all")) act("*", "stop-all"); };
+  ($("usageBtn") as HTMLAnchorElement).onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void showUsage();
+  };
   ($("helpBtn") as HTMLButtonElement).onclick = showHelp;
   ($("termBtn") as HTMLButtonElement).onclick = () => {
+    if (!requireLocal("Terminal")) return;
     const inst = activeInstanceName() || (store.data.instances[0] && store.data.instances[0].name);
     if (!inst) { toast("create an instance first", "err"); return; }
     navigate(instancePath(inst, true));
@@ -170,7 +187,7 @@ function boot(): void {
   onRoute((route) => {
     render();
     if (route.page === "create") initCreateView();
-    if (route.page === "remote" || route.page === "remote-instance" || route.page === "home") {
+    if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {
       void refresh();
     }
     if (route.page === "instance" && route.console) {

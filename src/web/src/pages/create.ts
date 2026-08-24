@@ -1,11 +1,15 @@
 import { $ } from "../dom";
-import { navigate } from "../router";
+import { currentRoute, hostContext, localHostPath, navigate } from "../router";
 import { act } from "../actions";
 import { toast } from "../ui/toast";
 
 // Public entry kept for the existing call sites (sidebar "New" button + the
 // welcome CTA) — both just route to this page.
 export function doCreate(): void {
+  if (hostContext(currentRoute()).kind !== "local") {
+    toast("New instance is available only for the local host", "err");
+    return;
+  }
   navigate("/create");
 }
 
@@ -37,7 +41,7 @@ export function submitCreate(): void {
 
 export function createView(): string {
   return `<div class="max-w-2xl mx-auto px-6 py-8">
-    <a href="/" data-link class="inline-flex items-center gap-1 text-[12.5px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
+    <a href="${localHostPath()}" data-link class="inline-flex items-center gap-1 text-[12.5px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
       <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Back</a>
 
@@ -61,7 +65,7 @@ export function createView(): string {
     <p class="mt-4 text-[12.5px] text-neutral-500 dark:text-neutral-400">Creation runs as a background job. Progress opens in the activity panel.</p>
 
     <div class="mt-7">
-      <a href="/" data-link class="px-4 py-2 rounded-full border border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">Back to instances</a>
+      <a href="${localHostPath()}" data-link class="px-4 py-2 rounded-full border border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">Back to instances</a>
     </div>
   </div>`;
 }

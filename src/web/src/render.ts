@@ -3,10 +3,10 @@
 
 import { $, esc } from "./dom";
 import { store } from "./state";
-import { currentRoute, instancePath, type Route } from "./router";
+import { currentRoute, hostContext, instancePath, remoteInstancePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
-import { hostsView, sidebarHostSelector } from "./pages/hosts";
+import { hostsView, localHostView, sidebarHostSelector } from "./pages/hosts";
 import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
@@ -70,6 +70,40 @@ function listItem(r: Instance): string {
      ${tail}</a>`;
 }
 
+function remoteListItem(host: string, name: string, running: boolean): string {
+  const route = currentRoute();
+  const selected = route.page === "remote-instance" && route.name === host && route.instance === name;
+  return `<a href="${remoteInstancePath(host, name)}" data-link class="group flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-[13.5px] ${selected ? "bg-white font-medium text-neutral-900 shadow-sm dark:bg-neutral-800 dark:text-neutral-50" : "text-neutral-700 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800/60"}">
+    <span class="h-2 w-2 shrink-0 rounded-full ${running ? "bg-emerald-500" : "bg-neutral-300 dark:bg-neutral-600"}"></span><span class="truncate">${esc(name)}</span><span class="ml-auto text-[10px] text-neutral-400">remote</span></a>`;
+}
+
+const groupLabel = (label: string): string =>
+  `<div class="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">${esc(label)}</div>`;
+
+function remoteItems(host: string): string {
+  const data = store.remote[host];
+  if (!data) return `<div class="px-3 py-3 text-[11px] text-neutral-400">${store.remoteBusy[host] ? "Loading remote inventory…" : "Remote inventory not loaded"}</div>`;
+  const rows = data.instances?.rows || [];
+  return rows.length ? rows.map(row => remoteListItem(host, row.name, row.running)).join("")
+    : `<div class="px-3 py-3 text-[11px] text-neutral-400">No remote instances reported</div>`;
+}
+
+function setLocalActionState(local: boolean): void {
+  const reason = "Available only for the local host";
+  for (const id of ["newBtn", "termBtn", "startAll", "stopAll"]) {
+    const button = $(id) as HTMLButtonElement;
+    button.disabled = !local;
+    button.title = local ? "" : reason;
+    button.classList.toggle("opacity-40", !local);
+    button.classList.toggle("cursor-not-allowed", !local);
+  }
+  const usage = $("usageBtn") as HTMLAnchorElement;
+  usage.setAttribute("aria-disabled", String(!local));
+  usage.title = local ? "" : reason;
+  usage.classList.toggle("opacity-40", !local);
+  usage.classList.toggle("cursor-not-allowed", !local);
+}
+
 export function renderSidebar(forceHost = false): void {
   // Don't rewrite the list out from under an open row menu (the 5s poll would
   // otherwise close it mid-interaction). Action clicks call rowMenuClose()
@@ -78,16 +112,45 @@ export function renderSidebar(forceHost = false): void {
   // Keep an open keyboard/mouse host menu stable during passive polling. Full
   // route renders pass forceHost so back/forward navigation stays accurate.
   if (!forceHost && document.querySelector("#hostSelector[open]")) return;
-  const items = store.data.instances;
   const active = currentRoute();
-  const activeHost = active.page === "instance" || active.page === "create" ? "local"
-    : active.page === "remote" || active.page === "remote-instance" ? active.name : "all";
+  const context = hostContext(active);
+  const activeHost = context.kind === "remote" ? context.name : context.kind;
   $("hostSelectorSlot").innerHTML = sidebarHostSelector(activeHost);
-  $("list").innerHTML = items.map(listItem).join("");
-  const running = items.filter((i) => i.running).length;
-  $("runcount").textContent = running + "/" + items.length;
-  $("footstat").textContent = items.length
-    ? running + " of " + items.length + " running" : "no instances yet";
+  const localItems = store.data.instances;
+  let total = 0, running = 0, markup = "";
+  if (context.kind === "local") {
+    total = localItems.length;
+    running = localItems.filter(item => item.running).length;
+    markup = localItems.length ? localItems.map(listItem).join("")
+      : `<div class="px-3 py-3 text-[11px] text-neutral-400">No local instances yet</div>`;
+  } else if (context.kind === "remote") {
+    const inventory = store.remote[context.name];
+    const rows = inventory?.instances?.rows || [];
+    total = rows.length;
+    running = rows.filter(row => row.running).length;
+    markup = remoteItems(context.name);
+  } else {
+    total = localItems.length;
+    running = localItems.filter(item => item.running).length;
+    markup = groupLabel("Local host") + (localItems.length ? localItems.map(listItem).join("") : `<div class="px-3 py-2 text-[11px] text-neutral-400">No local instances</div>`);
+    for (const remote of store.data.remotes) {
+      const rows = store.remote[remote.name]?.instances?.rows || [];
+      total += rows.length;
+      running += rows.filter(row => row.running).length;
+      markup += groupLabel(remote.name + " · remote") + remoteItems(remote.name);
+    }
+  }
+  $("list").innerHTML = markup;
+  if (context.kind === "remote" && !store.remote[context.name]) {
+    $("runcount").textContent = store.remoteBusy[context.name] ? "…" : "—";
+    $("footstat").textContent = store.remoteBusy[context.name]
+      ? "loading remote inventory" : "remote inventory not loaded";
+  } else {
+    $("runcount").textContent = running + "/" + total;
+    $("footstat").textContent = total ? running + " of " + total + " running"
+      : context.kind === "all" ? "no known instances" : "no instances reported";
+  }
+  setLocalActionState(context.kind === "local");
 }
 
 // Detail re-render guard: don't clobber an open input/modal or unchanged DOM.
@@ -101,6 +164,7 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
+  if (route.page === "local-host") return "local-host:" + JSON.stringify(store.data.instances);
   if (route.page === "remote" || route.page === "remote-instance") return route.page + ":" + route.name + ":" + (route.page === "remote-instance" ? route.instance : "") + ":" + !!store.remoteBusy[route.name] + ":" + JSON.stringify(store.remote[route.name] || null);
   if (route.page === "home") return "home:" + store.sync.refreshing + ":" + store.sync.lastCompleted + ":" + store.sync.error + ":" + JSON.stringify(store.data.remotes) + ":" + JSON.stringify(store.remote);
   return route.page;
@@ -117,6 +181,7 @@ function viewForRoute(route: Route): string {
   switch (route.page) {
     case "create": return createView();
     case "usage": return usageView();
+    case "local-host": return localHostView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
     case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);
     case "instance": {

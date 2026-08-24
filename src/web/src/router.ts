@@ -4,6 +4,7 @@
 //   /                        -> home (welcome, or auto-first instance)
 //   /instance/<name>         -> instance detail
 //   /instance/<name>/console -> instance detail + console drawer open
+//   /host/local              -> local host overview
 //   /usage                   -> agent usage page
 //
 // On hard-refresh/deep-link the Python server serves the app for any non-/api
@@ -12,6 +13,7 @@
 export type Route =
   | { page: "home" }
   | { page: "create" }
+  | { page: "local-host" }
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
   | { page: "remote"; name: string }
@@ -22,6 +24,8 @@ export function parse(pathname: string): Route {
   const parts = pathname.replace(/\/+$/, "").split("/").filter(Boolean);
   if (parts.length === 0) return { page: "home" };
   if (parts[0] === "create" && parts.length === 1) return { page: "create" };
+  if (parts[0] === "host" && parts[1] === "local" && parts.length === 2)
+    return { page: "local-host" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
   if (parts[0] === "remote" && parts[1] && parts.length === 2)
     return { page: "remote", name: decodeURIComponent(parts[1]) };
@@ -35,6 +39,17 @@ export function parse(pathname: string): Route {
 }
 
 export const currentRoute = (): Route => parse(location.pathname);
+
+export type HostContext = { kind: "all" } | { kind: "local" } |
+  { kind: "remote"; name: string };
+
+export function hostContext(route: Route = currentRoute()): HostContext {
+  if (route.page === "remote" || route.page === "remote-instance")
+    return { kind: "remote", name: route.name };
+  if (route.page === "local-host" || route.page === "instance" ||
+      route.page === "create" || route.page === "usage") return { kind: "local" };
+  return { kind: "all" };
+}
 
 // The render callback is injected by main.ts to avoid a circular import.
 let onChange: (r: Route) => void = () => {};
@@ -52,6 +67,7 @@ export function instancePath(name: string, console = false): string {
   const base = `/instance/${encodeURIComponent(name)}`;
   return console ? `${base}/console` : base;
 }
+export const localHostPath = (): string => "/host/local";
 export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
 export const remoteInstancePath = (name: string, instance: string): string =>
   `${remotePath(name)}/instance/${encodeURIComponent(instance)}`;

@@ -38,7 +38,7 @@ export function usageView(): string {
       <span class="w-16 text-right text-neutral-700 dark:text-neutral-200">${fmt$(s.cost)}</span></div>`).join("");
   return `<div class="px-6 py-6 max-w-3xl">
     <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50">Agent usage</h1>
-    <p class="mt-1 text-[12.5px] text-neutral-400">Currently collected from Claude session telemetry; this collector does not yet include Codex. Cost is <b>estimated</b> from public per-token prices.</p>
+    <p class="mt-1 text-[12.5px] text-neutral-400">Local host telemetry only. Currently collected from Claude sessions; this collector does not yet include Codex. Cost is <b>estimated</b> from public per-token prices.</p>
     <div class="mt-5 grid grid-cols-3 gap-3">
       ${statCard("Total tokens", fmtN(u.tokens))}
       ${statCard("Estimated cost", fmt$(u.cost))}

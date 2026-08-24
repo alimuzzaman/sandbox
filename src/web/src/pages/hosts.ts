@@ -1,6 +1,6 @@
 import { esc } from "../dom";
 import { store } from "../state";
-import { instancePath, remotePath } from "../router";
+import { instancePath, localHostPath, remotePath } from "../router";
 import { theme } from "../theme";
 
 type HostKind = "all" | "local" | "remote";
@@ -22,7 +22,6 @@ function hostIcon(kind: HostKind, ready = true): string {
 }
 
 export function sidebarHostSelector(active = "all"): string {
-  const localHref = store.data.instances[0] ? instancePath(store.data.instances[0].name) : "/create";
   const activeRemote = store.data.remotes.find(remote => remote.name === active);
   const currentKind: HostKind = active === "local" ? "local" : activeRemote ? "remote" : "all";
   const currentName = currentKind === "local" ? "Local host" : activeRemote?.name || "All hosts";
@@ -47,7 +46,7 @@ export function sidebarHostSelector(active = "all"): string {
     </summary>
     <nav aria-label="Hosts" class="absolute left-0 right-0 z-50 mt-1 max-h-64 space-y-0.5 overflow-auto rounded-lg border border-neutral-200 bg-white p-2 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
       ${option("/", "All hosts", "all", true, "Host overview", active === "all")}
-      ${option(localHref, "Local host", "local", true, "This machine", active === "local")}${remotes}
+      ${option(localHostPath(), "Local host", "local", true, "This machine", active === "local")}${remotes}
     </nav>
   </details>`;
 }
@@ -105,7 +104,27 @@ export function hostsView(): string {
       ${[["Hosts", knownHosts], ["Known instances", localTotal + remoteInstances], ["Local running", localRunning], ["Remote hosts", store.data.remotes.length]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
     </section>
     <section><div class="mb-3 flex items-center justify-between"><h2 class="text-[14px] font-semibold">Available hosts</h2><span class="text-[11px] ${theme.quiet}">Select a host to inspect its instances</span></div>
-      <div class="grid gap-4 lg:grid-cols-2">${hostCard("Local host", store.data.instances[0] ? instancePath(store.data.instances[0].name) : "/create", "This machine", true, String(localTotal), String(localRunning), "—", "Open local instances and lifecycle controls")}${remoteCards}</div>
+      <div class="grid gap-4 lg:grid-cols-2">${hostCard("Local host", localHostPath(), "This machine", true, String(localTotal), String(localRunning), "—", "Open local instances and lifecycle controls")}${remoteCards}</div>
     </section>
+  </div></div>`;
+}
+
+export function localHostView(): string {
+  const instances = store.data.instances;
+  const running = instances.filter(instance => instance.running).length;
+  const pending = instances.filter(instance => instance.pending).length;
+  const stopped = Math.max(0, instances.length - running - pending);
+  const rows = instances.length ? instances.map(instance => `<a href="${instancePath(instance.name)}" data-link class="flex items-center gap-3 border-t border-neutral-200 px-4 py-3 first:border-t-0 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:border-neutral-800 dark:hover:bg-neutral-800/50">
+    <span class="h-2 w-2 shrink-0 rounded-full ${instance.running ? "bg-emerald-500" : instance.pending ? "bg-amber-400" : "bg-neutral-300 dark:bg-neutral-600"}"></span>
+    <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium text-neutral-900 dark:text-white">${esc(instance.name)}</span><span class="block truncate text-[11px] ${theme.quiet}">${esc(instance.project || "Local project")} · ${esc(instance.server || "server unknown")}</span></span>
+    <span class="text-[11px] ${theme.quiet}">${instance.pending ? "pending" : instance.running ? "running" : "stopped"}</span><span aria-hidden="true" class="text-neutral-400">→</span>
+  </a>`).join("") : `<div class="p-6 text-center text-[13px] ${theme.quiet}">No local instances yet. Use New instance to create one from a local project.</div>`;
+
+  return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">
+    <header><div class="${theme.label}">Local host</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">This machine</h1><p class="mt-1 text-[13px] ${theme.muted}">Local Sandbox instances and lifecycle controls.</p></header>
+    <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 sm:grid-cols-4">
+      ${[["Instances", instances.length], ["Running", running], ["Stopped", stopped], ["Pending", pending]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
+    </section>
+    <section><div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Local instances</h2><a href="/create" data-link class="${theme.primary}">New instance</a></div><div class="${theme.panel} overflow-hidden">${rows}</div></section>
   </div></div>`;
 }

@@ -5,6 +5,7 @@ import { MAX_BACKEND_REQUEST_BYTES, MAX_BACKEND_RESPONSE_BYTES } from "./securit
 
 const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "cookie", "set-cookie"]);
 const PROXY_COOKIE = "sandbox_desktop";
+export const BACKEND_HANDSHAKE_TIMEOUT_MS = 15_000;
 
 export interface BackendHandshake {
   readonly protocol: 1;
@@ -48,7 +49,7 @@ function requestBackend(target: URL, path: string, method: string, headers: Reco
   });
 }
 
-export async function handshakeBackend(target: URL, timeoutMs = 5_000): Promise<BackendHandshake> {
+export async function handshakeBackend(target: URL, timeoutMs = BACKEND_HANDSHAKE_TIMEOUT_MS): Promise<BackendHandshake> {
   const response = await requestBackend(target, "/api/instances", "GET", { Accept: "application/json", "User-Agent": "SandboxDesktop/1" }, Buffer.alloc(0), timeoutMs);
   if (response.status !== 200) throw new Error(`backend_status_${response.status}`);
   if (!String(response.headers["content-type"] ?? "").startsWith("application/json")) throw new Error("backend_content_type");

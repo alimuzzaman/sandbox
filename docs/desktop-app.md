@@ -19,7 +19,9 @@ loopback origin with `SANDBOX_DESKTOP_URL`; development can use
 `SANDBOX_DESKTOP_DEV_URL`. Paths, query strings, embedded credentials, non-loopback
 hosts, and arbitrary protocols are rejected.
 
-Startup performs a five-second, bounded `/api/instances` protocol-shape handshake.
+Startup performs a 15-second, bounded `/api/instances` protocol-shape handshake. This
+allows for a cold or inventory-heavy dashboard response while still failing closed when
+the configured backend does not respond.
 Until it succeeds, the app displays its packaged `sandbox-app://` recovery UI. Retry is
 a typed IPC operation. The app never responds to a failed handshake by starting `sb`,
 Docker, SSH, or an arbitrary process.

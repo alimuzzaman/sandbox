@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import test from "node:test";
-import { createAuthenticatedProxy, handshakeBackend } from "../dist/backend-proxy.js";
+import { BACKEND_HANDSHAKE_TIMEOUT_MS, createAuthenticatedProxy, handshakeBackend } from "../dist/backend-proxy.js";
 
 async function listen(handler) {
   const server = createServer(handler);
@@ -29,6 +29,29 @@ test("backend handshake validates the bounded protocol shape", async (t) => {
   });
   t.after(() => backend.server.close());
   assert.deepEqual(await handshakeBackend(backend.origin), { protocol: 1, instances: 1, remotes: 0 });
+});
+
+test("backend handshake tolerates a healthy delayed response", async (t) => {
+  const backend = await listen((_request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ instances: [], remotes: [] }));
+    }, 75);
+  });
+  t.after(() => backend.server.close());
+  assert.ok(BACKEND_HANDSHAKE_TIMEOUT_MS > 7_000);
+  assert.deepEqual(await handshakeBackend(backend.origin, 250), { protocol: 1, instances: 0, remotes: 0 });
+});
+
+test("backend handshake still rejects a response beyond its bounded timeout", async (t) => {
+  const backend = await listen((_request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ instances: [], remotes: [] }));
+    }, 150);
+  });
+  t.after(() => backend.server.close());
+  await assert.rejects(handshakeBackend(backend.origin, 25), { message: "backend_timeout" });
 });
 
 test("authenticated proxy rejects anonymous clients and hashes inline CSP", async (t) => {

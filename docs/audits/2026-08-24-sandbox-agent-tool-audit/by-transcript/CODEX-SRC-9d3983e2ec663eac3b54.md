@@ -1,7 +1,6 @@
-# Transcript `019fc1f7-ec2d-7d81-95dc-195376f44fe7`
+# Safe source `CODEX-SRC-9d3983e2ec663eac3b54`
 
-Source: Sandbox CLI remote-tests and retention gap sweep
-Rollout summary: `2026-08-02T10-14-38-3QEf-sandbox_cli_remote_tests_gap_sweep.md`
+Source class: Codex CLI and retention contract review
 Evidence role: destructive default and confirmation-boundary cross-check
 
 ## Findings sourced here

@@ -1,8 +1,6 @@
-# Transcript `019f5f36-49e4-7a20-8bf9-f03789818c63`
+# Safe source `CODEX-SRC-d0c49010c51e6c34fd86`
 
-Source: `Check CI runner status`
-Source record: accessible Codex app thread transcript (no matching local
-`session_meta.id` was found)
+Source class: accessible Codex app thread with no matching local metadata ID
 Evidence role: CI agent-use cross-check
 
 ## Findings sourced here

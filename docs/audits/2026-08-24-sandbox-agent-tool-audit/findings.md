@@ -367,8 +367,8 @@ Confidence: medium-high
 
 Across the detailed rollout, exact duplicates included `./sb guide
 --project-dir .` four times and `./sb skill show sandbox-cli` seven times. In the
-broader 473-rollout corpus, 303 sessions contained a guide pattern and 223
-contained a skill-show pattern.
+separate historical pattern snapshot, 303 included files contained a guide
+candidate and 223 contained a skill-show candidate.
 
 ### Recommendation
 
@@ -486,7 +486,7 @@ Confidence: high
 
 ### Evidence
 
-The Hermes setup transcript `01a027e9-9d13-7b20-aa49-cef6c5e847b0` recorded a
+The Hermes setup transcript `CODEX-SRC-409992bca83e0fee7c74` recorded a
 trusted child exiting with code 11 while `sb secrets run` reported success and
 returned a zero shell status. The current command path always emits the broker
 result with `as_json=False` and does not translate the child result into the
@@ -525,7 +525,7 @@ The current CLI only adds `--follow` to `job-output` in
 [`sandbox/commands/jobs_runtime.py`](../../../sandbox/commands/jobs_runtime.py:201)
 and registers no `job-follow` command in its manifest at line 928. MCP does
 expose a bounded `job_follow` in [`mcp/wp-server/tools/jobs.py`](../../../mcp/wp-server/tools/jobs.py:291).
-The CLI/MCP surface-sweep transcript `019fc242-d2cd-7500-b4b9-84f184f1324e`
+The CLI/MCP surface-sweep transcript `CODEX-SRC-1ef32de148e66c485200`
 recorded the mismatch while checking the documented interface.
 
 ### Recommendation
@@ -582,7 +582,7 @@ Confidence: high
 
 ### Evidence
 
-The retention transcript `019fc1f7-ec2d-7d81-95dc-195376f44fe7` recorded
+The retention transcript `CODEX-SRC-9d3983e2ec663eac3b54` recorded
 `./sb job-retention --json` removing logs and metrics for many historical jobs;
 the command had no `--dry-run` or `--confirm`. Current
 [`configure_retention_parser`](../../../sandbox/commands/jobs_runtime.py:304)
@@ -620,7 +620,7 @@ but [`reclaim_service`](../../../sandbox/resources/context.py:53) constructs a
 `provisioned` state in [`sandbox/resources/remote.py`](../../../sandbox/resources/remote.py:3259),
 then sends `/resources` requests without an ownership or runtime-revision
 probe. Spec 035 requires equivalent remote safety semantics. The remote storage
-transcript `01a0068a-ee37-7260-9aff-888a5fd36c89` supplied the partial-inventory
+transcript `CODEX-SRC-1fc24f65c9da2980e674` supplied the partial-inventory
 and unavailable-measurement scenario where cleanup authority must remain
 fail-closed.
 
@@ -797,7 +797,7 @@ Confidence: medium-high
 ### Evidence
 
 In the delegated-validation transcript
-`019ff4f9-d326-7b21-86ff-d757086fae61`, a Luna slice reported a compile pass, but
+`CODEX-SRC-6a9a7779c9d1442ce649`, a Luna slice reported a compile pass, but
 the integrated root run later found a real `SyntaxError` in
 `sandbox/resources/remote.py` from the slice. The report did not bind its pass
 to a commit, exact file set, or reusable machine-readable receipt, so the root

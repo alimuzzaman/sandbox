@@ -19,8 +19,9 @@ audit:  codex/sandbox-agent-tool-audit
 
 ## Corpus-level indicators
 
-There were 473 August session records whose exact session cwd was the Sandbox
-checkout. Pattern extraction from recorded tool-call inputs found:
+The `HISTORICAL-CODEX-PATTERN` population is defined in
+[approved-root-decision.md](approved-root-decision.md). Its tool-input pattern
+extraction found:
 
 | Pattern | Rollouts containing it | Occurrences |
 |---|---:|---:|
@@ -35,10 +36,10 @@ checkout. Pattern extraction from recorded tool-call inputs found:
 | `sb workspace` | 13 | 85 |
 | `ci_run` | 2 | 8 |
 
-These are lower-bound indicators, not normalized command telemetry. A recorded
-tool-call input can contain a shell loop, a documentation example, or more than
-one nested `exec_command`; use them to locate repetition, not to claim exact
-production call volume.
+These are approximate candidate hits, not normalized command telemetry. A
+recorded tool-call input can contain a shell loop, a documentation example, or
+more than one nested `exec_command`; tokenization failures can also miss calls.
+Use them to locate repetition, not to claim exact production call volume.
 
 ### Independent Luna Max normalization
 
@@ -73,9 +74,8 @@ count of documentation examples.
 
 ## Detailed storage-attribution rollout
 
-Source: `rollout-2026-08-23T16-10-46-01a02e19-edfa-7602-b84a-562fb2accecb.jsonl`
-Session ID: `01a02e19-edfa-7602-b84a-562fb2accecb`
-Project cwd: Sandbox
+Safe source: `CODEX-SRC-b0cd2f139137896fc41b`
+Source class: `CODEX-LOCAL-EXACT-CWD`
 
 Exact `CommandExecution` summary:
 
@@ -99,8 +99,8 @@ The 45 non-zero commands were mixed: deliberate interrupt/termination statuses,
 operator typos, broad test failures, transport/protocol friction, and expected
 revision guard refusals. They should not be aggregated as one Sandbox defect.
 
-The most repeated exact commands included `sleep 30` (18 times), the same
-process/stat/tail probe (16), a four-module unittest command (13), the same
+The most repeated command signatures included `sleep` (18 times), the same
+process/stat/tail probe (16), a multi-module unittest command (13), the same
 remote migration plan (7), and repeated status/output reads for one durable job.
 
 Notable friction observed in this rollout:
@@ -118,22 +118,21 @@ Notable friction observed in this rollout:
 
 ## Cross-checked transcript findings
 
-### CI runner status
+### CI agent-use cross-check
 
-Thread: `Check CI runner status`
-Transcript ID: `019f5f36-49e4-7a20-8bf9-f03789818c63`
+Safe source: `CODEX-SRC-d0c49010c51e6c34fd86`
 
 Visible MCP calls included two identical `ci_run` calls, four `ci_plan` calls,
 one `ensure_instance`, and one `focus_get`. `ci_run` itself provisions isolated
 matrix cells, so the `ensure_instance` was unnecessary. The duplicate CI call is
 the direct evidence for ATO-002.
 
-### Remote-only storage request
+### Remote-only resource cross-check
 
-Thread: `Free up remote server space`
+Safe source: `CODEX-SRC-1fc24f65c9da2980e674`
 
 The agent initially checked local state despite a remote-only user constraint,
-then corrected to explicit `--remote scaleway-sandbox`. This is the direct
+then corrected to an explicit remote target. This is the direct
 evidence for ATO-006 and supports a target receipt/guard rather than relying only
 on prompt wording.
 
@@ -150,13 +149,13 @@ The follow-up passes were read-only and used `gpt-5.6-luna` at Max reasoning
 effort. They reviewed additional transcript families and then checked each
 candidate against the current source/spec surface before it was added.
 
-| Transcript/session ID | Evidence used | Findings |
+| Safe source | Evidence used | Findings |
 |---|---|---|
-| `01a027e9-9d13-7b20-aa49-cef6c5e847b0` | Hermes setup rollout `rollout-2026-08-22T11-20-16-01a027e9-9d13-7b20-aa49-cef6c5e847b0.jsonl`; repeated `hermes status`, `health`, dashboard, remote-service, and secret-broker actions | ATO-017, ATO-022–ATO-026 |
-| `019fc242-d2cd-7500-b4b9-84f184f1324e` | CLI/MCP surface sweep summary and raw rollout; documented job-follow surface, malformed-ID traces, and bounded command checks | ATO-018, ATO-019 |
-| `019fc1f7-ec2d-7d81-95dc-195376f44fe7` | Remote job/retention gap sweep; raw retention invocation and persistent cleanup result | ATO-020 |
-| `01a0068a-ee37-7260-9aff-888a5fd36c89` | Remote storage/operator transcript plus current resource adapter and workspace preflight source | ATO-021 and ATO-006 corroboration |
-| `019ff4f9-d326-7b21-86ff-d757086fae61` | Delegated validation rollout where root integration contradicted a Luna compile-pass report | ATO-027 |
+| `CODEX-SRC-409992bca83e0fee7c74` | Hermes setup evidence; repeated `hermes status`, `health`, dashboard, remote-service, and secret-broker actions | ATO-017, ATO-022–ATO-026 |
+| `CODEX-SRC-1ef32de148e66c485200` | CLI/MCP surface sweep summary and raw rollout; documented job-follow surface, malformed-ID traces, and bounded command checks | ATO-018, ATO-019 |
+| `CODEX-SRC-9d3983e2ec663eac3b54` | Remote job/retention gap sweep; raw retention invocation and persistent cleanup result | ATO-020 |
+| `CODEX-SRC-1fc24f65c9da2980e674` | Remote storage/operator transcript plus current resource adapter and workspace preflight source | ATO-021 and ATO-006 corroboration |
+| `CODEX-SRC-6a9a7779c9d1442ce649` | Delegated validation rollout where root integration contradicted a Luna compile-pass report | ATO-027 |
 
 The Hermes rollout also exposed agent-call overhead that is useful for product
 design: 19 Hermes job-status calls, 14 Hermes status calls, 14 dashboard calls,

@@ -1,7 +1,6 @@
-# Transcript `01a027e9-9d13-7b20-aa49-cef6c5e847b0`
+# Safe source `CODEX-SRC-409992bca83e0fee7c74`
 
-Source: Hermes setup and remote-operations exploration
-Rollout file: `rollout-2026-08-22T11-20-16-01a027e9-9d13-7b20-aa49-cef6c5e847b0.jsonl`
+Source class: Hermes and remote-operations review
 Evidence role: follow-up Hermes agent-use and source-contract cross-check
 
 ## Findings sourced here

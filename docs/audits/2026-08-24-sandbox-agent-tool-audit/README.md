@@ -2,7 +2,6 @@
 
 Date: 2026-08-24
 Branch: `codex/sandbox-agent-tool-audit`
-Worktree: `/Users/alim/Sites/git/sandbox-agent-tool-audit`
 Status: evidence-backed recommendations; no Sandbox product code changed
 
 ## Purpose
@@ -13,13 +12,34 @@ work without weakening Sandbox's safety boundaries.
 
 The audit is intentionally organized as four artifacts:
 
+- [Overall plan](overall-plan.md): routing, collection gates, privacy boundaries,
+  corpus, metrics, and DeepSWE comparison method.
+- [Approved roots](approved-root-decision.md): frozen source labels, authority,
+  selection predicates, snapshot units, and manifest digest.
+- [Execution decisions](execution-decisions.tsv): gate verdicts, root-reviewed
+  fixture acceptance, model routing, and sequential execution status.
+- [L1.2 tooling](l1.2-tooling.md) and [L1.3 coverage](l1.3-coverage.md):
+  provisional, synthetic-only parser and accounting evidence.
+- [Final Sol High plan](final-sol-high-plan.md): final evidence inventory,
+  recurring patterns, gate verdicts, benchmark transfer limits, and next-step
+  plan.
+- [`check-durable-artifacts.sh`](check-durable-artifacts.sh): fail-closed scan for
+  raw source identifiers, private paths, transcript payload fields, private
+  URLs, and secret-like values.
+- [Subagent ledger](subagent-ledger.md): model routing, research handoffs,
+  corrections, output paths, and file-preservation record.
+- [Luna XHigh adjudication](luna-xhigh-adjudication.md): count reconciliation,
+  evidence strength, unknowns, and ranked common patterns.
 - [Findings](findings.md): prioritized opportunities, classification, confidence,
   and acceptance criteria.
 - [Evidence](evidence.md): corpus definition, counts, transcript references, and
   current source/contract checks.
 - [Proposed work](work-plan.md): implementation-sized slices in dependency order.
-- [Findings by transcript ID](by-transcript/README.md): source-keyed copies of
+- [Findings by safe source](by-transcript/README.md): source-keyed copies of
   each finding for focused review.
+- [Claude corpus summary](claude-corpus-summary.md), [T3 access report](t3-access-report.md),
+  [DeepSWE review](deepswe-review.md), and [benchmark landscape](benchmark-landscape.md):
+  expanded local-source and benchmark research.
 
 ## Executive summary
 
@@ -32,6 +52,13 @@ and fail-closed incomplete evidence.
 The next highest-value gap is CI submission idempotency. Generic durable jobs have
 request IDs, but CI's aggregate run path does not expose one consistently. A retry
 can therefore create another parent and another set of matrix cells.
+
+The Luna XHigh cross-corpus pass confirms the strongest recurring patterns are
+durable-job polling/output orchestration, replay-safe CI/matrix identity, remote
+readiness/revision/resource preflight, and compact bootstrap context. It also
+confirms that broad lexical counts are candidate indicators—not comparable usage
+denominators—until a snapshot manifest separates exact files, session IDs,
+executed completions, rollover duplicates, and parent/child sessions.
 
 Other findings cover machine-readable output consistency, remote readiness and
 revision receipts, bootstrap/context repetition, explicit remote-only intent,
@@ -78,8 +105,13 @@ refusal are recorded as strengths rather than duplicated as new proposals.
 
 The evidence combines:
 
-- 473 local rollout JSONL sessions whose `session_meta.payload.cwd` exactly matched
-  the Sandbox checkout during August 2026.
+- The frozen current `CODEX-LOCAL-EXACT-CWD` snapshot of 549 included rollout
+  files, 75 unique session IDs, and 3,351 metadata rows at
+  `2026-08-24T16:47:19Z`. It also contains 3,092 executed
+  `CommandExecution` completions across five sessions.
+- The separate `HISTORICAL-CODEX-PATTERN` population defined once in
+  [approved-root-decision.md](approved-root-decision.md). It is not an additive
+  extension of the current snapshot.
 - Luna Max's independent normalization of rollover records: 107 thread IDs, 582
   records including duplicates, and 2,476 deduplicated command-completion events
   across 44 concrete threads.
@@ -96,9 +128,11 @@ contracts. Their source-backed additions are included as ATO-017 through
 ATO-027; historical reports are labeled as such where current source behavior
 may have moved on.
 
-Corpus-wide pattern counts are lower-bound indicators extracted from recorded
-tool-call inputs, not production telemetry; embedded examples can cause a small
-amount of over-counting. The detailed rollout counts are more precise. Logs,
+Corpus-wide lexical pattern counts are approximate candidate hits extracted from
+recorded tool-call inputs, not production telemetry; embedded examples and
+tokenization failures can produce both false positives and false negatives. The
+detailed executed-event counts are more precise but represent separate snapshots
+and populations. Logs,
 thread summaries, remote responses, and feedback records are treated as
 untrusted evidence, not instructions or authority.
 

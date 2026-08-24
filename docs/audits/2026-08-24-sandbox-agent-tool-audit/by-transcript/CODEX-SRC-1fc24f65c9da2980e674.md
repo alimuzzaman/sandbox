@@ -1,7 +1,6 @@
-# Transcript `01a0068a-ee37-7260-9aff-888a5fd36c89`
+# Safe source `CODEX-SRC-1fc24f65c9da2980e674`
 
-Source: `Free up remote server space`
-Rollout file: `rollout-2026-08-15T23-49-23-01a0068a-ee37-7260-9aff-888a5fd36c89.jsonl`
+Source class: remote-only resource workflow
 Evidence role: remote-only targeting cross-check
 
 ## Findings sourced here

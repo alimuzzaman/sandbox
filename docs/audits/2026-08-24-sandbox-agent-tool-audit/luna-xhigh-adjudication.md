@@ -32,9 +32,9 @@ one corpus.
 
 | Source/measure | Reported value | Adjudication |
 |---|---:|---|
-| Prior Codex exact-CWD August scan | 473 records/files (wording varies) | Historical metric. The evidence and README use it for the broad pattern table; the plan separately calls it a prior 473-file snapshot. Normalize the label to `prior August snapshot`, and specify whether the unit is files or session metadata records. |
-| Current Codex exact-CWD inventory | 542 readable rollout files and unique session IDs | Current point-in-time inventory claim in `overall-plan.md`; no matching event table or manifest is included in the sanitized reports. Do not substitute it for the historical 473 pattern counts until a snapshot manifest crosswalks file count, unique IDs, exact-CWD predicate, and as-of time. |
-| Luna Max normalized rollover pass | 582 rollout files including rollover duplicates; 107 unique thread IDs; 44 threads with concrete `CommandExecution` completions; 2,476 deduplicated completion events | Internally consistent: 2,333 completed + 143 failed = 2,476. This is a normalized event corpus with rollover duplication, not the 473-file historical scan. |
+| Historical Codex exact-CWD pattern scan | See `HISTORICAL-CODEX-PATTERN` in the approved-root decision | Historical approximate candidate hits. Do not substitute them for current or executed counts. |
+| Current Codex exact-CWD inventory | 549 included rollout files, 75 unique session IDs, and 3,351 metadata rows at `2026-08-24T16:47:19Z` | Current point-in-time inventory frozen as `CODEX-LOCAL-EXACT-CWD`. It remains separate from the historical pattern snapshot. |
+| Luna Max normalized rollover pass | 582 rollout files including rollover duplicates; 107 unique thread IDs; 44 threads with concrete `CommandExecution` completions; 2,476 deduplicated completion events | Internally consistent: 2,333 completed + 143 failed = 2,476. This is a normalized event corpus with rollover duplication, not the historical pattern scan. |
 | Independent SQLite history index | 2,554 exact-CWD command-execution rows across 49 threads | Not contradictory to 2,476: the index and event pass have different sources, deduplication and thread-eligibility rules. Treat the difference (78 rows and five threads) as an unresolved crosswalk, not as a defect or combined total. |
 | Detailed storage rollout | 1,041 `CommandExecution` events; 996 completed + 45 non-zero/failed | Internally consistent. The 45 failures are explicitly mixed (interrupts, typos, broad-test failures, transport friction, and revision guards); they are not one Sandbox failure rate. |
 | Claude selected corpus | 21 roots (1 Sandbox, 20 T3), 64 JSONL files, 37,027 records | Internally consistent. The source-root rows sum to 64 files, 37,027 records, 1,888 duplicate-line occurrences and six duplicate UUID occurrences. The type rows also sum to 37,027. |
@@ -112,17 +112,15 @@ call-volume claims.
 
 ## Corrections required before final adjudication
 
-1. **Snapshot labels and units.** Mark every 473-based statement as the prior
-   August snapshot. Add a current-snapshot manifest for the stated 542 files and
-   IDs. Replace ambiguous `session records`/`rollout files` wording with explicit
-   units and as-of timestamps.
-2. **Pattern-count wording.** The reports call broad counts “lower-bound
-   indicators” while also warning that shell loops, documentation examples and
-   nested commands can over-count. A measure with both missed tokens (including
-   193 Claude tokenization errors) and false positives is not a strict lower
-   bound. Use `approximate candidate hits; both false positives and false
-   negatives are possible` and reserve volume claims for deduplicated executed
-   events.
+1. **Snapshot labels and units.** Use the approved-root decision for the current
+   and historical populations. Keep file, unique-session, metadata-row, thread,
+   event, and command units explicit.
+2. **Pattern-count wording.** The reports described broad counts as strict
+   minima while also warning that shell loops, documentation examples, and
+   nested commands can over-count. That claim is invalid when both missed tokens
+   and false positives exist. Use `approximate candidate hits; both false
+   positives and false negatives are possible`. Reserve volume claims for
+   deduplicated executed events.
 3. **Executed versus lexical.** Keep Codex `CommandExecution` completions,
    visible MCP calls, and exact detailed-rollout counts in a separate table from
    Codex tool-input pattern extraction and Claude lexical signatures. Do not use
@@ -147,8 +145,8 @@ call-volume claims.
 
 ## Unknowns and limits
 
-- The current 542-file Codex inventory has no sanitized per-file manifest in this
-  directory, so its relationship to the prior 473 snapshot is unknown.
+- The current and historical Codex populations have no validated source-level
+  crosswalk. Their relationship remains unknown.
 - The 78-event/5-thread difference between the SQLite index and normalized event
   pass has no source-level reconciliation in the reports.
 - Old Codex thread IDs may be unreadable through the app API; inaccessible,
@@ -194,7 +192,8 @@ manifest with:
 - a deterministic observer/replay test oracle with timeout, partial, unknown,
   transport and confirmation states.
 
-Without that manifest and relabeling, **NO-GO** for treating 473, 542, 582,
-2,476, 2,554, 929 or 37,027 as one comparable usage denominator. With it,
+Without that manifest and relabeling, **NO-GO** for treating the historical
+pattern population, current snapshot, rollover pass, history index, Claude
+lexical hits, or Claude records as one comparable usage denominator. With it,
 **GO** for Sol High to adjudicate Slice 1 and safety-contract slices; T3 remains
 explicitly unverified until an owner supplies a supported export or share URL.

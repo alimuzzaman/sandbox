@@ -1,7 +1,6 @@
-# Transcript `01a02e19-edfa-7602-b84a-562fb2accecb`
+# Safe source `CODEX-SRC-b0cd2f139137896fc41b`
 
-Source file: `rollout-2026-08-23T16-10-46-01a02e19-edfa-7602-b84a-562fb2accecb.jsonl`
-Workflow: remote storage/deep attribution and durable resource scanning
+Source class: remote storage and durable resource workflow
 Evidence role: primary detailed rollout plus Luna Max source-contract expansion
 
 ## Findings sourced here

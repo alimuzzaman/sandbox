@@ -15,8 +15,18 @@ test("BrowserWindow keeps the renderer isolated and sandboxed", () => {
   assert.match(mainSource, /event\.senderFrame === mainWindow\.webContents\.mainFrame/);
 });
 
-test("preload exposes only the typed project-directory picker", () => {
+test("preload exposes only typed project and recovery operations", () => {
   assert.match(preloadSource, /exposeInMainWorld\("sandboxDesktop", api\)/);
   assert.match(contractsSource, /chooseProjectDirectory/);
+  assert.match(contractsSource, /retryBackend/);
   assert.doesNotMatch(contractsSource, /exec|spawn|shell|ssh|docker|token|readFile|writeFile/i);
+});
+
+test("main process pins navigation, IPC senders, and one app instance", () => {
+  assert.match(mainSource, /requestSingleInstanceLock/);
+  assert.match(mainSource, /will-navigate/);
+  assert.match(mainSource, /will-attach-webview/);
+  assert.match(mainSource, /setWindowOpenHandler/);
+  assert.match(mainSource, /event\.senderFrame === mainWindow\.webContents\.mainFrame/);
+  assert.match(mainSource, /setPermissionCheckHandler/);
 });

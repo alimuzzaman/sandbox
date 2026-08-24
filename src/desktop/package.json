@@ -1,19 +1,25 @@
 {
   "name": "sandbox-desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "commonjs",
   "description": "Secure macOS shell for the local Sandbox dashboard",
   "main": "dist/main.js",
   "scripts": {
+    "clean": "node scripts/clean.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "dev": "npm run build && install-electron && electron .",
-    "package:mac": "npm run test && electron-builder --mac"
+    "icon": "sh scripts/generate-icon.sh",
+    "package:mac:dir": "npm run test && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --dir",
+    "package:mac": "npm run clean && npm run icon && npm run test && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal && node scripts/artifact-manifest.mjs",
+    "package:mac:signed": "npm run clean && npm run icon && npm run test && electron-builder --mac --universal && node scripts/artifact-manifest.mjs",
+    "release:clean": "npm ci && npm run package:mac"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "@electron/fuses": "^1.8.0",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "typescript": "^5.9.3"
@@ -27,10 +33,16 @@
     },
     "files": [
       "dist/**/*",
+      "assets/**/*",
       "package.json"
     ],
+    "afterPack": "scripts/after-pack.cjs",
     "mac": {
       "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "icon": "build/icon.icns",
       "target": [
         "dmg",
         "zip"

@@ -8,6 +8,8 @@ test("dashboard endpoint is restricted to loopback HTTP", () => {
   assert.throws(() => parseDashboardUrl("https://example.com"), /loopback/);
   assert.throws(() => parseDashboardUrl("file:///tmp/dashboard.html"), /loopback/);
   assert.throws(() => parseDashboardUrl("http://user:pass@localhost:8765"), /credentials/);
+  assert.throws(() => parseDashboardUrl("http://localhost:8765/untrusted"), /origin/);
+  assert.throws(() => parseDashboardUrl("http://localhost:8765/?token=nope"), /origin/);
 });
 
 test("external URLs accept only credential-free HTTP(S)", () => {

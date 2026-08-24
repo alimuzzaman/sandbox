@@ -1,5 +1,7 @@
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const EXTERNAL_PROTOCOLS = new Set(["https:", "http:"]);
+export const MAX_BACKEND_RESPONSE_BYTES = 32 * 1024 * 1024;
+export const MAX_BACKEND_REQUEST_BYTES = 4 * 1024 * 1024;
 
 export function parseDashboardUrl(raw: string): URL {
   let url: URL;
@@ -13,6 +15,9 @@ export function parseDashboardUrl(raw: string): URL {
   }
   if (url.username || url.password) {
     throw new Error("Sandbox dashboard URL must not contain credentials");
+  }
+  if (url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("Sandbox dashboard URL must contain only an origin");
   }
   return url;
 }
@@ -31,6 +36,15 @@ export function parseExternalUrl(raw: string): URL | null {
 export function isSameDashboardOrigin(candidate: string, dashboard: URL): boolean {
   try {
     return new URL(candidate).origin === dashboard.origin;
+  } catch {
+    return false;
+  }
+}
+
+export function isRecoveryUrl(candidate: string): boolean {
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "sandbox-app:" && url.hostname === "app" && url.pathname === "/recovery.html";
   } catch {
     return false;
   }

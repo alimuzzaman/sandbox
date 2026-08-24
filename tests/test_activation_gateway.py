@@ -2,6 +2,8 @@ import threading
 import time
 import unittest
 from unittest import mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 def _records(*, mode="idle_stop", wake=True, kind="wordpress", host="site.tst",
@@ -162,6 +164,85 @@ class ActivationCaddyTests(unittest.TestCase):
         self.assertNotIn("forward_auth", direct)
         self.assertIn("forward_auth host.docker.internal:8766", wake)
         self.assertLess(wake.index("forward_auth"), wake.index("reverse_proxy"))
+
+    def test_gateway_enable_failure_is_reported_without_route_mutation(self):
+        from sandbox.core._domains import _ensure_activation_gateway
+        records, wp = _records()
+        with mock.patch("sandbox.core._domains.registry_all", return_value=records), \
+             mock.patch("sandbox.core._domains.resolve_instances", return_value=wp), \
+             mock.patch("sandbox.core._domains._activation_gateway_healthy", return_value=False), \
+             mock.patch("sandbox.activation.supervision.enable", return_value={"ok": False}):
+            self.assertFalse(_ensure_activation_gateway({}))
+
+
+class ActivationSchedulerTests(unittest.TestCase):
+    def make_scheduler(self, *, state="ready", safe=(True, "idle"), stop=True):
+        from sandbox.activation import ActivationService
+        from sandbox.activation.catalog import build_catalog
+        from sandbox.activation.scheduler import ActivationScheduler
+        records, wp = _records()
+        catalog = build_catalog(records, wp)
+        calls = []
+        scheduler = ActivationScheduler(
+            catalog, ActivationService(), observe_state=lambda _route: state,
+            activity_safe=lambda _route: safe,
+            suspend=lambda route, timeout: calls.append((route.route_id, timeout)) or stop,
+        )
+        scheduler.reconcile()
+        route = catalog.routes()[0]
+        return scheduler, route, calls
+
+    def test_reconciles_live_ready_then_suspends_due_route(self):
+        scheduler, route, calls = self.make_scheduler()
+        snapshot = scheduler.service.coordinator.snapshot(route.route_id)
+        due = float(snapshot["last_activity"]) + int(snapshot["policy"]["idle_after_seconds"]) + 1
+        results = scheduler.scan(now=due)
+        self.assertEqual(results[0].action, "suspended")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(scheduler.service.coordinator.snapshot(route.route_id)["state"], "asleep")
+
+    def test_dry_run_and_active_evidence_never_stop(self):
+        scheduler, route, calls = self.make_scheduler()
+        snapshot = scheduler.service.coordinator.snapshot(route.route_id)
+        due = float(snapshot["last_activity"]) + 901
+        self.assertEqual(scheduler.scan(now=due, dry_run=True)[0].action, "would_suspend")
+        self.assertEqual(calls, [])
+        scheduler, route, calls = self.make_scheduler(safe=(False, "active_job"))
+        snapshot = scheduler.service.coordinator.snapshot(route.route_id)
+        self.assertEqual(scheduler.scan(now=float(snapshot["last_activity"]) + 901)[0].reason,
+                         "active_job")
+        self.assertEqual(calls, [])
+
+    def test_uncertain_restart_is_error_and_never_suspends(self):
+        scheduler, route, calls = self.make_scheduler(state="unknown")
+        self.assertEqual(scheduler.service.coordinator.snapshot(route.route_id)["state"], "error")
+        self.assertEqual(scheduler.scan(now=10**12), ())
+        self.assertEqual(calls, [])
+
+    def test_scheduler_source_never_uses_destructive_compose_operations(self):
+        source = Path("sandbox/activation/scheduler.py").read_text(encoding="utf-8")
+        for forbidden in ("docker pause", "compose down", "recreate", "volume rm"):
+            self.assertNotIn(forbidden, source.lower())
+
+
+class ActivationLeaseTests(unittest.TestCase):
+    def test_instance_activity_is_visible_and_released(self):
+        from sandbox.activation import leases
+        with TemporaryDirectory() as temp, \
+             mock.patch.object(leases, "_root", return_value=Path(temp)):
+            self.assertFalse(leases.has_active_instance_lease("site"))
+            with leases.instance_activity("site", "wordpress_cli", ttl_seconds=30):
+                self.assertTrue(leases.has_active_instance_lease("site"))
+            self.assertFalse(leases.has_active_instance_lease("site"))
+
+    def test_malformed_lease_pins_fail_closed(self):
+        from sandbox.activation import leases
+        with TemporaryDirectory() as temp, \
+             mock.patch.object(leases, "_root", return_value=Path(temp)):
+            folder = Path(temp) / "site"
+            folder.mkdir()
+            (folder / "bad.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(leases.has_active_instance_lease("site"))
 
 
 if __name__ == "__main__":

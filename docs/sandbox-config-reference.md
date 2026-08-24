@@ -113,10 +113,11 @@ placed behind the loopback activation authority and Caddy `forward_auth`.
 Cron-enabled WordPress is pinned on and excluded. Herd/native runtimes,
 aliases, malformed hosts/ports, and identity collisions fail closed. The authority never receives or replays
 the original request; after readiness succeeds, Caddy's existing
-`reverse_proxy` sends the original method and body exactly once. Automatic
-idle scanning remains gated until HTTP, WebSocket, background-job, and cron
-activity have authoritative leases; this release does not run an unsupervised
-stop loop. Existing persisted registry rows without a lifecycle marker remain
+`reverse_proxy` sends the original method and body exactly once. The supervised
+host-local authority scans eligible routes and requires a live runtime state,
+no established backend HTTP/WebSocket connection, no active durable job, and
+no bounded WP-CLI activity lease before graceful stop. Missing evidence pins
+the route rather than guessing. Existing persisted registry rows without a lifecycle marker remain
 always-on until a normal `sb ensure` or `sb apply` reconciliation adopts the
 new default. Remote activation and function/FaaS adapters remain future gates.
 

@@ -30,6 +30,7 @@ class ActivationRoute:
     kind: str
     backend_port: int
     policy: Mapping[str, object]
+    instance: str | None = None
 
     def authorized(self, bearer: str) -> bool:
         return isinstance(bearer, str) and hmac.compare_digest(self.token, bearer)
@@ -104,7 +105,8 @@ def build_catalog(records: Mapping[str, Mapping[str, object]],
         if not isinstance(route_id, str) or not _ROUTE.fullmatch(route_id) or not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ActivationCatalogError("activation route credentials are invalid")
         routes.append(ActivationRoute(route_id, token, hostname.lower(), root, label,
-                                      str(kind), port, MappingProxyType(dict(policy))))
+                                      str(kind), port, MappingProxyType(dict(policy)),
+                                      str(instance) if instance else None))
     return ActivationCatalog(tuple(routes))
 
 

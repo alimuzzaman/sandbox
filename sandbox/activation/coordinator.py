@@ -91,7 +91,8 @@ class ActivationCoordinator:
         return route_id
 
     def register(self, route_id: str, policy: ActivationPolicy,
-                 *, state: ActivationState = ActivationState.ASLEEP) -> None:
+                 *, state: ActivationState = ActivationState.ASLEEP,
+                 reconcile: bool = False) -> None:
         route_id = self._route(route_id)
         if not isinstance(policy, ActivationPolicy) or not isinstance(state, ActivationState):
             raise ValueError("activation route registration is invalid")
@@ -101,6 +102,11 @@ class ActivationCoordinator:
                 self._routes[route_id] = _Route(policy, state=state, last_activity=self._clock())
             else:
                 existing.policy = policy
+                if reconcile and existing.pending == 0 and not existing.leases:
+                    existing.state = state
+                    existing.error = ("runtime_state_uncertain"
+                                      if state == ActivationState.ERROR else None)
+                    existing.last_activity = self._clock()
 
     def touch(self, route_id: str, *, now: float | None = None) -> None:
         with self._lock:

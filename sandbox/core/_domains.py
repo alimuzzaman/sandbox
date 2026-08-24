@@ -666,6 +666,24 @@ def _activation_gateway_healthy() -> bool:
         return False
 
 
+def _ensure_activation_gateway(cfg: dict) -> bool:
+    """Enable the per-user authority before rendering any request-wake route."""
+    from sandbox.activation.catalog import build_catalog, ActivationCatalogError
+    try:
+        catalog = build_catalog(registry_all(), resolve_instances(cfg))
+    except ActivationCatalogError:
+        return False
+    if not catalog.routes():
+        return True
+    if _activation_gateway_healthy():
+        return True
+    try:
+        from sandbox.activation.supervision import enable
+        return bool(enable().get("ok"))
+    except Exception:
+        return False
+
+
 def regen_caddyfile(cfg: dict) -> None:
     """Rewrite the Caddyfile from current config: a global block + one site
     block per instance whose domain is a .tst name. Mirrors write_compose_files
@@ -1284,6 +1302,10 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
 
     # 3. Boot-time alias restore + start the proxy with current routes.
     _install_alias_launchd()
+    # Eligible idle-stop routes are never written until their supervised
+    # authority is healthy. A failed service install leaves the current/direct
+    # Caddy routes intact through regen_caddyfile's existing rollback gate.
+    _ensure_activation_gateway(cfg)
     PROXY_COMPOSE.write_text(render_proxy_compose())
     regen_caddyfile(cfg)
     up, detail = proxy_apply()

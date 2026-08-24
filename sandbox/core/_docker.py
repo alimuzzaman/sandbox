@@ -674,9 +674,9 @@ def _wp_has_builtin_cli(instance: str, timeout: float | None = None) -> bool:
     return ok
 
 
-def wpcli(args: list[str], instance: str,
-          check: bool = True, capture: bool = False,
-          timeout: float | None = None):
+def _wpcli_unleased(args: list[str], instance: str,
+                    check: bool = True, capture: bool = False,
+                    timeout: float | None = None):
     """Run wp-cli against an instance. Herd runs the HOST wp with --path; Docker
     runs the **built-in** wp (a host wp-cli.phar bind-mounted into the always-running
     `wp` container) via `exec -u www-data` — no per-call container. Falls back to the
@@ -721,6 +721,16 @@ def wpcli(args: list[str], instance: str,
     return compose("run", "--rm", "wpcli", *args,
                    instance=instance, check=check, capture=capture,
                    timeout=timeout)
+
+
+def wpcli(args: list[str], instance: str,
+          check: bool = True, capture: bool = False,
+          timeout: float | None = None):
+    """Run WP-CLI while publishing a bounded cross-process idle-stop lease."""
+    from sandbox.activation.leases import instance_activity
+    bounded = int(timeout if timeout is not None else 300)
+    with instance_activity(instance, "wordpress_cli", ttl_seconds=min(604800, bounded + 60)):
+        return _wpcli_unleased(args, instance, check=check, capture=capture, timeout=timeout)
 
 
 def _managed_execution_gate(instance: str, capability: str, entry_path: str, argv: tuple[str, ...],

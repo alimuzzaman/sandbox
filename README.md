@@ -630,13 +630,21 @@ filesystem/process access to the renderer; see [docs/desktop-app.md](docs/deskto
 
 Request wake defaults on for newly resolved Docker instances. Set
 `instanceLifecycle.mode: "always_on"` to opt out and pin an instance on.
-`./sb activation serve` runs its loopback-only authority; eligible Caddy routes
-authorize readiness through stock `forward_auth`, then proxy the untouched
-original request. Invalid catalogs or an unhealthy authority retain the
-previous Caddyfile. Existing registry rows adopt the default only on normal
-`ensure`/`apply`. Automatic idle scanning is still gated on authoritative HTTP,
-WebSocket, job, and cron leases; remote wake and function/FaaS adapters are not
-implemented in this phase.
+Clean-URL setup installs and enables the per-user activation service before
+eligible Caddy routes authorize readiness through stock `forward_auth`. The
+same service scans idle routes and gracefully suspends them only after live
+runtime, established HTTP/WebSocket connection, durable-job, and WP-CLI lease
+checks pass. Missing evidence pins the route. Invalid catalogs or an unhealthy
+authority retain direct/previous Caddy routes. Existing registry rows adopt the
+default only on normal `ensure`/`apply`. Remote wake and function/FaaS adapters
+remain future work.
+
+```bash
+./sb activation status
+./sb activation scan --dry-run
+./sb activation enable
+./sb activation disable
+```
 
 Each instance can run a different **web server**, and you can switch in place
 without re-importing content:

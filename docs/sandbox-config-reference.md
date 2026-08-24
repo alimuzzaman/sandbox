@@ -69,7 +69,7 @@ Docker volume, add a `/sandbox-node` mount or environment variables, or material
 dependency tree. Those runtime overlay and identity/materialization changes are the separate
 Spec 044 T007 work and are not implemented by T006.
 
-The adapter supports `ensure`, `status`, `start`, `stop`, `logs`, bounded argv
+The adapter supports `ensure`, `status`, `start`, `stop`, `resume`, `suspend`, `logs`, bounded argv
 `exec`, `apply`, and non-destructive `destroy`. Sandbox writes only its
 loopback port overlay under `$SANDBOX_HOME/runtime/projects/<instance>/`; it
 validates the Compose service name, internal/host port range, health path, label
@@ -78,6 +78,33 @@ does not rewrite the project's Compose file, infer or execute package scripts,
 or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
 database, Mailpit, WordPress filesystem, abilities, snapshots) fail before
 their side effects with a capability error.
+
+### Opt-in idle-stop lifecycle
+
+Provisioned Docker-backed WordPress and generic Compose instances can declare
+an idle-stop policy. Omission keeps the historical always-on behavior; an
+explicit `null` or an unknown field is rejected.
+
+```json
+{
+  "instanceLifecycle": {
+    "mode": "idle_stop",
+    "idleAfterSeconds": 900,
+    "wakeTimeoutSeconds": 60,
+    "stopGraceSeconds": 30,
+    "maxPendingRequests": 32
+  }
+}
+```
+
+`idleAfterSeconds` accepts 60–604800, `wakeTimeoutSeconds` 5–600,
+`stopGraceSeconds` 1–120, and `maxPendingRequests` 1–256. All values are strict
+integers. `./sb instance suspend <name>` is refused unless the instance opted
+into `idle_stop`; `./sb instance resume <name>` starts an already-provisioned
+instance and waits for its declared health surface. Suspend uses graceful
+Compose `stop` and resume uses Compose `start`, preserving containers, volumes,
+ports, and registry identity. These commands provide the lifecycle foundation;
+automatic request-triggered wake routing is a separate gateway feature.
 
 `startupTimeoutSeconds` is the bounded time Sandbox waits for the declared
 health endpoint after `ensure` (30–3600 seconds; default 120). Set

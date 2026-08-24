@@ -759,8 +759,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
 
     ins = sub.add_parser("instance",
-        help="Delete a sandbox instance (create via `./sb init` in a plugin dir)")
-    ins.add_argument("action", choices=["delete"])
+        help="Suspend/resume or delete a sandbox instance")
+    ins.add_argument("action", choices=["suspend", "resume", "delete"])
     ins.add_argument("name")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")

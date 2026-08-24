@@ -124,6 +124,10 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
         if extension_requirements is not None:
             resolved["php_extensions"] = _json_safe_php_extensions(
                 extension_requirements)
+        lifecycle = inst.get("instance_lifecycle", runtime.get("instance_lifecycle"))
+        if lifecycle is not None:
+            from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
+            resolved["instance_lifecycle"] = normalize_instance_lifecycle(lifecycle)
         # Trusted, adapter-produced extension plan inputs are optional state;
         # preserve them only when present so the omission path remains exactly
         # the historical resolved mapping.
@@ -730,6 +734,13 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     if "phpExtensions" in pconf and pconf.get("phpExtensions") is not None:
         block["php_extensions"] = _json_safe_php_extensions(
             pconf.get("phpExtensions"))
+    # Persist the normalized lifecycle declaration beside the instance so a
+    # host-side activation gateway can make an explicit, read-only decision
+    # without re-reading project source or inventing Docker arguments.  Omitted
+    # declarations retain the historical always-on behavior and therefore do
+    # not perturb legacy instance blocks.
+    if "instanceLifecycle" in pconf and pconf.get("instanceLifecycle") is not None:
+        block["instance_lifecycle"] = dict(pconf["instanceLifecycle"])
     # Re-use only the previous adapter-produced identities.  These are not
     # project inputs and are never invented here; retaining them lets an
     # explicitly materialized child-image plan survive a later apply while a

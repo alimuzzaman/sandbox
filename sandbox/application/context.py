@@ -786,6 +786,68 @@ def runtime_service(cfg):
             "observation": {"source": "registry", "freshness": "snapshot"},
         }
 
+    def _wordpress_power(request: OperationRequest, operation: str):
+        """Start/stop an existing Docker WordPress stack without reconciling it.
+
+        This is intentionally narrower than ``ensure``/``apply``: idle wake and
+        suspend may only operate on the registry identity and generated Compose
+        file already owned by Sandbox.  They never install WordPress, rebuild an
+        image, remove containers, or touch volumes.
+        """
+        entry = sc.registry_get(request.project_root, label=request.label)
+        if not isinstance(entry, dict) or not entry.get("instance"):
+            return {"ok": False, "mutated": False,
+                    "error": {"code": "unknown_instance", "message": "no provisioned instance exists"}}
+        instance = str(entry["instance"])
+        instance_cfg = sc.resolve_instances(cfg).get(instance) or {}
+        if instance_cfg.get("server") == "herd":
+            return {"ok": False, "mutated": False,
+                    "error": {"code": "unsupported_runtime", "message": "host-served instances cannot be suspended"}}
+        from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
+        try:
+            lifecycle = normalize_instance_lifecycle(instance_cfg.get("instance_lifecycle"))
+        except ValueError as exc:
+            return {"ok": False, "mutated": False,
+                    "error": {"code": "invalid_instance_lifecycle", "message": str(exc)}}
+        if operation == "suspend" and lifecycle.get("mode") != "idle_stop":
+            return {"ok": False, "mutated": False,
+                    "error": {"code": "lifecycle_not_opted_in", "message": "instance lifecycle mode is always_on"}}
+        compose_operation = "start" if operation == "resume" else "stop"
+        grace = int(lifecycle["stopGraceSeconds"])
+        compose_args = ((compose_operation,) if operation == "resume" else
+                        (compose_operation, "--timeout", str(grace)))
+        result = core.compose(
+            *compose_args, instance=instance, check=False, capture=True,
+            timeout=float(lifecycle["wakeTimeoutSeconds"] if operation == "resume" else grace + 10),
+        )
+        command_ok = getattr(result, "returncode", 1) == 0
+        ready = (command_ok and (operation != "resume" or core._wait_reachable(
+            instance_cfg, timeout=int(lifecycle["wakeTimeoutSeconds"]))))
+        ok = bool(command_ok and ready)
+        data = {
+            "instance": instance,
+            "status": "ready" if operation == "resume" and ok else "stopped" if ok else "error",
+            "lifecycleState": "ready" if operation == "resume" and ok else "asleep" if operation == "suspend" and ok else "error",
+            "instanceLifecycle": lifecycle,
+            "stdout": str(getattr(result, "stdout", "") or "")[-4096:],
+            "stderr": str(getattr(result, "stderr", "") or "")[-4096:],
+        }
+        if not ok:
+            data["error"] = {
+                "code": ("resume_readiness_failed" if command_ok and operation == "resume"
+                         else "compose_lifecycle_failed"),
+                "message": ("instance did not become reachable before the wake deadline"
+                            if command_ok and operation == "resume"
+                            else "Docker Compose lifecycle operation failed"),
+            }
+        if command_ok:
+            sc.registry_put(
+                request.project_root, label=request.label,
+                status=data["status"], lifecycleState=data["lifecycleState"],
+                instanceLifecycle=lifecycle,
+            )
+        return {"ok": ok, "mutated": command_ok, **data}
+
     dependencies = runtime_neutral_dependencies(
         registry=sc, allowed_roots=(core.ROOT, core.BASE),
         proxy=wordpress_proxy_facade(cfg, core=core),
@@ -797,7 +859,9 @@ def runtime_service(cfg):
         "compose.remote-deploy",
     })
     adapters = builtin_adapter_registry(
-        {"ensure": ensure, "apply": apply, "status": status}, compose=compose,
+        {"ensure": ensure, "apply": apply, "status": status,
+         "resume": lambda request: _wordpress_power(request, "resume"),
+         "suspend": lambda request: _wordpress_power(request, "suspend")}, compose=compose,
     )
     adapters.for_kind("wordpress").adapter.capabilities = frozenset({
             *adapters.for_kind("wordpress").adapter.capabilities,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from .domains import normalize_domain_policy
+from .instance_lifecycle import normalize_instance_lifecycle
 from .php_extensions import normalize_php_extensions
 from .runtime import normalize_runtime_policy
 from .secrets import normalize_secret_config
@@ -15,6 +16,9 @@ from .wordpress_runtime import normalize_wordpress_runtime
 COMMON_CONFIG_PROVIDERS = (
     ("runtime", lambda result: normalize_runtime_policy(result.get("runtime")),
      "sandbox.config.runtime", 10),
+    ("instanceLifecycle", lambda result: normalize_instance_lifecycle(
+        result.get("instanceLifecycle")),
+     "sandbox.config.instance_lifecycle", 15),
     ("domains", normalize_domain_policy, "sandbox.config.domains", 20),
     ("wordpressRuntime", normalize_wordpress_runtime,
      "sandbox.config.wordpress_runtime", 30),
@@ -62,10 +66,10 @@ def apply_common_config(result: dict) -> dict:
         # compatibility.  Presence (including an explicit null) is validated
         # by the provider/manifest and therefore cannot be mistaken for
         # omission here.
-        if key == "phpExtensions" and key not in resolved:
+        if key in {"phpExtensions", "instanceLifecycle"} and key not in resolved:
             continue
-        if key == "phpExtensions" and resolved[key] is None:
-            raise ValueError("phpExtensions must be an object when declared")
+        if key in {"phpExtensions", "instanceLifecycle"} and resolved[key] is None:
+            raise ValueError(f"{key} must be an object when declared")
         resolved[key] = provider(resolved)
     resolved.pop("_domains_raw", None)
     resolved.pop("_persisted_hostname", None)

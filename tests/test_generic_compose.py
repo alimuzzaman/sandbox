@@ -237,6 +237,60 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertIn('mem_limit: "4096m"', content)
             self.assertIn("pids_limit: 512", content)
 
+    def test_suspend_and_resume_use_stop_start_without_recreate_or_destroy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+            registry.descriptor["instanceLifecycle"] = {"mode": "idle_stop"}
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+            process.calls.clear()
+            suspended = adapter.invoke(OperationRequest(str(root), "suspend"))
+            resumed = adapter.invoke(OperationRequest(str(root), "resume"))
+            self.assertTrue(suspended.ok)
+            self.assertEqual(suspended.data["lifecycleState"], "asleep")
+            self.assertTrue(resumed.ok)
+            self.assertEqual(resumed.data["lifecycleState"], "ready")
+            calls = [call[0] for call in process.calls]
+            self.assertTrue(any("stop" in call for call in calls))
+            self.assertTrue(any("start" in call for call in calls))
+            self.assertFalse(any("down" in call for call in calls))
+            self.assertIsNotNone(registry.registry_get(str(root)))
+
+    def test_suspend_requires_explicit_idle_stop_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, _, _, _ = self.make_adapter(root)
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+            with self.assertRaisesRegex(ValueError, "idle_stop"):
+                adapter.invoke(OperationRequest(str(root), "suspend"))
+
+    def test_lifecycle_requires_a_provisioned_registry_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, _, _, _ = self.make_adapter(root)
+            with self.assertRaisesRegex(ValueError, "provisioned instance"):
+                adapter.invoke(OperationRequest(str(root), "resume"))
+
+    def test_failed_status_is_never_reported_as_asleep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+            registry.descriptor["instanceLifecycle"] = {"mode": "idle_stop"}
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+
+            def fail(argv, *, cwd=None, env=None, timeout=None):
+                return ProcessResult(tuple(argv), 1, "", "Docker unavailable")
+
+            process.run = fail
+            status = adapter.invoke(OperationRequest(str(root), "status"))
+            self.assertFalse(status.ok)
+            self.assertEqual(status.data["status"], "error")
+            self.assertEqual(status.data["lifecycleState"], "error")
+
     def test_ensure_can_recreate_a_dependency_bootstrapping_service(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

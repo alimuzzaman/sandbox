@@ -63,6 +63,8 @@ class ComposeSchemaProvider:
         project_domains = raw_domain_layer(document)
         project_runtime = raw_wordpress_runtime_layer(document)
         project_secrets = raw_secret_layer(document)
+        lifecycle_declared = "instanceLifecycle" in document
+        lifecycle = document.get("instanceLifecycle")
         machine_domains = {}
         machine_runtime = {}
         machine_secrets = {}
@@ -75,6 +77,9 @@ class ComposeSchemaProvider:
             _reject_php_extensions(override_doc)
             document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
             document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
+            if "instanceLifecycle" in override_doc:
+                lifecycle_declared = True
+                lifecycle = override_doc["instanceLifecycle"]
             machine_domains.update(raw_domain_layer(override_doc))
             machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
             merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
@@ -88,6 +93,9 @@ class ComposeSchemaProvider:
                 _reject_php_extensions(override_doc)
                 document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
                 document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
+                if "instanceLifecycle" in override_doc:
+                    lifecycle_declared = True
+                    lifecycle = override_doc["instanceLifecycle"]
                 machine_domains.update(raw_domain_layer(override_doc))
                 machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
                 merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
@@ -151,7 +159,7 @@ class ComposeSchemaProvider:
             if not isinstance(argv, list) or not argv or any(not _safe_text(item) or not item for item in argv):
                 raise ValueError(f"compose test mode {name!r} requires a non-empty argv list")
             normalized_modes[name] = {"argv": list(argv)}
-        return {"kind": "compose", "framework": document.get("framework") or document.get("preset"),
+        result = {"kind": "compose", "framework": document.get("framework") or document.get("preset"),
                 "compose_file": str(path), "service": service,
                 "internal_port": port, "health_path": health_path,
                 "http_port": http_port,
@@ -169,3 +177,6 @@ class ComposeSchemaProvider:
                 "_secrets_raw": {"project": project_secrets,
                                   "machine_override": machine_secrets},
                 "root": str(root), "source": config_path.name}
+        if lifecycle_declared:
+            result["instanceLifecycle"] = lifecycle
+        return result

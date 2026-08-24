@@ -690,9 +690,26 @@ def cmd_instance(cfg, args) -> None:
     action = args.action
     name = args.name
 
+    if action in {"suspend", "resume"}:
+        owner = _core().registry_find_instance(name)
+        if not owner or not owner.get("root"):
+            die(f"unknown instance '{name}'")
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], action, label=owner.get("label", "default"),
+        ))
+        if isinstance(result, OperationError):
+            die(result.message)
+        data = dict(result.data)
+        if not result.ok:
+            detail = data.get("error") if isinstance(data.get("error"), Mapping) else {}
+            die(str(detail.get("message") or f"could not {action} instance '{name}'"))
+        state = data.get("lifecycleState") or ("ready" if action == "resume" else "asleep")
+        verb = "resumed" if action == "resume" else "suspended"
+        ok(f"Instance '{name}' {verb} ({state}).")
+        return
+
     if action != "delete":
-        die("`./sb instance` only supports `delete` now. Create an instance by "
-            "cd-ing into a plugin repo and running `./sb init` (or `./sb ensure`).")
+        die("unsupported instance action")
 
     owner = _core().registry_find_instance(name)
     if owner and owner.get("runtime_mode") == "managed_native":

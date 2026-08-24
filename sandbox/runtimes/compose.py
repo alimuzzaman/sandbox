@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
+
 from .base import OperationRequest, OperationResult, RuntimeDependencies
 
 
@@ -65,7 +67,10 @@ class ComposeAdapter:
         self.dependencies = dependencies
         self.registry = registry
         self.timeout = timeout
-        self.capabilities = frozenset({"ensure", "status", "start", "stop", "logs", "exec", "apply", "destroy", "open"})
+        self.capabilities = frozenset({
+            "ensure", "status", "start", "stop", "resume", "suspend", "logs",
+            "exec", "apply", "destroy", "open",
+        })
 
     @staticmethod
     def _runtime_id(root: str, label: str, taken: set[str]) -> str:
@@ -111,9 +116,11 @@ class ComposeAdapter:
         recreate_on_ensure = descriptor.get("recreate_on_ensure", False)
         if not isinstance(recreate_on_ensure, bool):
             raise ValueError("Compose recreate-on-ensure setting is invalid")
+        lifecycle = normalize_instance_lifecycle(descriptor.get("instanceLifecycle"))
         return {**descriptor, "root": str(root), "compose_file": str(compose_file),
                 "startup_timeout_seconds": float(startup_timeout),
-                "recreate_on_ensure": recreate_on_ensure}
+                "recreate_on_ensure": recreate_on_ensure,
+                "instanceLifecycle": lifecycle}
 
     def _record(self, request: OperationRequest, **fields: Any) -> dict[str, Any] | None:
         return self.registry.registry_get(request.project_root, label=request.label)
@@ -178,6 +185,11 @@ class ComposeAdapter:
         project_args = ["--project-name", f"sandbox-{runtime_id}", "--project-directory", descriptor["root"], "--file", descriptor["compose_file"], "--file", str(overlay)]
         service = descriptor["service"]
 
+        if op in {"resume", "suspend"} and record is None:
+            raise ValueError(f"Compose {op} requires a provisioned instance")
+        if op == "suspend" and descriptor["instanceLifecycle"]["mode"] != "idle_stop":
+            raise ValueError("Compose suspend requires instanceLifecycle.mode idle_stop")
+
         if op == "ensure":
             config = self.dependencies.process.run(["docker", "compose", *project_args, "config", "--services"], cwd=descriptor["root"], timeout=30)
             if config.returncode != 0 or service not in config.stdout.split():
@@ -192,7 +204,7 @@ class ComposeAdapter:
             deadline = time.monotonic() + descriptor["startup_timeout_seconds"]
             while time.monotonic() < deadline:
                 if self.dependencies.http.probe(url + descriptor["health_path"], timeout=2):
-                    data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": url, "health_path": descriptor["health_path"], "framework": descriptor.get("framework"), "status": "ready"}
+                    data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": url, "health_path": descriptor["health_path"], "framework": descriptor.get("framework"), "status": "ready", "instanceLifecycle": descriptor["instanceLifecycle"], "lifecycleState": "ready"}
                     stored = {key: value for key, value in data.items() if key != "root"}
                     self.registry.registry_put(descriptor["root"], **stored)
                     return OperationResult(True, op, descriptor["root"], "compose", data)
@@ -230,10 +242,27 @@ class ComposeAdapter:
                 status = "ready" if not states else "stopped"
             else:
                 status = "ready" if service_state == "running" else "stopped"
-            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "compose": compose_output, "observation": {"source": "compose", "freshness": "live"}}
+            lifecycle_state = (
+                "ready" if status == "ready" else
+                "asleep" if status == "stopped" and descriptor["instanceLifecycle"]["mode"] == "idle_stop" else
+                "stopped" if status == "stopped" else
+                "error"
+            )
+            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "lifecycleState": lifecycle_state, "instanceLifecycle": descriptor["instanceLifecycle"], "compose": compose_output, "observation": {"source": "compose", "freshness": "live"}}
             return OperationResult(result.returncode == 0, op, descriptor["root"], "compose", data)
 
-        commands = {"start": ["start", service], "stop": ["stop", service], "logs": ["logs", "--no-color", service], "apply": ["up", "-d", "--force-recreate", service], "destroy": ["down"]}
+        commands = {
+            "start": ["start", service],
+            "stop": ["stop", service],
+            # These names are deliberately narrower lifecycle contracts. They
+            # preserve the Compose project and volumes; unlike ensure/destroy,
+            # they never reconcile files or remove containers.
+            "resume": ["start"],
+            "suspend": ["stop", "--timeout", str(descriptor["instanceLifecycle"]["stopGraceSeconds"])],
+            "logs": ["logs", "--no-color", service],
+            "apply": ["up", "-d", "--force-recreate", service],
+            "destroy": ["down"],
+        }
         if op == "exec":
             command = request.arguments.get("argv")
             if (not isinstance(command, (list, tuple)) or not command or
@@ -242,9 +271,13 @@ class ComposeAdapter:
             commands[op] = ["exec", "-T", service, *command]
         if op not in commands:
             raise ValueError(f"unsupported Compose operation: {op}")
+        operation_timeout = (
+            max(self.timeout, descriptor["instanceLifecycle"]["stopGraceSeconds"] + 10)
+            if op == "suspend" else self.timeout
+        )
         result = self.dependencies.process.run(
             ["docker", "compose", *project_args, *commands[op]], cwd=descriptor["root"],
-            timeout=self._operation_timeout(request) if op == "exec" else self.timeout,
+            timeout=self._operation_timeout(request) if op == "exec" else operation_timeout,
         )
         if result.returncode != 0:
             if op == "exec":
@@ -275,7 +308,25 @@ class ComposeAdapter:
                 )
             detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())
             raise RuntimeError(detail or f"Compose {op} failed")
-        data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "destroy"} else "ready", output=result.stdout[-10000:])
+        if op == "resume":
+            url = f"http://127.0.0.1:{http_port}"
+            deadline = time.monotonic() + descriptor["instanceLifecycle"]["wakeTimeoutSeconds"]
+            while time.monotonic() < deadline:
+                if self.dependencies.http.probe(url + descriptor["health_path"], timeout=2):
+                    break
+                time.sleep(0.1)
+            else:
+                data = dict(
+                    record or {}, instance=runtime_id, root=descriptor["root"],
+                    label=request.label, kind="compose", adapter=self.adapter_id,
+                    service=service, http_port=http_port, url=url, status="error",
+                    lifecycleState="error", instanceLifecycle=descriptor["instanceLifecycle"],
+                    output=result.stdout[-10000:], mutated=True,
+                    reason={"code": "resume_readiness_failed"},
+                )
+                return OperationResult(False, op, descriptor["root"], "compose", data)
+        lifecycle_state = "asleep" if op in {"stop", "suspend"} and descriptor["instanceLifecycle"]["mode"] == "idle_stop" else "stopped" if op in {"stop", "suspend", "destroy"} else "ready"
+        data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "suspend", "destroy"} else "ready", lifecycleState=lifecycle_state, instanceLifecycle=descriptor["instanceLifecycle"], output=result.stdout[-10000:])
         if op == "destroy":
             self.registry.registry_remove(descriptor["root"], label=request.label)
             # Registry removal is the source-of-truth mutation; remove the

@@ -619,6 +619,8 @@ view and drive instances with:
 ./sb instances            # list every per-project instance + status + URL
 ./sb dashboard            # full-screen TUI: start/stop/restart/open/focus/delete
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
+./sb instance suspend <name>  # graceful stop; requires instanceLifecycle.idle_stop
+./sb instance resume <name>   # start a provisioned instance and wait for readiness
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)
 ```
 

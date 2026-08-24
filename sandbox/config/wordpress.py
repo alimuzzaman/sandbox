@@ -28,6 +28,8 @@ class WordPressSchemaProvider:
         project_domains = raw_domain_layer(project_document)
         project_runtime = raw_wordpress_runtime_layer(project_document)
         project_secrets = raw_secret_layer(project_document)
+        lifecycle_declared = "instanceLifecycle" in project_document
+        lifecycle = project_document.get("instanceLifecycle")
         machine_domains = {}
         machine_runtime = {}
         machine_secrets = {}
@@ -46,6 +48,9 @@ class WordPressSchemaProvider:
         ):
             if path is not None:
                 document = _load_mapping(path)
+                if "instanceLifecycle" in document:
+                    lifecycle_declared = True
+                    lifecycle = document["instanceLifecycle"]
                 machine_domains.update(raw_domain_layer(document))
                 machine_runtime.update(raw_wordpress_runtime_layer(document))
                 merge_secret_layers(machine_secrets, raw_secret_layer(document))
@@ -61,6 +66,8 @@ class WordPressSchemaProvider:
         result["_secrets_raw"] = {
             "project": project_secrets, "machine_override": machine_secrets,
         }
+        if lifecycle_declared:
+            result["instanceLifecycle"] = lifecycle
         if "tests" not in result:
             result["tests"] = {"suite": "auto"}
         tests = result["tests"]

@@ -72,14 +72,22 @@ def build_catalog(records: Mapping[str, Mapping[str, object]],
         instance = record.get("instance")
         block = wp.get(str(instance), {}) if instance else {}
         lifecycle_raw = block.get("instance_lifecycle", record.get("instanceLifecycle"))
-        policy = normalize_instance_lifecycle(lifecycle_raw if isinstance(lifecycle_raw, Mapping) else None)
+        # Default adoption happens through normal ensure/apply reconciliation,
+        # which persists the normalized marker and route identity atomically.
+        # Merely upgrading Sandbox must never place a legacy/public registry
+        # row behind request wake or make it eligible for later suspension.
+        if not isinstance(lifecycle_raw, Mapping):
+            continue
+        policy = normalize_instance_lifecycle(lifecycle_raw)
         if policy["mode"] != "idle_stop" or not policy["wakeOnRequest"]:
             continue
         kind = record.get("kind", "wordpress")
         if kind not in {"wordpress", "compose"} or block.get("server") == "herd":
             raise ActivationCatalogError("activation runtime is unsupported")
         if kind == "wordpress" and (block.get("wp_config") or {}).get("DISABLE_WP_CRON") is not True:
-            raise ActivationCatalogError("cron-enabled WordPress cannot use request wake")
+            # A deliberate background-work policy pins this instance on. It is
+            # an ordinary ineligible route, not corruption of unrelated routes.
+            continue
         aliases = block.get("aliases", record.get("aliases"))
         if aliases:
             raise ActivationCatalogError("activation routes do not support aliases")

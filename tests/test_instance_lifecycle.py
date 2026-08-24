@@ -7,17 +7,26 @@ from unittest import mock
 
 
 class TestInstanceLifecycleConfig(unittest.TestCase):
-    def test_omission_is_explicitly_always_on(self):
+    def test_omission_resolves_to_idle_stop_and_request_wake(self):
         from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
 
         self.assertEqual(normalize_instance_lifecycle(), {
-            "mode": "always_on",
-            "wakeOnRequest": False,
+            "mode": "idle_stop",
+            "wakeOnRequest": True,
             "idleAfterSeconds": 900,
             "wakeTimeoutSeconds": 60,
             "stopGraceSeconds": 30,
             "maxPendingRequests": 32,
         })
+
+    def test_common_manifest_materializes_default_and_allows_explicit_opt_out(self):
+        from sandbox.config.manifest import apply_common_config
+
+        resolved = apply_common_config({})
+        self.assertEqual(resolved["instanceLifecycle"]["mode"], "idle_stop")
+        self.assertIs(resolved["instanceLifecycle"]["wakeOnRequest"], True)
+        opted_out = apply_common_config({"instanceLifecycle": {"mode": "always_on"}})
+        self.assertEqual(opted_out["instanceLifecycle"]["mode"], "always_on")
 
     def test_idle_stop_is_strict_and_detached(self):
         from sandbox.config.instance_lifecycle import normalize_instance_lifecycle

@@ -257,11 +257,22 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertFalse(any("down" in call for call in calls))
             self.assertIsNotNone(registry.registry_get(str(root)))
 
-    def test_suspend_requires_explicit_idle_stop_policy(self):
+    def test_suspend_uses_default_idle_stop_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
             adapter, _, _, _ = self.make_adapter(root)
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+            result = adapter.invoke(OperationRequest(str(root), "suspend"))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["lifecycleState"], "asleep")
+
+    def test_suspend_respects_explicit_always_on_opt_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, _, _, registry = self.make_adapter(root)
+            registry.descriptor["instanceLifecycle"] = {"mode": "always_on"}
             adapter.invoke(OperationRequest(str(root), "ensure"))
             with self.assertRaisesRegex(ValueError, "idle_stop"):
                 adapter.invoke(OperationRequest(str(root), "suspend"))

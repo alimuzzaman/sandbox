@@ -61,14 +61,13 @@ MACHINE_CONFIG_PROVIDERS = (
 def apply_common_config(result: dict) -> dict:
     resolved = dict(result)
     for key, provider, _owner, _order in sorted(COMMON_CONFIG_PROVIDERS, key=lambda item: item[3]):
-        # This field is deliberately additive: an omitted declaration must not
-        # appear in the normalized descriptor or perturb legacy byte/behavior
-        # compatibility.  Presence (including an explicit null) is validated
-        # by the provider/manifest and therefore cannot be mistaken for
-        # omission here.
-        if key in {"phpExtensions", "instanceLifecycle"} and key not in resolved:
+        # PHP extensions remain additive. Instance lifecycle is different: its
+        # default must be materialized into every newly resolved descriptor so
+        # normal ensure/apply is the explicit adoption point. Persisted legacy
+        # registry rows are not rewritten merely by loading the catalog.
+        if key == "phpExtensions" and key not in resolved:
             continue
-        if key in {"phpExtensions", "instanceLifecycle"} and resolved[key] is None:
+        if key in {"phpExtensions", "instanceLifecycle"} and resolved.get(key) is None and key in resolved:
             raise ValueError(f"{key} must be an object when declared")
         resolved[key] = provider(resolved)
     resolved.pop("_domains_raw", None)

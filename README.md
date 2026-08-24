@@ -619,18 +619,20 @@ view and drive instances with:
 ./sb instances            # list every per-project instance + status + URL
 ./sb dashboard            # full-screen TUI: start/stop/restart/open/focus/delete
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
-./sb instance suspend <name>  # graceful stop; requires instanceLifecycle.idle_stop
+./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default
 ./sb instance resume <name>   # start a provisioned instance and wait for readiness
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)
 ```
 
-Request wake is separately opt-in with
-`instanceLifecycle.wakeOnRequest: true` and remains off by default.
+Request wake defaults on for newly resolved Docker instances. Set
+`instanceLifecycle.mode: "always_on"` to opt out and pin an instance on.
 `./sb activation serve` runs its loopback-only authority; eligible Caddy routes
 authorize readiness through stock `forward_auth`, then proxy the untouched
 original request. Invalid catalogs or an unhealthy authority retain the
-previous Caddyfile. Automatic idle scanning, remote wake, WebSocket draining,
-and function/FaaS adapters are not implemented in this phase.
+previous Caddyfile. Existing registry rows adopt the default only on normal
+`ensure`/`apply`. Automatic idle scanning is still gated on authoritative HTTP,
+WebSocket, job, and cron leases; remote wake and function/FaaS adapters are not
+implemented in this phase.
 
 Each instance can run a different **web server**, and you can switch in place
 without re-importing content:

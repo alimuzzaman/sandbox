@@ -88,12 +88,21 @@ class ActivationCatalogTests(unittest.TestCase):
         records, wp = _records(mode="always_on", wake=True)
         self.assertEqual(build_catalog(records, wp).routes(), ())
 
-    def test_catalog_rejects_cron_aliases_and_collisions(self):
+    def test_catalog_excludes_cron_enabled_and_legacy_unmarked_entries(self):
+        from sandbox.activation.catalog import build_catalog
+
+        records, wp = _records(cron_disabled=False)
+        self.assertEqual(build_catalog(records, wp).routes(), ())
+        records, wp = _records()
+        records["key"].pop("instanceLifecycle")
+        wp["site"].pop("instance_lifecycle")
+        self.assertEqual(build_catalog(records, wp).routes(), ())
+
+    def test_catalog_rejects_aliases_and_collisions(self):
         from sandbox.activation.catalog import ActivationCatalogError, build_catalog
-        for kwargs in ({"cron_disabled": False}, {"aliases": ["alias.tst"]}):
-            records, wp = _records(**kwargs)
-            with self.assertRaises(ActivationCatalogError):
-                build_catalog(records, wp)
+        records, wp = _records(aliases=["alias.tst"])
+        with self.assertRaises(ActivationCatalogError):
+            build_catalog(records, wp)
         records, wp = _records()
         records["other"] = dict(records["key"], root="/other")
         with self.assertRaises(ActivationCatalogError):

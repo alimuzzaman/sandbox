@@ -12,8 +12,8 @@ import copy
 
 
 DEFAULTS = {
-    "mode": "always_on",
-    "wakeOnRequest": False,
+    "mode": "idle_stop",
+    "wakeOnRequest": True,
     "idleAfterSeconds": 900,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
@@ -57,8 +57,11 @@ def _bounded_integer(name: str, value: object, minimum: int, maximum: int) -> in
 def normalize_instance_lifecycle(raw: Mapping[str, object] | None = None) -> dict[str, object]:
     """Return a detached, strict lifecycle policy.
 
-    Omission is intentionally represented as ``always_on`` so every runtime
-    can make the safe default explicit without adding a new background actor.
+    Omission declares the resource-saving policy.  This is configuration, not
+    permission for an unsupervised background actor: automatic suspension is
+    still gated on authoritative activity/lease evidence.  Existing persisted
+    registry entries without a lifecycle marker remain legacy always-on until
+    a normal ensure/apply reconciliation materializes this policy.
     """
     source = _mapping(raw)
     mode = source.get("mode", DEFAULTS["mode"])

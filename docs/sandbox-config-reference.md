@@ -79,17 +79,17 @@ or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
 database, Mailpit, WordPress filesystem, abilities, snapshots) fail before
 their side effects with a capability error.
 
-### Opt-in idle-stop lifecycle
+### Default idle-stop lifecycle
 
-Provisioned Docker-backed WordPress and generic Compose instances can declare
-an idle-stop policy. Omission keeps the historical always-on behavior; an
-explicit `null` or an unknown field is rejected.
+Newly resolved Docker-backed WordPress and generic Compose instances default to
+an idle-stop policy with request wake enabled. An explicit `null` or unknown
+field is rejected. Use `mode: "always_on"` to pin an instance on.
 
 ```json
 {
   "instanceLifecycle": {
     "mode": "idle_stop",
-    "wakeOnRequest": false,
+    "wakeOnRequest": true,
     "idleAfterSeconds": 900,
     "wakeTimeoutSeconds": 60,
     "stopGraceSeconds": 30,
@@ -107,15 +107,18 @@ Compose `stop` and resume uses Compose `start`, preserving containers, volumes,
 ports, and registry identity. These commands provide the lifecycle foundation;
 automatic request-triggered wake routing is a separate gateway feature.
 
-`wakeOnRequest` is a strict boolean and defaults to `false`. When enabled,
+`wakeOnRequest` is a strict boolean and defaults to `true`. When enabled,
 only a provisioned Docker route with an opaque registry-owned identity may be
 placed behind the loopback activation authority and Caddy `forward_auth`.
-Cron-enabled WordPress, Herd/native runtimes, aliases, malformed hosts/ports,
-and identity collisions fail closed. The authority never receives or replays
+Cron-enabled WordPress is pinned on and excluded. Herd/native runtimes,
+aliases, malformed hosts/ports, and identity collisions fail closed. The authority never receives or replays
 the original request; after readiness succeeds, Caddy's existing
 `reverse_proxy` sends the original method and body exactly once. Automatic
-idle scanning, remote activation, and function/FaaS adapters remain future
-gates.
+idle scanning remains gated until HTTP, WebSocket, background-job, and cron
+activity have authoritative leases; this release does not run an unsupervised
+stop loop. Existing persisted registry rows without a lifecycle marker remain
+always-on until a normal `sb ensure` or `sb apply` reconciliation adopts the
+new default. Remote activation and function/FaaS adapters remain future gates.
 
 `startupTimeoutSeconds` is the bounded time Sandbox waits for the declared
 health endpoint after `ensure` (30–3600 seconds; default 120). Set

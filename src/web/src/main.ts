@@ -17,7 +17,7 @@ import {
   act, op, doFocus, doServer, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
-import { doCreate, submitCreate } from "./pages/create";
+import { doCreate, submitCreate, initCreateView } from "./pages/create";
 import type { SbApi } from "./types";
 
 // ---- data refresh scheduler ----
@@ -169,6 +169,7 @@ function boot(): void {
   // Re-render whenever the route changes (link clicks, back/forward, navigate()).
   onRoute((route) => {
     render();
+    if (route.page === "create") initCreateView();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home") {
       void refresh();
     }
@@ -182,6 +183,7 @@ function boot(): void {
 
   // Initial paint from current URL, then start polling.
   render();
+  if (currentRoute().page === "create") initCreateView();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);
   startPolling();

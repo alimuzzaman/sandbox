@@ -124,6 +124,14 @@ export interface SbApi {
   copyText(t: string, btn: HTMLElement): void;
 }
 
+export interface SandboxDesktopApi {
+  readonly platform: "darwin";
+  chooseProjectDirectory(): Promise<string | null>;
+}
+
 declare global {
-  interface Window { sb: SbApi }
+  interface Window {
+    sb: SbApi;
+    sandboxDesktop?: SandboxDesktopApi;
+  }
 }

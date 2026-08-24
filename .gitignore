@@ -47,12 +47,16 @@ Thumbs.db
 # IS committed (vendored); only the dev deps + dist are ignored.
 src/web/node_modules/
 src/web/dist/
+src/desktop/node_modules/
+src/desktop/dist/
+src/desktop/release/
 
 # npm/pnpm artifacts from the root package.json (the `sandbox` bin shim has no
 # JS deps — these regenerate on any npm/pnpm invocation and aren't committed).
 node_modules/
 pnpm-lock.yaml
 package-lock.json
+!src/desktop/package-lock.json
 
 # Release tarballs from scripts/make-release.sh (built artifacts — upload to the
 # public host, don't commit).

@@ -624,6 +624,10 @@ view and drive instances with:
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)
 ```
 
+The macOS desktop shell reuses this loopback dashboard and adds a narrowly scoped
+native project-folder picker. It never exposes Docker, SSH, credentials, or generic
+filesystem/process access to the renderer; see [docs/desktop-app.md](docs/desktop-app.md).
+
 Request wake defaults on for newly resolved Docker instances. Set
 `instanceLifecycle.mode: "always_on"` to opt out and pin an instance on.
 `./sb activation serve` runs its loopback-only authority; eligible Caddy routes

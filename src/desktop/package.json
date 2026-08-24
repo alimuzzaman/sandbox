@@ -1,0 +1,40 @@
+{
+  "name": "sandbox-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Secure macOS shell for the local Sandbox dashboard",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "dev": "npm run build && install-electron && electron .",
+    "package:mac": "npm run test && electron-builder --mac"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.9.3"
+  },
+  "build": {
+    "appId": "app.xc1.sandbox.desktop",
+    "productName": "Sandbox",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+# Safe source `CODEX-SRC-409992bca83e0fee7c74`
+
+Source class: Hermes and remote-operations review
+Evidence role: follow-up Hermes agent-use and source-contract cross-check
+
+## Findings sourced here
+
+### ATO-017 — Secret child exit status (P1/P2)
+
+The transcript recorded a trusted secret-broker child exiting nonzero while the
+public `sb secrets run` command reported success and shell exit 0. The runner
+already retains child exit metadata, so the missing boundary is failure
+propagation and a stable machine-readable result. See [canonical finding](../findings.md#ato-017--make-secrets-run-fail-closed-on-child-failure).
+
+### ATO-022 — Hermes absence state (P2)
+
+A reachable/provisioned remote without Hermes installed produced generic
+`doctor_failed`/degraded evidence rather than an explicit install-needed state.
+Distinguish expected absence from broken prerequisites and transport failure.
+See [canonical finding](../findings.md#ato-022--distinguish-expected-hermes-absence-from-doctor-failure).
+
+### ATO-023 — Component-scoped Hermes health (P2)
+
+The transcript showed a capability-specific remote-MCP decision blocked by
+unrelated aggregate gateway/cron drift. Hermes already returns component data,
+but only the aggregate health exit is directly usable. Add scoped readiness
+without weakening conservative aggregate health. See [canonical finding](../findings.md#ato-023--add-component-scoped-hermes-readiness).
+
+### ATO-024 — Hermes host-only operations (P2)
+
+An attempted host service-maintenance run failed because Hermes `run` requires a
+repository and prompt. Provide an explicit bounded host-operation capability or
+make the unsupported boundary discoverable; do not invent a repository or allow
+arbitrary shell. See [canonical finding](../findings.md#ato-024--separate-hermes-host-operations-from-repository-runs).
+
+### ATO-025 — Resumable remote clone (P2)
+
+A large remote clone progressed substantially before a synchronous SSH request
+returned `clone_failed`, with no durable job ID or safe resume handle. Treat
+clone/submodule/LFS work as a request-identified durable operation with explicit
+partial state. See [canonical finding](../findings.md#ato-025--make-remote-repository-cloning-durable-and-resumable).
+
+### ATO-026 — Dashboard session resume (P2)
+
+A stored dashboard/TUI session reopened blank and remained connecting after a
+PTY/WebSocket attach failure; a one-shot run also lacked a safe resume action.
+Expose snapshot, transport, cursor, and resumability as separate receipt fields.
+See [canonical finding](../findings.md#ato-026--add-a-durable-dashboard-session-attachment-receipt).

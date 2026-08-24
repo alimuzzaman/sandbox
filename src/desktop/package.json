@@ -12,9 +12,13 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "dev": "npm run build && install-electron && electron .",
     "icon": "sh scripts/generate-icon.sh",
-    "package:mac:dir": "npm run test && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --dir",
-    "package:mac": "npm run clean && npm run icon && npm run test && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal && node scripts/artifact-manifest.mjs",
-    "package:mac:signed": "npm run clean && npm run icon && npm run test && electron-builder --mac --universal && node scripts/artifact-manifest.mjs",
+    "package:mac:dir": "npm run test && SANDBOX_MAC_PACKAGE_MODE=local CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --dir && npm run smoke:mac",
+    "package:mac": "npm run clean && npm run icon && npm run test && SANDBOX_MAC_PACKAGE_MODE=local CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal && node scripts/artifact-manifest.mjs && npm run smoke:mac",
+    "package:mac:signed": "npm run clean && npm run icon && npm run test && SANDBOX_MAC_PACKAGE_MODE=signed electron-builder --mac --universal --config.forceCodeSigning=true && node scripts/artifact-manifest.mjs",
+    "smoke:mac": "node scripts/smoke-mac.mjs",
+    "smoke:mac:launch": "node scripts/smoke-mac.mjs --launch",
+    "open:mac": "node scripts/smoke-mac.mjs --open",
+    "run:mac": "npm run package:mac:dir && npm run open:mac",
     "release:clean": "npm ci && npm run package:mac"
   },
   "devDependencies": {

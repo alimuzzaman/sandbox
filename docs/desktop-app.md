@@ -138,7 +138,7 @@ anonymous proxy rejection, hash-based CSP, fuses, and packaging policy.
 
 ## Deterministic macOS package
 
-An unsigned local universal build is reproducible from the lockfile:
+An identity-unsigned local universal build is reproducible from the lockfile:
 
 ```bash
 cd src/desktop
@@ -149,7 +149,23 @@ npm run package:mac
 This generates universal arm64+x64 DMG/ZIP artifacts and
 `release/RELEASE-MANIFEST.json` with byte sizes and SHA-256 checksums. The source SVG is
 converted to ICNS with macOS `sips` and `iconutil`. `package:mac:dir` creates an unpacked
-smoke-test app. The unsigned command disables certificate auto-discovery deliberately.
+smoke-test app. The local commands disable certificate auto-discovery deliberately, flip
+the production Electron fuses, then apply a local ad-hoc signature so macOS can execute
+the universal bundle. That ad-hoc signature is not a Developer ID signature and is not
+acceptable for distribution.
+
+Open the real packaged app directly; never open `node_modules/electron/dist/Electron.app`,
+which is only Electron's raw runtime and displays its `path-to-app` screen:
+
+```bash
+npm run run:mac       # rebuild, validate, and open release/mac-universal/Sandbox.app
+npm run open:mac      # validate and open an existing packaged Sandbox.app
+npm run smoke:mac:launch # launch for five seconds, fail on crash, then stop it
+```
+
+The smoke check requires the `Sandbox.app` name and bundle identifier, rejects the raw
+Electron runtime path, verifies the complete code-signing graph and universal framework,
+and can prove that the packaged executable stays alive through startup.
 
 ## Release-operator checklist
 
@@ -158,7 +174,9 @@ Code completion cannot substitute for these Apple-controlled release gates:
 1. Install the `Developer ID Application` certificate in an isolated release keychain.
 2. Provide electron-builder signing inputs only in the protected release environment.
 3. Run `npm ci`, `npm audit --audit-level=high`, `npm test`, and the web build/typecheck.
-4. Run `npm run package:mac:signed`; verify both architectures with `lipo -archs`.
+4. Run `npm run package:mac:signed`; this mode does not apply the local ad-hoc signing
+   pass and fails if a signing identity is unavailable. Verify both architectures with
+   `lipo -archs`.
 5. Verify signing with `codesign --verify --deep --strict --verbose=2`.
 6. Submit both artifacts to Apple's notary service, wait for acceptance, and staple the
    DMG/app. Notarization credentials must never enter the repository.

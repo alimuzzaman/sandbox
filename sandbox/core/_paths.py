@@ -593,6 +593,9 @@ _WEB_PAGE = """<!doctype html>
     <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
                 text-neutral-400">Instances</div>
     <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
+    <div class="px-3 pt-2 pb-1 text-[11px] font-medium uppercase tracking-wide
+                text-neutral-400">Remotes</div>
+    <nav id="remoteList" class="max-h-40 overflow-auto px-2 pb-2 space-y-0.5"></nav>
     <div class="p-2 border-t border-brd dark:border-brd-dark space-y-0.5">
       <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded
         text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800

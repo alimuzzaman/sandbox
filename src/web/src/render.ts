@@ -3,11 +3,12 @@
 
 import { $, esc } from "./dom";
 import { store } from "./state";
-import { currentRoute, instancePath, type Route } from "./router";
+import { currentRoute, instancePath, remotePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
 import { welcome } from "./pages/welcome";
 import { createView } from "./pages/create";
+import { remoteView } from "./pages/remote";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
 import type { Instance } from "./types";
 
@@ -76,6 +77,9 @@ export function renderSidebar(): void {
   if (document.querySelector("[data-rowmenu-pop]:not(.hidden)")) return;
   const items = store.data.instances;
   $("list").innerHTML = items.map(listItem).join("");
+  const active = currentRoute();
+  $("remoteList").innerHTML = store.data.remotes.map(remote =>
+    `<a href="${remotePath(remote.name)}" data-link class="w-full px-3 py-2 rounded flex items-center gap-2 text-[13px] ${active.page === "remote" && active.name === remote.name ? "bg-white dark:bg-neutral-800 shadow-sm font-medium" : "hover:bg-neutral-100 dark:hover:bg-neutral-800/60"}"><span class="w-2 h-2 rounded-full ${remote.control_ready ? "bg-blue-500" : "bg-neutral-400"}"></span><span class="truncate">${esc(remote.name)}</span></a>`).join("");
   const running = items.filter((i) => i.running).length;
   $("runcount").textContent = running + "/" + items.length;
   $("footstat").textContent = items.length
@@ -93,6 +97,7 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
+  if (route.page === "remote") return "remote:" + route.name + ":" + JSON.stringify(store.remote[route.name] || null);
   return route.page;
 }
 
@@ -107,6 +112,7 @@ function viewForRoute(route: Route): string {
   switch (route.page) {
     case "create": return createView();
     case "usage": return usageView();
+    case "remote": return remoteView(route.name, store.remote[route.name]);
     case "instance": {
       const r = store.data.instances.find((i) => i.name === route.name) || null;
       return instanceView(r);

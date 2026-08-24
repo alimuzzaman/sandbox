@@ -41,10 +41,12 @@ def cmd_web(cfg, args) -> None:
         def log_message(self, *a):     # quiet — don't spam the console
             pass
 
-        def _send(self, code, body, ctype="application/json"):
+        def _send(self, code, body, ctype="application/json", *, no_store=False):
             data = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -79,7 +81,7 @@ def cmd_web(cfg, args) -> None:
 
         def do_GET(self):
             # Split path + query.
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import urlparse, parse_qs, unquote
             u = urlparse(self.path)
             path, qs = u.path, parse_qs(u.query)
 
@@ -87,6 +89,7 @@ def cmd_web(cfg, args) -> None:
                 return self._send(403, json.dumps({"error": "forbidden"}))
 
             if path == "/api/instances":
+                import sandbox.core._remote as remote_core
                 cfg = load_config()
                 # Per-project model: the "plugins" list is the set of projects
                 # the registry tracks (each project dir = its plugin), not a
@@ -101,7 +104,36 @@ def cmd_web(cfg, args) -> None:
                     "servers": list(SERVERS),
                     "seeds": _web_list_seeds(),
                     "domains_ready": domains_ready(),
+                    "remotes": [{"name": name,
+                                 "provisioned": bool(entry.get("provisioned")),
+                                 "control_ready": bool(entry.get("control_url") and entry.get("bearer_token"))}
+                                for name, entry in sorted(remote_core.list_remotes().items())],
                 }))
+            if path.startswith("/api/remote/"):
+                import sandbox.core._remote as remote_core
+                name = unquote(path[len("/api/remote/"):])
+                try:
+                    name = remote_core.validate_remote_name(name)
+                except ValueError:
+                    return self._send(400, json.dumps({"error": "invalid remote name"}))
+                entry = remote_core.get_remote(name)
+                if not entry:
+                    return self._send(404, json.dumps({"error": "no such remote"}))
+                deep = qs.get("deep") == ["1"]
+                if qs and any(key != "deep" or values != ["1"]
+                             for key, values in qs.items()):
+                    return self._send(400, json.dumps({"error": "only deep=1 is supported"}))
+                try:
+                    inventory = remote_core.remote_inventory(
+                        entry, mode="deep" if deep else "fast",
+                    )
+                except RuntimeError as exc:
+                    return self._send(503, json.dumps({
+                        "ok": False, "inventory_schema": 1, "transport": "control",
+                        "evidence_status": "unavailable", "partial_reasons": [str(exc)],
+                    }))
+                inventory["name"] = name
+                return self._send(200, json.dumps(inventory), no_store=True)
             if path.startswith("/api/job/"):
                 jid = path.rsplit("/", 1)[-1]
                 offset = int((qs.get("offset") or ["0"])[0])

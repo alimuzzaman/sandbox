@@ -501,6 +501,24 @@ point-in-time views can drift immediately. `comm` grouping is heuristic and its
 CPU sum can exceed 100% on multicore hosts. This requires diagnostics schema 2;
 update an older installed remote through the supported Sandbox lifecycle first.
 
+Open the local dashboard with `./sb web`, then choose a configured remote from the
+**Remotes** rail. Its inventory page shows hosted-instance counts, running/stopped
+state, per-instance container memory/CPU attribution, process/apps, containers, jobs,
+RAM/load/disk, and storage evidence. The quick view is cache-only and may be partial;
+**Rebuild attribution** performs a bounded deep refresh through the authenticated
+service. Unknown and overlapping values are shown as unknown/non-additive rather than
+treated as safe cleanup candidates.
+
+For the exceptional case where an operator must run a command directly on a host,
+use the explicit CLI escape hatch. It is never used internally and is not exposed as
+an MCP tool:
+
+```sh
+./sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
+```
+Normal diagnostics, resource probes, dashboard inventory, and future service-backed
+operations never fall back to it.
+
 Projects whose service startup bootstraps dependencies can declare a bounded
 `compose.startupTimeoutSeconds`; persistent workspaces can additionally opt
 into `compose.recreateOnEnsure` to rerun that bootstrap after each deployed

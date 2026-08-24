@@ -3,8 +3,8 @@
 
 import { $ } from "./dom";
 import { store } from "./state";
-import { fetchData, fetchUsage } from "./api";
-import { navigate, initRouter, onRoute, currentRoute, instancePath } from "./router";
+import { fetchData, fetchUsage, fetchRemote } from "./api";
+import { navigate, initRouter, onRoute, currentRoute, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
@@ -26,6 +26,10 @@ async function refresh(): Promise<void> {
   let d;
   try { d = await fetchData(); } catch { return; }
   store.data = d;
+  const route = currentRoute();
+  if (route.page === "remote") {
+    try { store.remote[route.name] = await fetchRemote(route.name); } catch { /* retain prior evidence */ }
+  }
   renderSidebar();
   renderDetail(false); // soft: only if changed + idle
 }
@@ -40,6 +44,15 @@ async function showUsage(): Promise<void> {
 
 function goHome(): void { navigate("/"); }
 function selectInstance(name: string): void { navigate(instancePath(name)); }
+function selectRemote(name: string): void { navigate(remotePath(name)); }
+async function refreshRemote(name: string, deep = false): Promise<void> {
+  try {
+    store.remote[name] = await fetchRemote(name, deep ? "deep" : "fast");
+    renderDetail(true);
+  } catch {
+    toast("remote inventory refresh failed", "err");
+  }
+}
 
 function showHelp(): void {
   modal({
@@ -58,7 +71,7 @@ function showHelp(): void {
 
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
-  navigate, goHome, selectInstance, showUsage, showHelp, openTerminal,
+  navigate, goHome, selectInstance, selectRemote, refreshRemote, showUsage, showHelp, openTerminal,
   doCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
   loadUsageThenRender,
@@ -95,6 +108,9 @@ function boot(): void {
   // Re-render whenever the route changes (link clicks, back/forward, navigate()).
   onRoute((route) => {
     render();
+    if (route.page === "remote") {
+      fetchRemote(route.name).then(data => { store.remote[route.name] = data; renderDetail(true); }).catch(() => {});
+    }
     if (route.page === "instance" && route.console) {
       // Deep-linked console: open the terminal for that instance.
       openTerminal(route.name);

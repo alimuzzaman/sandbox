@@ -108,6 +108,48 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         app = run.call_args.args[0]
         self.assertEqual(run.call_args.kwargs, {"host": "127.0.0.1", "port": 9174})
         self.assertTrue(any(getattr(route, "path", None) == "/diagnostics" for route in app.routes))
+        self.assertTrue(any(getattr(route, "path", None) == "/resources" for route in app.routes))
+        self.assertTrue(any(getattr(route, "path", None) == "/inventory" for route in app.routes))
+
+    def test_resource_contract_rejects_arbitrary_actions(self):
+        with self.assertRaisesRegex(ValueError, "unsupported resource action"):
+            server._resource_contract({"action": "shell", "command": "id"})
+
+    def test_inventory_route_accepts_fast_and_explicit_deep_modes(self):
+        with patch("uvicorn.run") as run:
+            server._run_streamable_http("127.0.0.1", 9174, "sekrit")
+        app = run.call_args.args[0]
+        route = next(item for item in app.routes if getattr(item, "path", None) == "/inventory")
+
+        class Query:
+            def __init__(self, items):
+                self._items = items
+
+            def multi_items(self):
+                return self._items
+
+        class Request:
+            def __init__(self, items):
+                self.query_params = Query(items)
+
+        with patch("server._hosted_inventory_snapshot", return_value={
+            "ok": True, "inventory_schema": 1, "transport": "control",
+            "scan_mode": "fast",
+        }) as snapshot:
+            response = asyncio.run(route.endpoint(Request([])))
+        self.assertEqual(response.status_code, 200)
+        snapshot.assert_called_once_with(deep=False)
+
+        with patch("server._hosted_inventory_snapshot", return_value={
+            "ok": True, "inventory_schema": 1, "transport": "control",
+            "scan_mode": "deep",
+        }) as snapshot:
+            response = asyncio.run(route.endpoint(Request([("deep", "1")])))
+        self.assertEqual(response.status_code, 200)
+        snapshot.assert_called_once_with(deep=True)
+
+        invalid = asyncio.run(route.endpoint(Request([("deep", "true")])))
+        self.assertEqual(invalid.status_code, 400)
 
     @patch("server.subprocess.run")
     def test_process_snapshot_uses_only_fixed_argv_probes(self, run):

@@ -14,6 +14,7 @@ export type Route =
   | { page: "create" }
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
+  | { page: "remote"; name: string }
   | { page: "notfound" };
 
 export function parse(pathname: string): Route {
@@ -21,6 +22,8 @@ export function parse(pathname: string): Route {
   if (parts.length === 0) return { page: "home" };
   if (parts[0] === "create" && parts.length === 1) return { page: "create" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
+  if (parts[0] === "remote" && parts[1] && parts.length === 2)
+    return { page: "remote", name: decodeURIComponent(parts[1]) };
   if (parts[0] === "instance" && parts[1]) {
     return { page: "instance", name: decodeURIComponent(parts[1]),
              console: parts[2] === "console" };
@@ -46,6 +49,7 @@ export function instancePath(name: string, console = false): string {
   const base = `/instance/${encodeURIComponent(name)}`;
   return console ? `${base}/console` : base;
 }
+export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
 
 export function initRouter(): void {
   window.addEventListener("popstate", () => onChange(currentRoute()));

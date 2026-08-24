@@ -52,6 +52,19 @@ The response requires diagnostics schema 2 and `transport: control`; update an o
 installed remote through the supported Sandbox lifecycle first. The deprecated
 `--ssh` flag is rejected before remote lookup.
 
+Run `./sb web` to open the local host dashboard. Select a remote under **Remotes**
+to see hosted-instance totals/state, per-instance container attribution, apps,
+processes, containers, jobs, RAM/load/disk, and storage evidence. Quick refresh is
+cache-only; **Rebuild attribution** performs a bounded deep refresh through the
+authenticated service and keeps partial/unknown evidence visible.
+
+Direct SSH is an explicit operator escape hatch only; it is never an internal
+fallback or MCP operation:
+
+```sh
+sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
+```
+
 Status and planning are read-only. Treat unavailable or timed-out bytes as
 unknown. Ordinary cache plans never contain named persistent volumes or
 worktrees; those require the separate stale scope and complete positive

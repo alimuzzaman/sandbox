@@ -22,6 +22,24 @@ export interface AppData {
   seeds: string[];
   servers: string[];
   domains_ready?: boolean;
+  remotes: RemoteSummary[];
+}
+
+export interface RemoteSummary { name: string; provisioned: boolean; control_ready: boolean }
+export interface ResourceRow { name?: string; pid?: number; cpu_percent?: number; rss_bytes?: number; memory_used_bytes?: number; memory_percent?: number; pids?: number; process_count?: number; attribution_status?: string }
+export interface RemoteInventory {
+  ok: boolean; name?: string; inventory_schema: number; transport: "control";
+  evidence_status: "complete" | "partial" | "unavailable";
+  scan_mode?: "fast" | "deep";
+  partial_reasons: string[];
+  instances?: { total: number; running: number; stopped: number; rows: Array<{ name: string; running: boolean; server: string; project: string; label: string }> };
+  host?: { memory_total_mb?: number | null; memory_used_mb?: number | null; memory_used_percent?: number | null; load_1m?: number | null; disk_total_bytes?: number | null; disk_used_bytes?: number | null; disk_free_bytes?: number | null };
+  jobs?: { total?: number | null; active?: number | null; queued?: number | null; by_lifecycle?: Record<string, number> };
+  process_view?: { status: string; processes?: ResourceRow[]; apps?: ResourceRow[]; limitations?: string[] };
+  containers?: { status: string; rows?: ResourceRow[] };
+  per_instance_usage?: Array<{ name: string; attribution_status: string; container_count: number; memory_used_bytes: number; cpu_percent: number }>;
+  unattributed_containers?: ResourceRow[];
+  storage?: { status: string; attribution_status: string; capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null; category_outcomes?: Array<Record<string, unknown>> };
 }
 
 export interface ActionResult {
@@ -77,6 +95,8 @@ export interface SbApi {
   navigate(path: string): void;
   goHome(): void;
   selectInstance(name: string): void;
+  selectRemote(name: string): void;
+  refreshRemote(name: string, deep?: boolean): void;
   showUsage(): void;
   showHelp(): void;
   openTerminal(name: string): void;

@@ -1678,6 +1678,68 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10,
     return sanitized
 
 
+def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
+                            payload: dict | None = None) -> dict:
+    """Call one authenticated, bounded remote-control HTTP endpoint."""
+    base = remote.get("control_url")
+    token = remote.get("bearer_token")
+    parsed_base = urlsplit(base) if isinstance(base, str) else None
+    tailscale_http = bool(
+        parsed_base
+        and remote.get("control_transport") == "tailscale"
+        and parsed_base.scheme == "http"
+        and parsed_base.hostname == remote.get("tailscale_host")
+    )
+    if not isinstance(base, str) or not (base.startswith("https://") or tailscale_http):
+        raise RuntimeError("remote control requires an HTTPS control URL")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("remote control requires a provisioned bearer token")
+    data = None
+    headers = {"Authorization": f"Bearer {token}"}
+    if payload is not None:
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(base.rstrip("/") + path, data=data, headers=headers,
+                                     method="POST" if data is not None else "GET")
+    try:
+        with urllib.request.urlopen(request, timeout=max(int(timeout), 1)) as response:
+            if response.status != 200:
+                raise RuntimeError(f"remote control returned HTTP {response.status}")
+            raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise RuntimeError("remote control response is too large")
+            result = json.loads(raw.decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError("remote control endpoint is unreachable") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("remote control returned an invalid payload")
+    return result
+
+
+def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dict:
+    """Run a fixed resource observation/reviewed-cleanup contract over control HTTP."""
+    result = _remote_control_request(remote, "/resources", timeout=timeout, payload=payload)
+    if result.get("resource_schema") != 1:
+        raise RuntimeError("remote resource service does not support resource schema 1")
+    return result
+
+
+def remote_inventory(remote: dict, *, timeout: int = 15,
+                     mode: str = "fast") -> dict:
+    """Read the safe hosted-instance and host-resource dashboard inventory."""
+    if mode not in {"fast", "deep"}:
+        raise ValueError("remote inventory mode must be fast or deep")
+    path = "/inventory?deep=1" if mode == "deep" else "/inventory"
+    result = _remote_control_request(remote, path,
+                                     timeout=max(timeout, 45) if mode == "deep" else timeout)
+    if result.get("inventory_schema") != 1 or result.get("transport") != "control":
+        raise RuntimeError("remote service does not support inventory schema 1")
+    sanitized = redact_structure(result)
+    if not isinstance(sanitized, dict):
+        raise RuntimeError("remote inventory redaction failed")
+    return sanitized
+
+
 _SSH_DIAGNOSTICS_COMMAND = "\n".join((
     "set -eu",
     "awk '",

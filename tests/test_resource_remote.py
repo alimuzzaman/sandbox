@@ -34,13 +34,13 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown remote"):
             RemoteResourceAdapter(
                 "missing", remote_lookup=lambda _name: None,
-                ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+                service_request=lambda *_args, **_kwargs: calls.append("service"),
             ).target()
         with self.assertRaisesRegex(RuntimeError, "not provisioned"):
             RemoteResourceAdapter(
                 "remote-a",
                 remote_lookup=lambda _name: {"ssh": "host", "provisioned": False},
-                ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+                service_request=lambda *_args, **_kwargs: calls.append("service"),
             ).target()
         self.assertEqual(calls, [])
 
@@ -65,15 +65,15 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         snapshot = adapter.observe(thorough=True, budget_seconds=30)
         self.assertEqual(snapshot.target.identity, "remote-identity")
         self.assertEqual(snapshot.capacity["used_bytes"], 80)
         self.assertEqual(snapshot.capacity_scope_id, "capacity-root")
-        self.assertIn('PYTHONPATH="$sandbox_runtime" python3 -', calls[0][0])
-        self.assertIn("disk_usage", calls[0][1])
+        self.assertEqual(calls[0][0], "POST /resources")
+        self.assertNotIn("python3", calls[0][0])
         self.assertNotIn("deploy_exact_working_tree", str(calls))
         self.assertIn('"managed_host":true', calls[0][1])
         self.assertIn('"remote_name":"remote-a"', calls[0][1])
@@ -180,7 +180,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         snapshot = adapter.observe(
@@ -217,7 +217,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         current = adapter.revalidate(CleanupCandidate.from_observation(item))
@@ -235,7 +235,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         snapshot = adapter.observe(thorough=True, budget_seconds=2)
@@ -253,7 +253,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
 
@@ -288,7 +288,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         snapshot = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         ).observe(thorough=True, budget_seconds=2)
         self.assertEqual(snapshot.target.identity, "remote-identity")
@@ -301,7 +301,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         snapshot = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+            service_request=lambda *_args, **_kwargs: calls.append("service"),
             clock=lambda: NOW,
         ).observe(thorough=True, budget_seconds=30, cancelled=True)
         self.assertEqual(calls, [])
@@ -321,7 +321,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=lambda *_args, **_kwargs: ProcessResult(
+            service_request=lambda *_args, **_kwargs: ProcessResult(
                 ("ssh",), 130, json.dumps(payload), "interrupted",
             ),
             clock=lambda: NOW,
@@ -577,7 +577,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         outcome = adapter.remove(
@@ -607,14 +607,15 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh,
+            service_request=ssh,
             clock=lambda: NOW,
         )
         outcome = adapter.remove(CleanupCandidate.from_observation(item))
         self.assertEqual(outcome.status, "removed")
         self.assertIn('"kind":"build_cache"', calls[0])
         self.assertIn('"locator":"bbbbbbbbbbbbbbbbbbbbbbbb"', calls[0])
-        self.assertIn('"--filter", "id=" + locator', calls[0])
+        self.assertNotIn("python3", calls[0])
+        self.assertNotIn("docker rm", calls[0])
 
     def test_remote_workspace_lifecycle_keeps_one_owner_identity_and_refs(self):
         namespace = self._probe_namespace()
@@ -647,7 +648,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         adapter = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=lambda *_args, **_kwargs: calls.append("ssh"),
+            service_request=lambda *_args, **_kwargs: calls.append("service"),
             clock=lambda: NOW,
         )
         decision = adapter.release_network(NetworkLifecycle(
@@ -714,7 +715,7 @@ class TestRemoteProbeResilience(unittest.TestCase):
         snapshot = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh, clock=lambda: NOW,
+            service_request=ssh, clock=lambda: NOW,
         ).observe(thorough=True, budget_seconds=2, deep=True)
         self.assertEqual(snapshot.capacity["used_bytes"], 190)
         self.assertEqual(snapshot.capacity_scope_id, "capacity-root")
@@ -737,7 +738,7 @@ class TestRemoteProbeResilience(unittest.TestCase):
         snapshot = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh, clock=lambda: NOW,
+            service_request=ssh, clock=lambda: NOW,
         ).observe(thorough=True, budget_seconds=2)
         self.assertEqual(
             snapshot.category_outcomes[0],
@@ -760,7 +761,7 @@ class TestRemoteProbeResilience(unittest.TestCase):
         snapshot = RemoteResourceAdapter(
             "remote-a",
             remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
-            ssh_process=ssh, clock=lambda: NOW,
+            service_request=ssh, clock=lambda: NOW,
         ).observe(thorough=True, budget_seconds=2)
         self.assertEqual(snapshot.capacity["used_bytes"], 190)
         self.assertEqual(

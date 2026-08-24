@@ -562,7 +562,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -570,7 +570,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "up/down: start/stop the remote MCP server; docker-pool: plan/apply "
              "the fixed /24 daemon address pools; domains: list configured "
              "instance and hosted-route domains; remove: forget a remote "
-             "locally (never touches the VPS itself)")
+             "locally (never touches the VPS itself); ssh: explicit operator-only "
+             "direct SSH escape hatch")
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
@@ -607,6 +608,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="deprecated compatibility flag; SSH diagnostics are rejected")
     remote_p.add_argument("--processes", action="store_true",
         help="with service diagnostics, include a bounded read-only process/app snapshot")
+    remote_p.add_argument("--command", default=None,
+        help="required with `remote ssh`: exact operator command to run directly over SSH")
+    remote_p.add_argument("--reason", default=None,
+        help="required with `remote ssh`: short operator reason for the command")
 
     deploy_p = sub.add_parser("deploy",
         help="Deploy local project state (committed + uncommitted) to a remote "

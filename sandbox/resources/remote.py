@@ -3240,19 +3240,19 @@ def _observation(value: dict) -> ResourceObservation:
 
 
 class RemoteResourceAdapter:
-    """Named-remote provider using one bounded SSH session per operation."""
+    """Named-remote provider using the authenticated control-plane service."""
 
     def __init__(
         self,
         remote_name: str,
         *,
         remote_lookup: Callable | None = None,
-        ssh_process: Callable | None = None,
+        service_request: Callable | None = None,
         clock=utc_now,
     ) -> None:
         self.remote_name = remote_name
         self._remote_lookup = remote_lookup
-        self._ssh_process = ssh_process
+        self._service_request = service_request
         self.clock = clock
         self._target: StorageTarget | None = None
 
@@ -3288,33 +3288,36 @@ class RemoteResourceAdapter:
             hashlib.sha256(seed.encode()).hexdigest()[:24],
         )
 
-    def _ssh(self, entry: dict, request: dict, timeout: float) -> ProcessResult:
-        if self._ssh_process is None:
-            from sandbox.core._remote import ssh_process
-            execute = ssh_process
-        else:
-            execute = self._ssh_process
-        try:
-            result = execute(
-                entry,
-                (
-                    'sandbox_runtime="${SANDBOX_HOME:-$HOME/sandbox}/sb-src"; '
-                    'PYTHONPATH="$sandbox_runtime" python3 -'
-                ),
-                input_data=_program(request),
-                timeout=max(int(timeout), 1),
+    def _request(self, entry: dict, request: dict, timeout: float) -> ProcessResult:
+        """Submit a typed service request; never open SSH in production.
+
+        ``service_request`` is an injected HTTP transport seam for tests and
+        downstream adapters. It receives a protocol marker, never executable source.
+        """
+        if self._service_request is not None:
+            execute = self._service_request
+            try:
+                result = execute(
+                    entry, "POST /resources",
+                    input_data=json.dumps(request, separators=(",", ":")),
+                    timeout=max(int(timeout), 1),
+                )
+            except subprocess.TimeoutExpired as exc:
+                return ProcessResult(("control-http",), 124, "", str(exc))
+            return ProcessResult(
+                tuple(getattr(result, "args", getattr(result, "argv", ("control-http",)))),
+                int(result.returncode), str(result.stdout or ""), str(result.stderr or ""),
             )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
-            return ProcessResult(tuple(exc.cmd) if isinstance(exc.cmd, (list, tuple)) else ("ssh",),
-                                 124, stdout, stderr)
-        return ProcessResult(
-            tuple(getattr(result, "args", getattr(result, "argv", ("ssh",)))),
-            int(result.returncode),
-            str(result.stdout or ""),
-            str(result.stderr or ""),
-        )
+        from sandbox.core._remote import remote_resource_request
+        try:
+            envelope = remote_resource_request(entry, request, timeout=max(int(timeout), 1))
+        except RuntimeError as exc:
+            return ProcessResult(("control-http",), 1, "", str(exc))
+        result = envelope.get("result")
+        if not isinstance(result, dict):
+            return ProcessResult(("control-http",), 1, "", "invalid resource response")
+        return ProcessResult(("control-http",), 0,
+                             json.dumps(result, separators=(",", ":")), "")
 
     @staticmethod
     def _cancelled(signal) -> bool:
@@ -3341,7 +3344,7 @@ class RemoteResourceAdapter:
             )
         if progress:
             progress("remote_probe")
-        response = self._ssh(entry, {
+        response = self._request(entry, {
             "action": "observe",
             "thorough": bool(thorough),
             "budget_seconds": float(budget_seconds),
@@ -3395,11 +3398,11 @@ class RemoteResourceAdapter:
                 budget_seconds: float = 900) -> dict:
         """Execute one reviewed candidate set in a single bounded session.
 
-        One SSH round trip per candidate would mean hundreds of handshakes and
+        One request per candidate would mean hundreds of transport calls and
         hundreds of chances to lose the connection mid-run, so the reviewed set
-        travels together and the probe re-asserts every protection host-side.
+        travels together and the host-side probe re-asserts every protection.
         """
-        response = self._ssh(self._entry(), {
+        response = self._request(self._entry(), {
             "action": "reclaim",
             "run_id": run_id,
             "trigger": trigger,
@@ -3412,7 +3415,7 @@ class RemoteResourceAdapter:
     def lease(self, op: str, *, name: str | None = None,
               expires_at: str | None = None,
               active_references: dict | None = None) -> dict:
-        response = self._ssh(self._entry(), {
+        response = self._request(self._entry(), {
             "action": "lease",
             "op": op,
             "name": name,
@@ -3450,7 +3453,7 @@ class RemoteResourceAdapter:
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         entry = self._entry()
-        response = self._ssh(entry, {
+        response = self._request(entry, {
             "action": "observe",
             "thorough": True,
             "budget_seconds": 30,
@@ -3479,7 +3482,7 @@ class RemoteResourceAdapter:
         ), None)
 
     def remove(self, candidate: CleanupCandidate) -> CleanupItemOutcome:
-        response = self._ssh(self._entry(), {
+        response = self._request(self._entry(), {
             "action": "remove",
             "kind": candidate.kind,
             "locator": candidate.locator,

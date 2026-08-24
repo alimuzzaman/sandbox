@@ -140,8 +140,46 @@ def cmd_remote(cfg, args) -> None:
         "domains": _cmd_domains,
         "service": _cmd_service,
         "plugins": _cmd_plugins,
+        "ssh": _cmd_ssh,
     }
     dispatch[action](args, as_json)
+
+
+def _cmd_ssh(args, as_json: bool) -> None:
+    """Explicit operator escape hatch. Internal workflows must never call it."""
+    name = _require_name(args)
+    command = _arg_str(args, "command")
+    if not command:
+        die("usage: ./sb remote ssh <name> --command <command>")
+    if not _arg_true(args, "confirm"):
+        die("direct SSH requires --confirm")
+    reason = _arg_str(args, "reason")
+    if not reason:
+        die("direct SSH requires --reason <text>")
+    if len(command) > 4096 or "\x00" in command:
+        die("direct SSH command is invalid or too long")
+    if len(reason) > 256 or "\x00" in reason:
+        die("direct SSH reason is invalid or too long")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        result = sr.ssh_process(entry, command, timeout=3600)
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        die(f"direct SSH command failed: {sr.redact_ssh_connection(str(exc), entry)}")
+    stdout = result.stdout.decode(errors="replace") if isinstance(result.stdout, bytes) else str(result.stdout or "")
+    stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr or "")
+    if as_json:
+        print(json.dumps({"ok": result.returncode == 0, "name": name,
+                          "exit_code": int(result.returncode),
+                          "stdout": stdout, "stderr": stderr}))
+    else:
+        if stdout:
+            sys.stdout.write(stdout)
+        if stderr:
+            sys.stderr.write(stderr)
+    if result.returncode != 0:
+        raise SystemExit(int(result.returncode))
 
 
 def _cmd_plugins(args, as_json: bool) -> None:

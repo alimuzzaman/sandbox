@@ -362,6 +362,32 @@ class TestSshRun(unittest.TestCase):
 
 class TestRemoteDiagnostics(unittest.TestCase):
     @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_resource_and_inventory_use_authenticated_control_http(self, urlopen):
+        response = MagicMock(status=200)
+        response.read.side_effect = [
+            b'{"resource_schema":1,"result":{"identity":"host-a"}}',
+            b'{"ok":true,"inventory_schema":1,"transport":"control"}',
+            b'{"ok":true,"inventory_schema":1,"transport":"control"}',
+        ]
+        urlopen.return_value.__enter__.return_value = response
+        remote = {"control_url": "https://control.example.test",
+                  "bearer_token": "secret-token"}
+        result = sr.remote_resource_request(remote, {"action": "observe"}, timeout=10)
+        self.assertEqual(result["result"]["identity"], "host-a")
+        request = urlopen.call_args_list[0].args[0]
+        self.assertEqual(request.full_url, "https://control.example.test/resources")
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(json.loads(request.data), {"action": "observe"})
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
+        inventory = sr.remote_inventory(remote)
+        self.assertEqual(inventory["inventory_schema"], 1)
+        self.assertEqual(urlopen.call_args_list[1].args[0].full_url,
+                         "https://control.example.test/inventory")
+        sr.remote_inventory(remote, mode="deep")
+        self.assertEqual(urlopen.call_args_list[2].args[0].full_url,
+                         "https://control.example.test/inventory?deep=1")
+
+    @patch("sandbox.core._remote.urllib.request.urlopen")
     def test_diagnostics_use_authenticated_https_without_ssh(self, urlopen):
         response = MagicMock(status=200)
         response.read.return_value = b'{"ok":true,"memory_available_mb":1024}'

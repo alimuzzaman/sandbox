@@ -48,18 +48,16 @@ co-located remote MCP server and its durable job status/output tools.
 Generic Compose instances are resource-bounded by default (2 CPUs, 4 GiB RAM,
 and 512 PIDs); override those values only through `compose.resources` in the
 project descriptor. The remote scheduler admits at most two jobs and refuses
-new work below its free-memory/disk floors. When SSH is unavailable but the
-HTTPS control plane responds, use the authenticated, log-free host snapshot:
+new work below its free-memory/disk floors. Use the authenticated, log-free
+control-plane host snapshot:
 
 ```sh
 ./sb remote service diagnostics scaleway-sandbox --json
-# direct SSH metrics: total/used/available RAM plus usage percentage
-./sb remote service diagnostics scaleway-sandbox --ssh --json
-# opt-in bounded process/app view plus optional non-sudo Docker stats
-./sb remote service diagnostics scaleway-sandbox --ssh --processes --json
+# opt-in service-backed process/app view plus optional non-sudo Docker stats
+./sb remote service diagnostics scaleway-sandbox --processes --json
 ```
 
-The process view uses only PID, PPID, CPU percentage, memory percentage, RSS,
+The process view uses only PID, sanitized process name, CPU percentage, and RSS,
 and `comm`; it never reads command lines, arguments, environments, working
 directories, Docker inspect/top, or sudo. Names and row counts are bounded and
 unsafe/path-like names are redacted. CPU is the lifetime average reported by
@@ -67,7 +65,9 @@ unsafe/path-like names are redacted. CPU is the lifetime average reported by
 snapshot can drift immediately, and Docker rows overlap host processes and are
 therefore never added to process totals. Grouping by `comm` is heuristic and
 group CPU can exceed 100% on multicore hosts. Docker memory parsing supports only B,
-KiB, MiB, GiB, and TiB. `--processes` is valid only with SSH diagnostics.
+KiB, MiB, GiB, and TiB. The process response requires diagnostics schema 2 and
+`transport: control`; update an older installed remote through the supported Sandbox
+lifecycle first. The deprecated `--ssh` flag is rejected before remote lookup.
 
 Output observation is control-plane only: `job-output` reads durable files in
 bounded cursor pages, including a selected stream, a tail, or a bounded

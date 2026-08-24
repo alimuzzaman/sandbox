@@ -490,17 +490,16 @@ durable bounded submission snapshot without mutating prior terminal attempts.
 
 Generic Compose instances have enforced default limits of 2 CPUs, 4 GiB RAM,
 and 512 PIDs. The remote durable scheduler admits at most two jobs and checks
-free memory/disk before starting another. If SSH is unavailable, retrieve the
-authenticated, log-free HTTPS host snapshot with
+free memory/disk before starting another. Retrieve the authenticated, log-free
+control-plane host snapshot with
 `./sb remote service diagnostics <remote> --json`.
-For a direct SSH probe with total, used, available, and percentage RAM, use
-`./sb remote service diagnostics <remote> --ssh --json`.
-Add `--processes` for an opt-in, read-only snapshot grouped by the sanitized
+Add `--processes` for an opt-in, service-backed read-only snapshot grouped by the sanitized
 `comm` name. It reports bounded process and optional Docker rows without command
 lines, arguments, environment, paths, or sudo. CPU is the `ps` lifetime average;
 RSS can double-count shared pages, host and container rows overlap, and the
 point-in-time views can drift immediately. `comm` grouping is heuristic and its
-CPU sum can exceed 100% on multicore hosts.
+CPU sum can exceed 100% on multicore hosts. This requires diagnostics schema 2;
+update an older installed remote through the supported Sandbox lifecycle first.
 
 Projects whose service startup bootstraps dependencies can declare a bounded
 `compose.startupTimeoutSeconds`; persistent workspaces can additionally opt

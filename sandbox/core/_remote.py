@@ -1624,7 +1624,8 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) 
     ))
 
 
-def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
+def remote_diagnostics(remote: dict, *, timeout: int = 10,
+                       include_processes: bool = False) -> dict:
     """Read authenticated, non-secret host evidence over the HTTPS control plane.
 
     This deliberately avoids SSH and does not expose job output, command lines,
@@ -1633,11 +1634,20 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
     """
     base = remote.get("control_url")
     token = remote.get("bearer_token")
-    if not isinstance(base, str) or not base.startswith("https://"):
+    parsed_base = urlsplit(base) if isinstance(base, str) else None
+    tailscale_http = bool(
+        parsed_base
+        and remote.get("control_transport") == "tailscale"
+        and parsed_base.scheme == "http"
+        and parsed_base.hostname == remote.get("tailscale_host")
+    )
+    if not isinstance(base, str) or not (base.startswith("https://") or tailscale_http):
         raise RuntimeError("remote diagnostics require an HTTPS control URL")
     if not isinstance(token, str) or not token:
         raise RuntimeError("remote diagnostics require a provisioned bearer token")
     url = base.rstrip("/") + "/diagnostics"
+    if include_processes:
+        url += "?processes=1"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -1648,6 +1658,20 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
         raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
+    if include_processes:
+        capabilities = payload.get("capabilities")
+        if (
+            payload.get("diagnostics_schema") != 2
+            or payload.get("transport") != "control"
+            or not isinstance(capabilities, list)
+            or "process_view" not in capabilities
+            or "container_view" not in capabilities
+            or not isinstance(payload.get("process_view"), dict)
+            or not isinstance(payload.get("containers"), dict)
+        ):
+            raise RuntimeError(
+                "remote diagnostics service does not support process diagnostics"
+            )
     sanitized = redact_structure(payload)
     if not isinstance(sanitized, dict):
         raise RuntimeError("remote diagnostics redaction failed")
@@ -1908,37 +1932,10 @@ def _parse_container_view(stdout: str) -> dict:
 
 
 def remote_ssh_diagnostics(remote: dict, *, timeout: int = 10, include_processes: bool = False) -> dict:
-    """Read aggregate host metrics directly over the registered SSH transport."""
-    if not isinstance(remote.get("ssh"), str) or not remote["ssh"].strip():
-        raise RuntimeError("remote SSH diagnostics require a registered SSH target")
-    result = ssh_run(remote, _SSH_DIAGNOSTICS_COMMAND, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError("remote SSH diagnostics command failed")
-    values = _parse_ssh_diagnostics(result.stdout)
-    service = remote.get("mcp_service") or {}
-    values.update({
-        "ok": True,
-        "service": "sandbox-remote-mcp",
-        "transport": "ssh",
-        "runtime_revision": service.get("runtime_revision", "unknown"),
-        "jobs": {"active": None, "queued": None},
-    })
-    if include_processes:
-        try:
-            process_result = ssh_run(remote, _SSH_PROCESS_COMMAND, timeout=timeout)
-            if process_result.returncode != 0:
-                raise RuntimeError("process probe failed")
-            values["process_view"], values["containers"] = _parse_ssh_process_view(process_result.stdout)
-        except (RuntimeError, subprocess.SubprocessError, OSError):
-            values["process_view"] = {
-                "status": "unavailable", "observed_at": datetime.now(timezone.utc).isoformat(),
-                "snapshot": "point_in_time", "cpu_semantics": "ps_lifetime_average",
-                "limits": {"max_rows": _SSH_PROCESS_LIMIT, "name_chars": _SSH_PROCESS_NAME_LIMIT},
-                "observed_count": 0, "truncated": False, "processes": [], "apps": [],
-                "limitations": ["The independently bounded process probe was unavailable."],
-            }
-            values["containers"] = _unavailable_container_view()
-    return values
+    """Compatibility guard: diagnostics are service-backed and never use SSH."""
+    raise RuntimeError(
+        "direct SSH diagnostics are no longer supported; use authenticated remote diagnostics"
+    )
 
 
 REMOTE_DOCKER_ADDRESS_POOLS = (

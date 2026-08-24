@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 import os
 import shlex
@@ -19,6 +20,54 @@ from app import (
 )
 from dependencies import ToolDependencies
 from tools.manifest import DEFAULT_MCP_GROUPS, built_in_tool_registry, project_default_groups
+
+
+_DIAGNOSTICS_SCHEMA_VERSION = 2
+_DIAGNOSTICS_PROBE_TIMEOUT_SECONDS = 5
+_DIAGNOSTICS_MAX_PROBE_ROWS = 101
+
+
+def _diagnostic_process_snapshot() -> dict:
+    """Collect bounded process evidence with fixed argv and no shell or SSH."""
+    from sandbox.core import _remote as remote_core
+
+    sections = ["__SANDBOX_PS_BEGIN__"]
+    try:
+        ps_result = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,pcpu=,pmem=,rss=,comm="],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=_DIAGNOSTICS_PROBE_TIMEOUT_SECONDS, check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        ps_result = None
+    if ps_result is not None and ps_result.returncode == 0:
+        sections.extend(ps_result.stdout.splitlines()[:_DIAGNOSTICS_MAX_PROBE_ROWS])
+    sections.extend(("__SANDBOX_PS_END__", "__SANDBOX_DOCKER_BEGIN__"))
+
+    try:
+        docker_result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{json .}}"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=_DIAGNOSTICS_PROBE_TIMEOUT_SECONDS, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        docker_result = None
+    if docker_result is not None and docker_result.returncode == 0:
+        sections.append("__SANDBOX_DOCKER_AVAILABLE__")
+        sections.extend(docker_result.stdout.splitlines()[:_DIAGNOSTICS_MAX_PROBE_ROWS])
+    sections.append("__SANDBOX_DOCKER_END__")
+
+    probe_output = "\n".join(sections)
+    process_view, _ = remote_core._parse_ssh_process_view(probe_output)
+    containers = remote_core._parse_container_view(probe_output)
+    return {
+        "diagnostics_schema": _DIAGNOSTICS_SCHEMA_VERSION,
+        "transport": "control",
+        "capabilities": ["process_view", "container_view"],
+        "process_view": process_view,
+        "containers": containers,
+    }
 
 
 def _runtime_service():
@@ -299,8 +348,17 @@ def _run_streamable_http(bind: str, port: int, token: str,
             "jobs": jobs,
         }
 
-    async def diagnostics(_request):
-        return JSONResponse(diagnostic_snapshot())
+    async def diagnostics(request):
+        query = list(request.query_params.multi_items())
+        if query and query != [("processes", "1")]:
+            return JSONResponse({
+                "ok": False,
+                "error": "invalid diagnostics query; only processes=1 is supported",
+            }, status_code=400)
+        snapshot = diagnostic_snapshot()
+        if query:
+            snapshot.update(await asyncio.to_thread(_diagnostic_process_snapshot))
+        return JSONResponse(snapshot)
 
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):

@@ -15,8 +15,12 @@ The whole-suite `.cli-venv/bin/python -m unittest discover -s tests` run
 (this repo's main convention) does NOT have those deps, so this module skips
 itself cleanly there instead of erroring out the whole discovery run.
 """
+import asyncio
+import json
 import os
+import subprocess
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -104,6 +108,74 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         app = run.call_args.args[0]
         self.assertEqual(run.call_args.kwargs, {"host": "127.0.0.1", "port": 9174})
         self.assertTrue(any(getattr(route, "path", None) == "/diagnostics" for route in app.routes))
+
+    @patch("server.subprocess.run")
+    def test_process_snapshot_uses_only_fixed_argv_probes(self, run):
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "10 1 2.5 1.0 20 worker\n", ""),
+            subprocess.CompletedProcess([], 1, "", "unavailable"),
+        ]
+        snapshot = server._diagnostic_process_snapshot()
+        self.assertEqual(snapshot["diagnostics_schema"], 2)
+        self.assertEqual(snapshot["transport"], "control")
+        self.assertEqual(snapshot["process_view"]["processes"][0]["name"], "worker")
+        self.assertEqual(run.call_args_list[0].args[0], [
+            "ps", "-eo", "pid=,ppid=,pcpu=,pmem=,rss=,comm=",
+        ])
+        self.assertEqual(run.call_args_list[1].args[0], [
+            "docker", "stats", "--no-stream", "--format", "{{json .}}",
+        ])
+        for call in run.call_args_list:
+            self.assertNotIn("shell", call.kwargs)
+
+    @patch("server.subprocess.run")
+    def test_optional_docker_view_survives_unavailable_ps(self, run):
+        run.side_effect = [
+            subprocess.CompletedProcess([], 1, "", "unavailable"),
+            subprocess.CompletedProcess(
+                [], 0,
+                '{"Name":"web","CPUPerc":"1%","MemUsage":"2MiB / 4MiB",'
+                '"MemPerc":"50%","PIDs":"3"}\n',
+                "",
+            ),
+        ]
+        snapshot = server._diagnostic_process_snapshot()
+        self.assertEqual(snapshot["process_view"]["status"], "unavailable")
+        self.assertEqual(snapshot["containers"]["status"], "complete")
+
+    def test_diagnostics_route_validates_query_and_preserves_default(self):
+        with patch("uvicorn.run") as run:
+            server._run_streamable_http("127.0.0.1", 9174, "sekrit")
+        app = run.call_args.args[0]
+        route = next(item for item in app.routes if getattr(item, "path", None) == "/diagnostics")
+
+        class Query:
+            def __init__(self, items):
+                self._items = items
+
+            def multi_items(self):
+                return self._items
+
+        default = asyncio.run(route.endpoint(types.SimpleNamespace(query_params=Query([]))))
+        self.assertEqual(default.status_code, 200)
+        self.assertNotIn("diagnostics_schema", json.loads(default.body))
+
+        invalid = asyncio.run(route.endpoint(types.SimpleNamespace(
+            query_params=Query([("processes", "true")])
+        )))
+        self.assertEqual(invalid.status_code, 400)
+
+        process_snapshot = {
+            "diagnostics_schema": 2, "transport": "control",
+            "capabilities": ["process_view", "container_view"],
+            "process_view": {"status": "complete"},
+            "containers": {"status": "unavailable"},
+        }
+        with patch("server._diagnostic_process_snapshot", return_value=process_snapshot):
+            response = asyncio.run(route.endpoint(types.SimpleNamespace(
+                query_params=Query([("processes", "1")])
+            )))
+        self.assertEqual(json.loads(response.body)["diagnostics_schema"], 2)
 
 
 if __name__ == "__main__":

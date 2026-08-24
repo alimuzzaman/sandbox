@@ -32,23 +32,25 @@ sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox --json
 sb workspace reap --remote scaleway-sandbox --dry-run --json
 ```
 
-For direct host health evidence over the registered SSH transport, use:
+For authenticated host health evidence through the remote Sandbox service, use:
 
 ```sh
-sb remote service diagnostics scaleway-sandbox --ssh --json
-sb remote service diagnostics scaleway-sandbox --ssh --processes --json
+sb remote service diagnostics scaleway-sandbox --json
+sb remote service diagnostics scaleway-sandbox --processes --json
 ```
 
-The SSH probe is read-only and reports aggregate total, used, available, and
-percentage RAM, plus load and free disk. Use the default diagnostics command
-for the authenticated HTTPS snapshot when SSH is unavailable.
+The default service snapshot reports aggregate total, used, available, and
+percentage RAM, plus load and free disk.
 
-`--processes` opts into a second independently bounded, read-only SSH probe.
+`--processes` opts into independently bounded, read-only service-side probes.
 It groups sanitized `comm` identities, exposes no command lines, arguments,
 environment, paths, or sudo data, and optionally includes non-sudo Docker stats.
 CPU is a `ps` lifetime average; RSS/shared pages, snapshot drift, and overlapping
 host/container rows prevent these values from being additive accounting totals.
 Grouping by `comm` is heuristic and grouped CPU can exceed 100% on multicore hosts.
+The response requires diagnostics schema 2 and `transport: control`; update an older
+installed remote through the supported Sandbox lifecycle first. The deprecated
+`--ssh` flag is rejected before remote lookup.
 
 Status and planning are read-only. Treat unavailable or timed-out bytes as
 unknown. Ordinary cache plans never contain named persistent volumes or

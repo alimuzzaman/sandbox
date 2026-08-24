@@ -374,97 +374,68 @@ class TestRemoteDiagnostics(unittest.TestCase):
         self.assertEqual(request.full_url, "https://control.example.test/diagnostics")
         self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
 
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_process_diagnostics_require_versioned_control_capability(self, urlopen):
+        response = MagicMock(status=200)
+        response.read.return_value = json.dumps({
+            "ok": True,
+            "diagnostics_schema": 2,
+            "transport": "control",
+            "capabilities": ["process_view", "container_view"],
+            "process_view": {"status": "complete"},
+            "containers": {"status": "unavailable"},
+        }).encode()
+        urlopen.return_value.__enter__.return_value = response
+        result = sr.remote_diagnostics({
+            "control_url": "https://control.example.test", "bearer_token": "secret-token",
+        }, include_processes=True)
+        self.assertEqual(result["diagnostics_schema"], 2)
+        request = urlopen.call_args[0][0]
+        self.assertEqual(
+            request.full_url, "https://control.example.test/diagnostics?processes=1"
+        )
+
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_process_diagnostics_reject_old_service_without_capability(self, urlopen):
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"ok":true,"memory_available_mb":1024}'
+        urlopen.return_value.__enter__.return_value = response
+        with self.assertRaisesRegex(RuntimeError, "does not support process diagnostics"):
+            sr.remote_diagnostics({
+                "control_url": "https://control.example.test", "bearer_token": "secret-token",
+            }, include_processes=True)
+
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_diagnostics_allow_only_matching_registered_tailscale_http(self, urlopen):
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"ok":true}'
+        urlopen.return_value.__enter__.return_value = response
+        result = sr.remote_diagnostics({
+            "control_url": "http://100.64.1.2:9174",
+            "control_transport": "tailscale",
+            "tailscale_host": "100.64.1.2",
+            "bearer_token": "secret-token",
+        })
+        self.assertTrue(result["ok"])
+        with self.assertRaisesRegex(RuntimeError, "HTTPS"):
+            sr.remote_diagnostics({
+                "control_url": "http://100.64.1.3:9174",
+                "control_transport": "tailscale",
+                "tailscale_host": "100.64.1.2",
+                "bearer_token": "secret-token",
+            })
+
     def test_diagnostics_require_https_control_and_token(self):
         with self.assertRaisesRegex(RuntimeError, "HTTPS"):
             sr.remote_diagnostics({"control_url": "http://control.example.test", "bearer_token": "x"})
         with self.assertRaisesRegex(RuntimeError, "bearer token"):
             sr.remote_diagnostics({"control_url": "https://control.example.test"})
 
-    @patch("sandbox.core._remote.ssh_run")
-    def test_ssh_diagnostics_reports_total_used_available_and_percent(self, ssh_run):
-        ssh_run.return_value = _completed(stdout=(
-            "memory_total_mb=11960\n"
-            "memory_used_mb=11500\n"
-            "memory_available_mb=459\n"
-            "memory_used_percent=96.16\n"
-            "load_1m=2.5\n"
-            "disk_free_mb=23564\n"
-        ))
-        result = sr.remote_ssh_diagnostics({
-            "ssh": "registered-target",
-            "mcp_service": {"runtime_revision": "revision-1"},
-        })
-        self.assertEqual(result["transport"], "ssh")
-        self.assertEqual(result["memory_total_mb"], 11960)
-        self.assertEqual(result["memory_available_mb"], 459)
-        self.assertEqual(result["memory_used_mb"], 11500)
-        self.assertEqual(result["memory_used_percent"], 96.16)
-        command = ssh_run.call_args.args[1]
-        self.assertIn("/proc/meminfo", command)
-        self.assertIn("MemAvailable:", command)
-        self.assertNotIn("registered-target", command)
-
-    def test_ssh_diagnostics_probe_fails_when_meminfo_field_is_missing_or_invalid(self):
-        awk_program = sr._SSH_DIAGNOSTICS_COMMAND.split("' /proc/meminfo", 1)[0].split("awk '", 1)[1]
-        invalid_meminfo = (
-            "MemTotal: 12247040 kB\n",
-            "MemAvailable: 470016 kB\n",
-            "MemTotal: invalid kB\nMemAvailable: 470016 kB\n",
-            "MemTotal: 12247040 kB\nMemAvailable: invalid kB\n",
-            "MemTotal: 0 kB\nMemAvailable: 0 kB\n",
-        )
-        for meminfo in invalid_meminfo:
-            with self.subTest(meminfo=meminfo):
-                result = subprocess.run(
-                    ["awk", awk_program], input=meminfo, text=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, "")
-
-    def test_parse_ssh_diagnostics_rejects_incomplete_or_invalid_payloads(self):
-        valid = {
-            "memory_total_mb": "11960",
-            "memory_used_mb": "11500",
-            "memory_available_mb": "459",
-            "memory_used_percent": "96.16",
-            "load_1m": "2.5",
-            "disk_free_mb": "23564",
-        }
-        invalid_overrides = (
-            {"memory_total_mb": None},
-            {"memory_used_mb": "invalid"},
-            {"memory_total_mb": "0", "memory_used_mb": "0", "memory_available_mb": "0"},
-            {"memory_used_mb": "-1"},
-            {"disk_free_mb": str(1 << 63)},
-            {"memory_used_percent": "nan"},
-            {"memory_used_percent": "inf"},
-            {"memory_used_percent": "100.01"},
-            {"load_1m": "-0.1"},
-            {"load_1m": "inf"},
-            {"memory_used_mb": "11490"},
-            {"memory_available_mb": "11961", "memory_used_mb": "0"},
-        )
-        for overrides in invalid_overrides:
-            payload = valid | overrides
-            stdout = "\n".join(
-                f"{key}={value}" for key, value in payload.items() if value is not None
-            )
-            with self.subTest(overrides=overrides), self.assertRaisesRegex(RuntimeError, "invalid payload"):
-                sr._parse_ssh_diagnostics(stdout)
-
-    @patch("sandbox.core._remote.ssh_run")
-    def test_ssh_diagnostics_rejects_failed_probe(self, ssh_run):
-        ssh_run.return_value = _completed(returncode=1)
-        with self.assertRaisesRegex(RuntimeError, "command failed"):
+    def test_ssh_diagnostics_are_disabled_before_any_probe(self):
+        with self.assertRaisesRegex(RuntimeError, "no longer supported"):
             sr.remote_ssh_diagnostics({"ssh": "registered-target"})
 
-    @patch("sandbox.core._remote.ssh_run")
-    def test_ssh_process_view_is_bounded_grouped_and_privacy_safe(self, ssh_run):
-        aggregate = (
-            "memory_total_mb=1000\nmemory_used_mb=500\nmemory_available_mb=500\n"
-            "memory_used_percent=50\nload_1m=1\ndisk_free_mb=100\n"
-        )
+    def test_process_view_is_bounded_grouped_and_privacy_safe(self):
         process = "\n".join((
             "__SANDBOX_PS_BEGIN__",
             "20 1 1.5 2.0 100 worker",
@@ -476,32 +447,12 @@ class TestRemoteDiagnostics(unittest.TestCase):
             '{"Name":"web","CPUPerc":"4.5%","MemUsage":"2MiB / 4MiB","MemPerc":"50%","PIDs":"3"}',
             "__SANDBOX_DOCKER_END__",
         ))
-        ssh_run.side_effect = [_completed(stdout=aggregate), _completed(stdout=process)]
-        result = sr.remote_ssh_diagnostics({"ssh": "registered-target"}, include_processes=True)
-        self.assertEqual(result["process_view"]["status"], "complete")
-        self.assertEqual(result["process_view"]["apps"][0]["name"], "worker")
-        self.assertEqual(result["process_view"]["apps"][0]["process_count"], 2)
-        self.assertEqual(result["process_view"]["processes"][0]["name"], "redacted")
-        self.assertEqual(result["containers"]["rows"][0]["memory_used_bytes"], 2 * 1024 * 1024)
-        command = ssh_run.call_args_list[1].args[1]
-        self.assertIn("LC_ALL=C ps", command)
-        self.assertIn("docker stats --no-stream", command)
-        for forbidden in ("/proc/cmdline", "docker inspect", "docker top", "sudo", " args=", " cmd=", " command="):
-            self.assertNotIn(forbidden, command)
-        self.assertNotIn("registered-target", command)
-
-    @patch("sandbox.core._remote.ssh_run")
-    def test_process_subprobe_failure_preserves_aggregate(self, ssh_run):
-        ssh_run.side_effect = [
-            _completed(stdout=("memory_total_mb=1000\nmemory_used_mb=500\n"
-                               "memory_available_mb=500\nmemory_used_percent=50\n"
-                               "load_1m=1\ndisk_free_mb=100\n")),
-            subprocess.TimeoutExpired(cmd="ssh", timeout=10),
-        ]
-        result = sr.remote_ssh_diagnostics({"ssh": "registered-target"}, include_processes=True)
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["process_view"]["status"], "unavailable")
-        self.assertEqual(result["containers"]["status"], "unavailable")
+        process_view, containers = sr._parse_ssh_process_view(process)
+        self.assertEqual(process_view["status"], "complete")
+        self.assertEqual(process_view["apps"][0]["name"], "worker")
+        self.assertEqual(process_view["apps"][0]["process_count"], 2)
+        self.assertEqual(process_view["processes"][0]["name"], "redacted")
+        self.assertEqual(containers["rows"][0]["memory_used_bytes"], 2 * 1024 * 1024)
 
     def test_process_parser_marks_bounds_and_optional_docker_fallback(self):
         rows = [f"{pid} 1 0.1 0.1 1 worker" for pid in range(1, 102)]
@@ -2115,29 +2066,23 @@ class TestRemoteServiceCommand(unittest.TestCase):
         self.assertEqual(payload["data"], status)
         self.assertNotIn("secret-token", output.getvalue())
 
-    def test_diagnostics_can_explicitly_use_ssh(self):
+    def test_diagnostics_rejects_ssh_before_remote_lookup(self):
         args = types.SimpleNamespace(name="diagnostics", ssh_url="myvps", confirm=False, ssh=True)
-        diagnostics = {"transport": "ssh", "memory_used_percent": 89.53}
-        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
-                patch.object(remote_cmd.sr, "remote_ssh_diagnostics", return_value=diagnostics) as probe, \
-                redirect_stdout(StringIO()) as output:
+        with patch.object(remote_cmd.sr, "get_remote") as lookup, \
+                redirect_stderr(StringIO()) as error, self.assertRaises(SystemExit):
             remote_cmd._cmd_service(args, as_json=True)
-        probe.assert_called_once_with({"ssh": "registered-target"})
-        self.assertEqual(json.loads(output.getvalue())["data"], diagnostics)
+        lookup.assert_not_called()
+        self.assertIn("no longer supported", error.getvalue())
 
-    def test_diagnostics_processes_dispatches_only_with_ssh(self):
+    def test_diagnostics_processes_dispatches_to_control_service(self):
         args = types.SimpleNamespace(name="diagnostics", ssh_url="myvps", confirm=False,
-                                     ssh=True, processes=True)
-        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
-                patch.object(remote_cmd.sr, "remote_ssh_diagnostics", return_value={}) as probe, \
+                                     ssh=False, processes=True)
+        remote = {"control_url": "https://control.example.test"}
+        with patch.object(remote_cmd.sr, "get_remote", return_value=remote), \
+                patch.object(remote_cmd.sr, "remote_diagnostics", return_value={}) as probe, \
                 redirect_stdout(StringIO()):
             remote_cmd._cmd_service(args, as_json=True)
-        probe.assert_called_once_with({"ssh": "registered-target"}, include_processes=True)
-
-        args.ssh = False
-        with redirect_stderr(StringIO()) as error, self.assertRaises(SystemExit):
-            remote_cmd._cmd_service(args, as_json=True)
-        self.assertIn("--processes requires", error.getvalue())
+        probe.assert_called_once_with(remote, include_processes=True)
 
     def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
         with tempfile.TemporaryDirectory() as d:

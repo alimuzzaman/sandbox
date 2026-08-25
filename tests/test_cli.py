@@ -398,6 +398,18 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("astro", r.stdout)
         self.assertIn("compose", r.stdout)
 
+    def test_version_flag_reports_checked_in_version_without_setup(self):
+        r = run_sb("--version")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        expected = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(r.stdout.strip(), f"sandbox {expected}")
+        self.assertEqual(r.stderr, "")
+
+    def test_singular_instance_list_help_exposes_inventory_alias(self):
+        r = run_sb("instance", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("list", r.stdout)
+
     def test_final_public_command_inventory_matches_the_owned_manifest(self):
         from sandbox.commands.manifest import load_builtin_commands, validate_builtin_command_coverage
         from sandbox.registry import COMMANDS, COMMAND_SPECS

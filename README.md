@@ -91,6 +91,7 @@ instead, where it behaves exactly like the Ubuntu path above.
 git clone -b main https://github.com/alimuzzaman/sandbox.git
 cd sandbox
 ./sb global           # puts `sb` on your PATH (do this first)
+./sb --version        # report the checked-in CLI version without setup/mutation
 ./sb setup            # prepares the CLI and local runtime
 ./sb guide            # show the runtime-aware CLI catalog
 ./sb domains setup    # optional: clean no-port URLs → https://<name>.<tld>
@@ -617,6 +618,7 @@ view and drive instances with:
 
 ```bash
 ./sb instances            # list every per-project instance + status + URL
+./sb instance list        # discoverable singular alias for the same inventory
 ./sb dashboard            # full-screen TUI: start/stop/restart/open/focus/delete
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
 ./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default

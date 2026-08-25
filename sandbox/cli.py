@@ -200,6 +200,15 @@ def _wp_timeout(value: str) -> int:
     return timeout
 
 
+def _cli_version() -> str:
+    """Read the checked-in CLI version without loading machine state."""
+    try:
+        value = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        value = "unknown"
+    return value or "unknown"
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -219,6 +228,10 @@ Per-project (each plugin carries its own sandbox.config.json):
   ./sb ensure              just boot/refresh this project's instance
   ./sb doctor              audit everything is healthy
 """,
+    )
+    p.add_argument(
+        "--version", action="version", version=f"%(prog)s {_cli_version()}",
+        help="show the checked-in Sandbox CLI version and exit",
     )
     sub = p.add_subparsers(dest="cmd")
 
@@ -769,10 +782,17 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     ins = sub.add_parser("instance",
         help="Suspend/resume or delete a sandbox instance")
-    ins.add_argument("action", choices=["suspend", "resume", "delete"])
-    ins.add_argument("name")
+    ins.add_argument(
+        "action", choices=["list", "suspend", "resume", "delete"],
+        help="list all instances, or change one named instance's lifecycle",
+    )
+    ins.add_argument("name", nargs="?", help="instance name (not needed for list)")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
+    ins.add_argument("--project-dir", default=None,
+        help="filter list to instances owned by this project root")
+    ins.add_argument("--json", action="store_true",
+        help="print a machine-readable inventory when action is list")
     instance_target = ins.add_mutually_exclusive_group()
     instance_target.add_argument(
         "--local", action="store_true",

@@ -678,7 +678,11 @@ def _cleanup_native_owner(cfg, owner) -> bool:
 
 
 def cmd_instance(cfg, args) -> None:
-    """Delete a sandbox instance end-to-end.
+    """List or change a sandbox instance lifecycle.
+
+    ``./sb instance list`` is a discoverable singular alias for the
+    registry-wide ``./sb instances`` inventory. Lifecycle actions remain
+    explicit and operate on one named instance.
 
     `./sb instance delete <name>` stops the stack, removes the volume, deletes
     runtime/wp-<name>/, removes the block from sandbox.local.yml, drops the
@@ -689,6 +693,15 @@ def cmd_instance(cfg, args) -> None:
     """
     action = args.action
     name = args.name
+
+    if action == "list":
+        # Keep the discoverable singular spelling as a compatibility alias for
+        # the registry-wide `instances` inventory.  It must not resolve or
+        # mutate a cwd-selected instance before listing.
+        cmd_instances(cfg, args)
+        return
+    if not name:
+        die(f"instance name is required for {action}")
 
     remote_name = getattr(args, "remote", None)
     if remote_name and not getattr(args, "local", False):

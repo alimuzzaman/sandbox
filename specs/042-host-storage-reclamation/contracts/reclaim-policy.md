@@ -54,9 +54,12 @@ A volume is eligible **only** when all of the following hold:
    (`owning_workspace_retained`). Exact matching produced this exact false positive on the
    real remote.
 4. No running container mounts the volume.
-5. The container inventory is complete. If the engine probe is partial or
-   unavailable, every volume is withheld with `container_inventory_unavailable`;
-   incomplete evidence can never authorize a volume deletion.
+5. The container inventory and deployment/workspace listing are complete. If
+   the engine probe is partial or unavailable, every volume is withheld with
+   `container_inventory_unavailable`; if the deployment listing is partial,
+   unavailable, or truncated, every volume is withheld with
+   `deployment_inventory_unavailable`. Incomplete evidence can never authorize
+   a volume deletion.
 
 Everything else is protected with reason `volume_not_workspace_scoped`, including volumes the
 engine reports as unused. The four volumes that motivated this rule —

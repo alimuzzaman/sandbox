@@ -518,6 +518,24 @@ def _engine_complete(block: Mapping[str, Any]) -> bool:
     return str(block.get("status") or "complete") == "complete"
 
 
+def _deployment_inventory_complete(block: Mapping[str, Any]) -> bool:
+    """Whether the deployment/workspace listing is complete enough to prune.
+
+    A complete container-engine probe is not sufficient by itself.  Volume
+    ownership is inferred from the deployment entries, so an unreadable or
+    truncated deployment root must fail closed even when the engine inventory
+    is healthy.  New probes may declare this explicitly; older probes retain
+    the conservative status/truncation fallback.
+    """
+    declared = block.get("deployment_inventory_complete")
+    if isinstance(declared, bool):
+        return declared
+    return (
+        str(block.get("status") or "complete") == "complete"
+        and block.get("truncated") is not True
+    )
+
+
 def tier_rank(tier: str) -> int:
     if tier not in TIERS:
         raise ReclaimPolicyError(f"unknown reclaim tier {tier!r}", "invalid_tier")
@@ -568,6 +586,7 @@ def tier_candidates(
     """
     rank = tier_rank(tier)
     complete = _engine_complete(inventory)
+    deployment_complete = _deployment_inventory_complete(inventory)
     entries = tuple(inventory.get("entries") or ())
     if entries and isinstance(entries[0], Mapping):
         leases = inventory.get("leases") or {}
@@ -630,6 +649,15 @@ def tier_candidates(
                 "kind": "volume", "locator": name, "display_name": name,
                 "class": "VOLUME",
                 "reason": "container_inventory_unavailable",
+                "bytes": volume.get("size_bytes"),
+            })
+            continue
+        if not deployment_complete:
+            name = str(volume.get("name") or "")
+            skipped.append({
+                "kind": "volume", "locator": name, "display_name": name,
+                "class": "VOLUME",
+                "reason": "deployment_inventory_unavailable",
                 "bytes": volume.get("size_bytes"),
             })
             continue
@@ -927,6 +955,7 @@ def build_report(
     hosted = block.get("hosted_sites") or ()
     leases = block.get("leases") or {}
     complete = _engine_complete(block)
+    deployment_complete = _deployment_inventory_complete(block)
     entries = tuple(
         classify_entry(item, now=now, hosted_sites=hosted, leases=leases,
                        inventory_complete=complete)
@@ -945,6 +974,11 @@ def build_report(
             decision = replace(
                 decision, eligible=False,
                 reason="container_inventory_unavailable",
+            )
+        elif not deployment_complete:
+            decision = replace(
+                decision, eligible=False,
+                reason="deployment_inventory_unavailable",
             )
         volumes.append(decision.to_dict())
     eligible = [item for item in volumes if item["eligible"]]

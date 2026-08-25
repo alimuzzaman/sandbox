@@ -213,6 +213,35 @@ class TestVolumeProtection(unittest.TestCase):
             "container_inventory_unavailable",
         )
 
+    def test_partial_deployment_inventory_never_plans_workspace_volume(self):
+        inventory = {
+            "entries": [],
+            "volumes": [{
+                "name": "sandbox-gone-workspace-11_app-node-modules",
+                "size_bytes": 5,
+                "mounted_running": False,
+            }],
+            "scratch": [], "leases": {}, "hosted_sites": [],
+            "status": "partial", "engine_complete": True,
+            "truncated": True,
+        }
+        for tier in reclaim.TIERS:
+            selection = reclaim.tier_candidates(inventory, tier, now=NOW)
+            self.assertEqual(selection.candidates, ())
+            volume = next(
+                item for item in selection.skipped
+                if item["kind"] == "volume"
+            )
+            self.assertEqual(volume["reason"],
+                             "deployment_inventory_unavailable")
+
+        report = reclaim.build_report(inventory, None, now=NOW)
+        self.assertEqual(report["volumes"]["eligible"], 0)
+        self.assertEqual(
+            report["volumes"]["records"][0]["reason"],
+            "deployment_inventory_unavailable",
+        )
+
     def test_mounted_workspace_volume_is_refused(self):
         decision = reclaim.classify_volume(
             {"name": "sandbox-x-workspace-11_app-node-modules",

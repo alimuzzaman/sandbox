@@ -45,6 +45,11 @@ to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
 operators must not remove Docker networks directly or treat disk capacity as a
 network-capacity fix.
 
+The Docker-pool transaction also treats a client-side timeout as an unknown
+outcome. The safe error omits the generated transaction command (including its
+encoded program); inspect the remote receipt and running-container state before
+considering any replay.
+
 At the transport boundary, a blocked admission is normalized to one bounded
 error envelope. It always reports `ok: false`, `status: blocked`, one of the
 stable capacity codes (`docker_network_capacity_unavailable`,

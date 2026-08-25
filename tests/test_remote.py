@@ -1983,6 +1983,16 @@ json.load(open(path))
         self.assertEqual(result["message"], "Docker pool update failed")
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_docker_pool_timeout_hides_encoded_transaction_command(self, mock_ssh_run):
+        encoded = "c2Vuc2l0aXZlLXRyYW5zYWN0aW9u"
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired(
+            ["ssh", "remote", "-c", encoded], 300,
+        )
+        with self.assertRaisesRegex(RuntimeError, "outcome is unknown") as caught:
+            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
+        self.assertNotIn(encoded, str(caught.exception))
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_remote_response_rejects_unexpected_fields(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(stdout=json.dumps({
             "ok": True, "status": "planned", "secret": "must-not-pass",

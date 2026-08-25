@@ -2731,7 +2731,16 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "sudo -n python3 -c " + shlex.quote(
             "import base64;exec(base64.b64decode(" + repr(program) + "))")
     )
-    result = ssh_run(remote, command, timeout=timeout)
+    try:
+        result = ssh_run(remote, command, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # ``TimeoutExpired`` carries the full argv, which includes the
+        # base64-encoded transaction program.  Never let that command leak via
+        # a user-facing error; the remote operation's outcome is unknown and
+        # must be inspected before any replay.
+        raise RuntimeError(
+            "remote Docker pool operation timed out; outcome is unknown"
+        ) from None
     output = (result.stdout or "").strip()
     try:
         payload = json.loads(output)

@@ -206,6 +206,44 @@ class TestResolutionGate(unittest.TestCase):
                 env.assert_not_called()
                 commands["ensure"].assert_not_called()
 
+    def test_project_routed_init_rejects_instance_before_side_effects(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        invocations = [
+            ["sb", "--instance", "fixture", "init", "--project-dir", "/tmp/project"],
+            ["sb", "init", "--instance", "fixture", "--project-dir", "/tmp/project"],
+            ["sb", "init", "--instance=fixture", "--project-dir", "/tmp/project"],
+        ]
+        expected = (
+            "error: init is project-scoped and cannot target --instance NAME; use "
+            "`sb init --project-dir DIR` to select the project; use "
+            "`sb ensure --project-dir DIR --label LABEL --create` for an "
+            "additional instance.\n"
+        )
+        for argv in invocations:
+            with self.subTest(argv=argv):
+                errors = StringIO()
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                        mock.patch.object(cli, "load_config") as load_config, \
+                        mock.patch.object(cli, "write_compose_files") as compose, \
+                        mock.patch.object(cli, "write_env_for_compose") as env, \
+                        mock.patch.object(cli, "COMMANDS", {
+                            "init": mock.Mock(name="init_handler"),
+                        }) as commands, \
+                        redirect_stderr(errors):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main()
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(errors.getvalue(), expected)
+                auto_migrate.assert_not_called()
+                load_config.assert_not_called()
+                compose.assert_not_called()
+                env.assert_not_called()
+                commands["init"].assert_not_called()
+
     def test_ensure_help_explains_instance_selector_boundary(self):
         result = run_sb("ensure", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)

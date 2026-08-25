@@ -1094,6 +1094,11 @@ Per-project (each plugin carries its own sandbox.config.json):
                     "for a new label.\n"
                     "Use sb apply --instance NAME for an existing named instance"
                 )
+            elif sp_name == "init":
+                instance_help = (
+                    "invalid for init; use --project-dir to select the project; "
+                    "use sb ensure --label for an additional instance"
+                )
             sp_parser.add_argument("--instance", default=argparse.SUPPRESS,
                                    help=instance_help)
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
@@ -1153,6 +1158,20 @@ Per-project (each plugin carries its own sandbox.config.json):
         die(
             "setup is registry-wide; use `sb apply --instance NAME` or "
             "`sb ensure --project-dir DIR` for project-scoped setup.",
+            2,
+        )
+
+    # `init` is project-routed and derives its target from --project-dir and
+    # --label. A shared global --instance selector was otherwise accepted but
+    # ignored by the initializer, which could scaffold/boot the controller cwd
+    # instead of the explicitly named fixture. Refuse it before migration,
+    # config loading, or any runtime handler can mutate state.
+    if args.cmd == "init" and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            "init is project-scoped and cannot target --instance NAME; use "
+            "`sb init --project-dir DIR` to select the project; use "
+            "`sb ensure --project-dir DIR --label LABEL --create` for an "
+            "additional instance.",
             2,
         )
 

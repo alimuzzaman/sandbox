@@ -289,6 +289,8 @@ def _project_observation_route(args) -> tuple[bool, bool]:
     but targets the named inner instance without a checkout. A local
     observation is the inverse: the co-located CLI owns the instance lookup,
     but the explicit staged root (not the controller cwd) is authoritative.
+    The project-dir form is local by default; ``--local`` remains an explicit,
+    backwards-compatible spelling rather than a required switch.
     Keeping this classification in one small seam prevents the ordinary
     instance gate from accidentally handling either form.
     """
@@ -307,7 +309,7 @@ def _project_observation_route(args) -> tuple[bool, bool]:
         (observation or direct_remote_instance)
         and bool(getattr(args, "remote", None))
         and not bool(getattr(args, "local", False)),
-        observation and bool(getattr(args, "local", False))
+        observation
         and not bool(getattr(args, "remote", None)),
     )
 

@@ -17,6 +17,11 @@ for an explicit `--remote NAME` or a project whose `runtime.default` is
 `remote`. Registering a single remote therefore never moves a plain dev boot
 onto a VPS. Durable job execution keeps inferring the one configured remote.
 
+For a local project outside the current working directory, pass
+`--project-dir DIR` to `sb status` or `sb logs`; that root selects the registered
+instance by default. `--local` remains accepted as an explicit spelling for
+scripts that already use it.
+
 Use `--local` as an explicit override. Remote execution deploys the exact local
 working tree before acceptance, then the remote supervisor drains process pipes
 to durable local files. CLI/MCP callers read bounded retained output by cursor;

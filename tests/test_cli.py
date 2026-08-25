@@ -382,6 +382,42 @@ class TestResolutionGate(unittest.TestCase):
             auto_migrate.assert_not_called()
             finalize.assert_not_called()
 
+    def test_project_dir_status_is_local_by_default(self):
+        """A local project selector must not require a redundant --local flag."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        record = {"instance": "inner-default", "label": "default"}
+        core = mock.Mock()
+        core.registry_all.return_value = {}
+        with mock.patch.object(sys, "argv", [
+                "sb", "status", "--project-dir", "/srv/staged-project",
+        ]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "status": lambda _cfg, args: observed.append(args.resolved_instance),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances",
+                                  return_value={"inner-default": {}}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli, "resolve_registered_instance",
+                                  return_value=record) as resolve_root, \
+                mock.patch.object(cli, "_cwd_instance",
+                                  side_effect=AssertionError("controller cwd consulted")), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+            cli.main()
+
+        self.assertEqual(observed, ["inner-default"])
+        resolve_root.assert_called_once_with("/srv/staged-project", label=None)
+        compose.assert_not_called()
+        env.assert_not_called()
+        auto_migrate.assert_not_called()
+        finalize.assert_not_called()
+
     def test_project_routed_local_observation_preserves_known_and_unknown_explicit_instance(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

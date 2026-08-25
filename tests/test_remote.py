@@ -2198,6 +2198,18 @@ class TestRemoteDomainInventory(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_single_remote_name_defaults_to_read_only_status(self):
+        args = types.SimpleNamespace(name="myvps", ssh_url=None, confirm=False)
+        status = {"ownership": "proven", "active": True}
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "ubuntu@1.2.3.4"}), \
+                patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=status) as probe, \
+                redirect_stdout(StringIO()) as output:
+            remote_cmd._cmd_service(args, as_json=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "observed")
+        self.assertEqual(payload["data"], status)
+        probe.assert_called_once()
+
     def test_status_json_passes_through_secret_safe_revision_evidence(self):
         args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
         status = {

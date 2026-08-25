@@ -644,6 +644,7 @@ reference. Summary:
 | `./sb remote provision <name> --control-host <host> --confirm` | Fully automated install + start the remote MCP server over public HTTPS |
 | `./sb remote provision <name> --control tailscale --confirm` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
+| `./sb remote service <name> --json` | Read-only status shorthand; equivalent to `service status <name>` |
 | `./sb remote service migrate <name> --plan --json` | Read-only systemd service migration plan |
 | `./sb remote service migrate <name> --confirm --json` | Stage the current Sandbox runtime, then install the protected owned service after explicit confirmation |
 | `./sb remote service stop <name> --confirm --json` | Stop only the selected proven service unit |

@@ -292,6 +292,13 @@ def _cmd_service(args, as_json: bool) -> None:
     """`sb remote service <status|diagnostics|migrate|stop> <name>` service contract."""
     operation = getattr(args, "name", None)
     name = getattr(args, "ssh_url", None)
+    # Keep the common read-only probe ergonomic: when ``service`` receives a
+    # single positional remote name, treat it as ``service status <name>``.
+    # Mutating and diagnostic operations still require their explicit verb so
+    # an incomplete command cannot silently change remote state.
+    if name is None and operation not in {None, "status", "diagnostics", "migrate", "stop"}:
+        name = operation
+        operation = "status"
     if operation not in {"status", "diagnostics", "migrate", "stop"} or not name:
         die("usage: ./sb remote service <status|diagnostics|migrate|stop> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):

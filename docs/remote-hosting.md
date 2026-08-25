@@ -333,6 +333,9 @@ selected by `host apply`:
 deploy:
   allowed_branches: [main]
   require_clean: true
+  # Host apply refuses to start below this free-space floor (MiB). A bounded
+  # rollback reserve is held separately while Compose runs.
+  min_free_disk_mb: 1024
   derived_environment:
     APP_SOURCE_REVISION: pushed_commit_sha
 ```
@@ -616,6 +619,15 @@ that status with the pager's, which reads as success — use `set -o pipefail`, 
 environment, so a checkout on the wrong branch fails instantly with
 `branch 'X' is not allowed for <environment>`. Deploy from the checkout whose branch
 the environment allows.
+
+**`insufficient remote disk for host apply`.** Before a confirmed apply, Sandbox
+reads the remote filesystem metric through the authenticated diagnostics service
+(or the registered SSH transport for older remotes). It requires the declared
+`deploy.min_free_disk_mb` floor plus a 32 MiB rollback reserve. The reserve is
+released after a successful apply and before DNS/Caddy rollback after a failed
+Compose or health step, so a build that fills the disk does not immediately
+remove the rollback path. Increase the manifest floor only after reviewing the
+remote capacity; do not bypass the preflight with an ad-hoc SSH mutation.
 
 **`failed to stat active key during commit: snapshot <id> does not exist`.**
 BuildKit's snapshotter metadata is holding an active snapshot entry whose on-disk

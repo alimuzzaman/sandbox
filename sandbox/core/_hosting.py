@@ -525,8 +525,12 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     if not isinstance(deploy.get("allowed_branches") or [], list) or not deploy["allowed_branches"] or not isinstance(deploy.get("require_clean"), bool):
         raise HostingError("deploy.allowed_branches and deploy.require_clean are required")
     secrets = _secrets(env)
+    min_free_disk_mb = deploy.get("min_free_disk_mb", 1024)
+    if isinstance(min_free_disk_mb, bool) or not isinstance(min_free_disk_mb, int) or not 1 <= min_free_disk_mb <= 1_048_576:
+        raise HostingError("deploy.min_free_disk_mb must be an integer between 1 and 1048576")
     deploy = {
         **deploy,
+        "min_free_disk_mb": min_free_disk_mb,
         "derived_environment": _derived_environment(deploy, secrets),
     }
     cf = env.get("cloudflare") or {}
@@ -754,6 +758,7 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
         "records": [],
         "certificate_hostnames": [route["hostname"] for route in validated["routes"]],
         "healthcheck": validated["healthcheck"],
+        "min_free_disk_mb": validated["deploy"]["min_free_disk_mb"],
     }
     derived = validated["deploy"].get("derived_environment", {})
     if derived:

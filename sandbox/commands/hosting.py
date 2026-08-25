@@ -161,6 +161,7 @@ _FAILURE_MARKERS = (
 # with the same snapshot id every run. `docker builder prune` does not clear
 # this -- it lives in containerd-overlayfs/metadata_v2.db, not cache.db.
 _STALE_SNAPSHOT_MARKER = "failed to stat active key during commit"
+_HOST_APPLY_ROLLBACK_RESERVE_MB = 32
 
 
 def _remote_failure_message(text: str, limit: int = 2000) -> str:
@@ -181,6 +182,97 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180) -> str:
     if result.returncode != 0:
         raise RuntimeError(_remote_failure_message(result.stderr or result.stdout))
     return result.stdout or ""
+
+
+def _disk_free_mb(value: object) -> int | None:
+    """Return a bounded integer disk metric without accepting booleans or floats."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= 1_000_000_000 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if 0 <= parsed <= 1_000_000_000 else None
+    return None
+
+
+def _remote_disk_free_mb(entry: dict, home: str) -> int:
+    """Read free space for the filesystem containing the Sandbox home.
+
+    Provisioned remotes expose the authenticated diagnostics endpoint. The SSH
+    ``df`` fallback keeps hosting usable for older SSH-only registrations, while
+    still failing closed if neither read-only observation path works.
+    """
+    diagnostics_error = None
+    if entry.get("control_url") and entry.get("bearer_token"):
+        try:
+            diagnostics = remote.remote_diagnostics(entry)
+            free = _disk_free_mb(diagnostics.get("disk_free_mb"))
+            if free is not None:
+                return free
+            diagnostics_error = "remote diagnostics omitted disk_free_mb"
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            diagnostics_error = str(exc) or type(exc).__name__
+    if entry.get("ssh"):
+        result = remote.ssh_run(
+            entry,
+            f"set -eu; df -Pm {shlex.quote(home)} | awk 'NR == 2 {{print $4; exit}}'",
+            timeout=30,
+        )
+        if result.returncode == 0:
+            free = _disk_free_mb((result.stdout or "").strip())
+            if free is not None:
+                return free
+        ssh_error = _remote_failure_message(result.stderr or result.stdout)
+        if diagnostics_error:
+            raise hosting.HostingError(
+                f"could not read remote disk availability ({diagnostics_error}; {ssh_error})"
+            )
+        raise hosting.HostingError(f"could not read remote disk availability ({ssh_error})")
+    if diagnostics_error:
+        raise hosting.HostingError(f"could not read remote disk availability ({diagnostics_error})")
+    raise hosting.HostingError("host apply requires a provisioned remote disk diagnostic")
+
+
+def _prepare_host_apply(entry: dict, home: str, validated: dict) -> str | None:
+    """Reject low-disk applies and reserve rollback space before mutation.
+
+    The reservation is released on success and before rollback. Deleting it
+    first gives Caddy/DNS rollback a bounded amount of filesystem headroom even
+    when a Compose build consumes the remaining space after preflight.
+    """
+    # Empty entries are used by offline unit tests and fail later on their first
+    # real remote operation. Every registered remote has one of these identities.
+    if not entry or not (entry.get("ssh") or (entry.get("control_url") and entry.get("bearer_token"))):
+        return None
+    minimum = int(validated["deploy"].get("min_free_disk_mb", 1024))
+    free = _remote_disk_free_mb(entry, home)
+    required = minimum + _HOST_APPLY_ROLLBACK_RESERVE_MB
+    if free < required:
+        raise hosting.HostingError(
+            f"insufficient remote disk for host apply: {free} MiB free, "
+            f"requires at least {required} MiB (including rollback reserve)"
+        )
+    reservation = (
+        f"{home}/.sandbox/host-apply-"
+        f"{validated['project']}-{validated['environment']}.rollback.reserve"
+    )
+    parent = str(__import__("posixpath").dirname(reservation))
+    command = (
+        f"set -eu; mkdir -p {shlex.quote(parent)}; "
+        f"if command -v fallocate >/dev/null 2>&1 && "
+        f"fallocate -l {_HOST_APPLY_ROLLBACK_RESERVE_MB}M {shlex.quote(reservation)}; then :; "
+        f"else dd if=/dev/zero of={shlex.quote(reservation)} "
+        f"bs=1048576 count={_HOST_APPLY_ROLLBACK_RESERVE_MB} conv=fsync status=none; fi; "
+        f"chmod 0600 {shlex.quote(reservation)}"
+    )
+    _remote_checked(entry, command, timeout=60)
+    return reservation
+
+
+def _release_host_apply_reservation(entry: dict, reservation: str | None) -> None:
+    if reservation:
+        _remote_checked(entry, f"rm -f {shlex.quote(reservation)}", timeout=30)
 
 
 def _remote_basic_auth_hash(entry: dict, password: str) -> str:
@@ -556,7 +648,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
     home = remote.resolve_sandbox_home(entry)
-    target = _ensure_host_source(entry, home, validated["project"])
+    reservation = _prepare_host_apply(entry, home, validated)
+    try:
+        target = _ensure_host_source(entry, home, validated["project"])
+    except Exception:
+        try:
+            _release_host_apply_reservation(entry, reservation)
+        except Exception as cleanup_error:
+            raise hosting.HostingError(
+                f"host staging failed; rollback-space cleanup failed: {cleanup_error}"
+            ) from cleanup_error
+        raise
     manifest_root = validated.get("manifest_root")
     source_root = validated.get("source_root")
     nested_source = (
@@ -593,7 +695,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     ssl_previous: dict[str, str | None] = {}
 
     def rollback() -> None:
+        nonlocal reservation
         failures: list[str] = []
+        try:
+            _release_host_apply_reservation(entry, reservation)
+            reservation = None
+        except Exception as exc:
+            failures.append(f"rollback-space cleanup: {exc}")
         for change in reversed(changes):
             try:
                 client.restore_record(change["zone_id"], change["previous"], change["created_id"])
@@ -613,6 +721,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("; ".join(failures))
 
     def apply() -> None:
+        nonlocal reservation
         _run_compose(entry, validated, target, runtime_dir, runtime)
         _verify_remote_health(entry, runtime)
         proxied = validated["cloudflare"]["proxied"]
@@ -674,6 +783,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         _verify_edge(validated["routes"], **verify_kwargs)
+        _release_host_apply_reservation(entry, reservation)
+        reservation = None
         state["hosts"][key] = {"loopback_port": runtime["loopback_port"], "compose_project": runtime["compose_project"],
                                "certificate": certificate, "records": changes, "commit": sha,
                                "caddy_name": caddy_name}

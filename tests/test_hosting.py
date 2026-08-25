@@ -101,6 +101,20 @@ class TestHostingManifest(unittest.TestCase):
             result["deploy"]["derived_environment"],
             {"LENZORA_SOURCE_REVISION": "pushed_commit_sha"},
         )
+        self.assertEqual(result["deploy"]["min_free_disk_mb"], 1024)
+
+    def test_validates_host_apply_disk_floor(self):
+        invalid = (
+            _manifest().replace(
+                "      require_clean: true\n",
+                "      require_clean: true\n      min_free_disk_mb: VALUE\n",
+            )
+        )
+        cases = [(0, "0"), (True, "true"), ("1024", '"1024"'), (1_048_577, "1048577")]
+        for value, token in cases:
+            with self.subTest(value=value), self._write(invalid.replace("VALUE", token)) as directory:
+                with self.assertRaisesRegex(hosting.HostingError, "min_free_disk_mb"):
+                    hosting.validate_manifest(directory)
 
     def test_rejects_invalid_deploy_derived_environment(self):
         cases = {
@@ -801,6 +815,46 @@ class TestHostingManifest(unittest.TestCase):
             hosting.save_host_state(state, path)
             self.assertEqual(hosting.load_host_state(path), state)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_remote_disk_free_prefers_authenticated_diagnostics(self):
+        entry = {"control_url": "https://control.example.test", "bearer_token": "token"}
+        with patch.object(hosting_cmd.remote, "remote_diagnostics", return_value={"disk_free_mb": 4096}) as diagnostics, \
+             patch.object(hosting_cmd.remote, "ssh_run") as ssh:
+            self.assertEqual(hosting_cmd._remote_disk_free_mb(entry, "/srv/sandbox"), 4096)
+        diagnostics.assert_called_once_with(entry)
+        ssh.assert_not_called()
+
+    def test_remote_disk_free_falls_back_to_registered_ssh(self):
+        entry = {"ssh": "alim@example.test"}
+        result = subprocess.CompletedProcess([], 0, stdout="2048\n", stderr="")
+        with patch.object(hosting_cmd.remote, "ssh_run", return_value=result) as ssh:
+            self.assertEqual(hosting_cmd._remote_disk_free_mb(entry, "/srv/sandbox"), 2048)
+        self.assertIn("df -Pm /srv/sandbox", ssh.call_args.args[1])
+
+    def test_host_apply_disk_preflight_rejects_before_reservation(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        entry = {"ssh": "alim@example.test"}
+        with patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=1055), \
+             patch.object(hosting_cmd, "_remote_checked") as checked:
+            with self.assertRaisesRegex(hosting.HostingError, "1056 MiB"):
+                hosting_cmd._prepare_host_apply(entry, "/srv/sandbox", validated)
+        checked.assert_not_called()
+
+    def test_host_apply_disk_preflight_reserves_bounded_rollback_space(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        entry = {"ssh": "alim@example.test"}
+        with patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=1056), \
+             patch.object(hosting_cmd, "_remote_checked", return_value="") as checked:
+            reservation = hosting_cmd._prepare_host_apply(entry, "/srv/sandbox", validated)
+        self.assertEqual(
+            reservation,
+            "/srv/sandbox/.sandbox/host-apply-example-site-production.rollback.reserve",
+        )
+        command = checked.call_args.args[1]
+        self.assertIn("fallocate -l 32M", command)
+        self.assertIn("chmod 0600", command)
 
     def test_failed_apply_calls_rollback(self):
         events = []

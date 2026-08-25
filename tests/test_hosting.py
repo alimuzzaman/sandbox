@@ -908,6 +908,33 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("ssh unavailable", result["health"]["reason"])
         self.assertEqual(state["hosts"], {})
 
+    def test_host_diagnose_combines_disk_images_and_source_revision_evidence(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        revision = "a" * 40
+        state = {"version": 1, "hosts": {
+            hosting.state_key("myvps", validated): {"commit": revision},
+        }}
+        status = {
+            "project": "example-site", "environment": "production", "remote": "myvps",
+            "deployed_revision": revision, "state_record": "present",
+            "services": [{"service": "web", "state": "running", "health": "healthy"}],
+            "health": {"state": "ready"},
+        }
+        images = '{"Service":"web","Image":"example:web","ID":"sha256:1","Created":"now"}\n'
+        with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=[images, revision]):
+            result = hosting_cmd._host_runtime_diagnose(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        self.assertEqual(result["disk"], {"state": "ready", "free_mb": 4096})
+        self.assertEqual(result["image_state"], {"state": "ready"})
+        self.assertEqual(result["source_revision"]["state"], "ready")
+        self.assertEqual(result["source_revision"]["checks"][0]["state"], "match")
+        self.assertTrue(result["apply_log"].endswith("/apply.log"))
+
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_stale_buildkit_snapshot_recovers_with_a_no_cache_rebuild(self, remote_checked, _info):

@@ -609,6 +609,93 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
     return result
 
 
+def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
+                           state: dict) -> dict:
+    """Collect one read-only deployment explanation without exposing secrets."""
+    result = _host_runtime_status(validated, entry, remote_name, state)
+    result["disk"] = {"state": "unavailable", "free_mb": None}
+    result["images"] = []
+    result["image_state"] = {"state": "unavailable", "reason": "image metadata not observed"}
+    result["source_revision"] = {"state": "not_declared", "checks": []}
+    result["apply_log"] = None
+    if not entry.get("provisioned"):
+        result["disk"]["reason"] = "remote is not provisioned"
+        result["image_state"] = {"state": "unavailable", "reason": "remote is not provisioned"}
+        return result
+
+    try:
+        home = remote.resolve_sandbox_home(entry)
+        runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+        result["apply_log"] = f"{runtime_dir}/apply.log"
+        try:
+            result["disk"] = {"state": "ready", "free_mb": _remote_disk_free_mb(entry, home)}
+        except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            result["disk"] = {
+                "state": "unavailable",
+                "free_mb": None,
+                "reason": remote.redact_text(str(exc))[:500],
+            }
+
+        source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
+        prefix = _compose_prefix(
+            validated, source_dir,
+            f"{runtime_dir}/compose.override.yml",
+            f"{runtime_dir}/environment.env",
+        )
+        try:
+            raw_images = _remote_checked(entry, f"{prefix} images --format json", timeout=60)
+            for line in (raw_images or "").splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(item, dict):
+                    result["images"].append({
+                        key: item.get(key)
+                        for key in ("Service", "Name", "Image", "ID", "Created", "Size")
+                        if item.get(key) is not None
+                    })
+            result["image_state"] = {"state": "ready" if result["images"] else "unknown"}
+            if not result["images"]:
+                result["image_state"]["reason"] = "Compose returned no image rows"
+        except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            result["image_state"] = {
+                "state": "unavailable",
+                "reason": remote.redact_text(str(exc))[:500],
+            }
+
+        derived = validated["deploy"].get("derived_environment", {})
+        checks = []
+        for key, provider in sorted(derived.items()):
+            check = {"key": key, "provider": provider, "state": "unavailable"}
+            service = shlex.quote(validated["compose"]["service"])
+            command = f"{prefix} exec -T {service} sh -c {shlex.quote(f'printf %s "${key}"')}"
+            try:
+                observed = _remote_checked(entry, command, timeout=30).strip()
+                check["observed"] = observed or None
+                if provider == "pushed_commit_sha" and observed:
+                    expected = result.get("deployed_revision")
+                    check["expected"] = expected
+                    check["state"] = "match" if expected == observed else "mismatch"
+                elif not observed:
+                    check["state"] = "missing"
+            except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+                check["reason"] = remote.redact_text(str(exc))[:500]
+            checks.append(check)
+        if checks:
+            result["source_revision"] = {
+                "state": "ready" if all(item["state"] == "match" for item in checks)
+                else "degraded",
+                "checks": checks,
+            }
+    except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        result["health"] = {
+            "state": "unavailable",
+            "reason": remote.redact_text(str(exc))[:500],
+        }
+    return result
+
+
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
                           state: dict, ttl_seconds: int | None) -> dict:
     config = validated.get("autologin")
@@ -1000,7 +1087,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, status, apply, logs, and login-url")
+        die("--remote is required for host plan, status, diagnose, apply, logs, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -1025,6 +1112,27 @@ def cmd_host(cfg, args) -> None:
                 print(f"  {service['service']}: {service['state']} ({service['health']})")
             if result["health"].get("reason"):
                 print(f"  reason: {result['health']['reason']}")
+        return
+    if args.action == "diagnose":
+        result = _host_runtime_diagnose(validated, entry, args.remote, state)
+        if args.json:
+            print(json.dumps({"ok": True, **result}, sort_keys=True))
+        else:
+            print(f"{result['project']} / {result['environment']} ({result['remote']})")
+            print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
+            print(f"  health: {result['health']['state']}")
+            print(f"  disk: {result['disk']['free_mb']} MiB free ({result['disk']['state']})")
+            print(f"  images: {len(result['images'])} ({result['image_state']['state']})")
+            source = result["source_revision"]
+            print(f"  source revision: {source['state']}")
+            for check in source.get("checks", []):
+                print(f"    {check['key']}: {check['state']}")
+            for service in result["services"]:
+                print(f"  {service['service']}: {service['state']} ({service['health']})")
+            if result["health"].get("reason"):
+                print(f"  reason: {result['health']['reason']}")
+            if result["apply_log"]:
+                print(f"  apply log: {result['apply_log']}")
         return
     if args.action == "logs":
         if not entry.get("provisioned"):

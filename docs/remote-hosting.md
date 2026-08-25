@@ -420,6 +420,12 @@ JSON contract and is appended to a mode-0600 remote log at the path returned as
 `./sb host logs --remote NAME --apply-log --lines 1000`; timeout errors retain the
 latest output tail rather than reducing a failed build to a bare timeout message.
 
+For a one-command, read-only failure explanation use
+`./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
+per-service Compose state/health, free disk, image metadata, derived source-revision
+checks, and the protected apply-log path. Missing remote evidence is reported as
+`unavailable` or `degraded`; the command never mutates the host or prints secrets.
+
 An environment may also protect its public origin with Basic Auth:
 
 ```yaml

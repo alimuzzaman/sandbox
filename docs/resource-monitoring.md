@@ -231,6 +231,10 @@ status. A remote disconnect after a valid payload similarly retains it with a
 `disconnected` terminal status; total transport loss returns unavailable rather
 than fabricated partial evidence.
 
+The durable `--detach --request-id` mode is available for `resources status`
+only. Plans and cleanup use their normal bounded plan/apply flow and do not
+accept a detached request identity.
+
 Deep findings do not create deletion authority. An exact finding may reference
 `existing_cache_scope` or `existing_stale_scope` only when the ordinary
 resource inventory independently establishes that same uniquely named

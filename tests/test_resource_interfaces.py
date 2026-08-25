@@ -229,6 +229,9 @@ class TestResourceInterfaces(unittest.TestCase):
             (status.action, status.remote, status.thorough, status.budget, status.json),
             ("status", "remote-a", True, 30.0, True),
         )
+        help_text = self.parser().format_help()
+        self.assertIn("status only", help_text)
+        self.assertIn("status-only replay-safe", help_text)
         plan = self.parser().parse_args(["plan", "--scope", "stale"])
         self.assertEqual(plan.scope, "stale")
         cleanup = self.parser().parse_args(

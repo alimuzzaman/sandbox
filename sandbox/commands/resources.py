@@ -201,13 +201,14 @@ def configure_parser(parser) -> None:
         "--detach",
         action="store_true",
         help=(
-            "accept a durable host-level scan and return a job id for polling"
+            "status only: accept a durable host-level scan and return a job id "
+            "for polling"
         ),
     )
     parser.add_argument(
         "--request-id",
         default=None,
-        help="replay-safe idempotency key required with --detach",
+        help="status-only replay-safe idempotency key required with --detach",
     )
     # Internal worker entrypoint used by the durable detached resource scan.
     # It is intentionally hidden: users submit with --detach and observe with

@@ -2284,6 +2284,28 @@ class TestRejectHerdProjects(unittest.TestCase):
 
 
 class TestDeployEnsureExpose(unittest.TestCase):
+    def test_deploy_rejects_global_instance_selector_before_remote_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = types.SimpleNamespace(
+                project_dir=d,
+                remote="myvps",
+                instance="wrong-instance",
+                source_ref=None,
+                json=True,
+            )
+            with patch.object(sr, "get_remote") as get_remote, \
+                 patch.object(sr, "ensure_deploy_repo") as ensure_repo, \
+                 patch("builtins.print") as mock_print, \
+                 self.assertRaises(SystemExit) as raised:
+                deploy_cmd.cmd_deploy(None, args)
+
+            self.assertEqual(raised.exception.code, 1)
+            payload = json.loads(mock_print.call_args.args[0])
+            self.assertFalse(payload["ok"])
+            self.assertIn("cannot target --instance", payload["error"])
+            get_remote.assert_not_called()
+            ensure_repo.assert_not_called()
+
     def test_remote_plugin_activation_targets_returned_instance_explicitly(self):
         remote = {"ssh": "ubuntu@example.test"}
         result = subprocess.CompletedProcess([], 0, stdout="", stderr="")

@@ -72,6 +72,19 @@ def cmd_deploy(cfg, args) -> None:
         if not isinstance(source_ref, str):
             source_ref = None
     as_json = bool(getattr(args, "json", False))
+    explicit_instance = getattr(args, "instance", None)
+    if isinstance(explicit_instance, str) and explicit_instance.strip():
+        # ``--instance`` is a global selector for observation/control commands,
+        # but deploy is project-scoped. Silently ignoring it can push the
+        # current checkout while the operator believes another instance was
+        # selected, so refuse before remote lookup or staging.
+        _fail(
+            remote_name,
+            "deploy is project-scoped and cannot target --instance NAME; use "
+            "--project-dir DIR for the intended checkout (or omit --instance)",
+            as_json,
+            source_ref=source_ref,
+        )
     try:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:

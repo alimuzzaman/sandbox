@@ -55,18 +55,33 @@ def enable() -> dict[str, object]:
         domain = f"gui/{os.getuid()}"
         path = str(installed["path"])
         _run(["launchctl", "bootout", domain, path])
-        ok = _run(["launchctl", "bootstrap", domain, path])
-        ok = _run(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"]) and ok
+        transition_ok = _run(["launchctl", "bootstrap", domain, path])
+        transition_ok = _run(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"]) and transition_ok
     else:
         _run(["systemctl", "--user", "daemon-reload"])
-        ok = _run(["systemctl", "--user", "enable", "--now", "sandbox-activation.service"])
-    if ok:
-        from sandbox.core._domains import _activation_gateway_healthy
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and not _activation_gateway_healthy():
-            time.sleep(.1)
-        ok = _activation_gateway_healthy()
-    return {**installed, "ok": ok, "state": "enabled" if ok else "enable_failed"}
+        transition_ok = _run(["systemctl", "--user", "enable", "--now", "sandbox-activation.service"])
+
+    # The service health probe is the authority for an idempotent enable.  On
+    # macOS, launchctl may return a non-zero transition result when the job was
+    # already bootstrapped or is being replaced, even though kickstart leaves a
+    # healthy supervisor running.  Reporting that healthy state as a failure
+    # makes callers retry a working service and can create a false outage.
+    from sandbox.core._domains import _activation_gateway_healthy
+    deadline = time.monotonic() + 3
+    healthy = False
+    while time.monotonic() < deadline:
+        if _activation_gateway_healthy():
+            healthy = True
+            break
+        time.sleep(.1)
+    if not healthy:
+        healthy = _activation_gateway_healthy()
+    ok = healthy
+    result = {**installed, "ok": ok,
+              "state": "enabled" if ok else "enable_failed"}
+    if healthy and not transition_ok:
+        result["warning"] = "supervisor transition returned non-zero; health probe is active"
+    return result
 
 
 def disable() -> dict[str, object]:

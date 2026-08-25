@@ -661,6 +661,10 @@ readable again.
 ./sb activation disable
 ```
 
+`activation enable` treats a healthy loopback authority as success even when a
+macOS service-manager transition reports a transient non-zero result; the JSON
+response may include a warning while the supervisor is already serving.
+
 Each instance can run a different **web server**, and you can switch in place
 without re-importing content:
 

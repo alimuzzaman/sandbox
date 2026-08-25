@@ -55,6 +55,67 @@ def _require_instance_field(instance: dict, field: str):
     return value
 
 
+def _failed_ensure_cleanup(
+    entry: dict,
+    target: str,
+    baseline: list[dict],
+    *,
+    label: str = "default",
+) -> str:
+    """Remove only a uniquely new instance after a failed remote ensure.
+
+    The remote CLI can register its instance before it emits a usable JSON
+    response. Cleanup therefore compares a read-only inventory captured before
+    ensure with a second inventory after failure. Never delete a baseline row,
+    and never guess when the inventory is unavailable or produces multiple
+    candidates.
+    """
+    try:
+        current = sr.list_remote_instances(entry, target)
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
+        return "remote instance cleanup is unverified: could not read post-failure inventory"
+    baseline_names = {
+        row.get("name") for row in baseline
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    candidates = [
+        row.get("name") for row in current
+        if isinstance(row, dict)
+        and isinstance(row.get("name"), str)
+        and row.get("name") not in baseline_names
+        and (row.get("label") or "default") == label
+    ]
+    if not candidates:
+        return "remote instance cleanup found no new instance"
+    if len(candidates) != 1:
+        return "remote instance cleanup is unverified: multiple new instances matched"
+    try:
+        sr.delete_remote_instance(entry, candidates[0])
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
+        return "remote instance cleanup failed for the newly created instance"
+    return "remote instance cleanup removed the newly created instance"
+
+
+def _ensure_remote_instance_transactional(entry: dict, target: str) -> dict:
+    """Ensure the default remote instance without leaving an orphan on failure."""
+    try:
+        baseline = sr.list_remote_instances(entry, target)
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        raise RuntimeError(
+            "could not establish the remote instance baseline before ensure; "
+            "refusing remote mutation"
+        ) from exc
+    try:
+        instance = sr.ensure_remote_instance(entry, target)
+        if not isinstance(instance, dict):
+            raise RuntimeError("remote ensure did not return an instance object")
+        _require_instance_field(instance, "instance")
+        return instance
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        cleanup = _failed_ensure_cleanup(entry, target, baseline)
+        raise RuntimeError(f"{exc}; {cleanup}") from exc
+
+
 def cmd_deploy(cfg, args) -> None:
     """`./sb deploy --project-dir DIR --remote NAME [--json]` -- push the local
     project's current state (committed HEAD + uncommitted changes, including
@@ -172,9 +233,7 @@ def cmd_deploy(cfg, args) -> None:
         instance = None
         public_url = None
         if getattr(args, "ensure", False) or getattr(args, "expose", False):
-            instance = sr.ensure_remote_instance(entry, target)
-            if not isinstance(instance, dict):
-                raise RuntimeError("remote ensure did not return an instance object")
+            instance = _ensure_remote_instance_transactional(entry, target)
             instance_name = _require_instance_field(instance, "instance")
             if is_wordpress:
                 reconciled = sr.reconcile_remote_instance(entry, target)

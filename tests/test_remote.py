@@ -2419,6 +2419,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0) as mock_overlay, \
+                     patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
@@ -2454,6 +2455,48 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
+
+    def test_failed_remote_ensure_removes_only_new_default_instance(self):
+        entry = {"ssh": "ubuntu@example.test", "provisioned": True}
+        baseline = [{"name": "existing", "label": "default"}]
+        after_failure = [
+            *baseline,
+            {"name": "orphan", "label": "default"},
+        ]
+        with patch.object(sr, "list_remote_instances",
+                          side_effect=[baseline, after_failure]), \
+             patch.object(sr, "ensure_remote_instance",
+                          side_effect=RuntimeError("remote ensure timed out")), \
+             patch.object(sr, "delete_remote_instance") as delete:
+            with self.assertRaisesRegex(
+                    RuntimeError, "cleanup removed the newly created instance"):
+                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
+        delete.assert_called_once_with(entry, "orphan")
+
+    def test_failed_remote_ensure_does_not_guess_when_multiple_instances_are_new(self):
+        entry = {"ssh": "ubuntu@example.test", "provisioned": True}
+        with patch.object(sr, "list_remote_instances",
+                          side_effect=[[], [
+                              {"name": "orphan-a", "label": "default"},
+                              {"name": "orphan-b", "label": "default"},
+                          ]]), \
+             patch.object(sr, "ensure_remote_instance",
+                          side_effect=RuntimeError("remote ensure failed")), \
+             patch.object(sr, "delete_remote_instance") as delete:
+            with self.assertRaisesRegex(
+                    RuntimeError, "multiple new instances matched"):
+                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
+        delete.assert_not_called()
+
+    def test_failed_remote_ensure_refuses_mutation_without_baseline(self):
+        entry = {"ssh": "ubuntu@example.test", "provisioned": True}
+        with patch.object(sr, "list_remote_instances",
+                          side_effect=RuntimeError("inventory unavailable")), \
+             patch.object(sr, "ensure_remote_instance") as ensure:
+            with self.assertRaisesRegex(
+                    RuntimeError, "refusing remote mutation"):
+                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
+        ensure.assert_not_called()
 
     def test_source_ref_still_transfers_ignored_primary_descriptor(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2517,6 +2560,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst), \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst), \
                      patch.object(sr, "activate_remote_plugin"), \
@@ -2603,6 +2647,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst), \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst), \
                      patch.object(sr, "activate_remote_plugin"), \
@@ -2640,6 +2685,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value={"status": "ready"}), \
                      patch("builtins.print") as mock_print:
                     with self.assertRaises(SystemExit):
@@ -2669,6 +2715,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=instance), \
                      patch.object(sr, "activate_remote_plugin") as activate, \
                      patch.object(sr, "set_remote_instance_url") as set_url, \

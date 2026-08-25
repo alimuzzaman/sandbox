@@ -228,6 +228,13 @@ DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)
 defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
 public URL path unless they explicitly opt out.
 
+When `--ensure` or `--expose` is requested, deploy first records the selected remote's
+read-only instance inventory. If remote `ensure` fails before returning a usable instance,
+Sandbox compares the post-failure inventory with that baseline and removes only one
+uniquely new default instance. An unavailable or ambiguous inventory fails closed and
+leaves the remote unchanged or reports cleanup as unverified; Sandbox never guesses which
+pre-existing instance to delete.
+
 #### Extra hostnames (`--alias`)
 
 `--alias HOSTNAME` (repeatable) exposes the instance on additional hostnames

@@ -404,6 +404,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     configure_lifecycle_parser(sub)
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
+    w.add_argument("--local", action="store_true",
+                   help="explicitly select the local WordPress runtime")
     wp_options = w.add_mutually_exclusive_group()
     wp_options.add_argument("--async", dest="run_async", action="store_true",
                             help="run as a background job (spec 004) — prints a job id")

@@ -170,6 +170,10 @@ select --local/--remote`.
 WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
 
+`sb wp --local` is accepted as an explicit local-runtime selector for scripts
+that share target flags across Sandbox commands; it does not change the
+WordPress command payload.
+
 Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
 through 3600 with `--timeout` before the `--` delimiter to change that bound:
 `./sb wp --timeout 120 -- plugin list`. The Compose client wait is a caller

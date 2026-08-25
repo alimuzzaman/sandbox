@@ -851,6 +851,11 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("argument --timeout: not allowed with argument --async", r.stderr)
         self.assertNotIn("no sandbox instance", r.stderr + r.stdout)
 
+    def test_wp_accepts_explicit_local_selector(self):
+        r = run_sb("wp", "--local", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("explicitly select the local WordPress runtime", r.stdout)
+
     def test_wp_timeout_parser_enforces_one_to_3600_seconds(self):
         for value in ("0", "3601", "not-an-integer"):
             with self.subTest(value=value):

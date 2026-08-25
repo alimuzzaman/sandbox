@@ -17,6 +17,12 @@ for an explicit `--remote NAME` or a project whose `runtime.default` is
 `remote`. Registering a single remote therefore never moves a plain dev boot
 onto a VPS. Durable job execution keeps inferring the one configured remote.
 
+For durable `sb test`, an explicit `--instance NAME` pins the run to that
+named local registry instance when `--remote` is not also supplied. This keeps
+an instance selector from silently turning a local test request into a source
+push to an inferred remote; use `--remote NAME` when the remote target is
+intentional.
+
 For a local project outside the current working directory, pass
 `--project-dir DIR` to `sb status` or `sb logs`; that root selects the registered
 instance by default. `--local` remains accepted as an explicit spelling for

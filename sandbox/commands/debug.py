@@ -24,6 +24,26 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 
 
+def _test_requests_explicit_local(args) -> bool:
+    """Pin a named local instance instead of silently inferring a remote."""
+    return bool(getattr(args, "local", False) or (
+        getattr(args, "instance", None) and not getattr(args, "remote", None)
+    ))
+
+
+def _local_test_entry(sc, root: str, args):
+    """Resolve an explicitly named local instance without default fallback."""
+    explicit = getattr(args, "instance", None)
+    if explicit:
+        entries = sc.registry_list_for_root(root)
+        entry = next((item for item in entries
+                      if item.get("instance") == explicit), None)
+        if not entry:
+            die(f"unknown local instance '{explicit}' for {root}")
+        return entry
+    return sc.registry_get(root, label=getattr(args, "label", None))
+
+
 
 def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
                                     workspaces: list[str], timeout: int | None,
@@ -245,10 +265,10 @@ def cmd_test(cfg, args) -> None:
         from sandbox.jobs.models import JobSubmission, TargetRequest
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-                project_dir=pd, local=bool(getattr(args, "local", False)),
+                project_dir=pd, local=_test_requests_explicit_local(args),
                 remote=getattr(args, "remote", None),
                 workspace=(getattr(args, "workspace", None) or [None])[0],
-                required_capability="job.exec" if not getattr(args, "local", False) else None,
+                required_capability="job.exec" if not _test_requests_explicit_local(args) else None,
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
@@ -277,7 +297,7 @@ def cmd_test(cfg, args) -> None:
                 remote_sb_path=_remote.remote_sb_path).submit(submission)
             print(json.dumps(accepted, sort_keys=True) if as_json else accepted["job_id"])
             return
-        entry = sc.registry_get(pconf["root"], label=getattr(args, "label", None))
+        entry = _local_test_entry(sc, pconf["root"], args)
         if not entry:
             die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
         result = runtime_service(cfg).invoke(OperationRequest(project_root=pconf["root"], operation="exec",
@@ -308,7 +328,7 @@ def cmd_test(cfg, args) -> None:
     requested_workspaces = list(getattr(args, "workspace", None) or [])
     try:
         selected_target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-            project_dir=pd, local=bool(getattr(args, "local", False)),
+            project_dir=pd, local=_test_requests_explicit_local(args),
             remote=getattr(args, "remote", None), workspace=(
                 requested_workspaces[0]
                 if getattr(args, "mode", None) == "matrix" else None),
@@ -371,7 +391,7 @@ def cmd_test(cfg, args) -> None:
         else:
             print(accepted["job_id"])
         return
-    entry = sc.registry_get(pconf["root"], label=label)
+    entry = _local_test_entry(sc, pconf["root"], args)
     if not entry:
         if label is None and len(sc.registry_list_for_root(pconf["root"])) > 1:
             known = [e["label"] for e in sc.registry_list_for_root(pconf["root"])]

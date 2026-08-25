@@ -11,6 +11,51 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestRuntimeTestModes(unittest.TestCase):
+    def test_explicit_instance_pins_wordpress_test_to_local_target(self):
+        import sandbox.commands.debug as debug
+
+        captured = []
+        args = SimpleNamespace(
+            project_dir="/fixture", label=None, instance="fixture-qa",
+            mode="unit", provision_only=False, local=False, remote=None,
+            workspace=None, timeout=60, output_profile="smart", json=False,
+            passthrough=[],
+        )
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"root": "/fixture", "tests": {"suite": "unit"}}
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [{"instance": "fixture-qa", "label": "qa"}]
+
+            @staticmethod
+            def registry_get(_root, label=None):
+                raise AssertionError("explicit instance must not fall back to registry_get")
+
+        target = SimpleNamespace(kind="local", project_root="/fixture",
+                                 remote_name=None, workspace_label="default")
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(
+                        resolve=lambda request: captured.append(request) or target),
+                }), \
+                patch("sandbox.application.context.managed_native_instance_selected",
+                      return_value=None), \
+                patch.object(debug, "_ensure_test_runner_tools", return_value={
+                    "phpunit": "phpunit", "composer": "composer",
+                }), \
+                patch.object(debug, "_run_tests_unit", return_value=0):
+            debug.cmd_test({}, args)
+
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].local)
+        self.assertIsNone(captured[0].remote)
+
     def test_remote_wordpress_workspace_selection_builds_isolated_matrix_leaves(self):
         import sandbox.commands.debug as debug
 

@@ -75,6 +75,25 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertNotIn("php_extensions", legacy)
         json.dumps(block["php_extensions"])
 
+    def test_machine_local_lifecycle_opt_in_survives_apply_rebuild(self):
+        import sandbox.core._instances as instances
+
+        previous = {
+            "instance_lifecycle": {"mode": "idle_stop", "wakeOnRequest": True,
+                                    "idleAfterSeconds": 1800},
+            "activation_route": {"id": "ar_1234567890abcdef", "token": "t" * 32},
+        }
+        with patch.object(instances, "_local_yaml",
+                          return_value={"instances": {"project": previous}}):
+            block = instances._build_instance_block(
+                {}, "project", "/tmp/project", {"root": "/tmp/project"},
+                {"wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125},
+                "nginx",
+            )
+
+        self.assertEqual(block["instance_lifecycle"]["mode"], "idle_stop")
+        self.assertEqual(block["activation_route"]["id"], "ar_1234567890abcdef")
+
     def test_profile_preflight_uses_catalogued_gd_plan_without_faking_digests(self):
         from sandbox.config.php_extensions import normalize_php_extensions
         from sandbox.core._docker import php_extension_preflight

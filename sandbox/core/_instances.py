@@ -128,6 +128,17 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
         if lifecycle is not None:
             from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
             resolved["instance_lifecycle"] = normalize_instance_lifecycle(lifecycle)
+        # Activation credentials are generated once when an opted-in instance
+        # is materialized and then retained in the machine-local instance
+        # block.  Carry the opaque route metadata through the internal
+        # resolution boundary so the activation catalog can validate and
+        # authorize it; public inventory serializers must continue to omit it.
+        activation_route = inst.get("activation_route", runtime.get("activation_route"))
+        if isinstance(activation_route, Mapping):
+            resolved["activation_route"] = {
+                str(key): _json_safe_php_extensions(value)
+                for key, value in activation_route.items()
+            }
         # Trusted, adapter-produced extension plan inputs are optional state;
         # preserve them only when present so the omission path remains exactly
         # the historical resolved mapping.
@@ -736,16 +747,20 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
             pconf.get("phpExtensions"))
     # Persist the normalized lifecycle declaration beside the instance so a
     # host-side activation gateway can make an explicit, read-only decision
-    # without re-reading project source or inventing Docker arguments.  Omitted
-    # declarations retain the historical always-on behavior and therefore do
-    # not perturb legacy instance blocks.
-    if "instanceLifecycle" in pconf and pconf.get("instanceLifecycle") is not None:
-        block["instance_lifecycle"] = dict(pconf["instanceLifecycle"])
-        lifecycle = block["instance_lifecycle"]
-        if lifecycle.get("mode") == "idle_stop" and lifecycle.get("wakeOnRequest") is True:
+    # without re-reading project source or inventing Docker arguments. Omitted
+    # project declarations retain the historical always-on behavior, unless a
+    # trusted machine-local lifecycle opt-in already exists for this instance.
+    # This keeps local review/benchmark policy durable across apply without
+    # forcing that policy into a project checkout.
+    previous_block = (_local_yaml().get("instances", {}).get(name, {}) or {})
+    lifecycle = (pconf.get("instanceLifecycle")
+                 if "instanceLifecycle" in pconf and pconf.get("instanceLifecycle") is not None
+                 else previous_block.get("instance_lifecycle"))
+    if lifecycle is not None:
+        block["instance_lifecycle"] = dict(lifecycle)
+        if block["instance_lifecycle"].get("mode") == "idle_stop" and block["instance_lifecycle"].get("wakeOnRequest") is True:
             import secrets
-            previous_route = (_local_yaml().get("instances", {}).get(name, {})
-                              .get("activation_route"))
+            previous_route = previous_block.get("activation_route")
             if isinstance(previous_route, dict) and previous_route.get("id") and previous_route.get("token"):
                 block["activation_route"] = dict(previous_route)
             else:
@@ -757,7 +772,7 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # project inputs and are never invented here; retaining them lets an
     # explicitly materialized child-image plan survive a later apply while a
     # changed requirement naturally invalidates it via the planner digest.
-    _previous_block = _local_yaml().get("instances", {}).get(name, {})
+    _previous_block = previous_block
     for _extension_key in (
             "php_extension_parent_digest", "php_extension_parent_digests",
             "php_extension_parent_images", "php_extension_digest", "wpcli_image_digest", "platform",

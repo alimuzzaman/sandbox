@@ -126,7 +126,14 @@ no established backend HTTP/WebSocket connection, no active durable job, and
 no bounded WP-CLI activity lease before graceful stop. Missing evidence pins
 the route rather than guessing. Existing persisted registry rows without a lifecycle marker remain
 always-on until a normal `sb ensure` or `sb apply` reconciliation adopts the
-new default. Remote activation and function/FaaS adapters remain future gates.
+new default. For a machine-local opt-in that should survive an apply without
+changing a project checkout, place the normalized `instance_lifecycle` and its
+generated `activation_route` under that instance in `sandbox.local.yml`. The
+instance resolver carries this trusted local declaration through apply
+reconciliation; public instance inventory continues to omit route credentials.
+This is useful for disposable review/benchmark instances, while durable
+instances should be left without the marker (or explicitly set to
+`always_on`). Remote activation and function/FaaS adapters remain future gates.
 
 `startupTimeoutSeconds` is the bounded time Sandbox waits for the declared
 health endpoint after `ensure` (30–3600 seconds; default 120). Set

@@ -82,6 +82,7 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
 
         cfg = {"instances": {"site-a": {
             "instance_lifecycle": {"mode": "idle_stop", "idleAfterSeconds": 300},
+            "activation_route": {"id": "ar_1234567890abcdef", "token": "t" * 32},
         }}}
         registry = {"fixture": {
             "instance": "site-a", "root": "/tmp/site-a", "kind": "wordpress",
@@ -92,6 +93,8 @@ class TestInstanceLifecycleConfig(unittest.TestCase):
             resolved = instances.resolve_instances(cfg)["site-a"]
         self.assertEqual(resolved["instance_lifecycle"]["mode"], "idle_stop")
         self.assertEqual(resolved["instance_lifecycle"]["idleAfterSeconds"], 300)
+        self.assertEqual(resolved["activation_route"]["id"], "ar_1234567890abcdef")
+        self.assertEqual(resolved["activation_route"]["token"], "t" * 32)
 
 
 class TestActivationCoordinator(unittest.TestCase):

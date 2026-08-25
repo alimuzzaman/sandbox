@@ -1256,6 +1256,11 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertIn(".cli-venv", tar_args)
         self.assertIn("mcp/wp-server/.venv", tar_args)
         self.assertIn("runtime", tar_args)
+        self.assertIn("node_modules", tar_args)
+        self.assertIn("src/desktop/release", tar_args)
+        self.assertIn("src/desktop/build", tar_args)
+        self.assertIn("src/desktop/dist", tar_args)
+        self.assertIn(".cache", tar_args)
         self.assertIn("._*", tar_args)
         self.assertIn("*/._*", tar_args)
         self.assertEqual(mock_run.call_args_list[0][1]["cwd"], str(ROOT))
@@ -1273,11 +1278,17 @@ class TestUploadRuntimeSource(unittest.TestCase):
             root = Path(d)
             (root / "sandbox").mkdir()
             (root / "nested").mkdir()
+            (root / "node_modules" / "large-tree").mkdir(parents=True)
+            (root / "src" / "desktop" / "release").mkdir(parents=True)
+            (root / ".cache").mkdir()
             (root / "._runtime-sidecar").write_bytes(b"sidecar")
             (root / "nested" / "._runtime-nested-sidecar").write_bytes(b"sidecar")
             (root / ".env").write_bytes(b"RUNTIME=keep\x00\xff")
             (root / "nested" / ".gitignore").write_bytes(b"*.tmp\n")
             (root / "ordinary.bin").write_bytes(b"\x00\x01\xfe\xff")
+            (root / "node_modules" / "large-tree" / "dependency.js").write_bytes(b"generated")
+            (root / "src" / "desktop" / "release" / "Sandbox.app").write_bytes(b"generated")
+            (root / ".cache" / "artifact").write_bytes(b"generated")
             ssh_result = _completed(returncode=0, stdout=b"", stderr=b"")
             with patch.object(remote_cmd, "ROOT", root), \
                  patch.object(sr, "ssh_process", return_value=ssh_result) as ssh, \
@@ -1291,7 +1302,8 @@ class TestUploadRuntimeSource(unittest.TestCase):
                 }
                 self.assertEqual(
                     members,
-                    {".", "sandbox", "nested", ".env", "nested/.gitignore", "ordinary.bin"},
+                    {".", "sandbox", "nested", ".env", "nested/.gitignore", "ordinary.bin",
+                     "src", "src/desktop"},
                 )
                 files = {
                     (member.name[2:] if member.name.startswith("./") else member.name):

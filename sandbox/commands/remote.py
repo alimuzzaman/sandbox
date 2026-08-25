@@ -469,6 +469,17 @@ def _upload_runtime_source(ssh_target: str) -> None:
         "mcp/wp-server/.venv",
         "runtime",
         "tmp",
+        # The remote MCP service runs the Python CLI/server surface.  Local
+        # JavaScript dependency trees and packaged Electron artifacts are
+        # generated, large, and never imported by that service.  Excluding
+        # them keeps the supported migration archive small enough to finish
+        # within its bounded upload window (the checkout may contain hundreds
+        # of megabytes of release/node_modules output).
+        "node_modules",
+        "src/desktop/release",
+        "src/desktop/build",
+        "src/desktop/dist",
+        ".cache",
         "__pycache__",
         ".pytest_cache",
     ]

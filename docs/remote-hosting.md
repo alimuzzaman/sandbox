@@ -599,6 +599,12 @@ Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtua
 environments before stopping a proven legacy process, so a runtime refresh cannot leave
 the replacement service without its interpreter dependencies.
 
+The migration archive intentionally excludes local-only generated payloads such as
+`node_modules`, Electron release/build output, `.cache`, and the existing runtime
+directory. These artifacts are not imported by the remote Python CLI/MCP service;
+excluding them keeps the supported upload within its bounded transfer window. Project
+source deployment remains a separate operation.
+
 ## 9. Troubleshooting a failed `host apply`
 
 **Read the error, not the exit code of a pipe.** `sb host apply` exits non-zero on

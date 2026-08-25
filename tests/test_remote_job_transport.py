@@ -429,6 +429,23 @@ class RemoteJobTransportTests(unittest.TestCase):
         ])
         self.assertNotIn("--project-dir", commands[0])
 
+    def test_remote_active_only_is_forwarded_to_controller_boundary(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda _remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"jobs":[]}'
+            ),
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
+            remote_sb_path=lambda _remote: "/srv/sandbox/sb-src/sb",
+        )
+
+        transport.list("r", active_only=True, limit=1)
+
+        self.assertEqual(commands, [
+            "/srv/sandbox/sb-src/sb job-list --limit 1 --active-only --json",
+        ])
+
     def test_control_uses_the_staged_remote_cli_not_path_lookup(self):
         commands = []
         transport = RemoteJobTransport(

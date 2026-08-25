@@ -102,6 +102,18 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["termination_reason"], "exit_nonzero")
             repository.close()
 
+    def test_sigkill_exit_is_classified_without_claiming_oom(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), components=None)
+            submitted = service.submit(JobSubmission("test", temp, "p", "local", "killed",
+                ("/bin/sh", "-c", "exit 137"), 20, SourceIdentity("source")))
+            state = self._wait_terminal(service, submitted["job_id"])
+            self.assertEqual(state["lifecycle"], "failed", state)
+            self.assertEqual(state["exit_code"], 137)
+            self.assertEqual(state["termination_reason"], "process_killed")
+            repository.close()
+
     def test_output_storage_failure_is_a_durable_terminal_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

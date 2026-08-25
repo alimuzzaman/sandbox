@@ -73,6 +73,12 @@ stall, supervisor-unresponsive, process-missing, orphaned, and unreachable state
 include the evidence used for classification. Stall warnings do not cancel a job
 unless the submission explicitly opts into cancellation-on-stall.
 
+When a child exits with POSIX `SIGKILL` (`-9` or shell status `137`), the durable
+record uses `termination_reason=process_killed` instead of the generic
+`exit_nonzero`. This is intentionally not labelled OOM: distinguishing a kernel/
+container OOM from an operator or runtime kill still requires independent host or
+cgroup evidence.
+
 After a host restart or supervisor failure, run:
 
 ```sh

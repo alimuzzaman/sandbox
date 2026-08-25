@@ -147,8 +147,9 @@ def run_descriptor(path: str | Path) -> int:
                 termination_reason="cancelled_by_request", output_completeness="complete", integrity_sha256=integrity)
             return 130
         target = Lifecycle.SUCCEEDED if return_code == 0 else Lifecycle.FAILED
+        termination_reason = _child_termination_reason(return_code)
         repository.transition(job_id, target, exit_code=return_code,
-            termination_reason=None if return_code == 0 else "exit_nonzero",
+            termination_reason=termination_reason,
             output_completeness="complete", integrity_sha256=integrity)
         return 0 if return_code == 0 else 1
     except OutputError as exc:
@@ -177,6 +178,22 @@ def run_descriptor(path: str | Path) -> int:
 def _iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _child_termination_reason(return_code: int) -> str | None:
+    """Classify a child kill without mistaking it for proof of an OOM event.
+
+    POSIX shells expose SIGKILL as 128 + 9 (137), while ``Popen`` can surface
+    the same event as ``-9``.  The host supervisor cannot independently prove
+    whether an operator, Docker, or the kernel sent that signal, so the stable
+    classification deliberately remains ``process_killed``; callers can use
+    host/cgroup evidence to distinguish OOM from another kill.
+    """
+    if return_code == 0:
+        return None
+    if return_code in {-9, 137}:
+        return "process_killed"
+    return "exit_nonzero"
 
 
 def _managed_native_job(descriptor) -> bool:

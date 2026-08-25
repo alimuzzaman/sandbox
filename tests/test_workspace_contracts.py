@@ -108,6 +108,31 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertNotIn("--project-dir", commands[0])
         self.assertNotIn("--checkout-locator", commands[0])
 
+    def test_remote_label_ambiguity_returns_bounded_workspace_ids(self):
+        target = SimpleNamespace(
+            remote_name="vps", project_root="/project",
+            workspace_label="resource-scan", sources={"identity": "project-id"},
+        )
+        listing = {
+            "ok": True,
+            "workspaces": [
+                {"label": "resource-scan", "workspace_id": "ws-one"},
+                {"label": "resource-scan", "workspace_id": "ws-two"},
+            ],
+        }
+        with patch("sandbox.core._remote.get_remote",
+                   return_value={"provisioned": True}), \
+             patch("sandbox.transports.remote_workspaces.RemoteWorkspaceTransport.list",
+                   return_value=listing):
+            result = _remote_workspace_control(
+                target, "status", SimpleNamespace(
+                    project_identity="project-id", workspace_id=None,
+                    migration_plan_id=None, confirm=False,
+                ))
+
+        self.assertEqual(result["code"], "workspace_identity_ambiguous")
+        self.assertEqual(result["workspace_ids"], ["ws-one", "ws-two"])
+
     def test_cli_lifecycle_forwards_one_explicit_target_request(self):
         service = _WorkspaceService()
         output = StringIO()

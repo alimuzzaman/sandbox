@@ -1081,6 +1081,37 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         self.assertLess(joined.index("git reset --hard"), joined.index("git clean -fd"))
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_reset_uses_remote_supervisor_and_client_grace(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+
+        sr.reset_target_to(
+            {"ssh": "ubuntu@1.2.3.4"},
+            "/home/ubuntu/sandbox/deploy-src/proj",
+            "abc1234",
+        )
+
+        command = mock_ssh_run.call_args.args[1]
+        timeout = mock_ssh_run.call_args.kwargs["timeout"]
+        self.assertIn(
+            "exec timeout --signal=TERM --kill-after=15s 120s sh -c",
+            command,
+        )
+        self.assertIn("git reset --hard abc1234", command)
+        self.assertIn("git clean -fd", command)
+        self.assertEqual(timeout, 150)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_reset_reports_remote_supervisor_timeout(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=124)
+
+        with self.assertRaisesRegex(RuntimeError, "remote reset timed out after 120s"):
+            sr.reset_target_to(
+                {"ssh": "ubuntu@1.2.3.4"},
+                "/home/ubuntu/sandbox/deploy-src/proj",
+                "abc1234",
+            )
+
+    @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")
     def test_apply_counts_tracked_and_untracked_files(self, mock_run, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)

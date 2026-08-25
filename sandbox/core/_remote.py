@@ -69,6 +69,11 @@ _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
 _NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS = 300
 REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS = 15
 REMOTE_REACHABILITY_TIMEOUT_SECONDS = 20
+REMOTE_RESET_TIMEOUT_SECONDS = 120
+REMOTE_RESET_KILL_GRACE_SECONDS = 15
+REMOTE_RESET_CLIENT_TIMEOUT_SECONDS = (
+    REMOTE_RESET_TIMEOUT_SECONDS + REMOTE_RESET_KILL_GRACE_SECONDS + 15
+)
 
 
 def is_appledouble_basename(value: str | os.PathLike) -> bool:
@@ -1492,8 +1497,29 @@ def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
     file. `git clean -fd` (no `-x`) removes untracked-but-not-ignored files
     only -- gitignored build output (node_modules/vendor/etc) is never
     touched, since those were never part of the deploy in the first place."""
-    cmd = f"cd {target_path} && git reset --hard {sha} && git clean -fd"
-    res = ssh_run(remote, cmd, timeout=30)
+    reset = (
+        f"cd {shlex.quote(target_path)} && "
+        f"git reset --hard {shlex.quote(sha)} && git clean -fd"
+    )
+    # Bound the stateful reset on the VPS as well as in the local SSH client.
+    # If the client disconnects, the remote supervisor still terminates the
+    # reset instead of leaving an unbounded git process behind.  The client
+    # budget includes the remote kill grace period and connection overhead.
+    cmd = (
+        "exec timeout --signal=TERM "
+        f"--kill-after={REMOTE_RESET_KILL_GRACE_SECONDS}s "
+        f"{REMOTE_RESET_TIMEOUT_SECONDS}s sh -c {shlex.quote(reset)}"
+    )
+    try:
+        res = ssh_run(remote, cmd, timeout=REMOTE_RESET_CLIENT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
+        ) from exc
+    if res.returncode == 124:
+        raise RuntimeError(
+            f"remote reset timed out after {REMOTE_RESET_TIMEOUT_SECONDS}s"
+        )
     if res.returncode != 0:
         raise RuntimeError(
             f"could not reset the VPS working tree to {sha}: "

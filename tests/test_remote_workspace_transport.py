@@ -131,6 +131,37 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
                 remote_lookup=lambda _name: {"provisioned": True}, ssh_run=numeric_ok,
             ).list("remote-a")
 
+    def test_status_accepts_nullable_error_field(self):
+        def status(_remote, _command, *, timeout):
+            return _Result(stdout=json.dumps({
+                "ok": True,
+                "workspace_id": "ws-123",
+                "status": "ready",
+                "error": None,
+            }))
+
+        transport = RemoteWorkspaceTransport(
+            remote_lookup=lambda _name: {"provisioned": True}, ssh_run=status,
+        )
+        self.assertEqual(
+            transport.status("remote-a", "ws-123")["workspace_id"],
+            "ws-123",
+        )
+
+    def test_successful_envelope_rejects_populated_error_field(self):
+        def malformed(_remote, _command, *, timeout):
+            return _Result(stdout=json.dumps({
+                "ok": True,
+                "status": "ready",
+                "error": {"code": "wrong_state"},
+            }))
+
+        transport = RemoteWorkspaceTransport(
+            remote_lookup=lambda _name: {"provisioned": True}, ssh_run=malformed,
+        )
+        with self.assertRaisesRegex(RemoteWorkspaceError, "workspace_protocol_invalid"):
+            transport.status("remote-a", "ws-123")
+
     def test_remote_error_preserves_stable_code_without_secret(self):
         def failed(_remote, _command, *, timeout):
             return _Result(

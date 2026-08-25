@@ -36,6 +36,13 @@ the source of truth for the remote deploy repository and the instance it
 ensures. The global `--instance` selector is rejected for this command rather
 than silently ignored; use the intended project directory explicitly.
 
+Each deploy resets the remote checkout to the pushed revision and removes only
+untracked, non-ignored files before applying the current uncommitted layer. The
+reset is supervised on the remote for 120 seconds with a 15-second termination
+grace; the local SSH client allows that grace plus connection overhead. A reset
+timeout leaves completion ambiguous, so inspect the remote deployment state
+before replaying the same request.
+
 Before remote workspace staging or durable test/job submission, Sandbox performs
 a read-only Docker network-capacity admission at the shared exact-tree staging
 seam. The probe must
@@ -674,6 +681,10 @@ supported lifecycle command, then retry:
 ```sh
 ./sb remote service migrate <name> --confirm --json
 ```
+
+When a label matches more than one remote record, lifecycle control fails closed and
+the JSON response includes the bounded candidate `workspace_ids`; retry with the
+chosen opaque ID using `--workspace-id` rather than guessing from a path.
 
 Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
 environments before stopping a proven legacy process, so a runtime refresh cannot leave

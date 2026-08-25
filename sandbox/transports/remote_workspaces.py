@@ -118,7 +118,11 @@ def _parse_envelope(stdout: object) -> dict[str, Any]:
         raise RemoteWorkspaceError(
             "workspace_protocol_invalid", "remote response must be a top-level ok object"
         )
-    if payload.get("ok") is True and "error" in payload:
+    # Workspace status records include an ``error`` field for their own
+    # nullable state, so ``error: null`` is part of a valid successful record.
+    # A populated error on an ``ok`` envelope remains malformed; failures must
+    # use ``ok: false`` so callers cannot mistake an error for a healthy state.
+    if payload.get("ok") is True and payload.get("error") is not None:
         raise RemoteWorkspaceError(
             "workspace_protocol_invalid", "successful remote response cannot contain error"
         )

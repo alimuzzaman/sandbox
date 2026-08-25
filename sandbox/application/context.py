@@ -1123,8 +1123,13 @@ def _remote_workspace_control(resolved_target, action, request=None):
         if len(matches) != 1 or not matches[0].get("workspace_id"):
             if listing.get("ok") is False:
                 return listing
+            workspace_ids = sorted({
+                item["workspace_id"] for item in matches
+                if isinstance(item, dict) and isinstance(item.get("workspace_id"), str)
+            })
             return {"ok": False, "code": "workspace_identity_ambiguous",
-                    "error": "workspace ID is required for remote lifecycle control"}
+                    "error": "workspace ID is required for remote lifecycle control",
+                    "workspace_ids": workspace_ids}
         workspace_id = matches[0]["workspace_id"]
     if action == "status":
         return transport.status(

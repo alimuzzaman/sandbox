@@ -466,6 +466,7 @@ class WorkspaceDegradedReportingTests(unittest.TestCase):
             self.assertEqual(listed["index"]["code"], "workspace_index_incomplete")
             self.assertEqual(listed["code"], "workspace_index_incomplete")
             self.assertIn("read-only report", listed["warning"])
+            self.assertEqual(listed["recovery_command"], "./sb workspace migrate --local --json")
             self.assertEqual(listed["index"]["counts"]["indeterminate"], 1)
             entries = {item["path"]: item for item in listed["on_disk"]["entries"]}
             self.assertEqual(set(entries), {str(indexed), str(orphan)})

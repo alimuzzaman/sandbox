@@ -41,6 +41,7 @@ _SIZE_TIME_BUDGET_SECONDS = 5.0
 _REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
 _REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
 _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
+_LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
 
 
 def _iso(epoch: float) -> str:
@@ -764,9 +765,10 @@ class WorkspaceService:
         }
         if incomplete:
             payload["code"] = "workspace_index_incomplete"
+            payload["recovery_command"] = _LOCAL_WORKSPACE_RECOVERY
             payload["warning"] = (
                 "workspace index is incomplete; this listing is a read-only "
-                "report and workspace mutation stays refused")
+                f"report and workspace mutation stays refused; recovery: {_LOCAL_WORKSPACE_RECOVERY}")
         return payload
 
     def status(self, request):
@@ -796,12 +798,14 @@ class WorkspaceService:
                         "workspaces": listing.get("workspaces", []),
                         "counts": listing.get("counts"),
                         "index": listing.get("index"),
-                        "on_disk": listing.get("on_disk")}
+                        "on_disk": listing.get("on_disk"),
+                        "recovery_command": _LOCAL_WORKSPACE_RECOVERY}
             return {"ok": False, "code": "workspace_not_found",
                     "workspace_id": workspace_id, "label": target.workspace_label}
         if record.status in _INCOMPLETE:
             return {"ok": False, "code": "workspace_index_incomplete",
-                    "workspace": _public_record(record, self._repo())}
+                    "workspace": _public_record(record, self._repo()),
+                    "recovery_command": _LOCAL_WORKSPACE_RECOVERY}
         return {"ok": True, **_public_record(record, self._repo())}
 
     def migration_plan(self, request):
@@ -886,6 +890,12 @@ class WorkspaceService:
                 return {"ok": False, "code": "workspace_not_found",
                         "workspace_id": current.workspace_id}
             if current.lifecycle != "ready" or current.status != "ready":
+                if current.status in _INCOMPLETE:
+                    raise WorkspaceIndexError(
+                        "workspace_recovery_required",
+                        "workspace metadata is incomplete; create and review a migration plan before mutation",
+                        recovery_command=_LOCAL_WORKSPACE_RECOVERY,
+                    )
                 raise WorkspaceIndexError(
                     "workspace_recovery_required",
                     "workspace lifecycle is not ready for mutation")

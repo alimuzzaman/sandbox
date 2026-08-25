@@ -51,6 +51,7 @@ def configure_parser(parser) -> None:
 
 _RETENTION_ACTIONS = frozenset({"release", "ttl", "reap"})
 _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
+_LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
 _REMOTE_REVISION_STATES = frozenset({"match", "mismatch", "unavailable", "unknown"})
 _REMOTE_OWNERSHIP_STATES = frozenset({"proven", "missing", "ambiguous", "unknown"})
 
@@ -155,8 +156,10 @@ def cmd_workspace(_cfg, args) -> None:
                         "ownership": observed["ownership"],
                         "runtime_revision_state": observed["runtime_revision_state"],
                     }
-                if details.get("recovery_command") == _REMOTE_WORKSPACE_RECOVERY:
-                    error["recovery_command"] = _REMOTE_WORKSPACE_RECOVERY
+                if details.get("recovery_command") in {
+                    _REMOTE_WORKSPACE_RECOVERY, _LOCAL_WORKSPACE_RECOVERY,
+                }:
+                    error["recovery_command"] = details["recovery_command"]
             print(json.dumps({
                 "ok": False,
                 "error": error,
@@ -166,9 +169,10 @@ def cmd_workspace(_cfg, args) -> None:
         message = str(exc)
         details = getattr(exc, "details", None)
         if (isinstance(details, dict) and
-                details.get("recovery_command") == _REMOTE_WORKSPACE_RECOVERY and
-                _REMOTE_WORKSPACE_RECOVERY not in message):
-            message += f"; recovery: {_REMOTE_WORKSPACE_RECOVERY}"
+                details.get("recovery_command") in {
+                    _REMOTE_WORKSPACE_RECOVERY, _LOCAL_WORKSPACE_RECOVERY,
+                } and details.get("recovery_command") not in message):
+            message += f"; recovery: {details['recovery_command']}"
         die(f"{getattr(exc, 'code', 'workspace_operation_failed')}: {message}")
     if args.json:
         print(json.dumps(result, sort_keys=True))
@@ -177,6 +181,8 @@ def cmd_workspace(_cfg, args) -> None:
         if index.get("complete") is False:
             print("WARNING: " + (result.get("warning") or "workspace index is incomplete") +
                   f" [{index.get('code', 'workspace_index_incomplete')}]")
+            if result.get("recovery_command"):
+                print(f"  recovery: {result['recovery_command']}")
         for item in result.get("workspaces", []): print(item["label"])
         on_disk = result.get("on_disk") or {}
         if on_disk.get("available") is False:

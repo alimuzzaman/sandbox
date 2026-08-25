@@ -406,6 +406,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     w = sub.add_parser("wp", help="Run any wp-cli command")
     w.add_argument("--local", action="store_true",
                    help="explicitly select the local WordPress runtime")
+    w.add_argument("--project-dir", default=None,
+                   help="project directory whose registered instance should run wp-cli")
     wp_options = w.add_mutually_exclusive_group()
     wp_options.add_argument("--async", dest="run_async", action="store_true",
                             help="run as a background job (spec 004) — prints a job id")
@@ -1248,7 +1250,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             bool(getattr(args, "project_dir", None))
             and args.cmd in {
                 "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
-                "plugin-check", "deploy",
+                "plugin-check", "deploy", "wp",
             }
         )
         if (inner_local_observation or project_routed_with_root) and not explicit:
@@ -1264,6 +1266,21 @@ Per-project (each plugin carries its own sandbox.config.json):
                 except Exception as exc:
                     die(str(exc), 2)
                 chosen = selected.get("instance") if selected else None
+            elif args.cmd == "wp":
+                try:
+                    selected = resolve_registered_instance(
+                        getattr(args, "project_dir", None), label=cwd_label,
+                    )
+                except Exception as exc:
+                    die(str(exc), 2)
+                if not selected:
+                    die(
+                        f"no sandbox instance for project directory "
+                        f"{Path(getattr(args, 'project_dir', '')).expanduser().resolve()}; "
+                        "run `sb ensure --project-dir DIR` to create one.",
+                        2,
+                    )
+                chosen = selected.get("instance")
             else:
                 # Project-routed handlers own their target resolution.  Do not
                 # consult the controller cwd or a global default just because
@@ -1293,6 +1310,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     if args.cmd == "apply" and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
     if args.cmd in {"status", "logs"} and getattr(args, "project_dir", None):
+        PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
+    if args.cmd == "wp" and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
 
     # Instance-scoped commands operate on ONE instance and require resolution.

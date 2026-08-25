@@ -870,6 +870,39 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("explicitly select the local WordPress runtime", r.stdout)
 
+    def test_wp_project_dir_resolves_registered_instance_outside_project_cwd(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        argv = ["sb", "wp", "--project-dir", "/fixture", "--", "option", "get", "siteurl"]
+        core = SimpleNamespace(
+            registry_all=lambda: {},
+            find_project_root=lambda path: Path(path),
+            registry_list_for_root=lambda _root: [{"instance": "fixture", "label": "default"}],
+        )
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "wp": lambda _cfg, args: observed.append(args),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "resolve_registered_instance",
+                                  return_value={"instance": "fixture", "label": "default"}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].resolved_instance, "fixture")
+        self.assertEqual(observed[0].project_dir, "/fixture")
+        self.assertEqual(observed[0].passthrough, ["--", "option", "get", "siteurl"])
+
     def test_wp_timeout_parser_enforces_one_to_3600_seconds(self):
         for value in ("0", "3601", "not-an-integer"):
             with self.subTest(value=value):

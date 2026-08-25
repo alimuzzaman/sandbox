@@ -162,6 +162,7 @@ select --local/--remote`.
 ./sb ensure
 ./sb status
 ./sb wp --timeout 60 -- plugin list
+./sb wp --project-dir <dir> --timeout 60 -- plugin list
 ./sb test
 ./sb test unit --project-dir <dir> --label <label> --remote <name> --timeout 500 -- --filter Smoke
 ./sb deploy --remote <name> --ensure --expose
@@ -171,8 +172,9 @@ WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
 
 `sb wp --local` is accepted as an explicit local-runtime selector for scripts
-that share target flags across Sandbox commands; it does not change the
-WordPress command payload.
+that share target flags across Sandbox commands; `--project-dir DIR` selects
+the registered instance for that project from any working directory. Neither
+flag changes the WordPress command payload.
 
 Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
 through 3600 with `--timeout` before the `--` delimiter to change that bound:

@@ -30,73 +30,73 @@ Generated 2026-08-25 from the machine-local feedback ledger with paginated `./sb
 | 9 | active | P1 | in_progress | high | 2413b7090bad3cc8f02ccf99b4247c0e | sb ensure/apply deadlock: apply uses --no-deps so db never starts |
 | 10 | active | P1 | in_progress | high | f591d52ba4ba7d741824c1fce7397731 | sb ensure: a themes/plugins zip URL is misread as a local path, so the ready fast path refuses forever |
 | 11 | active | P1 | in_progress | high | f3a4d100828e51e70f4ea6e862329e58 | Host logs fail when desired background service is absent |
-| 12 | active | P1 | blocked | high | 78aaf5836d63078b060336a9e306b7f5 | Remote fast-test harness blocked by Docker network pool exhaustion |
-| 13 | active | P1 | blocked | high | a813480b2b761798b839cd4682c0649b | Remote network pressure remains at 31 active managed networks |
-| 14 | active | P1 | blocked | high | bf05eeb9362ba7e408b9315669698b60 | Remote network pressure remains at 31 active managed networks |
-| 15 | active | P1 | blocked | high | 0fac3b07416044a28041c2a358cf2084 | Remote network pressure increased to 31 active managed networks |
-| 16 | active | P1 | blocked | high | 822b93235e7583db404d32b4400ae894 | Compose test provisioning blocks when Docker network pools are exhausted |
-| 17 | active | P1 | open | high | cfdb4f37418aaf17cd06a584e6e99dd6 | Lenzora hosted deployment failed because remote SSH became unreachable during apply and rollback |
-| 18 | active | P1 | open | high | 5e44095151d103a4e1d13f043ea83a27 | Hosted development apply reached rollback with network-unreachable SSH |
-| 19 | active | P1 | open | high | 834d2253f4455e6fd21eb0faffad76ea | sb ensure targets a remote that sb remote list already reports unreachable, then dies with a raw traceback after 120s |
-| 20 | active | P1 | open | high | fc79f41e549131be5d4d4edac49c4ad9 | workspace list/status/destroy all fail with workspace_index_incomplete on remote and host |
-| 21 | active | P1 | open | high | 02987b45f3796f5dee74d5328302a887 | Remote apply partially recreates runtime then fails on plugin permissions |
-| 22 | active | P1 | open | high | 7ab76b8b2a5191b77843b986f25d29c0 | Hosted dev apply stalled building missing worker images from multi-GB context |
-| 23 | active | P1 | open | high | 30a6c1d1f35eab1308137243f8ef119b | Provisioned remote reported unreachable during required validation retry |
-| 24 | active | P1 | open | high | 9c28c05a8b08c0aedd6e51e496cc8424 | Remote Sandbox revision sync is blocked because the provisioned controller is unreachable |
-| 25 | active | P1 | open | high | 0139d6637973f4f1d7ceec87a2f45b75 | Remote ensure fails at post-install baseline snapshot: mariadb-dump cannot write /snapshots (Errcode 13) |
-| 26 | active | P1 | open | high | b340f98a0df25f2c7817d7cac2bd652b | Registered remote reachability disagrees with brokered SSH |
-| 27 | active | P1 | open | high | 412f6c4c5a9eb9d337c8e73baf1ad2d0 | Disposable Free Sandbox reaches HTTP but WordPress install core download times out |
-| 28 | active | P1 | open | high | e6a9bec15a1cc6be016d4ec18af5528d | Remote full-test job blocked by Docker network capacity admission |
-| 29 | active | P1 | open | high | 17f8ea64f9128f062d3e6c9498945594 | sb test routes to a remote runner by default and fails with NetworkCapacityAdmissionError, even with a healthy local instance |
-| 30 | active | P1 | open | high | 4f4075f4b5b4fa35039263677ded6d1d | Remote test submission rejects required non-secret test fixtures as credential-like |
-| 31 | active | P1 | open | high | 0ed665d09e60921f170c48162e2d488e | Remote deploy is permanently blocked by docker_network_capacity_unavailable even though the address pools already match the desired plan |
-| 32 | active | P1 | open | high | 483a4fef967b99f8e1957030a35a00e1 | sb test always routes to the remote deploy path; --local is ignored and the run dies on an SSH git push timeout |
-| 33 | active | P1 | open | high | dd6bbbed8a6706da0e9b070e6cde7b6e | Remote workspace inventory blocked by runtime revision mismatch |
-| 34 | active | P1 | open | high | 2861828e0252f5187c93bd11a1c521f2 | Remote workspace inspection blocked by runtime revision mismatch |
-| 35 | active | P1 | open | high | 0cca9b50cc59c730b17ab11625fcd380 | WordPress apply failed reachability and rollback for xspeed review instance |
-| 36 | active | P1 | open | high | 81a2e388d2aae43cebb46b0d206e2a31 | WordPress apply rollback leaves CSS-capture instance unreachable |
-| 37 | active | P1 | open | high | c5b8e6a908f458f3ccc5b2236b0b39f1 | Remote Sandbox exact-head deploy hangs while ensuring instance |
-| 38 | active | P1 | open | high | 45dcb0236e2ad64607251481e1b1ddf8 | Reviewed Docker pool plan still blocks remote test job admission |
-| 39 | active | P1 | open | high | b4323966b25994dcd75e21650ab77f93 | Remote deployment job cannot be observed from Sandbox durable ledger |
-| 40 | active | P1 | open | high | 5fb893827632bc14bb55a7f051410723 | sandbox is adding steps for hosted apps: no deploy diagnose command, and secrets run cannot inject a credential pair |
-| 41 | active | P1 | open | high | 37d95e663fb02755608c87d5715d67f7 | host apply is silent for 30+ minutes and discards build output, so every deploy failure needs a manual forensic session |
-| 42 | active | P1 | open | high | b5ea143234f3d24d20f2ba78ea4435bb | Remote resource status cannot measure host capacity |
-| 43 | active | P1 | open | high | 6a1cca016d14d5cb8cb8f17648d15fc4 | Remote capacity and active-job monitor transport unavailable |
-| 44 | active | P1 | open | high | 3b3782464e982ed9387e8e2a81d12c53 | Remote network-capacity monitor unavailable |
-| 45 | active | P1 | open | high | c5548021faf772c2bc0bae19a8b94864 | Remote network capacity remains unmeasurable |
-| 46 | active | P1 | open | high | 84585e00f7126c3d37e11d6168091163 | Remote resource status classifies 32 networks as unattributed |
-| 47 | active | P1 | open | high | c4237726db9330b9c59a0fbc30328790 | Remote job-status SSH lookup timed out during accepted-job observation |
-| 48 | active | P1 | open | high | ab332c6de39e1d5c4fdd322ca1f5c057 | Remote job status SSH control timed out after jobs completed |
-| 49 | active | P1 | open | high | 25008adab7a0612dca8f360ea6c27663 | Fresh remote Feature019 job still cannot provision Compose network |
-| 50 | active | P1 | open | high | e66a25a7442e753015cd3a22d40f74af | Remote workspace references missing deployed project directory |
-| 51 | active | P1 | open | high | 498b193cc569470ec87feba685af3dea | Remote deploy blocked: Docker daemon out of address pools (31 networks) on scaleway-sandbox |
-| 52 | active | P1 | open | high | b06bb2505db8cfe037fe4af3f908f5c6 | Remote workspace list resolves a missing deploy path |
-| 53 | active | P1 | open | high | 76b5ac739bf331866795b3407295dff5 | Exact-source deploy Git push times out before remote job creation |
-| 54 | active | P1 | open | high | 0f423fb08b654a25161008d35dd30f34 | Remote job-list preflight cannot return old or fresh workspace records |
-| 55 | active | P1 | open | high | 95acb85a0e1cbbc855c7b8e508fbe73b | Hosted Lenzora dev deploy times out during compose restart and leaves worker runtime failures |
-| 56 | active | P1 | open | high | b459d15a68e801aa605881b9864a81ee | Hosted Lenzora deploy job is accepted but branch guard and job ledger prevent verification |
-| 57 | active | P1 | open | high | c0037db18a5c0485b646df051a1cdd59 | Remote deploy of a composer-autoloaded WP plugin boots to a fatal: vendor/ is gitignored, so PSR-4 classes are missing |
-| 58 | active | P1 | open | high | 529a0ed3d6697d12c2c958100c09369f | Remote service migration times out while staging current runtime |
-| 59 | active | P1 | open | high | ead67171123ba137eb48221d56cc0d46 | Remote service migration hangs during runtime source upload |
-| 60 | active | P1 | open | high | b067e765faaf880f32a7d1ee5c0539ac | remote job cancel fails with malformed control-plane error |
-| 61 | active | P1 | open | high | cfb94c42166cb64f3b45c2d8189f624d | Remote ensure leaves no registered instance after creating compose resources |
-| 62 | active | P1 | open | high | b9d6995a1966fe8b31077bd124d23b9b | Remote ensure cannot deploy detached exact-head review clone |
-| 63 | active | P1 | open | high | e25a8491a48f74accf72d1b96f6421e4 | Lenzora host apply returned generic remote command failure |
-| 64 | active | P1 | open | high | 4ad5d6605243e8a23beca6339ad7a001 | Hosted apply retry timed out while resetting deployed source |
-| 65 | active | P1 | open | high | 3d9a49cee63a623d9169eecfc6802610 | Remote job submission rejected by unsupported execution policy capability |
-| 66 | active | P1 | open | high | 3326ceaec6df31b36d18f9e2c229bf2c | Remote job submission blocked by missing execution policy capability |
-| 67 | active | P1 | open | high | 5978c11e472eae799b5855fdab356e72 | Remote high-memory build was host-killed below its container cap |
-| 68 | active | P1 | open | high | 0eab73b892802256d2ba001497ad2998 | Failed remote Compose job loses Jest failure evidence |
-| 69 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
-| 70 | active | P1 | open | high | ccd9e5e28f09f91f51cd36b5e7645900 | sb ensure against a remote target returns no instance record (no url) |
-| 71 | active | P1 | open | high | 01df389c5d1019fc1f82d52ea8072950 | resources status on remote: deep/scope-cache return measurement_unavailable, thorough times out most categories |
-| 72 | active | P1 | open | high | b69b39a5a25a10e244b7918e36e169ab | sb test silently runs REMOTE for a local project, and the working-tree push exceeds sb's own 120s timeout |
-| 73 | active | P1 | open | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
-| 74 | active | P1 | open | high | 822262fe39df0c080ec49b562307d7bf | Remote workspace index remains incomplete |
-| 75 | active | P1 | open | high | 3222e29592d229d03be37a60b9a43bf1 | Remote resource status currently unavailable |
-| 76 | active | P1 | open | high | 3a6e8c1a1fa71bde1a74b8b0eeb37e9c | Remote workspace index remains incomplete after provision |
-| 77 | active | P1 | open | high | 0384ab6b647c4b6f3ce1db9a348d496e | Remote job-start intermittently returns no acceptance payload or durable ledger entry |
-| 78 | active | P1 | open | high | 8371d7f7589feaff75cd7d4ee17424ca | Explicit local instance selector was routed to configured remote |
+| 12 | active | P1 | in_progress | high | 17f8ea64f9128f062d3e6c9498945594 | sb test routes to a remote runner by default and fails with NetworkCapacityAdmissionError, even with a healthy local instance |
+| 13 | active | P1 | in_progress | high | 483a4fef967b99f8e1957030a35a00e1 | sb test always routes to the remote deploy path; --local is ignored and the run dies on an SSH git push timeout |
+| 14 | active | P1 | in_progress | high | b69b39a5a25a10e244b7918e36e169ab | sb test silently runs REMOTE for a local project, and the working-tree push exceeds sb's own 120s timeout |
+| 15 | active | P1 | in_progress | high | 8371d7f7589feaff75cd7d4ee17424ca | Explicit local instance selector was routed to configured remote |
+| 16 | active | P1 | blocked | high | 78aaf5836d63078b060336a9e306b7f5 | Remote fast-test harness blocked by Docker network pool exhaustion |
+| 17 | active | P1 | blocked | high | a813480b2b761798b839cd4682c0649b | Remote network pressure remains at 31 active managed networks |
+| 18 | active | P1 | blocked | high | bf05eeb9362ba7e408b9315669698b60 | Remote network pressure remains at 31 active managed networks |
+| 19 | active | P1 | blocked | high | 0fac3b07416044a28041c2a358cf2084 | Remote network pressure increased to 31 active managed networks |
+| 20 | active | P1 | blocked | high | 822b93235e7583db404d32b4400ae894 | Compose test provisioning blocks when Docker network pools are exhausted |
+| 21 | active | P1 | open | high | cfdb4f37418aaf17cd06a584e6e99dd6 | Lenzora hosted deployment failed because remote SSH became unreachable during apply and rollback |
+| 22 | active | P1 | open | high | 5e44095151d103a4e1d13f043ea83a27 | Hosted development apply reached rollback with network-unreachable SSH |
+| 23 | active | P1 | open | high | 834d2253f4455e6fd21eb0faffad76ea | sb ensure targets a remote that sb remote list already reports unreachable, then dies with a raw traceback after 120s |
+| 24 | active | P1 | open | high | fc79f41e549131be5d4d4edac49c4ad9 | workspace list/status/destroy all fail with workspace_index_incomplete on remote and host |
+| 25 | active | P1 | open | high | 02987b45f3796f5dee74d5328302a887 | Remote apply partially recreates runtime then fails on plugin permissions |
+| 26 | active | P1 | open | high | 7ab76b8b2a5191b77843b986f25d29c0 | Hosted dev apply stalled building missing worker images from multi-GB context |
+| 27 | active | P1 | open | high | 30a6c1d1f35eab1308137243f8ef119b | Provisioned remote reported unreachable during required validation retry |
+| 28 | active | P1 | open | high | 9c28c05a8b08c0aedd6e51e496cc8424 | Remote Sandbox revision sync is blocked because the provisioned controller is unreachable |
+| 29 | active | P1 | open | high | 0139d6637973f4f1d7ceec87a2f45b75 | Remote ensure fails at post-install baseline snapshot: mariadb-dump cannot write /snapshots (Errcode 13) |
+| 30 | active | P1 | open | high | b340f98a0df25f2c7817d7cac2bd652b | Registered remote reachability disagrees with brokered SSH |
+| 31 | active | P1 | open | high | 412f6c4c5a9eb9d337c8e73baf1ad2d0 | Disposable Free Sandbox reaches HTTP but WordPress install core download times out |
+| 32 | active | P1 | open | high | e6a9bec15a1cc6be016d4ec18af5528d | Remote full-test job blocked by Docker network capacity admission |
+| 33 | active | P1 | open | high | 4f4075f4b5b4fa35039263677ded6d1d | Remote test submission rejects required non-secret test fixtures as credential-like |
+| 34 | active | P1 | open | high | 0ed665d09e60921f170c48162e2d488e | Remote deploy is permanently blocked by docker_network_capacity_unavailable even though the address pools already match the desired plan |
+| 35 | active | P1 | open | high | dd6bbbed8a6706da0e9b070e6cde7b6e | Remote workspace inventory blocked by runtime revision mismatch |
+| 36 | active | P1 | open | high | 2861828e0252f5187c93bd11a1c521f2 | Remote workspace inspection blocked by runtime revision mismatch |
+| 37 | active | P1 | open | high | 0cca9b50cc59c730b17ab11625fcd380 | WordPress apply failed reachability and rollback for xspeed review instance |
+| 38 | active | P1 | open | high | 81a2e388d2aae43cebb46b0d206e2a31 | WordPress apply rollback leaves CSS-capture instance unreachable |
+| 39 | active | P1 | open | high | c5b8e6a908f458f3ccc5b2236b0b39f1 | Remote Sandbox exact-head deploy hangs while ensuring instance |
+| 40 | active | P1 | open | high | 45dcb0236e2ad64607251481e1b1ddf8 | Reviewed Docker pool plan still blocks remote test job admission |
+| 41 | active | P1 | open | high | b4323966b25994dcd75e21650ab77f93 | Remote deployment job cannot be observed from Sandbox durable ledger |
+| 42 | active | P1 | open | high | 5fb893827632bc14bb55a7f051410723 | sandbox is adding steps for hosted apps: no deploy diagnose command, and secrets run cannot inject a credential pair |
+| 43 | active | P1 | open | high | 37d95e663fb02755608c87d5715d67f7 | host apply is silent for 30+ minutes and discards build output, so every deploy failure needs a manual forensic session |
+| 44 | active | P1 | open | high | b5ea143234f3d24d20f2ba78ea4435bb | Remote resource status cannot measure host capacity |
+| 45 | active | P1 | open | high | 6a1cca016d14d5cb8cb8f17648d15fc4 | Remote capacity and active-job monitor transport unavailable |
+| 46 | active | P1 | open | high | 3b3782464e982ed9387e8e2a81d12c53 | Remote network-capacity monitor unavailable |
+| 47 | active | P1 | open | high | c5548021faf772c2bc0bae19a8b94864 | Remote network capacity remains unmeasurable |
+| 48 | active | P1 | open | high | 84585e00f7126c3d37e11d6168091163 | Remote resource status classifies 32 networks as unattributed |
+| 49 | active | P1 | open | high | c4237726db9330b9c59a0fbc30328790 | Remote job-status SSH lookup timed out during accepted-job observation |
+| 50 | active | P1 | open | high | ab332c6de39e1d5c4fdd322ca1f5c057 | Remote job status SSH control timed out after jobs completed |
+| 51 | active | P1 | open | high | 25008adab7a0612dca8f360ea6c27663 | Fresh remote Feature019 job still cannot provision Compose network |
+| 52 | active | P1 | open | high | e66a25a7442e753015cd3a22d40f74af | Remote workspace references missing deployed project directory |
+| 53 | active | P1 | open | high | 498b193cc569470ec87feba685af3dea | Remote deploy blocked: Docker daemon out of address pools (31 networks) on scaleway-sandbox |
+| 54 | active | P1 | open | high | b06bb2505db8cfe037fe4af3f908f5c6 | Remote workspace list resolves a missing deploy path |
+| 55 | active | P1 | open | high | 76b5ac739bf331866795b3407295dff5 | Exact-source deploy Git push times out before remote job creation |
+| 56 | active | P1 | open | high | 0f423fb08b654a25161008d35dd30f34 | Remote job-list preflight cannot return old or fresh workspace records |
+| 57 | active | P1 | open | high | 95acb85a0e1cbbc855c7b8e508fbe73b | Hosted Lenzora dev deploy times out during compose restart and leaves worker runtime failures |
+| 58 | active | P1 | open | high | b459d15a68e801aa605881b9864a81ee | Hosted Lenzora deploy job is accepted but branch guard and job ledger prevent verification |
+| 59 | active | P1 | open | high | c0037db18a5c0485b646df051a1cdd59 | Remote deploy of a composer-autoloaded WP plugin boots to a fatal: vendor/ is gitignored, so PSR-4 classes are missing |
+| 60 | active | P1 | open | high | 529a0ed3d6697d12c2c958100c09369f | Remote service migration times out while staging current runtime |
+| 61 | active | P1 | open | high | ead67171123ba137eb48221d56cc0d46 | Remote service migration hangs during runtime source upload |
+| 62 | active | P1 | open | high | b067e765faaf880f32a7d1ee5c0539ac | remote job cancel fails with malformed control-plane error |
+| 63 | active | P1 | open | high | cfb94c42166cb64f3b45c2d8189f624d | Remote ensure leaves no registered instance after creating compose resources |
+| 64 | active | P1 | open | high | b9d6995a1966fe8b31077bd124d23b9b | Remote ensure cannot deploy detached exact-head review clone |
+| 65 | active | P1 | open | high | e25a8491a48f74accf72d1b96f6421e4 | Lenzora host apply returned generic remote command failure |
+| 66 | active | P1 | open | high | 4ad5d6605243e8a23beca6339ad7a001 | Hosted apply retry timed out while resetting deployed source |
+| 67 | active | P1 | open | high | 3d9a49cee63a623d9169eecfc6802610 | Remote job submission rejected by unsupported execution policy capability |
+| 68 | active | P1 | open | high | 3326ceaec6df31b36d18f9e2c229bf2c | Remote job submission blocked by missing execution policy capability |
+| 69 | active | P1 | open | high | 5978c11e472eae799b5855fdab356e72 | Remote high-memory build was host-killed below its container cap |
+| 70 | active | P1 | open | high | 0eab73b892802256d2ba001497ad2998 | Failed remote Compose job loses Jest failure evidence |
+| 71 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
+| 72 | active | P1 | open | high | ccd9e5e28f09f91f51cd36b5e7645900 | sb ensure against a remote target returns no instance record (no url) |
+| 73 | active | P1 | open | high | 01df389c5d1019fc1f82d52ea8072950 | resources status on remote: deep/scope-cache return measurement_unavailable, thorough times out most categories |
+| 74 | active | P1 | open | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
+| 75 | active | P1 | open | high | 822262fe39df0c080ec49b562307d7bf | Remote workspace index remains incomplete |
+| 76 | active | P1 | open | high | 3222e29592d229d03be37a60b9a43bf1 | Remote resource status currently unavailable |
+| 77 | active | P1 | open | high | 3a6e8c1a1fa71bde1a74b8b0eeb37e9c | Remote workspace index remains incomplete after provision |
+| 78 | active | P1 | open | high | 0384ab6b647c4b6f3ce1db9a348d496e | Remote job-start intermittently returns no acceptance payload or durable ledger entry |
 | 79 | active | P1 | open | high | 6e3ff886a6ccb6a37708abf705721189 | Sandbox cannot safely clean clearly temporary remote workspace stacks while the workspace index is incomplete |
 | 80 | active | P1 | open | high | 009845006beb244f191c461c3d75cf55 | Remote job-list large page failed and surfaced a tail of retained job data as an error |
 | 81 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |

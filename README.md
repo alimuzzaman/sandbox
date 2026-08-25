@@ -719,6 +719,7 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb zip [--dev|--clean]  # build the distributable plugin zip (see docs/plugin-zip.md)
 ./sb doctor [--instance NAME|--label LABEL] [--json]  # audit one local instance + controller health
 ./sb status               # which containers + project + focus are active
+./sb status --instance <name> --json  # inspect a known local instance from any cwd
 ./sb status --project-dir <dir> --json  # inspect a registered local project from any cwd
 ./sb status --remote <name> --instance <remote-instance> --json  # inspect a known remote instance directly
 ./sb down                 # stop containers (state preserved)

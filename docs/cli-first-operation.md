@@ -22,6 +22,10 @@ For a local project outside the current working directory, pass
 instance by default. `--local` remains accepted as an explicit spelling for
 scripts that already use it.
 
+If the instance name is already known, `sb status --instance NAME` and
+`sb logs --instance NAME` select it directly from any working directory; the
+controller does not consult the current directory as a fallback.
+
 `sb ensure` performs a bounded, read-only `docker info` preflight before it
 allocates ports or writes `sandbox.local.yml`/the instance registry. If Docker
 Desktop/OrbStack is stopped or its socket is unreachable, it fails within a few

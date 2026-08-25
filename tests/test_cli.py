@@ -418,6 +418,35 @@ class TestResolutionGate(unittest.TestCase):
         auto_migrate.assert_not_called()
         finalize.assert_not_called()
 
+    def test_explicit_instance_status_does_not_consult_controller_cwd(self):
+        """A named local instance is sufficient when invoked outside its project."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        core = mock.Mock()
+        core.registry_all.return_value = {}
+        with mock.patch.object(sys, "argv", [
+                "sb", "status", "--instance", "known",
+        ]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "status": lambda _cfg, args: observed.append(args.resolved_instance),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances",
+                                  return_value={"known": {}}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli, "_cwd_instance",
+                                  side_effect=AssertionError("controller cwd consulted")), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration",
+                                  return_value=False) as finalize:
+            cli.main()
+
+        self.assertEqual(observed, ["known"])
+
     def test_project_routed_local_observation_preserves_known_and_unknown_explicit_instance(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

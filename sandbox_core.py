@@ -376,6 +376,38 @@ def _project_slug(raw, fallback: str) -> str:
     return slug
 
 
+def _detect_project_plugin_slug(root: Path) -> str | None:
+    """Return a safe self-plugin slug for a descriptor-less checkout.
+
+    ``sb ensure`` is also a supported entry point for a fresh WordPress plugin
+    checkout, before ``sb init`` has written a descriptor.  Only a root-level
+    PHP file with a WordPress ``Plugin Name`` header qualifies; arbitrary
+    repositories (including the Sandbox repository itself) are left untouched.
+    Prefer the header's text domain because a detached worktree filename is not
+    a stable install slug, and fall back to the header file stem when needed.
+    """
+    root = Path(root)
+    header_re = re.compile(r"^\s*(?:\*+\s*)?Plugin\s+Name\s*:", re.I | re.M)
+    domain_re = re.compile(
+        r"^\s*(?:\*+\s*)?Text\s+Domain\s*:\s*([^\s*]+)", re.I | re.M,
+    )
+    for candidate in sorted(root.glob("*.php")):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            head = candidate.read_text(encoding="utf-8", errors="ignore")[:8192]
+        except OSError:
+            continue
+        if not header_re.search(head):
+            continue
+        match = domain_re.search(head)
+        raw = match.group(1) if match else candidate.stem
+        slug = str(raw).strip().lower()
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+            return slug
+    return None
+
+
 def _normalize_plugins(doc: dict):
     """Raw config doc -> ({slug: entry}, used_legacy: bool, self_entry).
 
@@ -594,6 +626,21 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
             source = wpenv.name
         else:
             native_doc, source = {}, "defaults"
+
+    # A bare WordPress plugin checkout is a valid ``sb ensure`` input even
+    # before ``sb init`` writes a descriptor.  Synthesize the same self mapping
+    # that init would scaffold, but only when a root-level WordPress plugin
+    # header proves this is a plugin repository.  Generic/non-plugin roots stay
+    # on the normal defaults path.
+    if source == "defaults":
+        detected_slug = _detect_project_plugin_slug(root)
+        if detected_slug:
+            native_doc = dict(native_doc)
+            native_doc["slug"] = detected_slug
+            native_plugins = native_doc.get("plugins")
+            native_plugins = dict(native_plugins) if isinstance(native_plugins, dict) else {}
+            native_plugins.setdefault(detected_slug, ".")
+            native_doc["plugins"] = native_plugins
 
     override_path = _first_existing(config_home, OVERRIDE_BASENAMES)
     override_doc = _load_doc(override_path) if override_path else {}

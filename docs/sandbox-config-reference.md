@@ -424,6 +424,14 @@ MCP Adapter release zip by default. Replace the
 `plugins` field in a project config with a smaller map/list if that project
 should not install those development helpers.
 
+Before a descriptor exists, `sb ensure --project-dir DIR` applies the same
+self-mapping automatically when `DIR` contains a root-level PHP file with a
+WordPress `Plugin Name` header. The header's `Text Domain` (or, if absent, the
+header file stem) becomes the install slug, so a detached worktree is wired
+without trusting its directory basename. Non-plugin and generic Compose roots
+do not receive a synthetic plugin mapping; run `sb init` to create an explicit
+descriptor when more control is needed.
+
 ### Value shorthands
 
 | Value | Means |

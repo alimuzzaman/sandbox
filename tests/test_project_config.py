@@ -63,6 +63,37 @@ from unittest import mock
 
 
 class TestProjectConfig(unittest.TestCase):
+    def test_bare_wordpress_plugin_root_gets_header_slug_self_mapping(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            (root / "worktree-entry.php").write_text(
+                "<?php\n/**\n * Plugin Name: Fixture\n * Text Domain: fixture-plugin\n */\n",
+            )
+            result = sandbox_core.load_project_config(root)
+
+        self.assertTrue(result["source"].endswith("defaults"))
+        self.assertEqual(result["slug"], "fixture-plugin")
+        self.assertEqual(
+            result["plugins_resolved"]["fixture-plugin"]["source"],
+            {"kind": "path", "value": "."},
+        )
+        self.assertTrue(result["plugins_resolved"]["fixture-plugin"]["active"])
+
+    def test_bare_non_plugin_root_does_not_get_a_synthetic_plugin_mapping(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            (root / "application.php").write_text("<?php echo 'not a plugin';\n")
+            result = sandbox_core.load_project_config(root)
+
+        self.assertIsNone(result["slug"])
+        self.assertNotIn(root.name, result["plugins_resolved"])
+
     def test_conventional_config_home_loads_complete_compose_family(self):
         import sandbox_core
 

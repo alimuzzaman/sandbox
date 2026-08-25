@@ -67,6 +67,8 @@ _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _APPLEDOUBLE_BASENAME_PREFIX = "._"
 _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
 _NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS = 300
+REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS = 120
+REMOTE_PUSH_TIMEOUT_MAX_SECONDS = 3600
 REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS = 15
 REMOTE_REACHABILITY_TIMEOUT_SECONDS = 20
 REMOTE_RESET_TIMEOUT_SECONDS = 120
@@ -74,6 +76,38 @@ REMOTE_RESET_KILL_GRACE_SECONDS = 15
 REMOTE_RESET_CLIENT_TIMEOUT_SECONDS = (
     REMOTE_RESET_TIMEOUT_SECONDS + REMOTE_RESET_KILL_GRACE_SECONDS + 15
 )
+
+
+class RemotePushTimeout(RuntimeError):
+    """Safe, command-free failure for a timed-out source push."""
+
+    def __init__(self, timeout_seconds: int) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"git push to remote timed out after {timeout_seconds} seconds; "
+            "inspect the remote deployment state before retrying"
+        )
+
+
+def normalize_remote_push_timeout(value: object) -> int:
+    """Validate one bounded local Git-push timeout in seconds."""
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= REMOTE_PUSH_TIMEOUT_MAX_SECONDS):
+        raise ValueError(
+            "remote push timeout must be an integer from 1 to "
+            f"{REMOTE_PUSH_TIMEOUT_MAX_SECONDS} seconds"
+        )
+    return value
+
+
+def remote_push_timeout_for_deadline(value: object) -> int:
+    """Derive a push budget from a job deadline without allowing an unbounded wait."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS
+    return normalize_remote_push_timeout(min(
+        REMOTE_PUSH_TIMEOUT_MAX_SECONDS,
+        max(REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS, value),
+    ))
 
 
 def is_appledouble_basename(value: str | os.PathLike) -> bool:
@@ -258,6 +292,7 @@ def deploy_exact_working_tree(
     source_root: str | Path | None = None,
     required_subnets: int = 1,
     remote_name: str | None = None,
+    push_timeout: int | None = None,
 ) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
@@ -266,6 +301,9 @@ def deploy_exact_working_tree(
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    push_timeout = normalize_remote_push_timeout(
+        REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
+    )
     # Admission is intentionally the first remote operation.  In particular,
     # it must precede ensure_deploy_repo(), git push, reset, dirty-overlay
     # upload, and any subsequent workspace/instance staging.  A partial or
@@ -289,6 +327,7 @@ def deploy_exact_working_tree(
         remote, root, target, branch,
         source_ref=source_ref, resolved_sha=resolved_source,
         source_root=source_root,
+        push_timeout=push_timeout,
     )
     reset_target_to(remote, target, pushed_sha)
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
@@ -1415,6 +1454,7 @@ def push_commits(
     source_ref: str | None = None,
     resolved_sha: str | None = None,
     source_root: str | Path | None = None,
+    push_timeout: int | None = None,
 ) -> str:
     """Push the committed source artifact to the deploy-target repo.
 
@@ -1425,6 +1465,9 @@ def push_commits(
     caller.  Both paths use the same registered SSH transport and never route
     through another Git remote.
     """
+    push_timeout = normalize_remote_push_timeout(
+        REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
+    )
     push_url = git_ssh_url(remote, target_path)
     source_commit = resolved_sha
     push_cwd = Path(project_root)
@@ -1468,11 +1511,14 @@ def push_commits(
         git_ssh = git_ssh_command(remote)
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = git_ssh
-    res = subprocess.run(
-        ["git", "push", push_url, source_spec],
-        cwd=str(push_cwd), env=env, capture_output=True, text=True,
-        timeout=120, check=False,
-    )
+    try:
+        res = subprocess.run(
+            ["git", "push", push_url, source_spec],
+            cwd=str(push_cwd), env=env, capture_output=True, text=True,
+            timeout=push_timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RemotePushTimeout(push_timeout) from None
     if res.returncode != 0:
         raise RuntimeError(
             f"git push to remote failed: "

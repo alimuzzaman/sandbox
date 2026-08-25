@@ -17,6 +17,38 @@ from sandbox.transports.remote_jobs import (
 
 
 class RemoteJobTransportTests(unittest.TestCase):
+    def test_job_deadline_is_forwarded_to_deploy_push_when_supported(self):
+        observed = {}
+
+        def deploy(_remote, _root, *, push_timeout=None):
+            observed["push_timeout"] = push_timeout
+            return {"target_path": "/srv/p", "identity": "sha256:id"}
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: None,
+            remote_lookup=lambda _name: {},
+        )
+        deployed = transport._deploy(
+            {}, "/project", deployment_timeout=900,
+        )
+        self.assertEqual(deployed["target_path"], "/srv/p")
+        self.assertEqual(observed["push_timeout"], 900)
+
+    def test_short_job_deadline_keeps_minimum_push_budget(self):
+        observed = {}
+
+        def deploy(_remote, _root, *, push_timeout=None):
+            observed["push_timeout"] = push_timeout
+            return {"target_path": "/srv/p", "identity": "sha256:id"}
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: None,
+            remote_lookup=lambda _name: {},
+        )
+        transport._deploy({}, "/project", deployment_timeout=60)
+        self.assertEqual(observed["push_timeout"], 120)
     @staticmethod
     def _blocked_admission(remote_name="vps"):
         decision = evaluate_network_capacity({"status": "partial"}, remote_name=remote_name)

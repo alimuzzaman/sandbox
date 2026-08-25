@@ -133,6 +133,18 @@ def cmd_deploy(cfg, args) -> None:
         if not isinstance(source_ref, str):
             source_ref = None
     as_json = bool(getattr(args, "json", False))
+    raw_deploy_timeout = getattr(args, "deploy_timeout", None)
+    # Hand-built adapters/tests may omit the argparse field; only an explicit
+    # integer changes the default instead of treating a mock attribute as input.
+    if isinstance(raw_deploy_timeout, bool) or not isinstance(raw_deploy_timeout, int):
+        raw_deploy_timeout = None
+    try:
+        deploy_timeout = sr.normalize_remote_push_timeout(
+            sr.REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS
+            if raw_deploy_timeout is None else raw_deploy_timeout
+        )
+    except ValueError as exc:
+        _fail(remote_name, str(exc), as_json, source_ref=source_ref)
     explicit_instance = getattr(args, "instance", None)
     if isinstance(explicit_instance, str) and explicit_instance.strip():
         # ``--instance`` is a global selector for observation/control commands,
@@ -206,6 +218,7 @@ def cmd_deploy(cfg, args) -> None:
         pushed_sha = sr.push_commits(
             entry, root, target, branch,
             source_ref=source_ref, resolved_sha=resolved_source,
+            push_timeout=deploy_timeout,
         )
         sr.reset_target_to(entry, target, pushed_sha)
         descriptor_files = sr.deploy_project_descriptor_files(root)

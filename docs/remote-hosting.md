@@ -36,6 +36,13 @@ the source of truth for the remote deploy repository and the instance it
 ensures. The global `--instance` selector is rejected for this command rather
 than silently ignored; use the intended project directory explicitly.
 
+The Git push budget defaults to 120 seconds. For a large first-time transfer,
+set a bounded value explicitly with `--deploy-timeout SECONDS` (1-3600). Remote
+test/job submissions derive the same budget from their job deadline, retaining
+a 120-second minimum and a 3600-second cap. A push timeout is reported as a
+handled, command-free error; inspect the remote deployment state before replaying
+because the final state is unknown.
+
 Each deploy resets the remote checkout to the pushed revision and removes only
 untracked, non-ignored files before applying the current uncommitted layer. The
 reset is supervised on the remote for 120 seconds with a 15-second termination
@@ -189,7 +196,7 @@ untouched.
 
 ```bash
 cd ~/some/plugin/project
-./sb deploy --remote myvps
+./sb deploy --remote myvps --deploy-timeout 600
 ```
 
 This is a **one-way, on-demand** push — never a continuous sync. Every deploy:
@@ -650,7 +657,7 @@ reference. Summary:
 | `./sb remote service stop <name> --confirm --json` | Stop only the selected proven service unit |
 | `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
-| `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
+| `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
 
 MCP tool:

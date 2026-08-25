@@ -654,7 +654,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 88)
+        self.assertEqual(len(COMMANDS), 89)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 
@@ -824,6 +824,7 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("deploy", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--source-ref", r.stdout)
+        self.assertIn("--deploy-timeout", r.stdout)
 
     def test_wp_payload_stdout_is_clean_and_diagnostics_use_stderr(self):
         import sandbox.commands.wp as command

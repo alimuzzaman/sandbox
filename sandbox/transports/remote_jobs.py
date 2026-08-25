@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import inspect
 import re
 import shlex
 import subprocess
@@ -342,10 +343,25 @@ class RemoteJobTransport:
         self.deploy = deploy
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
+        self._deploy_accepts_push_timeout = self._accepts_keyword(
+            deploy, "push_timeout"
+        )
         # The VPS runtime is staged under SANDBOX_HOME; its CLI is not
         # necessarily on PATH.  Keep the path policy injected by the remote
         # adapter so this transport remains runtime-neutral and testable.
         self.remote_sb_path = remote_sb_path or (lambda _remote: "sb")
+
+    @staticmethod
+    def _accepts_keyword(callable_obj: Callable, name: str) -> bool:
+        try:
+            parameters = inspect.signature(callable_obj).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == name
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
 
     def _remote_command(self, remote: dict, argv: list[str]) -> str:
         return shlex.join([self.remote_sb_path(remote), *argv])
@@ -376,18 +392,29 @@ class RemoteJobTransport:
                 "remote does not support job.execution-policy.v1; reprovision or update the remote before submitting jobs")
         return remote
 
-    def _deploy(self, remote: dict, project_root: str) -> dict:
+    def _deploy(self, remote: dict, project_root: str,
+                *, deployment_timeout: int | None = None) -> dict:
         """Deploy once, translating only the policy admission refusal."""
         # Keep this import lazy: the core remote adapter imports this transport
         # for workspace helpers, so importing it at module load would create a
         # cycle in callers that only need the local transport contract.
-        from sandbox.core._remote import NetworkCapacityAdmissionError
+        from sandbox.core._remote import (
+            NetworkCapacityAdmissionError,
+            RemotePushTimeout,
+            remote_push_timeout_for_deadline,
+        )
 
         caught = False
         timed_out = False
+        timeout_seconds = None
         decision = None
+        deploy_kwargs = {}
+        if deployment_timeout is not None and self._deploy_accepts_push_timeout:
+            deploy_kwargs["push_timeout"] = remote_push_timeout_for_deadline(
+                deployment_timeout
+            )
         try:
-            deployed = self.deploy(remote, project_root)
+            deployed = self.deploy(remote, project_root, **deploy_kwargs)
         except NetworkCapacityAdmissionError as exc:
             caught = True
             decision = getattr(exc, "decision", None)
@@ -397,11 +424,19 @@ class RemoteJobTransport:
             # the subprocess command (which may contain a private path) as a
             # raw traceback to CLI/MCP callers.
             timed_out = True
+        except RemotePushTimeout as exc:
+            timed_out = True
+            timeout_seconds = exc.timeout_seconds
         if timed_out:
             # Raise after leaving the handler so the private subprocess
             # exception is not retained as the public exception context.
+            suffix = (
+                f" after {timeout_seconds} seconds"
+                if timeout_seconds is not None else ""
+            )
             raise RemoteJobTransportError(
-                "remote source deployment timed out before job acceptance; "
+                "remote source deployment timed out"
+                f"{suffix} before job acceptance; "
                 "retry with --local or inspect the remote deployment state before replaying"
             ) from None
         if caught:
@@ -420,7 +455,10 @@ class RemoteJobTransport:
                 "remote job command contains credential-like material"
             ) from None
         remote = self._execution_remote(submission.remote_name)
-        deployed = self._deploy(remote, submission.project_root)
+        deployed = self._deploy(
+            remote, submission.project_root,
+            deployment_timeout=submission.deadline_seconds,
+        )
         self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
@@ -447,7 +485,10 @@ class RemoteJobTransport:
                     item.project_root != first.project_root for item in submissions)):
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
         remote = self._execution_remote(first.remote_name)
-        deployed = self._deploy(remote, first.project_root)
+        deployed = self._deploy(
+            remote, first.project_root,
+            deployment_timeout=max(item.deadline_seconds for item in submissions),
+        )
         self._validate_deployment(deployed)
         plan = []
         for item in submissions:

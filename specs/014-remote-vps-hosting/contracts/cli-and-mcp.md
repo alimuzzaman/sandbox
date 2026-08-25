@@ -23,7 +23,7 @@ remote.
 ## `./sb deploy` command
 
 ```
-./sb deploy --project-dir DIR --remote NAME [--ensure] [--expose] [--domain HOST] [--plugin-slug SLUG] [--json]
+./sb deploy --project-dir DIR --remote NAME [--ensure] [--expose] [--domain HOST] [--plugin-slug SLUG] [--deploy-timeout SECONDS] [--json]
 ```
 
 | Flag | Purpose |
@@ -34,6 +34,7 @@ remote.
 | `--expose` | Implies the remote instance must be ensured; add/update a Caddy public HTTPS route, set WordPress `home`/`siteurl`, and return the public URL. |
 | `--domain HOST` | Public hostname for `--expose`. If omitted, defaults to `default-<project-slug>.sandbox.asb.bd`. DNS must already point at the VPS. |
 | `--plugin-slug SLUG` | Plugin slug to symlink into the remote instance and activate after `--ensure`. Defaults to the project config slug, then the deploy target slug. |
+| `--deploy-timeout SECONDS` | Bounded Git push budget for this deploy, from 1 to 3600 seconds; default 120. The remote job transport derives the same budget from its job deadline, with a 120-second minimum and 3600-second cap. |
 | `--json` | Print the result as JSON on stdout, for scripting/the MCP tool. |
 
 **Exit codes**: `0` on a fully successful deploy; `1` on any failure (remote not

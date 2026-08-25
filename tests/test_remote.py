@@ -664,6 +664,42 @@ class TestDeployTargetPath(unittest.TestCase):
 
 
 class TestPushCommits(unittest.TestCase):
+    @patch("subprocess.run")
+    def test_push_timeout_is_forwarded_and_bounded(self, mock_run):
+        revision = "a" * 40
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
+            _completed(returncode=0),
+        ]
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                    "/home/ubuntu/sandbox/deploy-src/proj", "main",
+                    push_timeout=900,
+                )
+        self.assertEqual(mock_run.call_args_list[1].kwargs["timeout"], 900)
+        with self.assertRaisesRegex(ValueError, "1 to 3600"):
+            sr.normalize_remote_push_timeout(3601)
+
+    @patch("subprocess.run")
+    def test_push_timeout_is_safe_and_command_free_on_expiry(self, mock_run):
+        revision = "a" * 40
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
+            subprocess.TimeoutExpired(["git", "push", "/private/path"], 900),
+        ]
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                with self.assertRaises(sr.RemotePushTimeout) as raised:
+                    sr.push_commits(
+                        {"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                        "/home/ubuntu/sandbox/deploy-src/proj", "main",
+                        push_timeout=900,
+                    )
+        self.assertEqual(raised.exception.timeout_seconds, 900)
+        self.assertNotIn("/private/path", str(raised.exception))
+
     def test_nested_source_root_pushes_subtree_without_outer_files(self):
         with tempfile.TemporaryDirectory() as directory:
             outer = Path(directory)
@@ -2406,6 +2442,34 @@ class TestRejectHerdProjects(unittest.TestCase):
 
 
 class TestDeployEnsureExpose(unittest.TestCase):
+    def test_deploy_forwards_explicit_push_timeout(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock(
+                    project_dir=str(root), remote="myvps", source_ref=None,
+                    json=True, ensure=False, expose=False, pro_plugins=False,
+                    deploy_timeout=900, include=None, plugin_slug=None,
+                )
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value={
+                        "root": str(root), "slug": "demo", "kind": "wordpress"}), \
+                     patch.object(deploy_cmd, "preflight_project_capability", return_value=None), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="latest"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40) as push, \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch("builtins.print"):
+                    deploy_cmd.cmd_deploy(None, args)
+                self.assertEqual(push.call_args.kwargs["push_timeout"], 900)
+
     def test_deploy_rejects_global_instance_selector_before_remote_mutation(self):
         with tempfile.TemporaryDirectory() as d:
             args = types.SimpleNamespace(

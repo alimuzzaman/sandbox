@@ -799,6 +799,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--include", dest="include", action="append", default=None,
         metavar="PATH",
         help="explicitly transfer a relative ignored build artifact such as vendor/ (repeatable; sensitive paths rejected)")
+    deploy_p.add_argument("--deploy-timeout", dest="deploy_timeout", type=int,
+        default=None, metavar="SECONDS",
+        help="bounded Git push timeout for this deploy (1-3600 seconds; default 120)")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

@@ -1153,6 +1153,25 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        # Probe the Docker engine before the port allocator, local YAML, or
+        # pending registry record can mutate state.  A stopped/unreachable
+        # engine used to surface only after the first unbounded Compose call,
+        # leaving ``ensure`` silent until its outer job timeout.  Herd is
+        # host-served and must not require a Docker daemon.
+        server_hint = _valid_server(
+            (existing or {}).get("server") or pconf.get("server") or "nginx"
+        )
+        if server_hint != "herd":
+            daemon = docker_daemon_preflight()
+            if not daemon.get("ok"):
+                error = sc.ConfigError(
+                    str(daemon.get("message") or
+                        "Docker daemon is unavailable; retry `sb ensure` after starting it.")
+                )
+                # Preserve the typed preflight code at the CLI boundary while
+                # retaining ConfigError compatibility for older callers.
+                error.code = str(daemon.get("code") or "docker_daemon_unavailable")
+                raise error
         # The ready fast path must prove the live containers still expose the
         # exact source self-binds generated for this instance.  Do this before
         # port conflict reconciliation: that helper can write local config and

@@ -383,7 +383,8 @@ def cmd_ensure(cfg, args) -> None:
         if getattr(args, "json", False):
             _print_ensure_json({
                 "ok": False,
-                "error": {"code": "config_error", "message": message},
+                "error": {"code": getattr(e, "code", "config_error"),
+                           "message": message},
             }, compact=True)
             raise SystemExit(1)
         die(redact_text(message))

@@ -22,6 +22,12 @@ For a local project outside the current working directory, pass
 instance by default. `--local` remains accepted as an explicit spelling for
 scripts that already use it.
 
+`sb ensure` performs a bounded, read-only `docker info` preflight before it
+allocates ports or writes `sandbox.local.yml`/the instance registry. If Docker
+Desktop/OrbStack is stopped or its socket is unreachable, it fails within a few
+seconds with a retry hint instead of waiting for the outer provisioning timeout.
+Herd-backed projects skip this Docker check.
+
 Use `--local` as an explicit override. Remote execution deploys the exact local
 working tree before acceptance, then the remote supervisor drains process pipes
 to durable local files. CLI/MCP callers read bounded retained output by cursor;

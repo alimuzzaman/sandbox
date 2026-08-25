@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -623,6 +624,50 @@ def compose(*args: str, instance: str,
         *args],
         **run_kwargs,
     )
+
+
+def docker_daemon_preflight(*, timeout: float = 5.0) -> dict[str, object]:
+    """Return a bounded, read-only Docker engine readiness observation.
+
+    ``ensure`` can otherwise spend its entire outer job timeout inside the
+    first Compose call when Docker Desktop/OrbStack is stopped or its socket is
+    unreachable.  Keep this probe deliberately narrower than ``setup``:
+    starting a desktop engine is an operator action, while ensure must fail
+    before writing local instance or registry state and provide a deterministic
+    retry hint.  The public result never includes socket paths or raw stderr.
+    """
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("Docker daemon preflight timeout must be positive")
+    if shutil.which("docker") is None:
+        return {
+            "ok": False,
+            "code": "docker_cli_unavailable",
+            "message": "Docker CLI is not installed or is not on PATH; install Docker Desktop/OrbStack and retry `sb ensure`.",
+        }
+    try:
+        result = run(
+            ["docker", "info"], check=False, capture=True, timeout=float(timeout),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "code": "docker_daemon_timeout",
+            "message": f"Docker daemon did not respond within {float(timeout):g}s; start Docker Desktop/OrbStack and retry `sb ensure`.",
+        }
+    except (OSError, subprocess.SubprocessError):
+        return {
+            "ok": False,
+            "code": "docker_daemon_unavailable",
+            "message": "Docker daemon is unavailable; start Docker Desktop/OrbStack and retry `sb ensure`.",
+        }
+    if getattr(result, "returncode", 1) != 0:
+        return {
+            "ok": False,
+            "code": "docker_daemon_unavailable",
+            "message": "Docker daemon is unavailable; start Docker Desktop/OrbStack and retry `sb ensure`.",
+        }
+    return {"ok": True, "code": "docker_daemon_ready"}
 
 
 # Host-cached wp-cli phar, bind-mounted into every instance's `wp` container at

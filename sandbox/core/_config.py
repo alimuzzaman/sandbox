@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -126,17 +127,42 @@ def _venv_paths_match(venv: Path) -> bool:
     except OSError:
         return False
     target = str(venv.resolve())
-    # pyvenv.cfg lines like `home = /path/bin` and (3.11+) `executable`/`command`
-    # embed the creating interpreter, not the venv dir — so we check the venv's
-    # own bin/python symlink resolves and the cfg's `command` (if present) names
-    # this venv. Simplest robust signal: bin/python exists AND a `command =`/
-    # `executable =` line, when present, contains this venv path.
+    # pyvenv.cfg's `home` and `executable` values identify the *base
+    # interpreter*, not the venv directory.  In particular, a valid Python
+    # 3.14 venv normally has an `executable = /opt/homebrew/.../python3.14`
+    # line which can never contain `target`.  Treating that line as a path
+    # attestation made every `visit` invocation delete and rebuild a healthy
+    # venv after a workspace relocation.
     vpy = venv / "bin" / "python"
     if not vpy.exists():
         return False
     for line in text.splitlines():
         low = line.strip().lower()
-        if low.startswith(("command", "executable")) and target not in line:
+        if not low.startswith("command") or "=" not in line:
+            continue
+        # Newer Python versions record the command used to create the venv.
+        # When it includes an absolute destination, that is useful relocation
+        # evidence; when it is absent (older Python), the working interpreter
+        # above is the only portable signal and we keep the venv.
+        try:
+            tokens = shlex.split(line.split("=", 1)[1].strip())
+        except ValueError:
+            continue
+        try:
+            venv_at = tokens.index("venv")
+        except ValueError:
+            continue
+        destination = next(
+            (item for item in reversed(tokens[venv_at + 1:])
+             if not item.startswith("-")),
+            None,
+        )
+        if not destination or not Path(destination).is_absolute():
+            continue
+        try:
+            if Path(destination).resolve() != Path(target).resolve():
+                return False
+        except OSError:
             return False
     return True
 
@@ -168,9 +194,18 @@ def ensure_tools_venv() -> Path:
         TOOLS_VENV.parent.mkdir(parents=True, exist_ok=True)
         _make_venv(find_modern_python(), TOOLS_VENV)
 
-    pip = TOOLS_VENV / "bin" / "pip"
+    # `ensurepip` is allowed to expose only versioned entry points (`pip3`,
+    # `pip3.14`) on some Homebrew Python builds.  Calling the module through
+    # the venv interpreter works with all of those layouts and avoids a
+    # false FileNotFoundError for the unversioned `bin/pip` shim.
+    pip = [str(py), "-m", "pip"]
+    pip_check = subprocess.run(
+        [*pip, "--version"], capture_output=True, text=True,
+    )
+    if pip_check.returncode != 0:
+        subprocess.check_call([str(py), "-m", "ensurepip", "--upgrade"])
     info("Installing Playwright (one-time)…")
-    subprocess.check_call([str(pip), "install", "--quiet",
+    subprocess.check_call([*pip, "install", "--quiet",
                            "--disable-pip-version-check", "-r", str(req)])
     info("Downloading headless Chromium (one-time, ~150 MB)…")
     # Pin to chromium only — we don't need firefox/webkit and don't want

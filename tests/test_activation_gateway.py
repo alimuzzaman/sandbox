@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -204,6 +205,35 @@ class ActivationCaddyTests(unittest.TestCase):
              mock.patch("sandbox.core._domains._activation_gateway_healthy", return_value=False), \
              mock.patch("sandbox.activation.supervision.enable", return_value={"ok": False}):
             self.assertFalse(_ensure_activation_gateway({}))
+
+    def test_unhealthy_gateway_strips_stale_wake_middleware(self):
+        """A dead authority must not leave an old forward_auth Caddyfile live."""
+        from sandbox.core import _domains
+
+        records, wp = _records()
+        with tempfile.TemporaryDirectory() as td:
+            proxy_dir = Path(td) / "proxy"
+            caddyfile = proxy_dir / "Caddyfile"
+            caddyfile.parent.mkdir(parents=True)
+            caddyfile.write_text(
+                "forward_auth host.docker.internal:8766 {\n"
+                "    header_up Authorization \"Bearer redacted-test-token\"\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(_domains, "PROXY_DIR", proxy_dir), \
+                 mock.patch.object(_domains, "PROXY_CADDYFILE", caddyfile), \
+                 mock.patch.object(_domains, "registry_all", return_value=records), \
+                 mock.patch.object(_domains, "resolve_instances", return_value=wp), \
+                 mock.patch.object(_domains, "_activation_gateway_healthy",
+                                   return_value=False), \
+                 mock.patch.object(_domains, "_cert_paths", return_value=(
+                     proxy_dir / "missing.pem", proxy_dir / "missing-key.pem")):
+                _domains.regen_caddyfile({})
+            rendered = caddyfile.read_text(encoding="utf-8")
+
+        self.assertNotIn("forward_auth host.docker.internal:8766", rendered)
+        self.assertIn("reverse_proxy host.docker.internal:8080", rendered)
 
 
 class ActivationSchedulerTests(unittest.TestCase):

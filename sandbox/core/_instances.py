@@ -1012,11 +1012,18 @@ def _mount_attestation_refusal(code: object, project_dir: str,
 
 
 def _auto_heal_wp_url(name: str) -> bool:
-    """Restore a registered HTTPS instance URL if WP drifted to localhost."""
+    """Reconcile WordPress with the currently reachable browser URL.
+
+    The persisted clean hostname is not authoritative: a host ingress can be
+    intercepted by an engine-owned wildcard listener after a restart.  When
+    ``site_url`` falls back to the published localhost port, update both WP
+    options so opening that fallback does not immediately redirect back to the
+    dead hostname.
+    """
     cfg = load_config()
     ic = resolve_instances(cfg).get(name) or {}
     expected = site_url(ic)
-    if not expected.startswith("https://"):
+    if not expected.startswith(("http://", "https://")):
         return False
 
     current = wpcli(["option", "get", "siteurl"], instance=name,
@@ -1024,7 +1031,10 @@ def _auto_heal_wp_url(name: str) -> bool:
     if (getattr(current, "stdout", "") or "").strip() == expected:
         return False
 
-    _write_ssl_muplugin(name)
+    if expected.startswith("https://"):
+        _write_ssl_muplugin(name)
+    else:
+        _write_loopback_muplugin(name)
     wpcli(["option", "update", "siteurl", expected], instance=name,
           check=False)
     wpcli(["option", "update", "home", expected], instance=name,

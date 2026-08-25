@@ -258,7 +258,77 @@ def _sandbox_proxy_active(domain: str) -> bool:
     https://<domain> actually serves. Used by site_url()."""
     if not _caddyfile_has_route(domain):
         return False
-    return _proxy_container_running()
+    if not _proxy_container_running():
+        return False
+    # A container runtime can claim the published 127.0.0.77 socket while its
+    # own wildcard helper answers the request (OrbStack returns its Python
+    # index/404 here).  The old route/file checks therefore advertised a clean
+    # URL that never reached Caddy.  A bounded response-header probe is the
+    # final authority: even an upstream 4xx/5xx is useful evidence when the
+    # response is Caddy's, while a foreign listener is rejected.
+    return _sandbox_proxy_route_serving(domain)
+
+
+def _sandbox_proxy_route_serving(domain: str, *, timeout: float = 1.5) -> bool:
+    """Return whether a request for ``domain`` is answered by Sandbox Caddy.
+
+    This deliberately checks the ``Server`` header rather than requiring a
+    WordPress 2xx: a live Caddy route can legitimately surface a backend 4xx or
+    5xx, but a foreign wildcard listener must never make ``site_url`` publish a
+    hostname that browsers cannot use.  The probe bypasses ambient HTTP proxy
+    settings and accepts Sandbox's local mkcert certificate.
+    """
+    from urllib.error import HTTPError
+    from urllib.request import Request, build_opener, ProxyHandler
+    import ssl
+
+    cert, _ = _cert_paths(domain)
+    scheme = "https" if cert.exists() else "http"
+    request = Request(
+        f"{scheme}://{domain}/",
+        headers={"User-Agent": "sandbox-proxy-health"},
+        method="HEAD",
+    )
+    context = ssl._create_unverified_context() if scheme == "https" else None
+    handlers = [ProxyHandler({})]
+    if context is not None:
+        from urllib.request import HTTPSHandler
+        handlers.append(HTTPSHandler(context=context))
+    opener = build_opener(*handlers)
+    try:
+        response = opener.open(request, timeout=timeout)
+    except HTTPError as exc:
+        response = exc
+    except (OSError, ValueError):
+        return False
+    try:
+        return "caddy" in str(response.headers.get("Server", "")).lower()
+    finally:
+        # urllib keeps the socket/file descriptor open until the response is
+        # garbage-collected.  Health checks run for every managed hostname at
+        # startup, so close both normal and HTTPError responses explicitly.
+        response.close()
+
+
+def _proxy_transport_serving(cfg: dict) -> bool:
+    """Check one representative managed hostname reaches Sandbox Caddy.
+
+    A representative route detects many host-level wildcard failures, but a
+    runtime can route some cached hostnames to Caddy and leave newly-created
+    ones at the foreign listener. Probe the managed set with a short timeout so
+    startup cannot claim a globally healthy provider while one tenant is dead.
+    """
+    for ic in resolve_instances(cfg).values():
+        dom = ic.get("domain")
+        if dom and dom.endswith(f".{_tld(ic)}"):
+            if not _sandbox_proxy_route_serving(dom, timeout=0.5):
+                return False
+    for entry in _generic_proxy_entries():
+        dom = entry.get("domain")
+        if dom and dom.endswith(f".{_generic_tld(entry)}"):
+            if not _sandbox_proxy_route_serving(dom, timeout=0.5):
+                return False
+    return True
 
 
 def _caddyfile_has_route(domain: str, text: str | None = None) -> bool:
@@ -693,16 +763,19 @@ def regen_caddyfile(cfg: dict) -> None:
     try:
         activation_catalog = build_catalog(registry_all(), resolve_instances(cfg))
     except ActivationCatalogError:
-        # Candidate validation is transactional: never replace a previously
-        # working route set with a partially trusted activation catalog.
-        if PROXY_CADDYFILE.exists():
-            return
+        # Candidate validation is transactional: do not render a partially
+        # trusted wake catalog.  We can still render ordinary direct routes;
+        # keeping an old Caddyfile here is unsafe because it may contain a
+        # forward_auth hop to an authority that no longer exists.
         activation_catalog = build_catalog({}, {})
     if activation_catalog.routes() and not _activation_gateway_healthy():
-        # A wake route is useful only with a healthy local authority. Keep the
-        # current Caddyfile byte-for-byte; on first setup, render direct routes.
-        if PROXY_CADDYFILE.exists():
-            return
+        # A wake route is useful only with a healthy local authority.  Strip
+        # the wake middleware and render direct routes instead of preserving a
+        # stale Caddyfile: otherwise every request is sent to the dead
+        # host.docker.internal:8766 gateway and Caddy returns 502 before the
+        # WordPress backend is even contacted.  Stopped instances still return
+        # the normal backend 502 until the authority is restored; running
+        # instances remain reachable and the failure is observable.
         activation_catalog = build_catalog({}, {})
     blocks = [f"""# Generated by ./sb — do not edit by hand. Regenerated on
 # instance create/delete.
@@ -900,19 +973,27 @@ def site_url(inst_cfg: dict) -> str:
     localhost:<port> always works because the WP container publishes that port.
     """
     verified = inst_cfg.get("url")
-    if isinstance(verified, str) and verified.startswith(("http://", "https://")):
-        return verified
     port = inst_cfg.get("http_port", inst_cfg["wordpress_port"])
     dom = inst_cfg.get("domain")
     # herd (host) instances are served by Herd at https://<name>.test — no
     # docker port, no .tst proxy. `herd secure` runs during provisioning.
     if inst_cfg.get("server") == "herd" and dom:
         return f"https://{dom}"
-    if dom and dom.endswith(f".{_tld(inst_cfg)}") and _sandbox_proxy_active(dom):
-        cert, _ = _cert_paths(dom)
-        return (f"https://{dom}" if cert.exists() else f"http://{dom}")
+    if dom and dom.endswith(f".{_tld(inst_cfg)}"):
+        if _sandbox_proxy_active(dom):
+            if isinstance(verified, str) and verified.startswith(("http://", "https://")):
+                return verified
+            cert, _ = _cert_paths(dom)
+            return (f"https://{dom}" if cert.exists() else f"http://{dom}")
+        # A persisted clean URL is only a historical observation.  Once the
+        # proxy is intercepted or stopped, return the reachable published port
+        # instead of handing callers a stale .tst/.orb.local-style hostname.
+        return f"http://localhost:{port}"
     if dom and _valet_proxy_active(dom):
-        return f"http://{dom}"
+        return verified if isinstance(verified, str) and verified.startswith(("http://", "https://")) \
+            else f"http://{dom}"
+    if isinstance(verified, str) and verified.startswith(("http://", "https://")):
+        return verified
     return f"http://localhost:{port}"
 
 
@@ -1309,6 +1390,15 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
     PROXY_COMPOSE.write_text(render_proxy_compose())
     regen_caddyfile(cfg)
     up, detail = proxy_apply()
+    # An empty config is used by the compatibility/unit path to exercise the
+    # provider lifecycle without declaring any managed routes.  There is no
+    # hostname claim to validate in that case; real CLI callers pass the loaded
+    # config and therefore take the transport-health gate below.
+    if up and cfg and not _proxy_transport_serving(cfg):
+        up = False
+        detail = ("the proxy container is running, but the clean hostname probe "
+                  "was answered by another listener; localhost:<port> remains "
+                  "available")
     if not up:
         if _proxy_container_running():
             info(f"proxy is running but the config reload failed: "
@@ -1632,6 +1722,11 @@ def proxy_up(cfg: dict) -> bool:
     up, detail = (res.returncode == 0), _run_detail(res)
     if up:
         up, detail = proxy_apply()
+    if up and cfg and not _proxy_transport_serving(cfg):
+        up = False
+        detail = ("the proxy container is running, but the clean hostname probe "
+                  "was answered by another listener; localhost:<port> remains "
+                  "available")
     if not up:
         info(f"clean URL ingress did not start{': ' + detail if detail else '.'}")
     return up

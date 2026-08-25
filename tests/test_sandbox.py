@@ -82,6 +82,33 @@ class TestPureHelpers(unittest.TestCase):
         self.assertNotIn(p, used)
 
 
+class TestToolsVenvPathAttestation(unittest.TestCase):
+    def test_base_interpreter_lines_do_not_mark_a_valid_venv_as_relocated(self):
+        with tempfile.TemporaryDirectory() as td:
+            venv = Path(td) / "tools"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("", encoding="utf-8")
+            (venv / "pyvenv.cfg").write_text(
+                "home = /opt/homebrew/opt/python@3.14/bin\n"
+                "executable = /opt/homebrew/Cellar/python@3.14/3.14.3/"
+                "Frameworks/Python.framework/Versions/3.14/bin/python3.14\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(core._venv_paths_match(venv))
+
+    def test_creation_command_detects_a_copied_venv(self):
+        with tempfile.TemporaryDirectory() as td:
+            venv = Path(td) / "new-tools"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("", encoding="utf-8")
+            (venv / "pyvenv.cfg").write_text(
+                "command = /usr/bin/python3 -m venv --without-pip "
+                "/old/tools\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(core._venv_paths_match(venv))
+
+
 class TestSnapshotNameValidation(unittest.TestCase):
     """Spec 002 FR-010: the bridge must reject path-traversal names."""
 
@@ -205,6 +232,19 @@ class TestSiteUrl(unittest.TestCase):
             core.site_url({"server": "herd", "domain": "x.test",
                            "wordpress_port": 8080}),
             "https://x.test")
+
+    def test_persisted_clean_url_is_not_trusted_when_proxy_is_not_serving(self):
+        with mock.patch.object(domains_core, "_sandbox_proxy_active",
+                               return_value=False):
+            self.assertEqual(
+                core.site_url({
+                    "url": "https://demo.tst",
+                    "domain": "demo.tst",
+                    "tld": "tst",
+                    "wordpress_port": 8214,
+                }),
+                "http://localhost:8214",
+            )
 
 
 class TestCanonicalReachability(unittest.TestCase):
@@ -334,6 +374,21 @@ class TestCaddyBlocks(unittest.TestCase):
             rendered = caddyfile.read_text()
         self.assertIn("http://generic-app.tst {", rendered)
         self.assertIn("reverse_proxy host.docker.internal:49152", rendered)
+
+
+class TestProxyTransportHealth(unittest.TestCase):
+    def test_foreign_wildcard_response_blocks_clean_url_claim(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "demo": {"domain": "demo.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                                  return_value=False):
+            self.assertFalse(domains_core._proxy_transport_serving({}))
+
+    def test_no_declared_route_does_not_block_proxy_start(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={}), \
+             mock.patch.object(domains_core, "_generic_proxy_entries",
+                               return_value=[]):
+            self.assertTrue(domains_core._proxy_transport_serving({}))
 
 
 class TestProxyMountAndReload(unittest.TestCase):

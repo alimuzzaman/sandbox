@@ -114,7 +114,13 @@ def cmd_visit(cfg, args) -> None:
     """
     py = ensure_tools_venv()
     script = TOOLS_DIR / "visit" / "visit.py"
-    cmd = [str(py), str(script), *args.passthrough]
+    # The runner already emits one JSON report.  ``passthrough`` is a
+    # REMAINDER argument, so a conventional ``--json`` placed after the URL
+    # would otherwise be forwarded to the runner and rejected by its parser.
+    # Accept it as a harmless output selector for consistency with the other
+    # read-only CLI commands.
+    passthrough = [value for value in args.passthrough if value != "--json"]
+    cmd = [str(py), str(script), *passthrough]
     os.execv(str(py), cmd)
 
 register({

@@ -301,6 +301,16 @@ cache-only identity probe before comparing the persisted target; a failed probe
 refuses the apply as `remote_target_unavailable` rather than using a client-side
 fallback identity or touching the host.
 
+For the legacy cache/stale scopes, the same confirmation-gated one-click form
+is available when a scope is supplied:
+
+```sh
+./sb resources cleanup --scope cache --remote scaleway-sandbox --confirm --json
+```
+
+The command creates the scoped plan, then applies that exact plan. Without
+`--confirm`, it refuses before scanning or creating a plan.
+
 ## Tiered reclamation of deployment storage
 
 `--scope cache|stale` reclaims engine and cache resources. `--tier safe|tmp|all`

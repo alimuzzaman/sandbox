@@ -1014,7 +1014,40 @@ def cmd_resources(_cfg, args) -> None:
             )
             _emit(payload, bool(args.json))
             raise SystemExit(1)
-        if not args.plan_id:
+        if not args.plan_id and args.scope and not args.confirm:
+            from sandbox.resources.service import ResourceError, result
+            payload = result(
+                False, "cleanup", status="refused",
+                error=ResourceError(
+                    "resource cleanup requires explicit confirmation",
+                    "confirmation_required",
+                ),
+            )
+        elif not args.plan_id and args.scope:
+            plan_payload = service.plan(
+                args.scope,
+                thorough=bool(args.thorough),
+                budget_seconds=args.budget if args.budget is not None else 60,
+                progress=progress,
+            )
+            plan_data = plan_payload.get("data")
+            plan_id = (
+                plan_data.get("plan_id")
+                if isinstance(plan_data, dict) else None
+            )
+            if not plan_payload.get("ok"):
+                payload = plan_payload
+            elif not isinstance(plan_id, str) or not plan_id:
+                from sandbox.resources.service import ResourceError, result
+                payload = result(
+                    False, "cleanup", status="failed", data=plan_data or {},
+                    error=ResourceError(
+                        "cleanup plan did not return a plan id", "plan_not_found",
+                    ),
+                )
+            else:
+                payload = service.cleanup(plan_id, confirm=True)
+        elif not args.plan_id:
             from sandbox.resources.service import ResourceError, result
             payload = result(
                 False, "cleanup", status="refused",

@@ -519,6 +519,39 @@ class TestResourceInterfaces(unittest.TestCase):
             resources.cmd_resources({}, args)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "confirmation_required")
 
+    def test_scope_cleanup_without_plan_id_creates_and_applies_plan(self):
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        args = self.parser().parse_args([
+            "cleanup", "--scope", "cache", "--confirm", "--json",
+        ])
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(
+            service.calls,
+            [("plan", "cache", False, 60.0), ("cleanup", "a" * 32, True)],
+        )
+
+    def test_scope_cleanup_requires_confirmation_before_planning(self):
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        args = self.parser().parse_args(["cleanup", "--scope", "cache", "--json"])
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output), self.assertRaises(SystemExit):
+            resources.cmd_resources({}, args)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "confirmation_required")
+        self.assertEqual(service.calls, [])
+
     def test_monitor_resolves_policy_before_service_and_forwards_defaults(self):
         from sandbox.commands import resources
 

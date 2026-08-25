@@ -20,8 +20,8 @@ Generated 2026-08-25 from the machine-local feedback ledger with paginated `./sb
 | Rank | Queue | Tier | Status | Severity | Feedback ID | Summary |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | active | P0 | in_progress | critical | 71be94307c0b2dfee1ef2640898bf1a0 | sb host apply exits 0 after a failed deploy, and its rollback can fail silently when the disk is full |
-| 2 | active | P0 | in_progress | high | 74b4203d8e54a68aced7d0f164bcc652 | Every .tst instance URL returns 404: proxy forward_auth /v1/activate 404s for known route IDs |
-| 3 | active | P0 | open | critical | 1f094d2f708e7c57cf128ac9635aa5af | Failed deploy leaves wrong remote instance registered |
+| 2 | active | P0 | in_progress | critical | 1f094d2f708e7c57cf128ac9635aa5af | Failed deploy leaves wrong remote instance registered |
+| 3 | active | P0 | in_progress | high | 74b4203d8e54a68aced7d0f164bcc652 | Every .tst instance URL returns 404: proxy forward_auth /v1/activate 404s for known route IDs |
 | 4 | active | P1 | in_progress | high | a6f1f5a8c4611f430d6963b08d4e791a | domains up reports clean ingress unavailable when another listener answers the hostname probe |
 | 5 | active | P1 | in_progress | high | 74f5a1b8a8da1d6a90bc081bf3d2e3f4 | Activation supervisor restart fails while health state transitions to inactive |
 | 6 | active | P1 | blocked | high | 78aaf5836d63078b060336a9e306b7f5 | Remote fast-test harness blocked by Docker network pool exhaustion |

@@ -46,6 +46,9 @@ ENVELOPE = None
 DIRECTORY_CACHE_PATH = RUNTIME / "resources" / "directory-index.json"
 DIRECTORY_CACHE_TTL = max(float(REQUEST.get("directory_cache_ttl") or 21600), 0)
 DIRECTORY_CACHE_MODE = str(REQUEST.get("directory_cache") or "auto")
+# Keep each inspect response comfortably below the bounded stdout cap.  A
+# large container environment or mount list must not invalidate every row.
+DOCKER_INSPECT_BATCH_SIZE = 10
 # cache_only is the always-available fast path: read the cached host index,
 # never walk the disk, and never pay for engine inventory.
 FAST = DIRECTORY_CACHE_MODE == "cache_only"
@@ -487,6 +490,19 @@ def workspace_owner(projection, resource_type, resource_id):
         tuple(details["evidence"]), bool(details["protected"]),
     )
 
+def _json_rows(text):
+    try:
+        value = json.loads(text or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list) or any(
+        not isinstance(item, dict) for item in value
+    ):
+        return None
+    return value
+
 def docker_inventory():
     outcomes = []
     inventory = {
@@ -500,35 +516,69 @@ def docker_inventory():
         ("images", ["docker", "image", "ls", "-q"], ["docker", "image", "inspect"]),
     )
     for key, list_argv, inspect_argv in commands:
-        code, out, _err = run(list_argv, 3)
         category = "docker_" + key
-        if code:
-            outcomes.append({"category": category, "status": "timed_out" if code == 124 else "unavailable"})
-            continue
+        code, out, _err = run(list_argv, 10)
         identifiers = out.split()
+        list_failed = code != 0
         if not identifiers:
-            outcomes.append({"category": category, "status": "complete"})
+            outcomes.append({
+                "category": category,
+                "status": (
+                    "timed_out" if code == 124 else
+                    "unavailable" if list_failed else "complete"
+                ),
+            })
             continue
-        code, out, _err = run(inspect_argv + identifiers, 5)
-        if code:
-            outcomes.append({"category": category, "status": "timed_out" if code == 124 else "unavailable"})
-            continue
-        try:
-            inventory[key] = json.loads(out or "[]")
-            outcomes.append({"category": category, "status": "complete"})
-        except json.JSONDecodeError:
-            outcomes.append({"category": category, "status": "unavailable"})
+        rows = []
+        inspect_failed = False
+        inspect_timed_out = False
+        # Keep argv bounded and retain rows from successful batches when a
+        # container disappears during inspection or one batch times out.
+        for offset in range(0, len(identifiers), DOCKER_INSPECT_BATCH_SIZE):
+            batch = identifiers[
+                offset:offset + DOCKER_INSPECT_BATCH_SIZE
+            ]
+            code, inspected, _err = run(inspect_argv + batch, 20)
+            parsed = _json_rows(inspected)
+            if parsed is not None:
+                rows.extend(parsed)
+            if code != 0 or parsed is None or len(parsed) < len(batch):
+                inspect_failed = True
+            if code == 124:
+                inspect_timed_out = True
+        inventory[key] = rows
+        if not inspect_failed and not list_failed:
+            status = "complete"
+        elif rows:
+            status = "timed_out" if inspect_timed_out else "partial"
+        else:
+            status = (
+                "timed_out" if inspect_timed_out or code == 124
+                else "unavailable"
+            )
+        outcomes.append({"category": category, "status": status})
     code, out, _err = run(
         ["docker", "buildx", "du", "--format=json"], 20,
     )
-    if code == 0:
+    build_rows = []
+    build_failed = code != 0
+    for line in out.splitlines():
+        if not line.strip():
+            continue
         try:
-            inventory["build_cache"] = [
-                json.loads(line) for line in out.splitlines() if line.strip()
-            ]
-            status = "complete"
-        except json.JSONDecodeError:
-            status = "unavailable"
+            value = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            build_failed = True
+            continue
+        if isinstance(value, dict):
+            build_rows.append(value)
+        else:
+            build_failed = True
+    inventory["build_cache"] = build_rows
+    if not build_failed:
+        status = "complete"
+    elif build_rows:
+        status = "timed_out" if code == 124 else "partial"
     else:
         status = "timed_out" if code == 124 else "unavailable"
     outcomes.append({"category": "docker_build_cache", "status": status})

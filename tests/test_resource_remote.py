@@ -188,6 +188,26 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, program)
 
+    def test_remote_program_batches_and_retains_partial_docker_inventory(self):
+        program = _program({
+            "action": "observe",
+            "thorough": True,
+            "deep": True,
+            "budget_seconds": 30,
+            "managed_host": True,
+            "remote_name": "remote-a",
+        })
+        compile(program, "<remote-resource-probe>", "exec")
+        for evidence in (
+            "DOCKER_INSPECT_BATCH_SIZE = 10",
+            "for offset in range(0, len(identifiers), DOCKER_INSPECT_BATCH_SIZE)",
+            "inspect_timed_out = False",
+            'status = "timed_out" if inspect_timed_out else',
+            '"timed_out" if inspect_timed_out or code == 124',
+            "build_rows = []",
+        ):
+            self.assertIn(evidence, program)
+
     def test_remote_deep_payload_is_validated_and_returned(self):
         calls = []
         payload = {
@@ -886,7 +906,6 @@ class TestRemoteProbeResilience(unittest.TestCase):
             stores.get("containerd content store"), 25_000_000_000,
         )
         self.assertEqual(outcomes[0]["category"], "docker_storage")
-
 
 if __name__ == "__main__":
     unittest.main()

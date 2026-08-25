@@ -208,6 +208,11 @@ diagnostics are always non-capacity-accounted: shared layers, writable layers,
 volume data, and logical cache values must not be added to an already measured
 Docker data-root allocation.
 
+Remote Docker IDs are inspected in bounded batches. Rows delivered before a
+container race, malformed response, or timeout are retained and the category
+is marked `partial` or `timed_out`; an empty or unavailable category never
+authorizes cleanup.
+
 Review `deep_attribution.coverage`, capabilities, and filesystem limitations
 before treating the residual as genuinely unlocated. Every discovered
 filesystem and category says whether it was complete, partial, not selected,

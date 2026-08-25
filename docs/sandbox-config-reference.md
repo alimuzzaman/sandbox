@@ -926,8 +926,12 @@ warns about drift.
    Then `wp core update-db` (`--network` on multisite), so the schema follows
    the files. Container recreates never re-version WordPress — core lives in the
    bind mount — and an unpinned in-place apply deliberately preserves that live
-   core. An explicit `wpVersion` is the only apply-time core move. It is
-   non-fatal: a wp.org failure warns and leaves the site on its current core.
+   core. An explicit `wpVersion` is the only apply-time core move. If the core
+   command reports an error (including a PHP fatal/critical-error path), apply
+   fails instead of returning a ready record and restores the pre-apply
+   persisted config, generated Compose artifact, and web-tier lifecycle. The
+   database and uploads remain untouched; inspect the bounded WP/runtime error
+   and retry after the underlying problem is fixed.
    The result comes back as `wp_core: {from, to, changed}`.
 
    The web health gate probes the instance's canonical URL directly (without

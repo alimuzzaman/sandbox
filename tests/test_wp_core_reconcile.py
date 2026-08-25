@@ -7,9 +7,11 @@ was installed with forever — the failure mode where an edited (or deleted)
 """
 from pathlib import Path
 import sys
+import tempfile
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -105,6 +107,92 @@ class TestReconcileWpCore(unittest.TestCase):
         self.assertEqual(state["from"], "6.8.1")
         self.assertIn("core update failed", state["error"])
         self.assertEqual(wp.ran(["core", "update-db"]), [])
+
+    def test_apply_must_not_publish_ready_when_core_reconcile_reports_error(self):
+        import sandbox.core._instances as module
+
+        root = Path(tempfile.mkdtemp(prefix="sb-apply-core-error-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        existing = {
+            "instance": "fixture", "label": "default", "status": "ready",
+            "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
+            "server": "nginx",
+        }
+        pconf = {"root": str(root), "server": "nginx"}
+        block = {"server": "nginx"}
+        resolved = {"fixture": {
+            "server": "nginx", "wordpress_port": 8188,
+            "db_port": 3318, "mailpit_port": 8125,
+        }}
+        registry_put = Mock(side_effect=AssertionError(
+            "failed apply must not publish a ready registry record"))
+
+        class FakeCore:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_project, label=None):
+                return pconf
+
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return existing
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [existing]
+
+            @staticmethod
+            @contextmanager
+            def project_lock(_root):
+                yield
+
+        FakeCore.registry_put = registry_put
+
+        rollback = Mock(return_value={"ok": True})
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(module, "_core", return_value=FakeCore()))
+            stack.enter_context(patch.object(
+                module, "_local_yaml",
+                return_value={"instances": {"fixture": {}}}))
+            stack.enter_context(patch.object(module, "_write_local_yaml"))
+            stack.enter_context(patch.object(module, "_assert_apply_runtime_dependencies"))
+            stack.enter_context(patch.object(
+                module, "_capture_apply_rollback_state", return_value={}))
+            stack.enter_context(patch.object(module, "_build_instance_block", return_value=block))
+            stack.enter_context(patch.object(
+                module, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(patch.object(module, "load_config", return_value={}))
+            stack.enter_context(patch.object(module, "write_compose_files"))
+            stack.enter_context(patch.object(
+                module, "resolve_instances", return_value=resolved))
+            stack.enter_context(patch.object(
+                module, "compose", return_value=SimpleNamespace(
+                    returncode=0, stdout="", stderr="")))
+            stack.enter_context(patch.object(module, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(module, "_wire_project_plugins"))
+            stack.enter_context(patch.object(module, "_wire_project_themes"))
+            stack.enter_context(patch.object(
+                module, "_reconcile_wp_core", return_value={
+                    "changed": False, "error": "PHP Fatal error: plugin bootstrap"
+                }))
+            stack.enter_context(patch.object(
+                module, "_restore_apply_rollback_state", rollback))
+            stack.enter_context(patch.object(module, "wp_dir", return_value=root))
+            for helper in (
+                "_write_mail_muplugin", "_write_loopback_muplugin",
+                "_write_dl_cache_muplugin", "_write_ondemand_muplugin",
+                "_write_host_runtime_muplugins", "_write_licensing_muplugin",
+                "_remove_obsolete_builder_authoring_assets",
+            ):
+                stack.enter_context(patch.object(module, helper))
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "WordPress core reconcile failed: PHP Fatal error.*rollback=succeeded"):
+                module.apply_config({}, str(root))
+
+        rollback.assert_called_once()
+        registry_put.assert_not_called()
 
     def test_an_uninstalled_instance_is_skipped(self):
         wp = FakeWpCli(version=None)

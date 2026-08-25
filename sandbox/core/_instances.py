@@ -1528,25 +1528,52 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
                 _write_licensing_muplugin(name)  # spec 013 — cross-instance Pro license activation
                 _remove_obsolete_builder_authoring_assets(name)
 
-        # 3. Re-sync plugins + themes (idempotent symlinks + installs).
-        _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
-        _wire_project_themes(name, root, pconf)
+        # 3-5. Finish the reconciliation under the same rollback boundary as
+        # the web recreate. Plugin/theme wiring and WordPress core commands can
+        # fail after the new Compose/runtime state is live (for example a PHP
+        # fatal during a pinned core update). Letting that exception escape
+        # directly leaves sandbox.local.yml and the web tier on the new state
+        # while the registry still describes the old one.
+        try:
+            # 3. Re-sync plugins + themes (idempotent symlinks + installs).
+            _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
+            _wire_project_themes(name, root, pconf)
 
-        # 4. Multisite: convert if newly enabled. Skip if it was already a
-        #    network (idempotent) or if the config still disables multisite.
-        cur_ms = _multisite_mode(inst_cfg)
-        if cur_ms and not prev_ms:
-            info(f"apply_config: multisite newly enabled ({cur_ms}) — converting…")
-            _convert_multisite(name, inst_cfg)
-        elif cur_ms and prev_ms and cur_ms != prev_ms:
-            info(f"⚠ multisite mode change {prev_ms}→{cur_ms} can't be applied "
-                 f"in place — recreate the instance to switch network type.")
+            # 4. Multisite: convert if newly enabled. Skip if it was already a
+            #    network (idempotent) or if the config still disables multisite.
+            cur_ms = _multisite_mode(inst_cfg)
+            if cur_ms and not prev_ms:
+                info(f"apply_config: multisite newly enabled ({cur_ms}) — converting…")
+                _convert_multisite(name, inst_cfg)
+            elif cur_ms and prev_ms and cur_ms != prev_ms:
+                info(f"⚠ multisite mode change {prev_ms}→{cur_ms} can't be applied "
+                     f"in place — recreate the instance to switch network type.")
 
-        # 5. Reconcile WordPress core itself. The instance block was rewritten
-        #    from pconf above, so a pin-vs-block comparison can never disagree
-        #    here — the only honest source of drift is the LIVE `wp core
-        #    version`, which nothing else in apply touches.
-        core_state = _reconcile_wp_core(name, inst_cfg, pconf)
+            # 5. Reconcile WordPress core itself. The instance block was
+            # rewritten from pconf above, so a pin-vs-block comparison can
+            # never disagree here — the only honest source of drift is the
+            # LIVE `wp core version`, which nothing else in apply touches.
+            core_state = _reconcile_wp_core(name, inst_cfg, pconf)
+            if isinstance(core_state, dict) and core_state.get("error"):
+                raise RuntimeError(
+                    "WordPress core reconcile failed: "
+                    f"{str(core_state['error'])[:240]}"
+                )
+        except Exception as exc:
+            rollback = _restore_apply_rollback_state(
+                rollback_snapshot, name,
+            )
+            detail = str(exc)[:500]
+            if rollback["ok"]:
+                raise sc.ConfigError(
+                    f"apply failed after web reconcile: {detail}; "
+                    "rollback=succeeded (prior state and web runtime restored)"
+                ) from exc
+            rollback_detail = "; ".join(rollback.get("errors") or ())
+            raise sc.ConfigError(
+                f"apply failed after web reconcile: {detail}; "
+                f"rollback=failed ({rollback_detail}); manual recovery required"
+            ) from exc
 
         # Re-derive from live state instead of reusing the recorded URL: a
         # clean URL assigned AFTER this instance was registered (e.g. by a later

@@ -114,8 +114,11 @@ def cmd_activation(cfg, args) -> None:
     scheduler.reconcile()
     if args.action == "scan":
         import json
-        print(json.dumps({"ok": True, "results": [result.__dict__ for result in
-                         scheduler.scan(dry_run=bool(args.dry_run))]}, sort_keys=True))
+        payload = {"ok": True, "results": [result.__dict__ for result in
+                         scheduler.scan(dry_run=bool(args.dry_run))]}
+        if catalog.issues():
+            payload["warnings"] = list(catalog.issues())
+        print(json.dumps(payload, sort_keys=True))
         return
     import threading
     threading.Thread(target=scheduler.run, kwargs={"interval_seconds": args.interval},

@@ -88,9 +88,10 @@ instance on.
 
 This default is materialized when an instance is newly ensured or explicitly
 reconciled; loading an older registry row never silently opts it into stopping.
-The local activation authority also remains fail-closed until every opted-in
-route has valid credentials and activity evidence. This prevents a malformed
-legacy row or an unavailable checkout from authorizing a stop.
+The local activation authority quarantines an opted-in route whose host, port,
+root, or label metadata is stale, while keeping unrelated valid routes active.
+Invalid credentials, aliases, and identity collisions still fail closed rather
+than authorizing an ambiguous route.
 
 ```json
 {

@@ -37,7 +37,7 @@ class ActivationRoute:
 
 
 class ActivationCatalog:
-    def __init__(self, routes: tuple[ActivationRoute, ...]) -> None:
+    def __init__(self, routes: tuple[ActivationRoute, ...], issues: tuple[str, ...] = ()) -> None:
         by_id: dict[str, ActivationRoute] = {}
         by_host: dict[str, ActivationRoute] = {}
         for route in routes:
@@ -47,6 +47,7 @@ class ActivationCatalog:
             by_host[route.hostname] = route
         self._by_id = MappingProxyType(by_id)
         self._by_host = MappingProxyType(by_host)
+        self._issues = tuple(issues)
 
     def get(self, route_id: str) -> ActivationRoute | None:
         return self._by_id.get(route_id)
@@ -56,6 +57,10 @@ class ActivationCatalog:
 
     def routes(self) -> tuple[ActivationRoute, ...]:
         return tuple(self._by_id.values())
+
+    def issues(self) -> tuple[str, ...]:
+        """Non-secret, route-local metadata issues quarantined from the catalog."""
+        return self._issues
 
 
 def build_catalog(records: Mapping[str, Mapping[str, object]],
@@ -67,6 +72,7 @@ def build_catalog(records: Mapping[str, Mapping[str, object]],
     """
     wp = wordpress_instances or {}
     routes: list[ActivationRoute] = []
+    issues: list[str] = []
     for record in records.values():
         if not isinstance(record, Mapping):
             continue
@@ -98,16 +104,22 @@ def build_catalog(records: Mapping[str, Mapping[str, object]],
         root, label = record.get("root"), record.get("label", "default")
         if (not isinstance(hostname, str) or not _HOST.fullmatch(hostname.lower()) or
                 isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 or
-                not isinstance(credentials, Mapping) or
                 not isinstance(root, str) or not root or not isinstance(label, str) or not label):
-            raise ActivationCatalogError("activation route metadata is invalid")
+            # A stale registry row must not disable request wake for every
+            # otherwise valid instance. An incomplete route is quarantined and
+            # remains unreachable through the activation authority; callers can
+            # surface this count without exposing paths or credentials.
+            issues.append("activation route metadata is invalid")
+            continue
+        if not isinstance(credentials, Mapping):
+            raise ActivationCatalogError("activation route credentials are invalid")
         route_id, token = credentials.get("id"), credentials.get("token")
         if not isinstance(route_id, str) or not _ROUTE.fullmatch(route_id) or not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ActivationCatalogError("activation route credentials are invalid")
         routes.append(ActivationRoute(route_id, token, hostname.lower(), root, label,
                                       str(kind), port, MappingProxyType(dict(policy)),
                                       str(instance) if instance else None))
-    return ActivationCatalog(tuple(routes))
+    return ActivationCatalog(tuple(routes), tuple(issues))
 
 
 __all__ = ["ActivationCatalog", "ActivationCatalogError", "ActivationRoute", "build_catalog"]

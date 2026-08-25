@@ -114,6 +114,29 @@ class ActivationCatalogTests(unittest.TestCase):
         with self.assertRaises(ActivationCatalogError):
             build_catalog(records, wp)
 
+    def test_catalog_quarantines_stale_metadata_without_disabling_other_routes(self):
+        from sandbox.activation.catalog import build_catalog
+        bad_records, bad_wp = _records()
+        bad_records["key"]["instance"] = "bad-site"
+        bad_wp["site"]["domain"] = None
+        catalog = build_catalog({"bad": bad_records["key"]}, {"bad-site": bad_wp["site"]})
+        self.assertEqual(catalog.routes(), ())
+        self.assertEqual(catalog.issues(), ("activation route metadata is invalid",))
+
+        valid_records, valid_wp = _records()
+        # A separate malformed row must not prevent a valid route from being
+        # represented. Use a distinct instance name to avoid a route collision.
+        valid_records["key"]["instance"] = "valid-site"
+        valid_records["key"]["domain"] = "valid.tst"
+        combined = {"bad": bad_records["key"], "valid": valid_records["key"]}
+        combined_wp = {
+            "bad-site": bad_wp["site"],
+            "valid-site": dict(valid_wp["site"], domain="valid.tst"),
+        }
+        catalog = build_catalog(combined, combined_wp)
+        self.assertEqual([route.hostname for route in catalog.routes()], ["valid.tst"])
+        self.assertEqual(catalog.issues(), ("activation route metadata is invalid",))
+
     def test_scan_reports_invalid_catalog_without_traceback_or_scheduler(self):
         from sandbox.commands.activation import cmd_activation
 

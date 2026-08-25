@@ -166,7 +166,8 @@ _HOST_APPLY_ROLLBACK_RESERVE_MB = 32
 
 def _remote_failure_message(text: str, limit: int = 2000) -> str:
     """Report the decisive failure line rather than the head of the stream."""
-    lines = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    text = remote.redact_text(text or "")
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "remote command failed"
     decisive = [line for line in lines if any(marker in line for marker in _FAILURE_MARKERS)]
@@ -177,8 +178,28 @@ def _remote_failure_message(text: str, limit: int = 2000) -> str:
     return message
 
 
+def _decode_timeout_output(value: object) -> str:
+    """Normalize partial ``TimeoutExpired`` output without leaking bytes repr."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value or "").strip()
+
+
 def _remote_checked(entry: dict, command: str, timeout: int = 180) -> str:
-    result = remote.ssh_run(entry, command, timeout=timeout)
+    try:
+        result = remote.ssh_run(entry, command, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        partial = "\n".join(
+            value for value in (
+                _decode_timeout_output(getattr(exc, "stdout", None)),
+                _decode_timeout_output(getattr(exc, "stderr", None)),
+            ) if value
+        )
+        detail = _remote_failure_message(partial)
+        suffix = f"; partial output:\n{detail}" if detail != "remote command failed" else ""
+        raise RuntimeError(
+            f"remote command timed out after {timeout} seconds{suffix}"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(_remote_failure_message(result.stderr or result.stdout))
     return result.stdout or ""
@@ -533,7 +554,7 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
     # A recreated Compose service can reset its loopback connection between
     # `up -d` returning and its healthcheck becoming green. Treat that short
     # startup window as pending, not as a failed deployment.
-    for _ in range(30):
+    for attempt in range(30):
         result = remote.ssh_run(entry, command, timeout=30)
         output = (result.stdout or "").strip()
         if result.returncode == 0:
@@ -547,6 +568,11 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
                 last_error = f"remote healthcheck returned {code}, expected {minimum}-{maximum}"
         else:
             last_error = (result.stderr or output or "remote healthcheck command failed").strip()[:500]
+        if attempt == 0 or (attempt + 1) % 5 == 0:
+            info(
+                f"remote healthcheck pending ({min((attempt + 1) * 2, 60)}s/60s): "
+                f"{remote.redact_text(last_error)}"
+            )
         time.sleep(2)
     raise RuntimeError(
         f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds: {last_error}"

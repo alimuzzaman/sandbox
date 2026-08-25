@@ -235,6 +235,20 @@ uniquely new default instance. An unavailable or ambiguous inventory fails close
 leaves the remote unchanged or reports cleanup as unverified; Sandbox never guesses which
 pre-existing instance to delete.
 
+Host apply keeps bounded diagnostics at the SSH boundary. If a remote command times
+out, the CLI reports the timeout and a redacted tail of any partial output instead of
+discarding the captured stream; the remote command is not replayed automatically
+because its final state is unknown. During the 60-second loopback health window,
+Sandbox also emits a progress line every ten seconds with the last safe probe result.
+Use the host logs command for the declared service logs after a deployment:
+
+```bash
+./sb host logs --remote myvps --project-dir /path/to/site --environment production
+```
+
+These diagnostics are bounded and are not a substitute for live-host acceptance or
+an unbounded log-follow mode.
+
 #### Extra hostnames (`--alias`)
 
 `--alias HOSTNAME` (repeatable) exposes the instance on additional hostnames

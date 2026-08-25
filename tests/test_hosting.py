@@ -770,6 +770,20 @@ class TestHostingManifest(unittest.TestCase):
     def test_remote_failure_falls_back_when_output_is_empty(self):
         self.assertEqual(hosting_cmd._remote_failure_message(""), "remote command failed")
 
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_timeout_preserves_bounded_partial_output(self, ssh_run):
+        ssh_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["ssh", "secret-target"], timeout=45,
+            output="step 1\nstep 2\n",
+            stderr="target worker: failed to solve: timeout\n",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "remote command timed out after 45 seconds") as raised:
+            hosting_cmd._remote_checked({}, "docker compose build", timeout=45)
+
+        self.assertIn("failed to solve: timeout", str(raised.exception))
+        self.assertNotIn("secret-target", str(raised.exception))
+
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_stale_buildkit_snapshot_recovers_with_a_no_cache_rebuild(self, remote_checked, _info):

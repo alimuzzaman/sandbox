@@ -207,6 +207,36 @@ class ActivationHTTPTests(unittest.TestCase):
         self.assertEqual(self.app.handle("GET", "/api/instances", {}).status, 404)
         self.assertEqual(self.calls, [])
 
+    def test_supervised_application_refreshes_catalog_after_instance_creation(self):
+        from sandbox.activation import ActivationService
+        from sandbox.activation.catalog import ActivationCatalog
+        from sandbox.activation.http import ActivationHTTPApplication
+
+        current = [ActivationCatalog(())]
+        calls = []
+        app = ActivationHTTPApplication(
+            current[0], ActivationService(),
+            lambda route, timeout: calls.append((route.route_id, timeout)) or True,
+            catalog_provider=lambda: current[0],
+        )
+        self.assertEqual(app.handle("GET", "/healthz", {}).status, 204)
+        self.assertEqual(app.handle("GET", "/v1/activate", self.headers).status, 404)
+
+        current[0] = self.app.catalog
+        self.assertEqual(app.handle("GET", "/v1/activate", self.headers).status, 204)
+        self.assertEqual(len(calls), 1)
+
+    def test_catalog_provider_failure_revokes_old_routes_without_breaking_liveness(self):
+        from sandbox.activation.http import ActivationHTTPApplication
+
+        app = ActivationHTTPApplication(
+            self.app.catalog, self.app.service, lambda *_: self.calls.append(1) or True,
+            catalog_provider=lambda: (_ for _ in ()).throw(RuntimeError("read failed")),
+        )
+        self.assertEqual(app.handle("GET", "/healthz", {}).status, 204)
+        self.assertEqual(app.handle("GET", "/v1/activate", self.headers).status, 404)
+        self.assertEqual(self.calls, [])
+
 
 class ActivationCaddyTests(unittest.TestCase):
     def test_forward_auth_is_only_rendered_for_explicit_route(self):
@@ -307,6 +337,26 @@ class ActivationSchedulerTests(unittest.TestCase):
         source = Path("sandbox/activation/scheduler.py").read_text(encoding="utf-8")
         for forbidden in ("docker pause", "compose down", "recreate", "volume rm"):
             self.assertNotIn(forbidden, source.lower())
+
+    def test_scheduler_refreshes_routes_created_after_supervisor_start(self):
+        from sandbox.activation import ActivationService
+        from sandbox.activation.catalog import ActivationCatalog
+        from sandbox.activation.scheduler import ActivationScheduler
+
+        records, wp = _records()
+        empty = ActivationCatalog(())
+        from sandbox.activation.catalog import build_catalog
+        catalog = build_catalog(records, wp)
+        scheduler = ActivationScheduler(
+            empty, ActivationService(), observe_state=lambda _route: "asleep",
+            activity_safe=lambda _route: (True, "idle"),
+            suspend=lambda *_: True,
+        )
+        results = scheduler.refresh(catalog)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(scheduler.catalog.routes(), catalog.routes())
+        self.assertEqual(scheduler.service.coordinator.snapshot(
+            catalog.routes()[0].route_id)["state"], "asleep")
 
 
 class ActivationLeaseTests(unittest.TestCase):

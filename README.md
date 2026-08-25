@@ -645,7 +645,12 @@ runtime, established HTTP/WebSocket connection, durable-job, and WP-CLI lease
 checks pass. Missing evidence pins the route. Invalid catalogs or an unhealthy
 authority retain direct/previous Caddy routes. Existing registry rows adopt the
 default only on normal `ensure`/`apply`. Remote wake and function/FaaS adapters
-remain future work.
+remain future work. The supervised authority refreshes its catalog from the
+current registry/config on authenticated activation requests and scheduler
+cycles, so it does not keep serving a stale route snapshot after an instance
+is created, changed, or removed. Liveness stays independent of registry I/O;
+a failed refresh revokes the previous route allowlist until the source is
+readable again.
 
 ```bash
 ./sb activation status

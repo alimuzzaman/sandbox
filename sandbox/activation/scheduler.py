@@ -56,6 +56,27 @@ class ActivationScheduler:
         self.clock = clock or time.monotonic
         self._routes = {route.route_id: route for route in catalog.routes()}
 
+    def refresh(self, catalog: ActivationCatalog) -> tuple[ScanResult, ...]:
+        """Adopt a current route snapshot without dropping live coordinator state."""
+        if not isinstance(catalog, ActivationCatalog):
+            raise TypeError("activation catalog is invalid")
+        previous = self._routes
+        self.catalog = catalog
+        self._routes = {route.route_id: route for route in catalog.routes()}
+        changed = tuple(route for route in self._routes.values()
+                        if previous.get(route.route_id) != route)
+        if not changed:
+            return ()
+        # Reconcile only new/changed routes.  Removed routes are no longer
+        # reachable through the HTTP catalog and are intentionally not
+        # destructively altered in the in-memory coordinator.
+        original = self._routes
+        self._routes = {route.route_id: route for route in changed}
+        try:
+            return self.reconcile()
+        finally:
+            self._routes = original
+
     def reconcile(self) -> tuple[ScanResult, ...]:
         results = []
         for route in self._routes.values():
@@ -106,11 +127,19 @@ class ActivationScheduler:
                 results.append(ScanResult(route.route_id, "error", "suspend_failed"))
         return tuple(results)
 
-    def run(self, *, interval_seconds: int = 15, stop: threading.Event | None = None) -> None:
+    def run(self, *, interval_seconds: int = 15, stop: threading.Event | None = None,
+            catalog_provider: Callable[[], ActivationCatalog] | None = None) -> None:
         if not 1 <= interval_seconds <= 300:
             raise ValueError("activation scan interval is invalid")
         stopper = stop or threading.Event()
         while not stopper.wait(interval_seconds):
+            if catalog_provider is not None:
+                try:
+                    self.refresh(catalog_provider())
+                except Exception:
+                    # A transient/invalid catalog must pin rather than stop
+                    # anything using an old coordinator state.
+                    self._routes = {}
             self.scan()
 
 

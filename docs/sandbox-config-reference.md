@@ -127,7 +127,12 @@ no established backend HTTP/WebSocket connection, no active durable job, and
 no bounded WP-CLI activity lease before graceful stop. Missing evidence pins
 the route rather than guessing. Existing persisted registry rows without a lifecycle marker remain
 always-on until a normal `sb ensure` or `sb apply` reconciliation adopts the
-new default. For a machine-local opt-in that should survive an apply without
+new default. The long-lived supervised process refreshes its route catalog from
+the current registry/config on authenticated activation checks and scheduler
+cycles; newly created or removed instances therefore do not require a service
+restart. Liveness stays independent of registry I/O, while a failed refresh is
+fail-closed so stale route credentials are not retained.
+For a machine-local opt-in that should survive an apply without
 changing a project checkout, place the normalized `instance_lifecycle` and its
 generated `activation_route` under that instance in `sandbox.local.yml`. The
 instance resolver carries this trusted local declaration through apply

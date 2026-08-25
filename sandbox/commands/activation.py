@@ -27,6 +27,7 @@ def cmd_activation(cfg, args) -> None:
     from sandbox.activation.service import ActivationService
     from sandbox.application.context import runtime_service, wordpress_runtime_service
     from sandbox.core import resolve_instances
+    from sandbox.core._config import load_config
     from sandbox.runtimes.base import OperationRequest, OperationResult
 
     try:
@@ -49,6 +50,10 @@ def cmd_activation(cfg, args) -> None:
             payload["results"] = []
         print(json.dumps(payload, sort_keys=True))
         raise SystemExit(2)
+    def current_catalog():
+        """Read the registry/config on demand for the long-lived authority."""
+        return build_catalog(sc.registry_all(), resolve_instances(load_config()))
+
     generic = runtime_service(cfg)
     wordpress = wordpress_runtime_service(cfg)
 
@@ -64,7 +69,8 @@ def cmd_activation(cfg, args) -> None:
         return invoke(route, "resume", timeout)
 
     service = ActivationService()
-    application = ActivationHTTPApplication(catalog, service, resume)
+    application = ActivationHTTPApplication(catalog, service, resume,
+                                             catalog_provider=current_catalog)
     tcp = TcpActivityObserver()
     try:
         from sandbox.application.context import durable_job_dependencies
@@ -121,7 +127,8 @@ def cmd_activation(cfg, args) -> None:
         print(json.dumps(payload, sort_keys=True))
         return
     import threading
-    threading.Thread(target=scheduler.run, kwargs={"interval_seconds": args.interval},
+    threading.Thread(target=scheduler.run, kwargs={"interval_seconds": args.interval,
+                                                    "catalog_provider": current_catalog},
                      daemon=True, name="sandbox-activation-scheduler").start()
     serve(application, port=args.port)
 

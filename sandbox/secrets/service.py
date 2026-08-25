@@ -10,7 +10,7 @@ from .formats import SecretFormatError, parse_secret_document, validate_selector
 from .models import MAX_SELECTED_KEYS, SecretBrokerError, UseProfile, success
 from .parser import SecretParseError, parse_document
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
-from .runner import run_with_secret
+from .runner import run_with_secret, run_with_secrets
 from .sources import SourceRegistry
 from .organizer import organize as organize_document
 from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
@@ -192,18 +192,59 @@ class SecretService:
     def run(self, source: str, key: str, argv: Sequence[str], *, destination: str,
             timeout_seconds: int = 300, max_output_bytes: int = 1_048_576,
             surface: str = "cli") -> dict:
-        self._validate_source_key(source, key)
+        return self.run_many(
+            source, ((key, destination),), argv,
+            timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes,
+            surface=surface,
+        )
+
+    def run_many(self, source: str, bindings: Sequence[tuple[str, str]],
+                 argv: Sequence[str], *, timeout_seconds: int = 300,
+                 max_output_bytes: int = 1_048_576, surface: str = "cli") -> dict:
+        if not isinstance(bindings, (list, tuple)) or not bindings:
+            raise SecretBrokerError("selection_invalid", "at least one secret binding is required")
+        if len(bindings) > MAX_SELECTED_KEYS:
+            raise SecretBrokerError("selection_too_large", "too many secret keys were selected")
+        from .policy import validate_destination
+        normalized: list[tuple[str, str]] = []
+        destinations: set[str] = set()
+        for binding in bindings:
+            if not isinstance(binding, (list, tuple)) or len(binding) != 2:
+                raise SecretBrokerError("selection_invalid", "secret bindings must pair a key with a destination")
+            key, destination = binding
+            self._validate_source_key(source, key)
+            if not isinstance(destination, str):
+                raise SecretBrokerError("destination_denied", "secret destination is invalid")
+            validate_destination(destination)
+            if destination in destinations:
+                raise SecretBrokerError("destination_denied", "secret destinations must be unique")
+            destinations.add(destination)
+            normalized.append((key, destination))
+        keys = tuple(key for key, _destination in normalized)
+        if len(set(keys)) != len(keys):
+            raise SecretBrokerError("selection_invalid", "secret keys must be unique")
         if surface != "cli":
             raise SecretBrokerError("command_denied", "arbitrary secret commands are local CLI only")
         def perform(correlation):
             _, document = self._document(source)
-            record = document.entries.get(key)
-            if record is None:
-                raise SecretBrokerError("key_missing", "secret key does not exist")
-            result = run_with_secret(argv, destination=destination, value=self._entry_value(record),
-                                     timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
-            return success("run", source=source, key=key, result=result.as_dict(), correlation_id=correlation)
-        return self._operate("use", source, (key,), surface, perform)
+            values = {}
+            for key, destination in normalized:
+                record = document.entries.get(key)
+                if record is None:
+                    raise SecretBrokerError("key_missing", "secret key does not exist")
+                values[destination] = self._entry_value(record)
+            result = run_with_secrets(
+                argv, secrets=values, timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+            )
+            payload = {"source": source, "result": result.as_dict(),
+                       "correlation_id": correlation}
+            if len(keys) == 1:
+                payload["key"] = keys[0]
+            else:
+                payload["keys"] = list(keys)
+            return success("run", **payload)
+        return self._operate("use", source, keys, surface, perform)
 
     def use_profile(self, profile_name: str, *, surface: str = "mcp") -> dict:
         profile = self.use_profiles.get(profile_name)

@@ -8,7 +8,7 @@ import selectors
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from sandbox.services.redaction import StreamingRedactor
 
@@ -26,15 +26,21 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BASE_ENV = frozenset({"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "TERM"})
 
 
-def minimal_environment(destination: str, value: str) -> dict[str, str]:
-    destination = validate_destination(destination)
+def minimal_environment_values(values: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(values, Mapping) or not values:
+        raise SecretBrokerError("key_empty", "at least one secret is required")
     result = {
         key: item
         for key, item in os.environ.items()
         if key in _BASE_ENV or key.startswith("LC_")
     }
-    result[destination] = value
+    for destination, value in values.items():
+        result[validate_destination(destination)] = value
     return result
+
+
+def minimal_environment(destination: str, value: str) -> dict[str, str]:
+    return minimal_environment_values({destination: value})
 
 
 def run_with_secret(
@@ -42,6 +48,19 @@ def run_with_secret(
     *,
     destination: str,
     value: str,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    max_output_bytes: int = MAX_OUTPUT_BYTES,
+) -> RunResult:
+    return run_with_secrets(
+        argv, secrets={destination: value}, timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
+    )
+
+
+def run_with_secrets(
+    argv: Sequence[str],
+    *,
+    secrets: Mapping[str, str],
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     max_output_bytes: int = MAX_OUTPUT_BYTES,
 ) -> RunResult:
@@ -57,11 +76,15 @@ def run_with_secret(
     if not isinstance(max_output_bytes, int) or isinstance(max_output_bytes, bool) \
             or not 1 <= max_output_bytes <= MAX_OUTPUT_BYTES:
         raise SecretBrokerError("command_invalid", "secret use output limit is invalid")
-    if value == "":
-        raise SecretBrokerError("key_empty", "empty secrets cannot be used by a child process")
+    if not isinstance(secrets, Mapping) or not secrets:
+        raise SecretBrokerError("key_empty", "at least one secret is required")
+    for destination, value in secrets.items():
+        validate_destination(destination)
+        if not isinstance(value, str) or value == "":
+            raise SecretBrokerError("key_empty", "empty secrets cannot be used by a child process")
 
-    environment = minimal_environment(destination, value)
-    redactor = StreamingRedactor((value.encode(),))
+    environment = minimal_environment_values(secrets)
+    redactor = StreamingRedactor(tuple(value.encode() for value in secrets.values()))
     started = time.monotonic()
     try:
         process = subprocess.Popen(

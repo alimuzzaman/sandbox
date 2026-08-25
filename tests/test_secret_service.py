@@ -14,7 +14,7 @@ from unittest import mock
 
 from sandbox.secrets.audit import SecretAudit
 from sandbox.secrets.models import SecretBrokerError, UseProfile
-from sandbox.secrets.runner import minimal_environment, run_with_secret
+from sandbox.secrets.runner import minimal_environment, run_with_secret, run_with_secrets
 from sandbox.secrets.service import SecretService
 from sandbox.secrets.sources import SourceRegistry
 
@@ -198,6 +198,21 @@ class TestSecretRunner(unittest.TestCase):
         self.assertIn("[REDACTED]", result.output)
         self.assertNotIn(secret, result.output)
 
+    def test_child_receives_multiple_selected_secrets_and_redacts_each(self):
+        first = "TestOnly_First123456789AbCd"
+        second = "TestOnly_Second12345678AbCd"
+        result = run_with_secrets(
+            [sys.executable, "-c",
+             "import os; print(os.environ['ACCESS_KEY']); print(os.environ['ACCESS_SECRET'])"],
+            secrets={"ACCESS_KEY": first, "ACCESS_SECRET": second},
+            timeout_seconds=5,
+            max_output_bytes=1024,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.output.count("[REDACTED]"), 2)
+        self.assertNotIn(first, result.output)
+        self.assertNotIn(second, result.output)
+
     def test_output_is_bounded(self):
         result = run_with_secret(
             [sys.executable, "-c", "print('x' * 10000)"],
@@ -356,6 +371,25 @@ class TestSecretBrokerService(unittest.TestCase):
         self.assertNotIn("elapsed_seconds", result["result"])
         with self.assertRaisesRegex(SecretBrokerError, "not registered"):
             self.service.use_profile("missing", surface="mcp")
+
+    def test_run_many_injects_paired_credentials_in_one_child(self):
+        self.source.write_bytes(
+            self.source.read_bytes()
+            + b"ACCESS_KEY=AccessKeyFixture123456789AbCd\n"
+            + b"ACCESS_SECRET=AccessSecretFixture123456789AbCd\n"
+        )
+        result = self.service.run_many(
+            "fixture",
+            (("ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+             ("ACCESS_SECRET", "AWS_SECRET_ACCESS_KEY")),
+            [sys.executable, "-c", "import os; print(os.environ['AWS_ACCESS_KEY_ID']); print(os.environ['AWS_SECRET_ACCESS_KEY'])"],
+            timeout_seconds=5,
+            max_output_bytes=1024,
+        )
+        self.assertEqual(result["keys"], ["ACCESS_KEY", "ACCESS_SECRET"])
+        self.assertEqual(result["result"]["output"].count("[REDACTED]"), 2)
+        self.assertNotIn("AccessKeyFixture", repr(result))
+        self.assertNotIn("AccessSecretFixture", repr(result))
 
     def test_update_preserves_unrelated_bytes_and_checks_revision_and_intent(self):
         before = self.source.read_bytes()

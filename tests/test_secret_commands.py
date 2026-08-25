@@ -28,6 +28,16 @@ class SecretCommandTests(unittest.TestCase):
         self.assertEqual((args.action, args.mode, args.keys, args.project_dir),
                          ("inspect", "keys", None, "."))
 
+    def test_run_supports_repeatable_key_destination_bindings(self):
+        args = self.parser().parse_args([
+            "run", "--source", "fixture", "--secret", "ACCESS_KEY=AWS_ACCESS_KEY_ID",
+            "--secret", "ACCESS_SECRET=AWS_SECRET_ACCESS_KEY", "--", "child",
+        ])
+        self.assertEqual(args.secrets, [
+            "ACCESS_KEY=AWS_ACCESS_KEY_ID", "ACCESS_SECRET=AWS_SECRET_ACCESS_KEY",
+        ])
+        self.assertIsNone(args.key)
+
     def test_source_info_defaults_to_bucketed_metadata(self):
         args = self.parser().parse_args(["source-info", "--source", "fixture"])
         self.assertEqual(
@@ -132,10 +142,10 @@ class SecretCommandTests(unittest.TestCase):
 
     def test_run_propagates_trusted_child_failure(self):
         args = SimpleNamespace(
-            action="run", source="fixture", key="API_TOKEN", project_dir=".",
+            action="run", source="fixture", key="API_TOKEN", secrets=None, project_dir=".",
             destination="API_TOKEN", timeout_seconds=5, command=["--", "child"],
         )
-        service = SimpleNamespace(run=lambda *args, **kwargs: {
+        service = SimpleNamespace(run_many=lambda *args, **kwargs: {
             "ok": True,
             "operation": "run",
             "result": {
@@ -153,6 +163,35 @@ class SecretCommandTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 11)
         self.assertIn("child_failed", stderr.getvalue())
         self.assertIn("exit_code=11", stdout.getvalue())
+
+    def test_run_many_passes_pair_without_nested_child_invocation(self):
+        args = SimpleNamespace(
+            action="run", source="fixture", key=None, secrets=[
+                "ACCESS_KEY=AWS_ACCESS_KEY_ID", "ACCESS_SECRET=AWS_SECRET_ACCESS_KEY",
+            ], project_dir=".", destination="SANDBOX_SECRET", timeout_seconds=5,
+            command=["--", "child"],
+        )
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            def run_many(self, *call_args, **call_kwargs):
+                self.calls.append((call_args, call_kwargs))
+                return {
+                    "ok": True, "operation": "run", "keys": ["ACCESS_KEY", "ACCESS_SECRET"],
+                    "result": {"termination": "exited", "exit_code": 0, "output": ""},
+                }
+
+        service = Service()
+        with patch.object(command, "_service", return_value=service), \
+             patch.object(command, "_emit") as emit:
+            command.cmd_secrets({}, args)
+        bindings = service.calls[0][0][1]
+        self.assertEqual(bindings, [
+            ("ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+            ("ACCESS_SECRET", "AWS_SECRET_ACCESS_KEY"),
+        ])
+        emit.assert_called_once()
 
     def test_isolated_live_cli_flow_never_prints_fixture_value(self):
         repository = Path(__file__).parent.parent

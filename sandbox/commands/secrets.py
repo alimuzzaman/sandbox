@@ -51,9 +51,11 @@ def configure_parser(parser) -> None:
     validate.add_argument("--json", action="store_true")
     validate.add_argument("--project-dir", default=".")
 
-    run = actions.add_parser("run", help="inject one secret into one direct-argv child")
+    run = actions.add_parser("run", help="inject one or more secrets into one direct-argv child")
     run.add_argument("--source", required=True)
-    run.add_argument("--key", required=True)
+    run.add_argument("--key", help="one secret key (use --secret for paired bindings)")
+    run.add_argument("--secret", action="append", dest="secrets", metavar="KEY=DEST",
+                     help="bind one key to one child environment name; repeatable")
     run.add_argument("--destination", default="SANDBOX_SECRET")
     run.add_argument("--timeout-seconds", type=int, default=300)
     run.add_argument("--project-dir", default=".")
@@ -217,11 +219,28 @@ def cmd_secrets(cfg, args) -> None:
             command = list(args.command)
             if command and command[0] == "--":
                 command.pop(0)
-            payload = service.run(
-                args.source,
-                args.key,
-                command,
-                destination=args.destination,
+            if args.secrets:
+                if args.key or args.destination != "SANDBOX_SECRET":
+                    raise SecretBrokerError(
+                        "selection_invalid",
+                        "use either --key/--destination or repeat --secret KEY=DEST",
+                    )
+                bindings = []
+                for raw in args.secrets:
+                    if not isinstance(raw, str) or raw.count("=") != 1:
+                        raise SecretBrokerError(
+                            "selection_invalid", "each --secret must be KEY=DEST",
+                        )
+                    key, destination = raw.split("=", 1)
+                    bindings.append((key, destination))
+            else:
+                if not args.key:
+                    raise SecretBrokerError(
+                        "selection_invalid", "--key is required unless --secret is provided",
+                    )
+                bindings = [(args.key, args.destination)]
+            payload = service.run_many(
+                args.source, bindings, command,
                 timeout_seconds=args.timeout_seconds,
             )
             _emit(payload, False)

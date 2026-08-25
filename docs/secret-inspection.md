@@ -213,6 +213,19 @@ choose from one second to 30 minutes. Combined redacted output is bounded to
 `sb secrets run` exit nonzero after the bounded result is printed; the child
 exit code is preserved when it is safe for the shell to represent it.
 
+For paired credentials, repeat `--secret KEY=DEST` so both brokered values enter
+one child process, for example:
+
+```bash
+./sb secrets run --source SOURCE_ALIAS \
+  --secret ACCESS_KEY=AWS_ACCESS_KEY_ID \
+  --secret ACCESS_SECRET=AWS_SECRET_ACCESS_KEY \
+  --project-dir PROJECT_DIR -- trusted-program status
+```
+
+Do not nest `secrets run`; each destination must be unique and pass the same
+safe-environment policy.
+
 Before using it:
 
 1. Confirm the executable and every fixed argument are trusted and necessary.

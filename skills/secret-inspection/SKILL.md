@@ -134,6 +134,20 @@ exit status, a bounded status response, or a resource identifier already known
 to be public. An unsuccessful child exit is propagated as a nonzero Sandbox
 exit after the bounded, redacted result is printed; output alone is not success.
 
+For a provider that requires a credential pair, bind both keys in the same
+direct child instead of nesting `secrets run` commands:
+
+```bash
+./sb secrets run --source SOURCE_ALIAS \
+  --secret ACCESS_KEY=AWS_ACCESS_KEY_ID \
+  --secret ACCESS_SECRET=AWS_SECRET_ACCESS_KEY \
+  --project-dir PROJECT_DIR -- trusted-program status
+```
+
+Each `--secret KEY=DEST` is resolved through the same broker and injected into
+the same minimal child environment. Destinations must be unique and safe; the
+key names and destination names are recorded, never the values.
+
 MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary
 commands or a candidate secret. There is no MCP reveal tool.

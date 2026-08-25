@@ -185,6 +185,12 @@ or use `--async` for long work. Sandbox never retries a timed-out command
 automatically, and synchronous WP stdout remains raw rather than wrapped in
 JSON.
 
+`wp post list` does not support a `--search` query argument: WP-CLI forwards
+that unknown spelling to `WP_Query`, which can silently return an unfiltered
+list. Sandbox rejects it before execution so a list cannot accidentally feed a
+destructive cleanup loop. Use the supported `--s=<term>` query var, or inspect
+and validate explicit IDs before updating or deleting posts.
+
 `./sb test` consumes its Sandbox routing options whether they appear before or
 after the mode. Keep PHPUnit arguments after the `--` delimiter; only those
 tokens are forwarded to the runner.

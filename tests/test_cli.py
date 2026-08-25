@@ -859,6 +859,82 @@ class TestResolutionGate(unittest.TestCase):
             command.cmd_wp({}, args)
         self.assertEqual(wpcli.call_args.args[0], ["plugin", "list"])
 
+    def test_wp_post_list_rejects_unsupported_search_before_execution(self):
+        import sandbox.commands.wp as command
+
+        for search in (["--search", "Target"], ["--search=Target"]):
+            with self.subTest(search=search):
+                args = SimpleNamespace(
+                    resolved_instance="fixture",
+                    passthrough=["post", "list", *search, "--format=ids"],
+                    run_async=False,
+                )
+                err = StringIO()
+                with mock.patch.object(command, "preflight_instance_capability",
+                                       return_value=None), \
+                        mock.patch.object(command, "wpcli") as wpcli, \
+                        redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        command.cmd_wp({}, args)
+                self.assertEqual(raised.exception.code, 1)
+                self.assertIn("does not support --search", err.getvalue())
+                self.assertIn("unfiltered list", err.getvalue())
+                wpcli.assert_not_called()
+
+    def test_wp_post_list_rejects_search_without_a_value(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture",
+            passthrough=["post", "list", "--search", "--format=ids"],
+            run_async=False,
+        )
+        err = StringIO()
+        with mock.patch.object(command, "preflight_instance_capability",
+                               return_value=None), \
+                mock.patch.object(command, "wpcli") as wpcli, \
+                redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                command.cmd_wp({}, args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("no command was executed", err.getvalue())
+        wpcli.assert_not_called()
+
+    def test_wp_async_post_list_rejects_search_before_launching_job(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture",
+            passthrough=["--", "post", "list", "--search=Target"],
+            run_async=True,
+        )
+        err = StringIO()
+        with mock.patch.object(command, "preflight_instance_capability",
+                               return_value=None), \
+                mock.patch("sandbox.commands.jobs.launch_job") as launch_job, \
+                redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                command.cmd_wp({}, args)
+        self.assertIn("does not support --search", err.getvalue())
+        launch_job.assert_not_called()
+
+    def test_wp_other_commands_preserve_search_passthrough(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture",
+            passthrough=["plugin", "search", "--search=Target"],
+            run_async=False,
+        )
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(command, "preflight_instance_capability",
+                               return_value=None), \
+                mock.patch.object(command, "wpcli", return_value=result) as wpcli, \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            command.cmd_wp({}, args)
+        self.assertEqual(wpcli.call_args.args[0],
+                         ["plugin", "search", "--search=Target"])
+
     def test_wp_timeout_parser_rejects_async_combination_before_instance_work(self):
         r = run_sb("wp", "--async", "--timeout", "5", "--", "option", "get", "siteurl")
         self.assertEqual(r.returncode, 2)

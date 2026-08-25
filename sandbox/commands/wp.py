@@ -38,6 +38,35 @@ def _print_stream(value, *, stderr: bool = False) -> None:
     print(value, end="" if value.endswith("\n") else "\n", file=sys.stderr if stderr else sys.stdout)
 
 
+def _reject_ignored_post_list_search(argv: list[str]) -> None:
+    """Fail closed for the common, but unsupported, ``post list --search`` spelling.
+
+    ``wp post list`` forwards query arguments to ``WP_Query``.  ``search`` is
+    not a ``WP_Query`` query var, so WP-CLI accepts the option but silently
+    returns an unfiltered list.  That is especially dangerous when the output
+    feeds a delete/update loop.  Keep the raw passthrough contract for every
+    other command, but make this known unsafe spelling explicit and point to
+    the supported ``s`` query var instead.
+    """
+    if len(argv) < 2 or argv[:2] != ["post", "list"]:
+        return
+    for index, token in enumerate(argv[2:], start=2):
+        if token == "--search":
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+            if not value or value.startswith("-"):
+                die("wp post list does not support --search; no command was "
+                    "executed. Use --s=<term> or validate explicit IDs.")
+            die("wp post list does not support --search; WP_Query would "
+                "ignore it and return an unfiltered list. Use "
+                "--s=<term> or validate explicit IDs before destructive "
+                "actions.")
+        if token.startswith("--search="):
+            die("wp post list does not support --search; WP_Query would "
+                "ignore it and return an unfiltered list. Use "
+                "--s=<term> or validate explicit IDs before destructive "
+                "actions.")
+
+
 
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
@@ -46,12 +75,13 @@ def cmd_wp(cfg, args) -> None:
     if not args.passthrough:
         die("usage: ./sb wp <wp-cli args>")
     pt = list(args.passthrough)
+    if pt and pt[0] == "--":
+        pt = pt[1:]
+    if not pt:
+        die("usage: ./sb wp <wp-cli args>")
+    _reject_ignored_post_list_search(pt)
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):
-        if pt and pt[0] == "--":
-            pt = pt[1:]
-        if not pt:
-            die("usage: ./sb wp --async <wp-cli args>")
         if managed_native_instance_selected(args.resolved_instance) is not None:
             die("managed-native async wp requires an adapter-native durable "
                 "transport; host/legacy job fallback is disabled")
@@ -63,10 +93,6 @@ def cmd_wp(cfg, args) -> None:
         print(f"  follow: ./sb job {jid} --follow", file=sys.stderr)
         print(f"  kill:   ./sb job {jid} --kill", file=sys.stderr)
         return
-    if pt and pt[0] == "--":
-        pt = pt[1:]
-    if not pt:
-        die("usage: ./sb wp <wp-cli args>")
     # Keep direct command namespaces (including out-of-tree callers/tests)
     # aligned with the parser's bounded synchronous default.
     timeout = getattr(args, "timeout", 60)

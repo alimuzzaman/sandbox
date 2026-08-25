@@ -22,6 +22,10 @@ working tree before acceptance, then the remote supervisor drains process pipes
 to durable local files. CLI/MCP callers read bounded retained output by cursor;
 they do not hold test pipes open across SSH.
 
+If remote source staging times out before a durable job is accepted, the CLI
+returns a typed transport error with `--local` as the safe local fallback; it
+does not expose the underlying subprocess command as a traceback.
+
 Once a remote job is running on its selected VPS, Sandbox invokes its nested
 project commands with `--local`. In that context, `--local` means the selected
 VPS's co-located runtime, not the developer workstation; it prevents a
@@ -39,6 +43,10 @@ the declared Compose service, preserving the project's pinned container image.
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
 ```
+
+The optional test mode may be omitted when forwarding a child command; keep the
+`--` delimiter so the first child flag is not interpreted as the mode:
+`./sb test --project-dir <dir> -- --testsuite unit`.
 
 Use a named persistent workspace for development. Use deterministic isolated
 labels for parallel matrix cells, retain failures for diagnosis, and reset or

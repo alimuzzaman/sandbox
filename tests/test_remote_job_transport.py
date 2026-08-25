@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import subprocess
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -125,6 +126,32 @@ class RemoteJobTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             transport.submit(submission)
         self.assertIs(raised.exception, marker)
+
+    def test_deploy_timeout_is_typed_and_actionable(self):
+        def deploy(*_args):
+            raise subprocess.TimeoutExpired(
+                cmd=["git", "push", "/private/deploy/path"], timeout=120,
+            )
+
+        transport = RemoteJobTransport(
+            deploy=deploy,
+            ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": ["job.exec", "job.execution-policy.v1"],
+            },
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+        )
+
+        with self.assertRaisesRegex(RemoteJobTransportError, "timed out.*--local") as raised:
+            transport.submit(submission)
+
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertNotIn("/private/deploy/path", str(raised.exception))
 
     def test_unrelated_deploy_value_error_propagates_unchanged_for_submit_many(self):
         marker = ValueError("matrix-deploy-private-value")

@@ -102,6 +102,37 @@ class TestResolutionGate(unittest.TestCase):
         self.assertTrue(args.json)
         self.assertEqual(args.passthrough, ["--filter", "Smoke"])
 
+    def test_test_passthrough_flag_without_mode_is_not_consumed_as_mode(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        argv = [
+            "sb", "test", "--project-dir", "/fixture",
+            "--", "--testsuite", "unit",
+        ]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "test": lambda _cfg, args: observed.append(args),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "_core", return_value=SimpleNamespace(
+                    registry_all=lambda: {},
+                )), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration",
+                                  return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertIsNone(observed[0].mode)
+        self.assertEqual(observed[0].project_dir, "/fixture")
+        self.assertEqual(observed[0].passthrough, ["--testsuite", "unit"])
+
     def test_registry_wide_setup_rejects_instance_and_label_selectors_before_side_effects(self):
         import sandbox.cli as cli
         import sandbox.commands.config_setup as config_setup

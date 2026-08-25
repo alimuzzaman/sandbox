@@ -174,6 +174,7 @@ _TEST_ROUTING_OPTIONS = {
     "--output-profile": True,
     "--json": False,
 }
+_TEST_MODE_OMITTED_SENTINEL = "__sandbox_test_mode_omitted__"
 
 
 def _normalize_test_routing_options(argv: list[str]) -> list[str]:
@@ -213,6 +214,7 @@ def _normalize_test_routing_options(argv: list[str]) -> list[str]:
         len(tokens),
     )
     mode_index = None
+    unknown_option = False
     index = command_index + 1
     while index < delimiter:
         token = tokens[index]
@@ -229,8 +231,16 @@ def _normalize_test_routing_options(argv: list[str]) -> list[str]:
             break
         # An unknown option before the mode belongs to argparse's normal
         # error path. Do not guess at its arity or move anything around it.
+        unknown_option = True
         index += 1
     if mode_index is None:
+        # With an optional positional followed by argparse.REMAINDER, the
+        # parser treats the first child flag after `--` as the mode. Insert a
+        # private sentinel only when every pre-delimiter token was a known
+        # Sandbox option; main() converts it back to None after parsing, so
+        # configured/auto mode resolution keeps its existing semantics.
+        if delimiter < len(tokens) and not unknown_option:
+            return tokens[:delimiter] + [_TEST_MODE_OMITTED_SENTINEL] + tokens[delimiter:]
         return argv
 
     before_mode = tokens[command_index + 1:mode_index]
@@ -1089,6 +1099,8 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     raw_argv = _normalize_test_routing_options(list(sys.argv[1:]))
     args = p.parse_args(raw_argv)
+    if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:
+        args.mode = None
     pre_command_label = _global_label_before_subcommand(raw_argv)
     if pre_command_label is not None and args.cmd not in {"domains", "native", "vrdiff"}:
         args.label = pre_command_label

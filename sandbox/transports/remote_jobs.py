@@ -7,6 +7,7 @@ import base64
 import hashlib
 import re
 import shlex
+import subprocess
 from typing import Any, Callable
 
 from sandbox.jobs.models import normalize_output_wait_seconds, validate_ack_job_id
@@ -382,12 +383,26 @@ class RemoteJobTransport:
         from sandbox.core._remote import NetworkCapacityAdmissionError
 
         caught = False
+        timed_out = False
         decision = None
         try:
             deployed = self.deploy(remote, project_root)
         except NetworkCapacityAdmissionError as exc:
             caught = True
             decision = getattr(exc, "decision", None)
+        except subprocess.TimeoutExpired:
+            # A source push can time out before the durable job exists. Keep
+            # the transport boundary typed and actionable instead of leaking
+            # the subprocess command (which may contain a private path) as a
+            # raw traceback to CLI/MCP callers.
+            timed_out = True
+        if timed_out:
+            # Raise after leaving the handler so the private subprocess
+            # exception is not retained as the public exception context.
+            raise RemoteJobTransportError(
+                "remote source deployment timed out before job acceptance; "
+                "retry with --local or inspect the remote deployment state before replaying"
+            ) from None
         if caught:
             # Raising outside the except block keeps both __cause__ and
             # __context__ empty while still making the translation explicit.

@@ -58,17 +58,17 @@ Generated 2026-08-25 from the machine-local feedback ledger with paginated `./sb
 | 37 | active | P1 | blocked | high | c5b8e6a908f458f3ccc5b2236b0b39f1 | Remote Sandbox exact-head deploy hangs while ensuring instance |
 | 38 | active | P1 | blocked | high | b4323966b25994dcd75e21650ab77f93 | Remote deployment job cannot be observed from Sandbox durable ledger |
 | 39 | active | P1 | blocked | high | 95acb85a0e1cbbc855c7b8e508fbe73b | Hosted Lenzora dev deploy times out during compose restart and leaves worker runtime failures |
-| 40 | active | P1 | open | high | 412f6c4c5a9eb9d337c8e73baf1ad2d0 | Disposable Free Sandbox reaches HTTP but WordPress install core download times out |
-| 41 | active | P1 | open | high | b5ea143234f3d24d20f2ba78ea4435bb | Remote resource status cannot measure host capacity |
-| 42 | active | P1 | open | high | 6a1cca016d14d5cb8cb8f17648d15fc4 | Remote capacity and active-job monitor transport unavailable |
-| 43 | active | P1 | open | high | 3b3782464e982ed9387e8e2a81d12c53 | Remote network-capacity monitor unavailable |
-| 44 | active | P1 | open | high | c5548021faf772c2bc0bae19a8b94864 | Remote network capacity remains unmeasurable |
-| 45 | active | P1 | open | high | 84585e00f7126c3d37e11d6168091163 | Remote resource status classifies 32 networks as unattributed |
-| 46 | active | P1 | open | high | c4237726db9330b9c59a0fbc30328790 | Remote job-status SSH lookup timed out during accepted-job observation |
-| 47 | active | P1 | open | high | ab332c6de39e1d5c4fdd322ca1f5c057 | Remote job status SSH control timed out after jobs completed |
-| 48 | active | P1 | open | high | e66a25a7442e753015cd3a22d40f74af | Remote workspace references missing deployed project directory |
-| 49 | active | P1 | open | high | b06bb2505db8cfe037fe4af3f908f5c6 | Remote workspace list resolves a missing deploy path |
-| 50 | active | P1 | open | high | 76b5ac739bf331866795b3407295dff5 | Exact-source deploy Git push times out before remote job creation |
+| 40 | active | P1 | blocked | high | b5ea143234f3d24d20f2ba78ea4435bb | Remote resource status cannot measure host capacity |
+| 41 | active | P1 | blocked | high | 6a1cca016d14d5cb8cb8f17648d15fc4 | Remote capacity and active-job monitor transport unavailable |
+| 42 | active | P1 | blocked | high | 3b3782464e982ed9387e8e2a81d12c53 | Remote network-capacity monitor unavailable |
+| 43 | active | P1 | blocked | high | c5548021faf772c2bc0bae19a8b94864 | Remote network capacity remains unmeasurable |
+| 44 | active | P1 | blocked | high | 84585e00f7126c3d37e11d6168091163 | Remote resource status classifies 32 networks as unattributed |
+| 45 | active | P1 | blocked | high | c4237726db9330b9c59a0fbc30328790 | Remote job-status SSH lookup timed out during accepted-job observation |
+| 46 | active | P1 | blocked | high | ab332c6de39e1d5c4fdd322ca1f5c057 | Remote job status SSH control timed out after jobs completed |
+| 47 | active | P1 | blocked | high | e66a25a7442e753015cd3a22d40f74af | Remote workspace references missing deployed project directory |
+| 48 | active | P1 | blocked | high | b06bb2505db8cfe037fe4af3f908f5c6 | Remote workspace list resolves a missing deploy path |
+| 49 | active | P1 | blocked | high | 76b5ac739bf331866795b3407295dff5 | Exact-source deploy Git push times out before remote job creation |
+| 50 | active | P1 | open | high | 412f6c4c5a9eb9d337c8e73baf1ad2d0 | Disposable Free Sandbox reaches HTTP but WordPress install core download times out |
 | 51 | active | P1 | open | high | 0f423fb08b654a25161008d35dd30f34 | Remote job-list preflight cannot return old or fresh workspace records |
 | 52 | active | P1 | open | high | b459d15a68e801aa605881b9864a81ee | Hosted Lenzora deploy job is accepted but branch guard and job ledger prevent verification |
 | 53 | active | P1 | open | high | c0037db18a5c0485b646df051a1cdd59 | Remote deploy of a composer-autoloaded WP plugin boots to a fatal: vendor/ is gitignored, so PSR-4 classes are missing |

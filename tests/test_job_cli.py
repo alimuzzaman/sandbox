@@ -42,6 +42,28 @@ class JobCliTests(unittest.TestCase):
         invalid = parser.parse_args(["a" * 32, "--wait-seconds", "not-a-number"])
         self.assertEqual(invalid.wait_seconds, "not-a-number")
         self.assertIn("0-20 whole seconds", " ".join(parser.format_help().split()))
+        self.assertIn("1-262144 bytes", " ".join(parser.format_help().split()))
+
+    def test_cli_output_rejects_oversized_page_before_remote_lookup(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        parser = __import__("argparse").ArgumentParser()
+        configure_output_parser(parser)
+        args = parser.parse_args([
+            "a" * 32, "--remote", "vps", "--max-bytes", "262145", "--json",
+        ])
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies, \
+                patch("sandbox.core._remote.get_remote") as remote_lookup, \
+                redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                cmd_job_output(None, args)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": False, "code": "invalid_output_query",
+            "error": "output page bytes must be between 1 and 262144",
+        })
+        dependencies.assert_not_called()
+        remote_lookup.assert_not_called()
 
     def test_cli_output_rejects_invalid_wait_before_remote_lookup_with_json_failure(self):
         from sandbox.commands.jobs_runtime import cmd_job_output

@@ -16,7 +16,8 @@ from pathlib import Path
 from sandbox.application.context import durable_job_dependencies
 from sandbox.application.target_service import TargetResolutionError
 from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity,
-                                 TargetRequest, normalize_output_wait_seconds)
+                                 TargetRequest, normalize_output_page_bytes,
+                                 normalize_output_wait_seconds)
 from sandbox.jobs.registry import JobNotFound
 from sandbox.registry import CommandSpec, register_specs
 
@@ -207,7 +208,10 @@ def configure_output_parser(parser) -> None:
     position.add_argument("--tail-bytes", type=int)
     position.add_argument("--lines", type=int)
     position.add_argument("--since", help="RFC 3339 timestamp or Unix seconds")
-    parser.add_argument("--max-bytes", type=int, default=65536)
+    parser.add_argument(
+        "--max-bytes", type=int, default=65536,
+        help="bounded output page, 1-262144 bytes (default 65536)",
+    )
     parser.add_argument("--encoding", choices=("utf8", "base64"), default="utf8")
     parser.add_argument("--profile", default="full", help="declarative retained-output presentation profile")
     parser.add_argument("--follow", action="store_true")
@@ -424,6 +428,7 @@ def cmd_job_status(_cfg, args) -> None:
 
 def cmd_job_output(_cfg, args) -> None:
     try:
+        max_bytes = normalize_output_page_bytes(getattr(args, "max_bytes", 65536))
         wait_seconds = normalize_output_wait_seconds(getattr(args, "wait_seconds", 0))
     except ValueError as exc:
         if getattr(args, "json", False):
@@ -441,7 +446,7 @@ def cmd_job_output(_cfg, args) -> None:
             result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
                 offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
                 lines=getattr(args, "lines", None), since=getattr(args, "since", None),
-                max_bytes=args.max_bytes,
+                max_bytes=max_bytes,
                 wait_seconds=effective_wait_seconds,
                 encoding=args.encoding, profile=getattr(args, "profile", "full"))
             if args.json: print(json.dumps(result, sort_keys=True))
@@ -457,7 +462,7 @@ def cmd_job_output(_cfg, args) -> None:
             result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
                 offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
                 lines=getattr(args, "lines", None), since=getattr(args, "since", None),
-                max_bytes=args.max_bytes,
+                max_bytes=max_bytes,
                 wait_seconds=effective_wait_seconds,
                 encoding=args.encoding, profile=getattr(args, "profile", "full")))
         except RuntimeError as exc:

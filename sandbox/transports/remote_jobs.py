@@ -10,7 +10,8 @@ import shlex
 import subprocess
 from typing import Any, Callable
 
-from sandbox.jobs.models import normalize_output_wait_seconds, validate_ack_job_id
+from sandbox.jobs.models import (normalize_output_page_bytes,
+                                 normalize_output_wait_seconds, validate_ack_job_id)
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
 
@@ -648,6 +649,7 @@ class RemoteJobTransport:
                     since: str | None = None,
                     max_bytes: int = 65536, wait_seconds: int = 0,
                     encoding: str = "utf8", profile: str = "full") -> dict:
+        max_bytes = normalize_output_page_bytes(max_bytes)
         wait_seconds = normalize_output_wait_seconds(wait_seconds)
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict):

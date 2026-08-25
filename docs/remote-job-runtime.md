@@ -28,7 +28,11 @@ traceback, and never resubmits the job.
 `job-output` accepts exactly one retained-output position selector: an opaque
 cursor, a byte offset across the rendered stream, a trailing byte count, a line
 count, or an RFC 3339/Unix-seconds `since` timestamp. Its bounded long-poll
-interval is 0-20 whole seconds; zero disables a one-shot wait. `job-output
+interval is 0-20 whole seconds; zero disables a one-shot wait. Output page
+sizes are bounded to 1-262144 bytes. The CLI and remote transport reject
+values outside either bound before target lookup, so an invalid remote query
+returns a stable `invalid_output_query` envelope instead of a traceback.
+`job-output
 --follow` is a client polling loop over retained files and converts a validated
 zero into its one-second polling wait. `full`,
 `smart`, `errors`, `sampled`, `quiet`, and declarative custom profiles affect

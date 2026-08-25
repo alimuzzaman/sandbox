@@ -627,6 +627,17 @@ class RemoteJobTransportTests(unittest.TestCase):
                     transport.read_output("r", "a" * 32, wait_seconds=value)
         self.assertEqual(calls, [])
 
+    def test_output_page_rejects_oversized_value_before_remote_lookup(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_args: self.fail("deploy must not run"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("SSH must not run"),
+            remote_lookup=lambda _name: calls.append("lookup") or {"provisioned": True},
+        )
+        with self.assertRaisesRegex(ValueError, "output page bytes must be between 1 and 262144"):
+            transport.read_output("r", "a" * 32, max_bytes=262145)
+        self.assertEqual(calls, [])
+
     def test_matrix_rejection_reports_structured_remote_reason(self):
         transport = RemoteJobTransport(
             deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,

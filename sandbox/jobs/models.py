@@ -61,6 +61,16 @@ def normalize_output_wait_seconds(value: object) -> int:
     return value
 
 
+def normalize_output_page_bytes(value: object) -> int:
+    """Validate the retained-output page size before local or remote I/O."""
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= MAX_OUTPUT_PAGE_BYTES):
+        raise ValueError(
+            f"output page bytes must be between 1 and {MAX_OUTPUT_PAGE_BYTES}"
+        )
+    return value
+
+
 class Lifecycle(str, Enum):
     ACCEPTED = "accepted"
     QUEUED = "queued"
@@ -386,7 +396,7 @@ class OutputQuery:
     def __post_init__(self) -> None:
         if self.stream not in {"combined", "stdout", "stderr"}:
             raise ValueError("output stream is invalid")
-        _positive_seconds(self.max_bytes, "output page bytes", maximum=MAX_OUTPUT_PAGE_BYTES)
+        object.__setattr__(self, "max_bytes", normalize_output_page_bytes(self.max_bytes))
         _positive_seconds(self.max_events, "output page events", maximum=500)
         if self.encoding not in {"utf8", "base64"}:
             raise ValueError("output encoding is invalid")

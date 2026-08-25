@@ -2,7 +2,7 @@
 
 Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb feedback list --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **604**; reviewed/assigned status: **603**; unreviewed: **1**; invalid records withheld: **0**.
+- Total records: **604**; reviewed/assigned status: **604**; unreviewed: **0**; invalid records withheld: **0**.
 - Active remediation: **384** — P0: 1, P1: 207, P2: 168, P3: 8.
 - Verification/closure follow-up: **220** — resolved: 122, verified: 68, duplicate: 10, not_applicable: 20, wont_fix: 0, invalid: 0.
 
@@ -69,7 +69,7 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 47 | active | P1 | blocked | medium | 8468c164cd1eb21746ab9fa3c2360000 | Remote workspace listing is blocked by runtime revision mismatch |
 | 48 | active | P1 | blocked | medium | fb3f67c8f3b583854058d53a5cc02a19 | Workspace remote revision check stays mismatched after successful service migration |
 | 49 | active | P1 | blocked | medium | 00bad5d45624a2451bc59bd62d816b7a | Disposable source instance cannot start when a declared Docker network has disappeared |
-| 50 | active | P1 | unreviewed | high | ec48a43e60e5fd126f2fa846b460d8ff | Remote resources plan exceeds CLI wait without returning evidence |
+| 50 | active | P1 | open | high | ec48a43e60e5fd126f2fa846b460d8ff | Remote resources plan exceeds CLI wait without returning evidence |
 | 51 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
 | 52 | active | P1 | open | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
 | 53 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |

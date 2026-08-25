@@ -507,8 +507,9 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
       * pinned `wpVersion` and live core differs → `wp core update --version=<pin>
         --force` (works in both directions, so a downgrade for a version-specific
         repro works too);
-      * no pin → "track the current release": `wp core update`, a no-op when the
-        site is already current.
+      * no pin → preserve the live core.  Unpinned means "latest" for a new
+        install, but an in-place lifecycle apply must not silently upgrade a
+        working site; use an explicit `wpVersion` (or recreate) to move it.
 
     Then `wp core update-db` (network-wide on multisite), because a core swap
     under a live DB leaves the schema at the old version otherwise.
@@ -522,6 +523,9 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
     if live is None:
         info("apply: no WordPress core to reconcile yet (skipping core update)")
         return {"changed": False, "reason": "not-installed"}
+    if not want:
+        return {"changed": False, "from": live, "to": live,
+                "reason": "unpinned-preserved"}
     if want and live == want:
         return {"changed": False, "from": live, "to": live}
     if want:

@@ -302,7 +302,7 @@ file path.
   // need one exact WordPress build — a pin is EXACT, so "7.0" is the 7.0.0
   // release, not the newest 7.0.x. See "Version pins" below.
   "phpVersion": null,   // e.g. "8.1" — resolves server-aware (see below)
-  "wpVersion":  null,   // e.g. "6.4.3" — omit to track the current release
+  "wpVersion":  null,   // e.g. "6.4.3" — new installs use latest; apply preserves an existing core
 
   // false | true | "subdirectory" | "subdomain". true = subdirectory (the
   // baseline that works on localhost:<port>). See "Multisite" below.
@@ -561,8 +561,9 @@ plugin development, "match the user's stack") wants an unpinned, current
 WordPress. `phpVersion` is different: PHP is a real compatibility variable and
 pinning it costs nothing, so pin it whenever the target PHP matters.
 
-A pin that is no longer wanted is not sticky: delete it and `./sb apply
---project-dir <DIR>` moves the live site to the current release (see below).
+A pin that is no longer wanted is not a request to mutate an existing site:
+delete it and `./sb apply --project-dir <DIR>` preserves the live core. Set an
+explicit new `wpVersion`, or recreate the instance, when a core move is wanted.
 
 `phpVersion` maps to the right image **per server**; `wpVersion` never enters an
 image tag at all:
@@ -920,14 +921,14 @@ warns about drift.
    | `wpVersion: "6.8.2"` | `6.8.2` | nothing |
    | `wpVersion: "6.8.2"` | anything else | `wp core update --version=6.8.2 --force` (upgrade **or** downgrade) |
    | no pin | current release | nothing |
-   | no pin | older | `wp core update` → current release |
+   | no pin | older | nothing (preserve the live core) |
 
    Then `wp core update-db` (`--network` on multisite), so the schema follows
    the files. Container recreates never re-version WordPress — core lives in the
-   bind mount — so this step is the ONLY thing that moves a running instance off
-   the core it was installed with. It is non-fatal: a wp.org failure warns and
-   leaves the site on its current core. The result comes back as
-   `wp_core: {from, to, changed}`.
+   bind mount — and an unpinned in-place apply deliberately preserves that live
+   core. An explicit `wpVersion` is the only apply-time core move. It is
+   non-fatal: a wp.org failure warns and leaves the site on its current core.
+   The result comes back as `wp_core: {from, to, changed}`.
 
    The web health gate probes the instance's canonical URL directly (without
    following redirects); 2xx–4xx responses count as reachable, while 5xx and

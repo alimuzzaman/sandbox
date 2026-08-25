@@ -71,15 +71,15 @@ class TestReconcileWpCore(unittest.TestCase):
                          ["core", "update", "--version=7.0", "--force"])
         self.assertEqual(wp.ran(["core", "update-db"]), [["core", "update-db"]])
 
-    def test_no_pin_moves_a_stale_instance_to_the_current_release(self):
+    def test_no_pin_preserves_a_stale_instance_during_apply(self):
         wp = FakeWpCli(version="7.0", latest="7.0.4")
         state = self.reconcile(wp, pconf={})
 
-        self.assertEqual((state["from"], state["to"]), ("7.0", "7.0.4"))
-        # No --version: "unpinned" means the current release, whatever it is.
-        self.assertEqual(wp.ran(["core", "update"])[0], ["core", "update"])
+        self.assertEqual((state["from"], state["to"]), ("7.0", "7.0"))
+        self.assertEqual(state["reason"], "unpinned-preserved")
+        self.assertEqual(wp.ran(["core", "update"]), [])
 
-    def test_no_pin_on_a_current_site_skips_the_schema_upgrade(self):
+    def test_no_pin_on_a_current_site_still_skips_the_schema_upgrade(self):
         wp = FakeWpCli(version="7.0.4", latest="7.0.4")
         state = self.reconcile(wp, pconf={})
 
@@ -88,7 +88,11 @@ class TestReconcileWpCore(unittest.TestCase):
 
     def test_multisite_upgrades_the_whole_network_schema(self):
         wp = FakeWpCli(version="6.8.1", latest="6.8.3")
-        self.reconcile(wp, inst_cfg={"multisite": "subdirectory"}, pconf={})
+        self.reconcile(
+            wp,
+            inst_cfg={"multisite": "subdirectory"},
+            pconf={"wpVersion": "6.8.3"},
+        )
 
         self.assertEqual(wp.ran(["core", "update-db"]),
                          [["core", "update-db", "--network"]])

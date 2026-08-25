@@ -45,6 +45,42 @@ class Service:
 
 
 class TestDomainTransports(unittest.TestCase):
+    def test_nonready_cli_status_reports_dead_published_listener(self):
+        from sandbox.commands import domains
+        from unittest import mock
+
+        class FallbackService:
+            def status(self, project_dir, *, label):
+                return {
+                    "ok": False, "state": "fallback", "hostname": "demo.tst",
+                    "resolver": {"owner": "macos:scoped-resolver"},
+                    "reason": {"code": "resolver_not_selected",
+                               "message": "No resolver selected."},
+                    "mutated": False,
+                }
+
+        args = SimpleNamespace(
+            action="status", project_dir="/tmp/project", label="default",
+            resolver=None, json=True, tld=None,
+        )
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.domain_service",
+                        return_value=FallbackService()), \
+                mock.patch("sandbox.core._domains._published_listener_check",
+                           return_value={
+                               "ok": False,
+                               "label": "proxy published on 127.0.0.77:443 but nothing accepts there",
+                               "hint": "run `./sb domains up` to restore the proxy",
+                           }), \
+                redirect_stdout(output):
+            domains.cmd_domains({}, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["reason"]["code"], "ingress_listener_unreachable")
+        self.assertIn("domains up", payload["reason"]["message"])
+        self.assertEqual(payload["ingress"], {"state": "unreachable"})
+        self.assertEqual(payload["application"], {"state": "not_attempted"})
+
     def test_cli_and_mcp_preserve_the_same_closed_diagnostic_envelope(self):
         from sandbox.commands import domains
         from sandbox.network.models import DomainResult

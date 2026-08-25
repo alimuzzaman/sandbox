@@ -53,6 +53,37 @@ def _emit(payload: dict, as_json: bool) -> None:
         print(f"  fallback: {payload['fallback_url']}")
 
 
+def _annotate_default_ingress_failure(payload: dict) -> dict:
+    """Add bounded published-listener evidence to a non-ready status.
+
+    Resolver status and proxy listener status are separate observations. A
+    running container or a present loopback alias is not proof that the
+    published endpoint accepts connections, so expose the existing read-only
+    listener check when a project status is already non-ready. Keep ready
+    resolver results untouched and fail closed if the diagnostic is unavailable.
+    """
+    if not isinstance(payload, dict) or payload.get("state") == "ready":
+        return payload
+    try:
+        from sandbox.core import _domains
+        listener = _domains._published_listener_check()
+    except Exception:
+        return payload
+    if not isinstance(listener, dict) or listener.get("ok"):
+        return payload
+    label = str(listener.get("label") or "published ingress listener is unreachable")
+    hint = str(listener.get("hint") or "run `./sb domains up` to restore the proxy")
+    payload = dict(payload)
+    payload["ingress"] = {"state": "unreachable"}
+    payload["application"] = {"state": "not_attempted"}
+    payload["health"] = "degraded"
+    payload["reason"] = {
+        "code": "ingress_listener_unreachable",
+        "message": f"{label}; {hint}",
+    }
+    return payload
+
+
 def _support() -> dict:
     return {
         "ok": True,
@@ -232,6 +263,8 @@ def cmd_domains(cfg, args) -> None:
         payload = service.reconsider(args.resolver)
     if hasattr(payload, "to_dict"):
         payload = payload.to_dict()
+    if args.action == "status":
+        payload = _annotate_default_ingress_failure(payload)
     payload.setdefault("operation", args.action)
     _emit(payload, bool(args.json))
     if not payload.get("ok") and payload.get("state") not in {

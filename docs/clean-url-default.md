@@ -52,8 +52,9 @@ answer was to move the privileged target out of the checkout, not to remove clea
 
 ## Diagnosing a dead clean URL
 
-`./sb doctor` asserts the proxy's published endpoints actually accept connections, not
-merely that Docker reports a mapping. A container runtime can widen a published
+`./sb doctor` and a non-ready `./sb domains status` report whether the proxy's
+published endpoints actually accept connections, not merely that Docker reports a
+mapping. A container runtime can widen a published
 `127.0.0.77:80` bind to a wildcard one and then lose that port to whatever already owns it
 (observed live: OrbStack with `docker.expose_ports_to_lan: true` versus Herd's nginx on
 `127.0.0.1:80`). When doctor can identify the owner, it names the owning process and points

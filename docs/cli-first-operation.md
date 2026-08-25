@@ -26,6 +26,11 @@ If the instance name is already known, `sb status --instance NAME` and
 `sb logs --instance NAME` select it directly from any working directory; the
 controller does not consult the current directory as a fallback.
 
+When a clean-URL project status is non-ready, the command also performs a
+bounded published-listener check. If the proxy endpoint is down, the result
+names that condition and points to `./sb domains up` (or the owning service) so
+an HTTP hang is not mistaken for a slow WordPress runtime.
+
 `sb ensure` performs a bounded, read-only `docker info` preflight before it
 allocates ports or writes `sandbox.local.yml`/the instance registry. If Docker
 Desktop/OrbStack is stopped or its socket is unreachable, it fails within a few

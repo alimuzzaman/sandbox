@@ -773,10 +773,21 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # explicitly materialized child-image plan survive a later apply while a
     # changed requirement naturally invalidates it via the planner digest.
     _previous_block = previous_block
+    # A plan digest is a fingerprint of the complete extension requirement set.
+    # Do not feed a prior plan back as an expectation when a project has just
+    # added, removed, or changed ``phpExtensions``; the planner must derive the
+    # new digest and materialize/reuse the matching child images. Parent image
+    # digests remain reusable independently of the requirement fingerprint.
+    extension_requirements_match = (
+        block.get("php_extensions") is not None and
+        block.get("php_extensions") == _previous_block.get("php_extensions")
+    )
     for _extension_key in (
             "php_extension_parent_digest", "php_extension_parent_digests",
             "php_extension_parent_images", "php_extension_digest", "wpcli_image_digest", "platform",
             "architecture"):
+        if _extension_key == "php_extension_digest" and not extension_requirements_match:
+            continue
         if (_previous_block.get(_extension_key) is not None and
                 _extension_key not in block):
             block[_extension_key] = _json_safe_php_extensions(

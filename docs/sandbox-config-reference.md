@@ -584,6 +584,10 @@ Herd doesn't ship) falls back to the default host `php` rather than aborting.
 
 New WordPress scaffolds declare the immutable `wordpress@1` profile. Existing
 projects that omit `phpExtensions` retain their previous images and behavior.
+When a project adds or changes the field, `sb apply` recalculates the complete
+child-image plan; it does not reuse a stale digest from the prior instance
+configuration. Parent image digests may still be reused when their image
+references are unchanged.
 
 ```json
 {

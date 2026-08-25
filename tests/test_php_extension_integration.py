@@ -75,6 +75,28 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertNotIn("php_extensions", legacy)
         json.dumps(block["php_extensions"])
 
+    def test_extension_plan_digest_is_not_reused_when_requirements_change(self):
+        import sandbox.core._instances as instances
+        from sandbox.config.php_extensions import normalize_php_extensions
+
+        previous = {
+            "php_extensions": {"profile": "wordpress@1", "extensions": {"gd": True}},
+            "php_extension_digest": "sha256:" + "a" * 64,
+            "php_extension_parent_digests": {
+                "web": "sha256:" + "b" * 64,
+                "wpcli": "sha256:" + "c" * 64,
+            },
+        }
+        changed = normalize_php_extensions({"profile": "wordpress@1"})
+        with patch.object(instances, "_local_yaml", return_value={"instances": {"project": previous}}):
+            block = instances._build_instance_block(
+                {}, "project", "/tmp/project", {"root": "/tmp/project", "phpExtensions": changed},
+                {"wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125}, "nginx",
+            )
+
+        self.assertNotIn("php_extension_digest", block)
+        self.assertEqual(block["php_extension_parent_digests"], previous["php_extension_parent_digests"])
+
     def test_machine_local_lifecycle_opt_in_survives_apply_rebuild(self):
         import sandbox.core._instances as instances
 

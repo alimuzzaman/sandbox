@@ -200,6 +200,20 @@ existing SSH connection).
    reproduce plugin mounts. Machine-only `sandbox.config.override.*` and secret files
    are never included by this exception.
 
+Gitignored build artifacts are excluded by default. For a reviewed, bounded exception,
+repeat `--include PATH` with a relative file or directory such as a generated Composer
+`vendor/` tree:
+
+```bash
+./sb deploy --project-dir /path/to/plugin --remote myvps --ensure \
+  --include vendor/
+```
+
+Sandbox expands the directory to regular files, rejects machine-local or secret-looking
+paths (`.env*`, private-key files, `.git`, and `.sandbox`), and caps the transfer at
+10,000 files/512 MiB. The JSON result reports the exact included relative files under
+`included_paths`; the option is explicit and is never inferred from `.gitignore`.
+
 Before the remote instance is considered ready, `ensure` reconciles each instance's
 published WordPress, database, and Mailpit ports against listeners already present on
 the host. If a stale container or unrelated process owns a recorded port, Sandbox moves

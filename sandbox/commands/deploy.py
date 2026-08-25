@@ -168,6 +168,14 @@ def cmd_deploy(cfg, args) -> None:
         _fail(remote_name, "--plugin-slug is only supported for WordPress projects", as_json,
               source_ref=source_ref)
 
+    include_paths = getattr(args, "include", None)
+    if not isinstance(include_paths, (list, tuple)):
+        include_paths = []
+    try:
+        include_paths = sr.validate_deploy_include_paths(root, include_paths)
+    except (ValueError, OSError) as exc:
+        _fail(remote_name, str(exc), as_json, source_ref=source_ref)
+
     if not remote_name:
         _fail(
             remote_name,
@@ -208,7 +216,7 @@ def cmd_deploy(cfg, args) -> None:
             # Git; without it a ready remote fast-path cannot reconstruct the
             # deployed plugin bind mount.
             untracked = list(dict.fromkeys([
-                *untracked, *descriptor_files,
+                *untracked, *descriptor_files, *include_paths,
             ]))
             applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
         else:
@@ -217,8 +225,8 @@ def cmd_deploy(cfg, args) -> None:
             # keep it gitignored, but the remote still needs it to reconstruct
             # the exact bind mounts before activation.
             applied = sr.apply_uncommitted(
-                entry, target, root, "", descriptor_files,
-            ) if descriptor_files else 0
+                entry, target, root, "", [*descriptor_files, *include_paths],
+            ) if descriptor_files or include_paths else 0
         # Pro plugins are a HOST-level catalog, not project state: mirror them
         # before the instance boots so its On-Demand page lists the same slugs
         # the local machine offers. Fail-soft — a project deploy stays valid
@@ -326,6 +334,7 @@ def cmd_deploy(cfg, args) -> None:
              "pushed_commit": pushed_sha,
              "source_immutable": resolved_source is not None,
              "uncommitted_files_applied": applied, "instance": instance,
+             "included_paths": include_paths,
              "pro_plugins": pro_plugins,
              "url": public_url, "error": None}
     if as_json:
@@ -337,6 +346,8 @@ def cmd_deploy(cfg, args) -> None:
         else:
             print(f"  pushed HEAD ({pushed_sha[:7]}) -> {remote_name}")
             print(f"  applied {applied} uncommitted file(s)")
+        if include_paths:
+            print(f"  explicitly included {len(include_paths)} ignored artifact file(s)")
         if pro_plugins and not pro_plugins.get("ok"):
             print(f"  pro plugins: NOT mirrored — {pro_plugins.get('error')}")
         elif pro_plugins and pro_plugins.get("skipped") in (None, "unchanged"):

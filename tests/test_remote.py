@@ -1126,6 +1126,35 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             mock_ssh_run.assert_called_once()
             self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", mock_ssh_run.call_args[0][1])
 
+    def test_explicit_deploy_include_expands_ignored_build_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            project = Path(d)
+            vendor = project / "vendor"
+            vendor.mkdir()
+            (vendor / "autoload.php").write_text("<?php")
+            selected = sr.validate_deploy_include_paths(project, ["vendor"])
+            self.assertEqual(selected, ["vendor/autoload.php"])
+            with self.assertRaisesRegex(ValueError, "sensitive"):
+                sr.validate_deploy_include_paths(project, [".env"])
+
+    @patch("sandbox.core._remote.ssh_run")
+    @patch("subprocess.run")
+    def test_explicit_deploy_include_is_transferred_even_when_gitignored(self, mock_run, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as d:
+            project = Path(d)
+            vendor = project / "vendor"
+            vendor.mkdir()
+            (vendor / "autoload.php").write_text("<?php")
+            mock_run.return_value = _completed(returncode=0, stdout=b"archive")
+            applied = sr.apply_uncommitted(
+                {"ssh": "ubuntu@1.2.3.4"}, "/remote/project", project,
+                "", [], ["vendor"],
+            )
+            self.assertEqual(applied, 1)
+            self.assertIn("vendor/autoload.php", mock_run.call_args[0][0])
+            mock_ssh_run.assert_called_once()
+
     @patch("sandbox.core._remote.ssh_run")
     def test_dirty_archive_excludes_sidecars_and_preserves_dotfiles_bytes(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)

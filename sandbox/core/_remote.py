@@ -1599,8 +1599,84 @@ def deploy_project_descriptor_files(project_root) -> list[str]:
     return [relative.as_posix()]
 
 
+_DEPLOY_INCLUDE_SECRET_NAMES = {
+    ".env", ".env.local", ".env.production", ".env.development",
+    "id_rsa", "id_ed25519", "credentials.json", "auth.json",
+}
+_DEPLOY_INCLUDE_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+_DEPLOY_INCLUDE_MAX_FILES = 10_000
+_DEPLOY_INCLUDE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def validate_deploy_include_paths(project_root, paths) -> list[str]:
+    """Validate explicit ignored build artifacts before remote transfer."""
+    if paths is None:
+        return []
+    if not isinstance(paths, (list, tuple)):
+        raise ValueError("deploy include paths must be repeatable relative paths")
+    root = Path(project_root).expanduser().resolve()
+    selected: list[str] = []
+    seen: set[str] = set()
+    files = 0
+    total_bytes = 0
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("deploy include paths must be non-empty relative paths")
+        relative = Path(raw).expanduser()
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"unsafe deploy include path: {raw!r}")
+        if any(
+            part in _DEPLOY_INCLUDE_SECRET_NAMES
+            or part.startswith(".env.")
+            or part.endswith(_DEPLOY_INCLUDE_SECRET_SUFFIXES)
+            or part in {".git", ".sandbox"}
+            for part in relative.parts
+        ):
+            raise ValueError(f"deploy include path looks sensitive or machine-local: {raw!r}")
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"deploy include path escapes the project root: {raw!r}") from exc
+        if path.is_symlink():
+            raise ValueError(f"deploy include path must not be a symbolic link: {raw!r}")
+        if not path.exists():
+            raise ValueError(f"deploy include path does not exist: {raw!r}")
+        candidates = [path] if path.is_file() else [
+            child for child in path.rglob("*")
+            if child.is_file() and not child.is_symlink()
+        ] if path.is_dir() else []
+        for child in candidates:
+            child_relative = child.relative_to(root).as_posix()
+            if is_appledouble_basename(child_relative) or child_relative in seen:
+                continue
+            if any(
+                part in _DEPLOY_INCLUDE_SECRET_NAMES
+                or part.startswith(".env.")
+                or part.endswith(_DEPLOY_INCLUDE_SECRET_SUFFIXES)
+                or part in {".git", ".sandbox"}
+                for part in Path(child_relative).parts
+            ):
+                raise ValueError(f"deploy include path contains a sensitive file: {child_relative!r}")
+            size = child.stat().st_size
+            files += 1
+            total_bytes += size
+            if files > _DEPLOY_INCLUDE_MAX_FILES:
+                raise ValueError(
+                    f"deploy include paths exceed the {_DEPLOY_INCLUDE_MAX_FILES}-file limit"
+                )
+            if total_bytes > _DEPLOY_INCLUDE_MAX_BYTES:
+                raise ValueError(
+                    "deploy include paths exceed the 512 MiB transfer limit"
+                )
+            seen.add(child_relative)
+            selected.append(child_relative)
+    return selected
+
+
 def apply_uncommitted(remote: dict, target_path: str, project_root,
-                       diff_text: str, untracked: list[str]) -> int:
+                       diff_text: str, untracked: list[str],
+                       include_paths: list[str] | None = None) -> int:
     """Applies the dirty working tree on top of a just-reset clean tree by
     copying exact file bytes for changed tracked files and untracked files.
 
@@ -1637,6 +1713,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         deleted_set = set(deleted)
         to_copy.extend([n for n in changed_names if n not in deleted_set])
     to_copy.extend(untracked)
+    to_copy.extend(validate_deploy_include_paths(project_root, include_paths or []))
     def safe_relpath(value: str) -> str:
         path = Path(value)
         if path.is_absolute() or ".." in path.parts:

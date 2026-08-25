@@ -796,6 +796,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="skip the automatic pro-plugin store mirror (see `./sb remote plugins`)")
     deploy_p.add_argument("--plugin-slug", default=None,
         help="WordPress-only plugin slug to activate after --ensure; defaults to project slug")
+    deploy_p.add_argument("--include", dest="include", action="append", default=None,
+        metavar="PATH",
+        help="explicitly transfer a relative ignored build artifact such as vendor/ (repeatable; sensitive paths rejected)")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

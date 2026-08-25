@@ -103,6 +103,29 @@ class TestHostingManifest(unittest.TestCase):
         )
         self.assertEqual(result["deploy"]["min_free_disk_mb"], 1024)
 
+    def test_validates_compose_build_timeout(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      build_timeout_seconds: 2400\n",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(result["compose"]["build_timeout_seconds"], 2400)
+
+        for value in (True, 59, 7201, "2400"):
+            token = (
+                str(value).lower() if isinstance(value, bool)
+                else f'"{value}"' if isinstance(value, str)
+                else str(value)
+            )
+            invalid = _manifest().replace(
+                "      service: web\n",
+                f"      service: web\n      build_timeout_seconds: {token}\n",
+            )
+            with self.subTest(value=value), self._write(invalid) as directory:
+                with self.assertRaisesRegex(hosting.HostingError, "build_timeout_seconds"):
+                    hosting.validate_manifest(directory)
+
     def test_validates_host_apply_disk_floor(self):
         invalid = (
             _manifest().replace(
@@ -716,6 +739,24 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("up -d --force-recreate --renew-anon-volumes --remove-orphans web", commands[0])
         self.assertFalse(any(command.endswith("build setup") for command in commands))
         self.assertTrue(any(command.endswith("run --rm setup") for command in commands))
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_timeout_is_used_for_compose_build_steps(self, remote_checked, _write):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      build_timeout_seconds: 2400\n"
+            "      init_services: [setup]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        build_calls = [call for call in remote_checked.call_args_list
+                       if "--force-recreate" in call.args[1]
+                       or " build setup" in call.args[1]]
+        self.assertGreaterEqual(len(build_calls), 2)
+        self.assertTrue(all(call.kwargs.get("timeout") == 2400 for call in build_calls))
 
     def test_build_defaults_to_true_and_rejects_a_non_boolean(self):
         with self._write(_manifest()) as directory:

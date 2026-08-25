@@ -490,6 +490,13 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     build = compose.get("build", True)
     if not isinstance(build, bool):
         raise HostingError("compose.build must be true or false")
+    build_timeout_seconds = compose.get("build_timeout_seconds", 900)
+    if (isinstance(build_timeout_seconds, bool)
+            or not isinstance(build_timeout_seconds, int)
+            or not 60 <= build_timeout_seconds <= 7200):
+        raise HostingError(
+            "compose.build_timeout_seconds must be an integer between 60 and 7200"
+        )
     healthcheck = env.get("healthcheck") or {}
     if not isinstance(healthcheck.get("path"), str) or not healthcheck["path"].startswith("/"):
         raise HostingError("healthcheck.path must start with /")
@@ -561,7 +568,12 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     robots = env.get("robots", "allow")
     if robots not in {"allow", "deny"}:
         raise HostingError("robots must be allow or deny")
-    normalized_compose = {**compose, "files": compose_paths, "build": build}
+    normalized_compose = {
+        **compose,
+        "files": compose_paths,
+        "build": build,
+        "build_timeout_seconds": build_timeout_seconds,
+    }
     return {"project_root": str(source_root), "source_root": str(source_root),
             "manifest_root": str(root),
             "source_root_nested": source_root_nested,

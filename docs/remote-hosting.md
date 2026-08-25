@@ -401,6 +401,12 @@ skips the explicit `init_services` build. Compose still builds a service that ha
 image at all, so a first deploy works either way, and new application code only ships
 once the image is rebuilt.
 
+For a deliberate cold or large build, set `compose.build_timeout_seconds` to a bounded
+value from 60 through 7200 (default `900`). The value applies to the Compose `up` and
+explicit `init_services` build operations; the final no-build restart and health probes
+retain their own shorter limits. This keeps long builds observable and bounded instead
+of silently using a fixed 15-minute cutoff.
+
 An environment may also protect its public origin with Basic Auth:
 
 ```yaml

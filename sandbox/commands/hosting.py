@@ -427,20 +427,21 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     # image the remote already has. Compose still builds a service with no
     # image at all, so a first deploy works either way.
     build = validated["compose"].get("build", True)
+    build_timeout = validated["compose"].get("build_timeout_seconds", 900)
     build_flag = " --build" if build else ""
     # Replace the image's anonymous application volume on each deployment so
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
     _build_checked(entry, prefix,
                    f"{prefix} up -d{build_flag} --force-recreate --renew-anon-volumes --remove-orphans {service_args}",
-                   service_args, timeout=900)
+                   service_args, timeout=build_timeout)
     for init_service in validated["compose"].get("init_services", []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
         # is never run from a previous deployment's image.
         if build:
             _build_checked(entry, prefix, f"{prefix} build {shlex.quote(init_service)}",
-                           shlex.quote(init_service), timeout=900)
+                           shlex.quote(init_service), timeout=build_timeout)
         _remote_checked(entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}", timeout=900)
     _remote_checked(entry, f"{prefix} up -d {service_args}", timeout=300)
 

@@ -12,6 +12,8 @@ from .parser import ParseResult
 from .schema import (
     ACCOUNTING_SCHEMA,
     COMMAND_EXIT_STATUSES,
+    LABEL_KEYS,
+    LABEL_STATES,
     MAX_ARGUMENT_KEYS,
     MAX_FORMULA_VALUE_LENGTH,
     MAX_STRING_LENGTH,
@@ -187,6 +189,20 @@ def _validate_normalized(rows: list[dict[str, Any]]) -> list[str]:
         signature = row.get("argument_signature")
         if not isinstance(signature, dict) or len(signature) > MAX_ARGUMENT_KEYS:
             errors.append(f"argument_signature:{row_number}")
+        elif set(signature) - {
+            "target_class",
+            "format",
+            "cursor",
+            "headers",
+            "metadata",
+            "label_state",
+            "labels",
+        }:
+            errors.append(f"argument_signature_keys:{row_number}")
+        elif "label_state" in signature and signature["label_state"] not in LABEL_STATES:
+            errors.append(f"label_state:{row_number}")
+        elif "labels" in signature and signature["labels"] != "formula_safe":
+            errors.append(f"labels_marker:{row_number}")
         if row.get("timestamp_state") not in TIMESTAMP_STATES:
             errors.append(f"timestamp_state:{row_number}")
         if row.get("timestamp_state") == "missing" and row.get("timestamp") is not None:
@@ -216,14 +232,20 @@ def _validate_normalized(rows: list[dict[str, Any]]) -> list[str]:
         if row.get("terminal_state") != "emitted":
             errors.append(f"terminal_state:{row_number}")
         formula_values = row.get("formula_safe_values", {})
+        signature_values = signature if isinstance(signature, dict) else {}
         if not isinstance(formula_values, dict):
             errors.append(f"formula_values:{row_number}")
         else:
+            unknown_label_keys = set(formula_values) - LABEL_KEYS
+            if unknown_label_keys:
+                errors.append(f"formula_label_keys:{row_number}")
             for value in formula_values.values():
-                if not isinstance(value, str) or len(value) > MAX_FORMULA_VALUE_LENGTH:
+                if value not in LABEL_STATES:
                     errors.append(f"formula_value_shape:{row_number}")
-                elif value.startswith(("=", "+", "-", "@")):
-                    errors.append(f"formula_value_unescaped:{row_number}")
+            if formula_values and signature_values.get("labels") != "formula_safe":
+                errors.append(f"formula_values_marker:{row_number}")
+            if signature_values.get("labels") == "formula_safe" and not formula_values:
+                errors.append(f"formula_values_missing:{row_number}")
 
     if line_indexes != sorted(line_indexes):
         errors.append("normalized_file_order")

@@ -20,6 +20,7 @@ from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
 
+from .atomic import atomic_write_text
 from .parser import ParseResult, parse_jsonl
 from .schema import (
     ACCOUNTING_SCHEMA,
@@ -405,9 +406,7 @@ def write_manifest(manifest: dict[str, Any], output_path: str | Path) -> Path:
         raise ValueError("unsupported coverage schema")
     _safe_manifest_check(manifest)
     path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_json(manifest), encoding="utf-8")
-    return path
+    return atomic_write_text(path, _json(manifest))
 
 
 def reconcile_to_directory(

@@ -5,9 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.audit_agent_usage.__main__ import main as cli_main
-from tools.audit_agent_usage.parser import parse_jsonl, parse_to_directory
+from tools.audit_agent_usage.parser import ParseResult, parse_jsonl, parse_to_directory, write_result
 from tools.audit_agent_usage.redactor import formula_safe, redact_nested
 from tools.audit_agent_usage.schema import safe_source_ref
 from tools.audit_agent_usage.validator import validate_output_files, validate_result
@@ -86,14 +87,14 @@ class SyntheticFixtureTests(unittest.TestCase):
         self.assertEqual(
             formula["formula_safe_values"],
             {
-                "equals": "'=SYNTHETIC_FORMULA()",
-                "plus": "'+SYNTHETIC_SUM()",
-                "minus": "'-SYNTHETIC_SUBTRACTION()",
-                "at": "'@SYNTHETIC_LABEL",
+                "equals": "formula_candidate",
+                "plus": "formula_candidate",
+                "minus": "formula_candidate",
+                "at": "formula_candidate",
             },
         )
         for value in formula["formula_safe_values"].values():
-            self.assertFalse(value.startswith(("=", "+", "-", "@")))
+            self.assertIn(value, {"present", "formula_candidate"})
         self.assertEqual(formula_safe("=SYNTHETIC()"), "'=SYNTHETIC()")
 
     def test_bounded_nested_redactor(self) -> None:
@@ -139,6 +140,45 @@ class SyntheticFixtureTests(unittest.TestCase):
         self.assertNotIn("synthetic prose", json.dumps(row))
         validation = validate_result(result)
         self.assertTrue(validation.ok, validation.errors)
+
+    def test_label_projection_is_closed_and_drops_prose_and_email_values(self) -> None:
+        record = {
+            "fixture_schema": "audit-fixture-v1",
+            "source_label": "CODEX-LOCAL-EXACT-CWD",
+            "source_ref": "SYN-LABEL-001",
+            "record_kind": "tool_event",
+            "event_index": 1,
+            "event_key": "SYN-LABEL-EVENT",
+            "event": {
+                "namespace": "sandbox",
+                "name": "feedback",
+                "arguments": {
+                    "labels": {
+                        "equals": "operator@example.com",
+                        "plus": "synthetic prose must not survive",
+                        "minus": "=SYNTHETIC_FORMULA()",
+                        "at": 42,
+                        "unapproved": "unapproved value",
+                        "description": "another prose value",
+                    }
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "synthetic-labels.jsonl"
+            source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            result = parse_jsonl(source)
+
+        row = result.normalized[0]
+        self.assertEqual(
+            row["formula_safe_values"],
+            {"equals": "present", "plus": "present", "minus": "formula_candidate"},
+        )
+        rendered = json.dumps(row)
+        self.assertNotIn("operator@example.com", rendered)
+        self.assertNotIn("synthetic prose", rendered)
+        self.assertNotIn("unapproved", rendered)
+        self.assertTrue(validate_result(result).ok)
 
     def test_missing_explicit_index_is_excluded_without_inference(self) -> None:
         record = {
@@ -202,6 +242,173 @@ class SyntheticFixtureTests(unittest.TestCase):
                 Path(first_dir) / "accounting.json",
             )
             self.assertTrue(validation.ok, validation.errors)
+
+    def test_write_result_validates_before_creating_or_overwriting_outputs(self) -> None:
+        result = parse_jsonl(INPUT)
+        broken_row = dict(result.normalized[0])
+        broken_row["formula_safe_values"] = {"equals": "operator@example.com"}
+        broken = ParseResult(
+            normalized=(broken_row,) + result.normalized[1:],
+            exclusions=result.exclusions,
+            accounting=result.accounting,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "derived"
+            with self.assertRaises(ValueError):
+                write_result(broken, output_dir)
+            self.assertFalse(output_dir.exists())
+
+    def test_write_result_replaces_each_file_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "derived"
+            parse_to_directory(INPUT, output_dir)
+            before = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            result = parse_jsonl(INPUT)
+            write_result(result, output_dir)
+            after = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(
+                sorted(path.name for path in output_dir.iterdir()),
+                ["accounting.json", "exclusions.jsonl", "normalized.jsonl"],
+            )
+
+    def test_write_result_rolls_back_when_a_file_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "derived"
+            parse_to_directory(INPUT, output_dir)
+            before = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            result = parse_jsonl(INPUT)
+
+            import tools.audit_agent_usage.atomic as atomic_module
+
+            original_replace = atomic_module.os.replace
+            calls = 0
+
+            def fail_once(source: str | bytes | Path, destination: str | bytes | Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 5:
+                    raise OSError("synthetic replace failure")
+                original_replace(source, destination)
+
+            with patch.object(atomic_module.os, "replace", side_effect=fail_once):
+                with self.assertRaises(OSError):
+                    write_result(result, output_dir)
+
+            after = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(
+                [path.name for path in output_dir.iterdir() if path.name.endswith((".tmp", ".bak"))],
+                [],
+            )
+
+    def test_write_result_cleans_staging_files_when_backup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "derived"
+            parse_to_directory(INPUT, output_dir)
+            before = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            result = parse_jsonl(INPUT)
+
+            import tools.audit_agent_usage.atomic as atomic_module
+
+            original_replace = atomic_module.os.replace
+            failed = False
+
+            def fail_backup_once(source: str | bytes | Path, destination: str | bytes | Path) -> None:
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise OSError("synthetic backup failure")
+                original_replace(source, destination)
+
+            with patch.object(atomic_module.os, "replace", side_effect=fail_backup_once):
+                with self.assertRaises(OSError):
+                    write_result(result, output_dir)
+
+            after = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(
+                [path.name for path in output_dir.iterdir() if path.name.endswith((".tmp", ".bak"))],
+                [],
+            )
+
+    def test_write_result_preserves_backups_when_restore_fails_persistently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "derived"
+            parse_to_directory(INPUT, output_dir)
+            before = {
+                path.name: path.read_bytes()
+                for path in output_dir.iterdir()
+                if path.is_file()
+            }
+            result = parse_jsonl(INPUT)
+
+            import tools.audit_agent_usage.atomic as atomic_module
+
+            original_replace = atomic_module.os.replace
+            calls = 0
+
+            def fail_commit_and_restore(
+                source: str | bytes | Path, destination: str | bytes | Path
+            ) -> None:
+                nonlocal calls
+                calls += 1
+                if str(source).endswith(".bak") or calls == 5:
+                    raise OSError("persistent synthetic replace failure")
+                original_replace(source, destination)
+
+            with patch.object(atomic_module.os, "replace", side_effect=fail_commit_and_restore):
+                with self.assertRaises(OSError):
+                    write_result(result, output_dir)
+
+            self.assertEqual(calls, 8)  # 3 backups + 2 commits + 3 restore attempts.
+            backups = sorted(output_dir.glob(".*.bak"))
+            self.assertEqual(len(backups), len(before))
+            for backup in backups:
+                filename = next(
+                    name for name in before if backup.name.startswith(f".{name}.")
+                )
+                self.assertEqual(backup.read_bytes(), before[filename])
+
+            # The retained backups are sufficient to restore the prior set;
+            # clean them up through the normal filesystem path in this test.
+            for backup in backups:
+                filename = next(
+                    name for name in before if backup.name.startswith(f".{name}.")
+                )
+                original_replace(backup, output_dir / filename)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in output_dir.iterdir()
+                    if path.is_file()
+                },
+                before,
+            )
 
     def test_cli_requires_explicit_input_and_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -39,6 +39,12 @@ TIMESTAMP_STATES = frozenset({"present", "missing", "inversion", "invalid"})
 RELATION_SIGNALS = frozenset({"none", "parent_candidate", "child_candidate"})
 RELATION_STATES = frozenset({"unknown"})
 
+# Labels are represented as bounded states rather than carrying their source
+# text into derived rows.  Keep the key and state sets closed: an arbitrary
+# label key or a prose/email-like value must never become durable output.
+LABEL_KEYS = frozenset({"equals", "plus", "minus", "at"})
+LABEL_STATES = frozenset({"present", "formula_candidate"})
+
 # These limits apply to every string that can survive projection.  Raw input
 # strings are never copied into a derived row.
 MAX_STRING_LENGTH = 128
@@ -140,6 +146,8 @@ __all__ = [
     "MAX_ARGUMENT_KEYS",
     "MAX_FORMULA_VALUE_LENGTH",
     "MAX_STRING_LENGTH",
+    "LABEL_KEYS",
+    "LABEL_STATES",
     "NORMALIZED_SCHEMA",
     "RELATION_SIGNALS",
     "RELATION_STATES",

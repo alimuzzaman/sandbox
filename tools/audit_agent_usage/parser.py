@@ -13,11 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .atomic import atomic_write_texts
 from .redactor import (
     FORMULA_CANDIDATE_MARKER,
     FORMULA_MARKER,
     REDACTED,
-    formula_safe,
     is_formula_candidate,
     redact_nested,
     target_class,
@@ -26,6 +26,7 @@ from .schema import (
     ACCOUNTING_SCHEMA,
     COMMAND_EXIT_STATUSES,
     FIXTURE_SCHEMA,
+    LABEL_KEYS,
     MAX_ARGUMENT_KEYS,
     NORMALIZED_SCHEMA,
     RELATION_SIGNALS,
@@ -139,7 +140,7 @@ def _project_arguments(arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[
     """Project only bounded, semantically useful argument markers."""
 
     signature: OrderedDict[str, Any] = OrderedDict()
-    formula_values: OrderedDict[str, str] = OrderedDict()
+    label_states: OrderedDict[str, str] = OrderedDict()
 
     explicit_target = arguments.get("target_class")
     if explicit_target is not None:
@@ -176,21 +177,23 @@ def _project_arguments(arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[
 
     labels = arguments.get("labels")
     if isinstance(labels, dict):
-        signature["labels"] = FORMULA_MARKER
-        # JSON object insertion order is part of the fixture's deterministic
-        # projection contract.  No global timestamp sort or key reordering is
-        # applied to an event's explicitly supplied labels.
+        # Only the closed synthetic label vocabulary is retained.  Values are
+        # reduced to an allowlisted state, so prose, email-like text, and
+        # formula bodies never cross the projection boundary.
         for raw_key, raw_value in labels.items():
             key = bounded_text(raw_key, limit=32)
-            if key is None or len(formula_values) >= MAX_ARGUMENT_KEYS:
+            if key not in LABEL_KEYS or len(label_states) >= MAX_ARGUMENT_KEYS:
                 continue
-            value = formula_safe(raw_value)
-            if value is not None:
-                formula_values[key] = value
+            if is_formula_candidate(raw_value):
+                label_states[key] = FORMULA_CANDIDATE_MARKER
+            elif bounded_text(raw_value) is not None:
+                label_states[key] = "present"
+        if label_states:
+            signature["labels"] = FORMULA_MARKER
 
     # The signature is deliberately a small allowlist.  Unknown arguments are
     # ignored rather than copied, preserving schema evolution and privacy.
-    return dict(signature), dict(formula_values)
+    return dict(signature), dict(label_states)
 
 
 def _project_relation(record: dict[str, Any]) -> tuple[str, str | None, str]:
@@ -591,24 +594,25 @@ def parse_jsonl(input_path: str | Path) -> ParseResult:
 
 
 def write_result(result: ParseResult, output_dir: str | Path) -> tuple[Path, Path, Path]:
-    """Write canonical JSONL/JSON output to an explicit audit-only directory."""
+    """Validate then atomically write canonical JSONL/JSON output."""
+
+    # Keep validation ahead of directory creation and every output write.  The
+    # local import avoids the parser/validator type-import cycle.
+    from .validator import validate_result
+
+    validate_result(result).require_ok()
 
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     normalized_path = directory / "normalized.jsonl"
     exclusions_path = directory / "exclusions.jsonl"
     accounting_path = directory / "accounting.json"
-    normalized_path.write_text(
-        "".join(_json_line(row) + "\n" for row in result.normalized),
-        encoding="utf-8",
-    )
-    exclusions_path.write_text(
-        "".join(_json_line(row) + "\n" for row in result.exclusions),
-        encoding="utf-8",
-    )
-    accounting_path.write_text(
-        json.dumps(result.accounting, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    atomic_write_texts(
+        {
+            normalized_path: "".join(_json_line(row) + "\n" for row in result.normalized),
+            exclusions_path: "".join(_json_line(row) + "\n" for row in result.exclusions),
+            accounting_path: json.dumps(result.accounting, ensure_ascii=False, indent=2) + "\n",
+        }
     )
     return normalized_path, exclusions_path, accounting_path
 

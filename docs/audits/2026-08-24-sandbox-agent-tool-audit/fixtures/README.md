@@ -29,7 +29,7 @@ is being introduced.
 | 1–4 | Codex initial/rollover records; line 3 repeats the event key from line 2 | emitted, duplicate, emitted | normalized, exclusions |
 | 5–6 | Claude text plus tool content block; line 6 is a replay | emitted, duplicate | normalized, exclusions |
 | 7 | Nested sensitive-looking values under a tool argument | emitted with nested values redacted | normalized |
-| 8 | Formula-leading labels (`=`, `+`, `-`, `@`) | emitted with formula-safe values | normalized |
+| 8 | Formula-leading labels (`=`, `+`, `-`, `@`) | emitted with allowlisted label states | normalized |
 | 9 | Timestamp field absent | emitted with timestamp unavailable | normalized |
 | 10 | Timestamp goes backwards relative to the last present timestamp | emitted; file order is retained | normalized |
 | 11–14 | Partial, unknown, blocked, timeout, unverified, and ambiguous status combinations | emitted without collapsing status layers | normalized |
@@ -82,10 +82,11 @@ credential value, cookie value, private key, environment value, or copied
 transcript prose. Synthetic source references are not reversible source IDs and
 there is no reverse map.
 
-Formula-leading input labels are represented in the expected normalized row
-with a leading apostrophe (`'=` / `'+` / `'-` / `'@`) so a later tabular writer
-cannot evaluate them. The expected row records only the safe projection, not an
-unbounded argument or message body.
+Formula-leading input labels are represented in the expected normalized row by
+the allowlisted `formula_candidate` state. Non-formula labels become `present`;
+the label key set is limited to `equals`, `plus`, `minus`, and `at`. No formula
+body, prose, or email-like value reaches the derived row, so a later tabular
+writer has no arbitrary label text to evaluate.
 
 Parent and child candidates carry an explicitly unverified join signal. The
 expected rows preserve the signal class but set `relation_state` to `unknown`

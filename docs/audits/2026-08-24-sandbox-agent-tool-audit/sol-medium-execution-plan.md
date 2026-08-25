@@ -469,12 +469,14 @@ Run the narrowest checks that match the implemented audit files. The expected
 set is:
 
 ```text
-python3 -m unittest tests.test_agent_tool_audit
-python3 -m tools.audit_agent_usage.validate --fixtures
-python3 -m tools.audit_agent_usage.generate --manifest <approved-manifest> --output <temporary-output>
-python3 -m tools.audit_agent_usage.generate --manifest <approved-manifest> --output <second-temporary-output>
-diff -ru <temporary-output> <second-temporary-output>
-rg -n <forbidden-field-patterns> <temporary-output>
+python3 -m unittest discover -s tests/audit_agent_usage -p 'test_*.py' -v
+python3 -m tools.audit_agent_usage --input docs/audits/2026-08-24-sandbox-agent-tool-audit/fixtures/synthetic-events.jsonl --output-dir <temporary-parser-output>
+python3 -m tools.audit_agent_usage --input docs/audits/2026-08-24-sandbox-agent-tool-audit/fixtures/synthetic-events.jsonl --output-dir <second-temporary-parser-output>
+diff -ru <temporary-parser-output> <second-temporary-parser-output>
+python3 -m tools.audit_agent_usage.coverage --input docs/audits/2026-08-24-sandbox-agent-tool-audit/fixtures/synthetic-events.jsonl --output-dir <temporary-coverage-output>
+python3 -m tools.audit_agent_usage.coverage --input docs/audits/2026-08-24-sandbox-agent-tool-audit/fixtures/synthetic-events.jsonl --output-dir <second-temporary-coverage-output>
+diff -ru <temporary-coverage-output> <second-temporary-coverage-output>
+bash docs/audits/2026-08-24-sandbox-agent-tool-audit/check-durable-artifacts.sh
 git diff --check
 ```
 

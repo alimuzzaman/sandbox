@@ -1264,7 +1264,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # global, uninstall, domains, …) or takes its own name/project arg, so an
     # unresolved instance is fine for them.
     INSTANCE_SCOPED = {
-        "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
+        "up", "down", "status", "logs", "shell", "install", "wp", "seed",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
         "abilities", "job", "jobs", "dump", "qm", "reset", "exec",

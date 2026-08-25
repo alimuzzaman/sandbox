@@ -705,7 +705,7 @@ sandbox apply             # reconcile THIS project in place (cwd or --instance)
 sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit args after --)
 ./sb focus <plugin>       # mark which plugin is focused (for Claude)
 ./sb open [admin|site|mail]  # open in browser (default: admin)
-./sb visit <url> [...]    # load URL in headless Chromium, report DOM/console/iframes
+./sb visit <url> [...]    # load any URL in headless Chromium, report DOM/console/iframes
 ./sb snapshot <name> [--db-only]  # save DB + uploads, or fast DB-only state
 ./sb restore <name>       # restore a saved snapshot
 ./sb reset --yes          # restore the protected post-install DB baseline

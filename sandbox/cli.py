@@ -1242,18 +1242,31 @@ Per-project (each plugin carries its own sandbox.config.json):
         for entry in _core().registry_all().values():
             if entry.get("kind") == "compose" and entry.get("instance"):
                 instances.setdefault(entry["instance"], entry)
-        if inner_local_observation and not explicit:
+        project_routed_with_root = (
+            bool(getattr(args, "project_dir", None))
+            and args.cmd in {
+                "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
+                "plugin-check", "deploy",
+            }
+        )
+        if (inner_local_observation or project_routed_with_root) and not explicit:
             # The controller may be running from a different checkout (the
             # normal case for a staged remote workspace).  Resolve the inner
             # instance from the explicit project root and its registry only;
             # `_cwd_instance()` would silently inspect the controller cwd.
-            try:
-                selected = resolve_registered_instance(
-                    getattr(args, "project_dir", None), label=cwd_label,
-                )
-            except Exception as exc:
-                die(str(exc), 2)
-            chosen = selected.get("instance") if selected else None
+            if inner_local_observation:
+                try:
+                    selected = resolve_registered_instance(
+                        getattr(args, "project_dir", None), label=cwd_label,
+                    )
+                except Exception as exc:
+                    die(str(exc), 2)
+                chosen = selected.get("instance") if selected else None
+            else:
+                # Project-routed handlers own their target resolution.  Do not
+                # consult the controller cwd or a global default just because
+                # the command happens to have an instance-shaped parser field.
+                chosen = None
         else:
             # An explicitly named instance (including an unknown name) keeps
             # its normal precedence.  Do not replace an unknown selector with

@@ -81,8 +81,20 @@ def configure_init_parser(parser) -> None:
 
 
 def generic_init_predispatch_policy(args) -> bool:
-    """Tell the CLI to skip shared writes for explicit generic initialization."""
-    return _is_explicit_generic_init(args)
+    """Skip shared writes for every explicitly routed project initialization.
+
+    The legacy no-type initializer is still allowed to boot WordPress, but an
+    explicit ``--project-dir`` (or label) makes that project the authority.
+    Shared migration/Compose/env preparation must not run against the
+    controller checkout before the project handler resolves its own runtime.
+    """
+    if getattr(args, "cmd", None) != "init":
+        return False
+    return bool(
+        _is_explicit_generic_init(args)
+        or getattr(args, "project_dir", None)
+        or getattr(args, "label", None)
+    )
 
 
 def _generic_init_family(value: object) -> str:

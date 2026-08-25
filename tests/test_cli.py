@@ -244,6 +244,33 @@ class TestResolutionGate(unittest.TestCase):
                 env.assert_not_called()
                 commands["init"].assert_not_called()
 
+    def test_project_routed_init_skips_shared_writes_before_handler(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(sys, "argv", [
+                "sb", "init", "--project-dir", "/srv/fixture",
+        ]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "init": lambda cfg, args: observed.append((cfg, args.project_dir)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance",
+                                  side_effect=AssertionError("controller cwd consulted")), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+            cli.main()
+
+        self.assertEqual(observed, [({}, "/srv/fixture")])
+        compose.assert_not_called()
+        env.assert_not_called()
+        auto_migrate.assert_not_called()
+        finalize.assert_not_called()
+
     def test_ensure_help_explains_instance_selector_boundary(self):
         result = run_sb("ensure", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)

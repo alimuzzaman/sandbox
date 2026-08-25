@@ -104,10 +104,24 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
             provision._write_loopback_muplugin("preview-demo")
 
             rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
-        self.assertIn("CURLOPT_RESOLVE", rendered)
-        self.assertIn("host.docker.internal", rendered)
-        self.assertIn("'localhost' !== ( $dest['host']", rendered)
-        self.assertNotIn("update_option", rendered)
+            self.assertIn("CURLOPT_RESOLVE", rendered)
+            self.assertIn("host.docker.internal", rendered)
+            self.assertIn("$home_host !== $dest_host", rendered)
+            self.assertNotIn("update_option", rendered)
+
+    def test_loopback_muplugin_routes_clean_tst_self_fetches(self):
+        import sandbox.core._provision as provision
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(provision, "_ensure_muplugins_dir",
+                             return_value=Path(directory)):
+            provision._write_loopback_muplugin("preview-demo")
+
+            rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+        self.assertIn("preg_match( '/\\.tst$/i'", rendered)
+        self.assertIn("$dest_host . ':' . $dest_port", rendered)
+        self.assertIn("$home_host !== $dest_host", rendered)
+        self.assertIn("$home_port !== $dest_port", rendered)
 
     def test_shared_reconciler_writes_abilities_and_debug_plugins(self):
         import sandbox.core._provision as provision

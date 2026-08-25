@@ -120,25 +120,38 @@ def _write_mail_muplugin(instance: str) -> None:
 
 
 def _write_loopback_muplugin(instance: str) -> None:
-    """Route the exact localhost home origin through Docker's host gateway."""
+    """Route the exact Sandbox home origin through Docker's host gateway.
+
+    WordPress may store either its published localhost URL or its clean
+    ``.tst`` hostname. The latter is resolved by the host proxy, not by the
+    instance network, so self-fetches must use the same host-gateway path while
+    retaining the original Host header and request scheme.
+    """
     mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-loopback.php").write_text(
         "<?php\n"
-        "/* Sandbox: make the browser-facing localhost origin reachable from Docker. */\n"
+        "/* Sandbox: make the browser-facing Sandbox origin reachable from Docker. */\n"
         "add_action( 'http_api_curl', function ( $handle, $request, $url ) {\n"
         "    $home = wp_parse_url( home_url() );\n"
         "    $dest = wp_parse_url( $url );\n"
+        "    $home_host = strtolower( (string) ( $home['host'] ?? '' ) );\n"
+        "    $dest_host = strtolower( (string) ( $dest['host'] ?? '' ) );\n"
+        "    $sandbox_host = 'localhost' === $home_host\n"
+        "        || (bool) preg_match( '/\\.tst$/i', $home_host );\n"
+        "    $home_port = ! empty( $home['port'] ) ? (int) $home['port']\n"
+        "        : ( 'https' === strtolower( (string) ( $home['scheme'] ?? '' ) ) ? 443 : 80 );\n"
+        "    $dest_port = ! empty( $dest['port'] ) ? (int) $dest['port']\n"
+        "        : ( 'https' === strtolower( (string) ( $dest['scheme'] ?? '' ) ) ? 443 : 80 );\n"
         "    if ( ! is_array( $home ) || ! is_array( $dest )\n"
-        "         || 'localhost' !== ( $home['host'] ?? '' )\n"
-        "         || 'localhost' !== ( $dest['host'] ?? '' )\n"
-        "         || empty( $home['port'] ) || (int) $home['port'] !== (int) ( $dest['port'] ?? 0 ) ) {\n"
+        "         || ! $sandbox_host || $home_host !== $dest_host\n"
+        "         || $home_port !== $dest_port ) {\n"
         "        return;\n"
         "    }\n"
         "    $gateway = gethostbyname( 'host.docker.internal' );\n"
         "    if ( 'host.docker.internal' === $gateway || ! filter_var( $gateway, FILTER_VALIDATE_IP ) ) {\n"
         "        return;\n"
         "    }\n"
-        "    curl_setopt( $handle, CURLOPT_RESOLVE, array( 'localhost:' . (int) $home['port'] . ':' . $gateway ) );\n"
+        "    curl_setopt( $handle, CURLOPT_RESOLVE, array( $dest_host . ':' . $dest_port . ':' . $gateway ) );\n"
         "}, 10, 3 );\n"
     )
 

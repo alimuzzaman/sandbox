@@ -905,13 +905,35 @@ def _force_symlink(link: Path, src: Path) -> None:
     `link.unlink()` fails with EPERM on a real (non-symlink) directory, which
     is exactly the state we hit when a wp.org install of the same slug already
     sits in the plugins folder. Detect that case and remove the directory tree
-    instead. Symlinks (even dangling ones) get unlinked normally.
+    instead. A WordPress web user may have created files with restrictive mode
+    bits, so the bounded removal callback repairs only the exact replacement
+    tree's owner-write bits before retrying. Symlinks (even dangling ones) get
+    unlinked normally.
     """
     if link.is_symlink():
         link.unlink()
     elif link.is_dir():
         # Plain `rmtree` follows nothing here — link is a real dir, not a link.
-        shutil.rmtree(link)
+        def _repair_permissions(func, failed_path, exc_info):
+            # Removing a child needs write access on its parent; removing a
+            # directory entry may also fail when the entry itself is mode 000.
+            # Keep the repair scoped to the failed path and its immediate
+            # parent, and retry the original operation. If the caller does not
+            # own the path, chmod raises and the original failure is preserved.
+            candidates = {Path(failed_path), Path(failed_path).parent}
+            for candidate in candidates:
+                try:
+                    current = candidate.stat(follow_symlinks=False)
+                    mode = current.st_mode | (0o700 if candidate.is_dir() else 0o600)
+                    candidate.chmod(mode, follow_symlinks=False)
+                except OSError:
+                    pass
+            try:
+                func(failed_path)
+            except OSError:
+                raise exc_info[1]
+
+        shutil.rmtree(link, onerror=_repair_permissions)
     elif link.exists():
         link.unlink()
     link.symlink_to(src)

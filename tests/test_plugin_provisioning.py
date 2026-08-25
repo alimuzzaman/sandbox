@@ -8,6 +8,25 @@ from unittest.mock import patch
 from sandbox.core import _provision as provision
 
 
+class ForceSymlinkTests(unittest.TestCase):
+    def test_replaces_restrictive_web_user_tree_with_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = root / "plugins" / "managed"
+            existing.mkdir(parents=True)
+            nested = existing / "flat.php"
+            nested.write_text("<?php")
+            existing.chmod(0o500)
+            nested.chmod(0o400)
+            source = root / "source"
+            source.mkdir()
+
+            provision._force_symlink(existing, source)
+
+            self.assertTrue(existing.is_symlink())
+            self.assertTrue(existing.samefile(source))
+
+
 class PluginActivationOrderTests(unittest.TestCase):
     def test_declared_dependencies_activate_before_dependents(self):
         with tempfile.TemporaryDirectory() as tmp:

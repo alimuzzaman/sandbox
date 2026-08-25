@@ -503,7 +503,10 @@ batch partially failed.
 The generated Apache and Nginx/FPM stacks also reconcile ownership of
 `wp-content/plugins` during bootstrap. This keeps the WordPress web user able to
 create a new plugin directory for ordinary wp.org and wp-admin installs on the
-bind-mounted development tree.
+bind-mounted development tree. When a managed local plugin replaces an existing
+real directory, the rewire path removes only that exact directory and retries
+mode-only permission failures with owner-write bits on the failed entry and its
+immediate parent; it does not run broad `chown` or privileged cleanup.
 
 Generated local source binds are read-only inside every WordPress execution
 service. This includes `defaults.plugins_home` and local plugin, theme, and

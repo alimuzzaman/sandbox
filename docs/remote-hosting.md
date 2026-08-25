@@ -413,6 +413,13 @@ explicit `init_services` build operations; the final no-build restart and health
 retain their own shorter limits. This keeps long builds observable and bounded instead
 of silently using a fixed 15-minute cutoff.
 
+Text-mode `host apply` reports source, Compose, initializer, and healthcheck progress as
+the remote command runs. Compose output is streamed without changing the machine-readable
+JSON contract and is appended to a mode-0600 remote log at the path returned as
+`apply_log` in apply evidence. Read its bounded tail later with
+`./sb host logs --remote NAME --apply-log --lines 1000`; timeout errors retain the
+latest output tail rather than reducing a failed build to a bare timeout message.
+
 An environment may also protect its public origin with Basic Auth:
 
 ```yaml

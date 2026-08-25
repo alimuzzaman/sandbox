@@ -46,6 +46,8 @@ import urllib.request
 import subprocess
 import sys
 import time
+import selectors
+import os
 from pathlib import PurePosixPath
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -526,6 +528,113 @@ def ssh_run(remote: dict, command: str, timeout: int = 30,
     callers interpret returncode/stdout/stderr themselves, never a bare
     exception on a nonzero remote exit."""
     return ssh_process(remote, command, input_data=input_data, timeout=timeout)
+
+
+def ssh_stream(remote_or_target, command: str, *, timeout: int = 30,
+               on_line=None) -> subprocess.CompletedProcess:
+    """Run one SSH command while forwarding complete output lines.
+
+    The regular ``ssh_process`` API deliberately buffers output for callers
+    that need a bounded result.  Long-lived hosting builds need a different
+    contract: emit lines as they arrive, retain only a bounded tail for error
+    reporting, and raise a timeout with that tail attached.  This helper keeps
+    the same SSH argument and multiplexing policy as ``ssh_process`` and never
+    retries an ambiguous command.
+    """
+    multiplex = True
+    try:
+        _ensure_ssh_control_dir()
+    except OSError:
+        multiplex = False
+    args = ssh_command_args(remote_or_target, command, multiplex=multiplex)
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL, bufsize=0,
+    )
+    selector = selectors.DefaultSelector()
+    assert proc.stdout is not None
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    tail = bytearray()
+    pending = bytearray()
+    tail_limit = 128 * 1024
+    started = time.monotonic()
+
+    def retain(value: bytes) -> None:
+        tail.extend(value)
+        if len(tail) > tail_limit:
+            del tail[:-tail_limit]
+
+    def emit(value: bytes) -> None:
+        if on_line is None:
+            return
+        try:
+            on_line(value.decode("utf-8", errors="replace").rstrip("\r"))
+        except Exception:
+            # Progress observers must never change the remote command result.
+            return
+
+    def drain(value: bytes) -> None:
+        if not value:
+            return
+        pending.extend(value)
+        while b"\n" in pending:
+            line, _, rest = pending.partition(b"\n")
+            pending[:] = rest
+            line_with_newline = line + b"\n"
+            retain(line_with_newline)
+            emit(line)
+
+    try:
+        while True:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                proc.kill()
+                try:
+                    residual = proc.stdout.read() or b""
+                except (OSError, ValueError):
+                    residual = b""
+                drain(residual)
+                if pending:
+                    retain(bytes(pending))
+                    emit(bytes(pending))
+                    pending.clear()
+                proc.wait(timeout=1)
+                error = subprocess.TimeoutExpired(
+                    args, timeout,
+                    output=bytes(tail).decode("utf-8", errors="replace"),
+                )
+                error.stdout = bytes(tail).decode("utf-8", errors="replace")
+                error.stderr = ""
+                raise error
+            events = selector.select(min(remaining, 0.25))
+            if events:
+                try:
+                    chunk = os.read(proc.stdout.fileno(), 64 * 1024)
+                except (OSError, ValueError):
+                    chunk = b""
+                if chunk:
+                    drain(chunk)
+                    continue
+                selector.unregister(proc.stdout)
+                break
+            if proc.poll() is not None:
+                # Give the pipe one final read after the child exits.
+                continue
+        if pending:
+            retain(bytes(pending))
+            emit(bytes(pending))
+            pending.clear()
+        returncode = proc.wait(timeout=1)
+    finally:
+        selector.close()
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+    return subprocess.CompletedProcess(
+        args, returncode,
+        stdout=bytes(tail).decode("utf-8", errors="replace"), stderr="",
+    )
 
 
 def ssh_run_batch(remote: dict, commands: list[str], timeout: int = 30) -> subprocess.CompletedProcess:

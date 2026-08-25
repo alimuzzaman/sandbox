@@ -185,9 +185,30 @@ def _decode_timeout_output(value: object) -> str:
     return str(value or "").strip()
 
 
-def _remote_checked(entry: dict, command: str, timeout: int = 180) -> str:
+def _logged_remote_command(command: str, log_path: str) -> str:
+    """Tee one remote command to a protected apply log while preserving rc."""
+    log = shlex.quote(log_path)
+    status = f"{log}.status.$$"
+    return (
+        "set +e; "
+        f"{{ printf '%s\\n' '[Sandbox] apply command started'; {command}; "
+        "rc=$?; printf '[Sandbox] apply command exit %s\\n' \"$rc\"; "
+        f"printf '%s' \"$rc\" > {status}; exit \"$rc\"; }} "
+        f"2>&1 | tee -a {log}; "
+        f"rc=$(cat {status} 2>/dev/null || printf '125'); rm -f {status}; exit \"$rc\""
+    )
+
+
+def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
+                   progress=None, log_path: str | None = None) -> str:
+    if log_path:
+        command = _logged_remote_command(command, log_path)
     try:
-        result = remote.ssh_run(entry, command, timeout=timeout)
+        if progress is not None or log_path:
+            result = remote.ssh_stream(entry, command, timeout=timeout,
+                                       on_line=progress)
+        else:
+            result = remote.ssh_run(entry, command, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         partial = "\n".join(
             value for value in (
@@ -393,7 +414,8 @@ def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry
 
 
 def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
-                   timeout: int = 900) -> str:
+                   timeout: int = 900, *, progress=None,
+                   log_path: str | None = None) -> str:
     """Run a building compose command, recovering from a stale BuildKit snapshot.
 
     A single `--no-cache` build regenerates the affected layer as a valid
@@ -402,21 +424,34 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
     stopped and so takes every container on the host down with it.
     """
     try:
-        return _remote_checked(entry, command, timeout=timeout)
+        return _remote_checked(entry, command, timeout=timeout,
+                               progress=progress, log_path=log_path)
     except RuntimeError as error:
         if _STALE_SNAPSHOT_MARKER not in str(error):
             raise
-        info("stale BuildKit snapshot on the remote; rebuilding without cache")
-        _remote_checked(entry, f"{prefix} build --no-cache {service_args}", timeout=timeout * 2)
-        return _remote_checked(entry, command, timeout=timeout)
+        message = "stale BuildKit snapshot on the remote; rebuilding without cache"
+        if progress is None:
+            info(message)
+        else:
+            progress(message)
+        _remote_checked(entry, f"{prefix} build --no-cache {service_args}",
+                        timeout=timeout * 2, progress=progress, log_path=log_path)
+        return _remote_checked(entry, command, timeout=timeout,
+                               progress=progress, log_path=log_path)
 
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
-                 runtime: dict) -> None:
+                 runtime: dict, progress=None, apply_log: str | None = None) -> None:
     override = f"{runtime_dir}/compose.override.yml"
     env_file = f"{runtime_dir}/environment.env"
     _write_remote_text(entry, override, runtime["compose_override"], "0600")
     _write_remote_text(entry, env_file, runtime["environment"], "0600")
+    if apply_log:
+        _remote_checked(
+            entry,
+            f"umask 077; : >> {shlex.quote(apply_log)}; chmod 0600 {shlex.quote(apply_log)}",
+            timeout=30,
+        )
     prefix = _compose_prefix(validated, source_dir, override, env_file)
     runtime_services = [
         shlex.quote(validated["compose"]["service"]),
@@ -429,21 +464,43 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     build = validated["compose"].get("build", True)
     build_timeout = validated["compose"].get("build_timeout_seconds", 900)
     build_flag = " --build" if build else ""
+    if progress is not None:
+        progress(
+            f"Compose build/recreate started (timeout {build_timeout}s; "
+            f"build={'enabled' if build else 'disabled'})"
+        )
     # Replace the image's anonymous application volume on each deployment so
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
-    _build_checked(entry, prefix,
-                   f"{prefix} up -d{build_flag} --force-recreate --renew-anon-volumes --remove-orphans {service_args}",
-                   service_args, timeout=build_timeout)
+    _build_checked(
+        entry, prefix,
+        f"{prefix} up -d{build_flag} --force-recreate --renew-anon-volumes --remove-orphans {service_args}",
+        service_args, timeout=build_timeout, progress=progress, log_path=apply_log,
+    )
+    if progress is not None:
+        progress("Compose build/recreate completed")
     for init_service in validated["compose"].get("init_services", []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
         # is never run from a previous deployment's image.
         if build:
-            _build_checked(entry, prefix, f"{prefix} build {shlex.quote(init_service)}",
-                           shlex.quote(init_service), timeout=build_timeout)
-        _remote_checked(entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}", timeout=900)
-    _remote_checked(entry, f"{prefix} up -d {service_args}", timeout=300)
+            if progress is not None:
+                progress(f"Init service {init_service} build started")
+            _build_checked(
+                entry, prefix, f"{prefix} build {shlex.quote(init_service)}",
+                shlex.quote(init_service), timeout=build_timeout,
+                progress=progress, log_path=apply_log,
+            )
+            if progress is not None:
+                progress(f"Init service {init_service} build completed")
+        _remote_checked(
+            entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}",
+            timeout=900, progress=progress, log_path=apply_log,
+        )
+    _remote_checked(
+        entry, f"{prefix} up -d {service_args}", timeout=300,
+        progress=progress, log_path=apply_log,
+    )
 
 
 def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
@@ -603,7 +660,7 @@ def _ensure_host_source(entry: dict, home: str, project: str) -> str:
     return target
 
 
-def _verify_remote_health(entry: dict, runtime: dict) -> None:
+def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> None:
     port = runtime["loopback_port"]
     path = runtime["healthcheck"]["path"]
     minimum, maximum = min(runtime["healthcheck"]["statuses"]), max(runtime["healthcheck"]["statuses"])
@@ -630,10 +687,14 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
         else:
             last_error = (result.stderr or output or "remote healthcheck command failed").strip()[:500]
         if attempt == 0 or (attempt + 1) % 5 == 0:
-            info(
+            message = (
                 f"remote healthcheck pending ({min((attempt + 1) * 2, 60)}s/60s): "
                 f"{remote.redact_text(last_error)}"
             )
+            if progress is None:
+                info(message)
+            else:
+                progress(message)
         time.sleep(2)
     raise RuntimeError(
         f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds: {last_error}"
@@ -752,7 +813,8 @@ def _validate_apply_source(validated: dict) -> str:
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
-                state: dict, allow_zone_ssl_change: bool, branch: str) -> dict:
+                state: dict, allow_zone_ssl_change: bool, branch: str,
+                progress=None) -> dict:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -795,6 +857,15 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     if not require_clean:
         remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    apply_log = f"{runtime_dir}/apply.log"
+    stream_progress = None
+    if progress is not None:
+        def stream_progress(message: str) -> None:
+            safe = str(message)
+            for secret in secret_values.values():
+                if secret:
+                    safe = safe.replace(secret, "[REDACTED]")
+            progress(safe)
     key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
@@ -831,8 +902,16 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
     def apply() -> None:
         nonlocal reservation
-        _run_compose(entry, validated, target, runtime_dir, runtime)
-        _verify_remote_health(entry, runtime)
+        if stream_progress is not None:
+            stream_progress(f"source reset to {sha}")
+            stream_progress(f"apply log: {apply_log}")
+        _run_compose(
+            entry, validated, target, runtime_dir, runtime,
+            stream_progress, apply_log,
+        )
+        _verify_remote_health(entry, runtime, stream_progress)
+        if stream_progress is not None:
+            stream_progress("remote healthcheck passed")
         proxied = validated["cloudflare"]["proxied"]
         cert_path = key_path = None
         certificate = None
@@ -900,10 +979,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         hosting.save_host_state(state)
 
     hosting.apply_with_rollback(apply, rollback)
-    return {
+    result = {
         "commit": sha,
         "derived_environment": runtime.get("derived_environment", []),
     }
+    if progress is not None:
+        result["apply_log"] = apply_log
+    return result
 
 
 def cmd_host(cfg, args) -> None:
@@ -948,7 +1030,16 @@ def cmd_host(cfg, args) -> None:
         if not entry.get("provisioned"):
             die(f"remote '{args.remote}' is not provisioned")
         try:
-            output = _read_host_logs(validated, entry, lines=args.lines)
+            if getattr(args, "apply_log", False):
+                home = remote.resolve_sandbox_home(entry)
+                path = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}/apply.log"
+                output = _remote_checked(
+                    entry,
+                    f"test -f {shlex.quote(path)} && tail -n {int(args.lines)} {shlex.quote(path)}",
+                    timeout=60,
+                )
+            else:
+                output = _read_host_logs(validated, entry, lines=args.lines)
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
             die(str(exc))
         if args.json:
@@ -997,9 +1088,14 @@ def cmd_host(cfg, args) -> None:
         non_strict = [zone for zone, mode in ssl.items() if mode != "strict"]
         if non_strict:
             die("these zones require --allow-zone-ssl-change: " + ", ".join(non_strict))
+    progress = (lambda _message: None) if args.json else (
+        lambda message: info(f"host apply: {message}")
+    )
     try:
-        result = _apply_host(validated, entry, args.remote, plan["runtime"], state,
-                             bool(getattr(args, "allow_zone_ssl_change", False)), branch)
+        result = _apply_host(
+            validated, entry, args.remote, plan["runtime"], state,
+            bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
+        )
     except (hosting.HostingError, cloudflare.CloudflareError, RuntimeError,
             subprocess.SubprocessError, OSError) as exc:
         die(str(exc))
@@ -1012,6 +1108,8 @@ def cmd_host(cfg, args) -> None:
         "commit": result["commit"],
         "derived_environment": result["derived_environment"],
     }
+    if result.get("apply_log"):
+        evidence["apply_log"] = result["apply_log"]
     if args.json:
         print(json.dumps(evidence))
     else:

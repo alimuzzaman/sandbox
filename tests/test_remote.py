@@ -222,6 +222,27 @@ class TestSshRun(unittest.TestCase):
         with self.assertRaises(ValueError):
             sr.ssh_run({}, "true")
 
+    def test_ssh_stream_forwards_lines_and_returns_bounded_text_tail(self):
+        real_popen = subprocess.Popen
+        lines = []
+
+        def local_process(*_args, **_kwargs):
+            return real_popen(
+                ["sh", "-c", "printf 'first\\nsecond\\n'"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, bufsize=0,
+            )
+
+        with patch.object(sr.subprocess, "Popen", side_effect=local_process):
+            result = sr.ssh_stream(
+                {"ssh": "ubuntu@1.2.3.4"}, "ignored", timeout=10,
+                on_line=lines.append,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "first\nsecond\n")
+        self.assertEqual(lines, ["first", "second"])
+
     @patch("subprocess.run")
     def test_builds_expected_ssh_command(self, mock_run):
         mock_run.return_value = _completed(returncode=0)

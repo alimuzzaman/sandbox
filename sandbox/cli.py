@@ -816,6 +816,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
     host_p.add_argument("--lines", type=int, default=200,
         help="bounded number of recent hosted-service log lines (1-1000)")
+    host_p.add_argument("--apply-log", action="store_true",
+        help="read the protected replayable host-apply log instead of service logs")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
 

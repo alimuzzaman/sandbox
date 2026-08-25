@@ -742,6 +742,54 @@ class TestHostingManifest(unittest.TestCase):
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
+    def test_default_compose_apply_requests_a_fresh_build(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        command = remote_checked.call_args_list[0].args[1]
+        self.assertIn("up -d --build", command)
+
+    @patch("sandbox.commands.hosting.remote.ssh_stream")
+    def test_logged_remote_commands_use_stream_transport(self, ssh_stream):
+        ssh_stream.return_value = subprocess.CompletedProcess(
+            [], 0, stdout="remote output\n", stderr="",
+        )
+        lines = []
+        callback = lines.append
+        output = hosting_cmd._remote_checked(
+            {}, "printf output", timeout=42, progress=callback,
+            log_path="/srv/runtime/apply.log",
+        )
+        self.assertEqual(output, "remote output\n")
+        ssh_stream.assert_called_once()
+        self.assertIn("tee -a", ssh_stream.call_args.args[1])
+        self.assertEqual(ssh_stream.call_args.kwargs["timeout"], 42)
+        self.assertEqual(ssh_stream.call_args.kwargs["on_line"], callback)
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_compose_progress_is_phase_visible_and_log_is_forwarded(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        progress = []
+        hosting_cmd._run_compose(
+            {}, validated, "/srv/example", "/srv/runtime", runtime,
+            progress.append, "/srv/runtime/apply.log",
+        )
+        self.assertEqual(progress, [
+            "Compose build/recreate started (timeout 900s; build=enabled)",
+            "Compose build/recreate completed",
+        ])
+        build_call = next(
+            call for call in remote_checked.call_args_list
+            if "--build" in call.args[1]
+        )
+        self.assertEqual(build_call.kwargs["log_path"], "/srv/runtime/apply.log")
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
     def test_build_timeout_is_used_for_compose_build_steps(self, remote_checked, _write):
         manifest = _manifest().replace(
             "      service: web\n",

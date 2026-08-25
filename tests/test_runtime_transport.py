@@ -845,6 +845,37 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(forwarded["exit_code"], 1)
         self.assertEqual(forwarded["php_extensions"], document["php_extensions"])
 
+    def test_direct_remote_instance_status_uses_explicit_inner_selector(self):
+        import sandbox.commands.lifecycle as commands
+        import sandbox.core._remote as remote
+
+        result = types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"ok": True, "instance": "remote-instance",
+                               "status": "ready"}),
+            stderr="",
+        )
+        args = types.SimpleNamespace(
+            remote="fixture-remote", local=False, instance="remote-instance",
+            project_dir=None, workspace=None, refresh=True,
+        )
+        with mock.patch.object(remote, "get_remote", return_value={
+                    "provisioned": True, "capabilities": ["job.exec"],
+                }), \
+                mock.patch.object(remote, "remote_sb_path",
+                                  return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+            observed = commands._remote_lifecycle({}, args, "status")
+
+        command = ssh_run.call_args.args[1]
+        self.assertIn("/srv/sandbox/sb status --local --instance remote-instance", command)
+        self.assertIn("--json", command)
+        self.assertIn("--refresh", command)
+        self.assertEqual(observed["instance"], "remote-instance")
+        self.assertEqual(observed["target"], {
+            "remote": "fixture-remote", "instance": "remote-instance",
+        })
+
     def test_remote_observation_child_uses_staged_root_and_not_outer_label(self):
         """Outer workspace labels must not select an inner instance."""
         import sandbox.commands.lifecycle as commands

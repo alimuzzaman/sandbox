@@ -461,6 +461,55 @@ def cmd_logs(cfg, args) -> None:
     compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
 
 
+def _direct_remote_lifecycle(remote_name: str, instance: str,
+                             args, action: str) -> dict:
+    """Observe one known remote instance without a local project workspace."""
+    from sandbox.core import _remote
+
+    remote = _remote.get_remote(remote_name)
+    if not isinstance(remote, dict):
+        die(
+            f"unknown remote {remote_name!r}; run `./sb remote list` "
+            "or select another explicit target"
+        )
+    if not remote.get("provisioned"):
+        die(f"remote {remote_name!r} is not provisioned")
+    capabilities = remote.get("capabilities")
+    if not isinstance(capabilities, (list, tuple, set)) \
+            or "job.exec" not in capabilities:
+        die(f"remote {remote_name!r} does not advertise 'job.exec'")
+
+    command = [
+        _remote.remote_sb_path(remote), action, "--local",
+        "--instance", str(instance),
+    ]
+    if action == "status":
+        command.append("--json")
+        if getattr(args, "refresh", False):
+            command.append("--refresh")
+    result = _remote.ssh_run(
+        remote, __import__("shlex").join(command), timeout=25,
+    )
+    target = {"remote": remote_name, "instance": str(instance)}
+    if action == "logs":
+        if result.returncode != 0:
+            die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
+        return {"ok": True, "action": action, "output": result.stdout or "",
+                "target": target}
+
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, Mapping) and result.returncode != 0:
+        die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
+    if isinstance(payload, Mapping) and result.returncode != 0:
+        payload = dict(payload)
+        payload["ok"] = False
+        payload["exit_code"] = result.returncode
+    return {**(payload or {"ok": True}), "target": target}
+
+
 def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     """Run instance lifecycle operations against a selected provisioned remote."""
     remote_name = getattr(args, "remote", None)
@@ -468,6 +517,14 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     from sandbox.application.target_service import TargetResolutionError
     from sandbox.jobs.models import TargetRequest
     from sandbox.core import _remote
+    direct_instance = getattr(args, "instance", None)
+    if (
+        action in {"status", "logs"}
+        and remote_name
+        and direct_instance
+        and not getattr(args, "project_dir", None)
+    ):
+        return _direct_remote_lifecycle(remote_name, direct_instance, args, action)
     project_dir = getattr(args, "project_dir", None) or os.getcwd()
     workspace = getattr(args, "workspace", None) or getattr(args, "label", None)
     try:

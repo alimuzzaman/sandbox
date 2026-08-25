@@ -98,6 +98,7 @@ The guide detects the runtime and emits only its useful commands.
 ./sb ensure
 ./sb status
 ./sb status --instance <name> --stats --json
+./sb status --remote <remote> --instance <remote-instance> --json
 ./sb logs
 ./sb exec -- sh -lc 'npm test'
 ./sb deploy --remote <name> --ensure --expose
@@ -111,6 +112,9 @@ and PID count. The snapshot can drift immediately, and a zero-CPU sample does
 not prove that an instance is unused or safe to stop. Docker timeouts or
 unavailability are represented by a typed, non-fatal `container_resources`
 result. For remote hosts use `remote service diagnostics --processes`.
+When the remote instance name is already known, the remote `status`/`logs`
+forms above target that inner instance directly and do not require a local
+checkout or prepared workspace.
 For durable submissions, pass a stable `--request-id` so an uncertain caller
 can replay the same request without creating a duplicate. A request ID cannot
 turn a direct local or internal `--in-instance` invocation into a durable job;

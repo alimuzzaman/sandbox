@@ -235,6 +235,43 @@ class TestResolutionGate(unittest.TestCase):
             self.assertIsNone(observed_args.resolved_instance)
             self.assertEqual(observed_args.project_dir, "/srv/staged-project")
 
+    def test_direct_remote_instance_observation_skips_local_gate(self):
+        """An explicit remote instance does not need a local project checkout."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        for command in ("status", "logs"):
+            argv = [
+                "sb", command, "--remote", "fixture-remote",
+                "--instance", "remote-instance", "--json",
+            ]
+            with self.subTest(command=command), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "COMMANDS", {
+                        command: lambda _cfg, args: observed.append((
+                            args.resolved_instance, args.instance, args.project_dir,
+                        )),
+                    }), \
+                    mock.patch.object(cli, "load_config",
+                                      side_effect=AssertionError("local config loaded")), \
+                    mock.patch.object(cli, "resolve_instances",
+                                      side_effect=AssertionError("local registry loaded")), \
+                    mock.patch.object(cli, "_cwd_instance",
+                                      side_effect=AssertionError("controller cwd consulted")), \
+                    mock.patch.object(migrate, "maybe_auto_migrate",
+                                      side_effect=AssertionError("migration attempted")), \
+                    mock.patch.object(migrate, "finalize_auto_migration",
+                                      side_effect=AssertionError("finalization attempted")), \
+                    mock.patch.object(cli, "write_compose_files",
+                                      side_effect=AssertionError("compose written")), \
+                    mock.patch.object(cli, "write_env_for_compose",
+                                      side_effect=AssertionError("env written")):
+                cli.main()
+
+        self.assertEqual(observed, [(None, "remote-instance", None),
+                                    (None, "remote-instance", None)])
+
     def test_project_routed_local_observation_uses_root_selector_and_skips_writes(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

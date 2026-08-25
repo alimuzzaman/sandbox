@@ -166,19 +166,29 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
 def _project_observation_route(args) -> tuple[bool, bool]:
     """Classify the two explicit project-root lifecycle observation routes.
 
-    A remote observation is an outer controller request: the named remote owns
-    target resolution and the staged checkout is only an input to that control
-    plane.  A local observation is the inverse: the co-located CLI owns the
-    instance lookup, but the explicit staged root (not the controller cwd) is
-    authoritative.  Keeping this classification in one small seam prevents
-    the ordinary instance gate from accidentally handling either form.
+    A project-root remote observation is an outer controller request: the named
+    remote owns target resolution and the staged checkout is only an input to
+    that control plane. A direct remote-instance observation is also outer,
+    but targets the named inner instance without a checkout. A local
+    observation is the inverse: the co-located CLI owns the instance lookup,
+    but the explicit staged root (not the controller cwd) is authoritative.
+    Keeping this classification in one small seam prevents the ordinary
+    instance gate from accidentally handling either form.
     """
     observation = (
         getattr(args, "cmd", None) in {"status", "logs"}
         and bool(getattr(args, "project_dir", None))
     )
+    direct_remote_instance = (
+        getattr(args, "cmd", None) in {"status", "logs"}
+        and bool(getattr(args, "remote", None))
+        and not bool(getattr(args, "local", False))
+        and bool(getattr(args, "instance", None))
+        and not bool(getattr(args, "project_dir", None))
+    )
     return (
-        observation and bool(getattr(args, "remote", None))
+        (observation or direct_remote_instance)
+        and bool(getattr(args, "remote", None))
         and not bool(getattr(args, "local", False)),
         observation and bool(getattr(args, "local", False))
         and not bool(getattr(args, "remote", None)),
@@ -979,15 +989,20 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
-    # A project-root status/logs request has two deliberately separate target
-    # domains.  The outer remote form is dispatched directly to the remote
+    # A remote status/logs request has two deliberately separate target
+    # domains. The outer remote form is dispatched directly to the remote
     # lifecycle adapter: it must not require a local sandbox config, registry
     # record, cwd-selected instance, capability, migration, or generated-file
-    # write.  An explicit --instance is an inner local selector and therefore
-    # has no meaning on this outer route; reject it before any local helper can
-    # run (including the automatic migration check below).
+    # write. On a project-root route an explicit --instance is still an inner
+    # local selector and therefore has no meaning; reject it before any local
+    # helper can run (including the automatic migration check below). A direct
+    # remote-instance route uses that selector intentionally.
     outer_remote_observation, inner_local_observation = _project_observation_route(args)
-    if outer_remote_observation and _explicit_global_option(raw_argv, "--instance"):
+    if (
+        outer_remote_observation
+        and getattr(args, "project_dir", None)
+        and _explicit_global_option(raw_argv, "--instance")
+    ):
         die(
             f"{args.cmd} with --remote and --project-dir cannot combine --instance; "
             "omit --instance because the remote workspace resolves its inner "

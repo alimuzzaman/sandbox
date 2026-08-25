@@ -209,7 +209,9 @@ shell, substitute the secret into argv, export into the parent, or inherit all
 registered secrets. The child starts from a reviewed minimal environment plus
 the selected destination. The default timeout is five minutes; callers may
 choose from one second to 30 minutes. Combined redacted output is bounded to
-1 MiB and reports truncation.
+1 MiB and reports truncation. A child that exits unsuccessfully makes
+`sb secrets run` exit nonzero after the bounded result is printed; the child
+exit code is preserved when it is safe for the shell to represent it.
 
 Before using it:
 

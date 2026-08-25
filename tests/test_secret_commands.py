@@ -130,6 +130,30 @@ class SecretCommandTests(unittest.TestCase):
         self.assertNotIn(canary, rendered)
         self.assertNotIn("Traceback", rendered)
 
+    def test_run_propagates_trusted_child_failure(self):
+        args = SimpleNamespace(
+            action="run", source="fixture", key="API_TOKEN", project_dir=".",
+            destination="API_TOKEN", timeout_seconds=5, command=["--", "child"],
+        )
+        service = SimpleNamespace(run=lambda *args, **kwargs: {
+            "ok": True,
+            "operation": "run",
+            "result": {
+                "termination": "exited",
+                "exit_code": 11,
+                "output": "child failed\n",
+            },
+        })
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with patch.object(command, "_service", return_value=service), \
+             redirect_stdout(stdout), redirect_stderr(stderr), \
+             self.assertRaises(SystemExit) as raised:
+            command.cmd_secrets({}, args)
+        self.assertEqual(raised.exception.code, 11)
+        self.assertIn("child_failed", stderr.getvalue())
+        self.assertIn("exit_code=11", stdout.getvalue())
+
     def test_isolated_live_cli_flow_never_prints_fixture_value(self):
         repository = Path(__file__).parent.parent
         fixture_value = "sk_test_" + "SyntheticOnly1234567Qx9Z"

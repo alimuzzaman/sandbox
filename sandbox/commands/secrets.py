@@ -217,8 +217,22 @@ def cmd_secrets(cfg, args) -> None:
             command = list(args.command)
             if command and command[0] == "--":
                 command.pop(0)
-            _emit(service.run(args.source, args.key, command, destination=args.destination,
-                              timeout_seconds=args.timeout_seconds), False)
+            payload = service.run(
+                args.source,
+                args.key,
+                command,
+                destination=args.destination,
+                timeout_seconds=args.timeout_seconds,
+            )
+            _emit(payload, False)
+            result = payload.get("result") or {}
+            exit_code = result.get("exit_code")
+            termination = result.get("termination")
+            if termination == "exited" and isinstance(exit_code, int) and exit_code != 0:
+                from sandbox.core import die
+                # Preserve the trusted child's failure without rendering its
+                # command, environment, or raw output in the error message.
+                die("child_failed: secret use command failed", code=exit_code if 1 <= exit_code <= 125 else 1)
         elif args.action == "set":
             intent = "create" if args.create_only else "replace" if args.replace_only else "either"
             kwargs = dict(intent=intent, expected_revision=args.if_revision,

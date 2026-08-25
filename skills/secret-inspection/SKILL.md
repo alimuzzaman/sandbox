@@ -123,7 +123,7 @@ Before launch:
    interpreter, shell, prompt, and credential-helper control variables are
    denied.
 4. Disable shell tracing, debug dumps, verbose HTTP diagnostics, crash
-   reporters, environment serialization, and command logging.
+reporters, environment serialization, and command logging.
 5. Do not run `env`, `printenv`, `set`, or an unreviewed upload command.
 
 The child receives a minimal environment plus the selected secret. It is an
@@ -131,7 +131,8 @@ intentional recipient and can still print, transform, persist, pass to a child,
 or exfiltrate the value. Exact-match redaction is defense in depth: transformed
 or encoded output might not be redacted. Verify only non-secret evidence such as
 exit status, a bounded status response, or a resource identifier already known
-to be public.
+to be public. An unsuccessful child exit is propagated as a nonzero Sandbox
+exit after the bounded, redacted result is printed; output alone is not success.
 
 MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary

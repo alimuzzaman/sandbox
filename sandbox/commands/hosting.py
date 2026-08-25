@@ -503,6 +503,42 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     )
 
 
+def _verify_remote_derived_environment(entry: dict, validated: dict,
+                                       source_dir: str, runtime_dir: str,
+                                       expected_sha: str, progress=None,
+                                       log_path: str | None = None) -> None:
+    """Fail closed when a running service did not receive the pushed revision."""
+    derived = validated["deploy"].get("derived_environment", {})
+    if not derived:
+        return
+    prefix = _compose_prefix(
+        validated, source_dir,
+        f"{runtime_dir}/compose.override.yml",
+        f"{runtime_dir}/environment.env",
+    )
+    services = [
+        validated["compose"]["service"],
+        *validated["compose"].get("background_services", []),
+    ]
+    for service_name in services:
+        service = shlex.quote(service_name)
+        for key, provider in sorted(derived.items()):
+            if provider != "pushed_commit_sha":
+                continue
+            probe = shlex.quote(f'printf %s "${key}"')
+            observed = _remote_checked(
+                entry,
+                f"{prefix} exec -T {service} sh -c {probe}",
+                timeout=30, progress=progress, log_path=log_path,
+            ).strip()
+            if observed != expected_sha:
+                state = "missing" if not observed else "mismatch"
+                raise RuntimeError(
+                    f"deployed service {service_name} source revision check failed "
+                    f"for {key} (state={state})"
+                )
+
+
 def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
     if not 1 <= lines <= 1000:
         raise hosting.HostingError("--lines must be between 1 and 1000")
@@ -997,6 +1033,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             stream_progress, apply_log,
         )
         _verify_remote_health(entry, runtime, stream_progress)
+        _verify_remote_derived_environment(
+            entry, validated, target, runtime_dir, sha,
+            stream_progress, apply_log,
+        )
         if stream_progress is not None:
             stream_progress("remote healthcheck passed")
         proxied = validated["cloudflare"]["proxied"]

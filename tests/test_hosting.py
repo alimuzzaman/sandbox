@@ -788,6 +788,19 @@ class TestHostingManifest(unittest.TestCase):
         )
         self.assertEqual(build_call.kwargs["log_path"], "/srv/runtime/apply.log")
 
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_apply_rejects_a_stale_running_service_revision(self, remote_checked):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        remote_checked.return_value = "b" * 40
+        with self.assertRaisesRegex(RuntimeError, "source revision check failed"):
+            hosting_cmd._verify_remote_derived_environment(
+                {}, validated, "/srv/source", "/srv/runtime", "a" * 40,
+            )
+        command = remote_checked.call_args.args[1]
+        self.assertIn("exec -T web", command)
+        self.assertIn("LENZORA_SOURCE_REVISION", command)
+
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_build_timeout_is_used_for_compose_build_steps(self, remote_checked, _write):
@@ -1225,6 +1238,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose", side_effect=lambda *_: events.append("compose")) as compose, \
              patch.object(hosting_cmd, "_verify_remote_health"), \
+             patch.object(hosting_cmd, "_verify_remote_derived_environment"), \
              patch.object(hosting_cmd, "_configure_host_caddy"), \
              patch.object(hosting_cmd, "_verify_edge"), \
              patch.object(hosting_cmd.hosting, "save_host_state"):

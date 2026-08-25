@@ -6,6 +6,10 @@
 behavior into a safe, evidence-gated Sandbox feature. This research is read-only
 and does not claim live runtime proof.
 
+The follow-up comparison of V8/`workerd`, QuickJS-ng, Wasmtime, gVisor,
+Firecracker, and Scaleway Serverless Containers is recorded in
+[`docs/v8-isolates-and-managed-sandbox-research.md`](../../docs/v8-isolates-and-managed-sandbox-research.md).
+
 ## Sources and evidence boundary
 
 - OpenSandbox [Credential Vault guide](https://open-sandbox.ai/guides/credential-vault)

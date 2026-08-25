@@ -1,6 +1,6 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-23. This is the reconciled handoff queue for Hermes. Repository
+Updated: 2026-08-25. This is the reconciled handoff queue for Hermes. Repository
 task ledgers and feedback are evidence, not execution authority: reproduce them
 first, preserve dirty work, and do not reset, destroy, clean up remote resources,
 deploy, release, delete recovery data, or expose secrets without fresh explicit
@@ -292,6 +292,36 @@ observations; these are deduplicated work items, not permission to mutate.
   remote hosting V2 (portable provisioner, lifecycle UX, shared-VPS port policy,
   authenticated automation surface), dashboard parity, opt-in telemetry, and
   MCP hot reload (`docs/future-roadmap.md`).
+
+## Lower-priority runtime and provider research
+
+The evidence and decisions are recorded in
+[`docs/v8-isolates-and-managed-sandbox-research.md`](docs/v8-isolates-and-managed-sandbox-research.md).
+These items are discovery/RFC work only; they do not change the Compose default,
+promote the unproven native adapter, or authorize a provider deployment.
+
+- [ ] **Qualify a gVisor/Sandbox-v2-like managed-native profile.** Measure
+  syscall compatibility, browser startup, DNS/egress enforcement, `/tmp` RAM
+  accounting, fork/subprocess memory, OOM/restart behavior, and cleanup before
+  any adoption decision.
+- [ ] **Evaluate an optional Scaleway Serverless Containers provider adapter.**
+  Use the versioned `containers/v1` API with a dedicated least-privilege IAM
+  application/key, pinned image digest/region/sandbox mode, explicit private
+  access, bounded status/receipt handling, and external artifact storage. Model
+  scale-to-zero, rolling replacement, dynamic endpoints, provider quotas, and
+  the lack of snapshot/rollback semantics.
+- [ ] **Define an opaque credential-reference and exact-origin egress contract.**
+  Keep secret bytes in the registered-source/broker boundary; never use
+  Scaleway namespace secrets or guest environment variables as a Credential
+  Vault, and never persist values in job output or policy state.
+- [ ] **Benchmark a pure transform worker.** Start with QuickJS-ng, then compare
+  Wasmtime for a language-neutral ABI. Require a disposable outer process or
+  sandbox, no network/filesystem imports, schema-only I/O, CPU/memory/time/output
+  limits, and hostile probes; keep Chromium capture out of this path.
+- [ ] **Add provider/runtime evidence receipts.** Record runtime/provider,
+  image/API digest, region, policy digest, resource limits, and bounded
+  failure/restart reasons without secret values; require a release-specific
+  compatibility matrix before selection.
 
 ## Legacy backlog notes
 

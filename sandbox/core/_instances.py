@@ -1620,7 +1620,14 @@ def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
                         check=False, capture=True, timeout=15)
         if getattr(probe, "returncode", 1) == 0:
             rows = []
-            for line in (getattr(probe, "stdout", "") or "").splitlines():
+            raw = (getattr(probe, "stdout", "") or "").strip()
+            lines = ()
+            try:
+                decoded = json.loads(raw) if raw else []
+                rows = decoded if isinstance(decoded, list) else [decoded]
+            except (TypeError, ValueError):
+                lines = (getattr(probe, "stdout", "") or "").splitlines()
+            for line in lines:
                 try:
                     rows.append(json.loads(line))
                 except (TypeError, ValueError):

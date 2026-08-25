@@ -23,18 +23,22 @@ class _Result:
         self.stdout = stdout
 
 
-def _inspect_run(mounts_by_service, *, unavailable=False, malformed=False):
+def _inspect_run(mounts_by_service, *, unavailable=False, malformed=False,
+                 state="running"):
     """Return a source-only Docker observation fake for every web plane."""
     def run(command, **_kwargs):
         if unavailable:
             return _Result(1, "")
-        if command[:3] == ["docker", "ps", "-q"]:
+        if command[:4] == ["docker", "ps", "-a", "-q"]:
             label = next(item for item in command if item.startswith("label=com.docker.compose.service="))
             service = label.rsplit("=", 1)[-1]
             return _Result(0, f"container-{service}\n")
         if command[:2] == ["docker", "inspect"]:
             service = command[2].removeprefix("container-")
-            document = {"Mounts": "malformed" if malformed else mounts_by_service[service]}
+            document = {
+                "State": {"Status": state},
+                "Mounts": "malformed" if malformed else mounts_by_service[service],
+            }
             return _Result(0, json.dumps([document]))
         raise AssertionError(command)
     return run
@@ -87,6 +91,21 @@ class TestSourceMountAttestation(unittest.TestCase):
             with self.subTest(label=label), mock.patch.object(_docker, "run", fake):
                 result = _docker.attest_source_mounts("fixture", "apache", sources)
             self.assertEqual(result, {"ok": False, "code": "instance_mount_state_unavailable"})
+
+    def test_stopped_container_is_reported_separately_from_unavailable_state(self):
+        sources = ["/tmp/plugins-home"]
+        mounts = {"wp": self._mounts(sources)}
+        with mock.patch.object(_docker, "run", _inspect_run(mounts, state="exited")):
+            result = _docker.attest_source_mounts("fixture", "apache", sources)
+        self.assertEqual(result, {"ok": False, "code": "instance_runtime_stopped"})
+
+    def test_stopped_ready_instance_guides_operator_to_start_the_compose_set(self):
+        result = _instances._mount_attestation_refusal(
+            "instance_runtime_stopped", "/project", "fixture",
+        )
+        self.assertEqual(result["error"]["code"], "instance_runtime_stopped")
+        self.assertIn("sb up --instance fixture", result["error"]["message"])
+        self.assertIn("full Compose set", result["error"]["message"])
 
     def test_ready_refusal_precedes_every_write_capable_ensure_step(self):
         missing_plugins_home = Path(tempfile.mkdtemp()) / "not-created"

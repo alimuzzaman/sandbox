@@ -957,7 +957,8 @@ def _assert_apply_runtime_dependencies(name: str, server: str,
         raise error_factory(
             f"apply blocked for instance '{name}': runtime dependency state is "
             "unavailable; no state was changed. Run `sb status --instance "
-            f"{name} --json` and restore the existing runtime before retrying."
+            f"{name} --json`; if the stack is stopped, run `sb up --instance "
+            f"{name}` to restore the existing runtime before retrying."
         )
     rows = []
     raw = (getattr(result, "stdout", "") or "").strip()
@@ -983,7 +984,8 @@ def _assert_apply_runtime_dependencies(name: str, server: str,
             f"'db' is {observed}; no state was changed and `sb apply` will not "
             "create or replace its database volume. Inspect `sb status "
             f"--instance {name} --json` and restore the existing database "
-            "runtime or snapshot before retrying."
+            f"runtime with `sb up --instance {name}` or restore a snapshot "
+            "before retrying."
         )
 
 
@@ -991,11 +993,16 @@ def _mount_attestation_refusal(code: object, project_dir: str,
                                instance_name: str,
                                label: str = "default") -> dict:
     """Return a bounded ready-path refusal with an explicit safe remedy."""
-    if code not in {"instance_mount_drift", "instance_mount_state_unavailable"}:
+    if code not in {"instance_mount_drift", "instance_mount_state_unavailable",
+                    "instance_runtime_stopped"}:
         code = "instance_mount_state_unavailable"
     selector = f" --label {label}" if label != "default" else ""
     remedy = f"sb apply --project-dir {project_dir}{selector}"
     message = (
+        "the existing Sandbox instance containers are stopped; "
+        f"run `sb up --instance {instance_name}` to start the full Compose set, "
+        "then retry ensure"
+        if code == "instance_runtime_stopped" else
         "live Sandbox source mounts do not match the declared policy; "
         f"run `{remedy}` to reconcile"
         if code == "instance_mount_drift" else

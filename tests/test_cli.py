@@ -64,6 +64,44 @@ class TestResolutionGate(unittest.TestCase):
             if action is not None:
                 self.assertEqual(observed[0].action, action)
 
+    def test_test_routing_options_after_mode_are_not_forwarded_to_phpunit(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        argv = [
+            "sb", "test", "unit", "--project-dir", "/fixture",
+            "--label", "pr-123", "--timeout", "500", "--remote", "remote-a",
+            "--workspace", "unit-a", "--json", "--", "--filter", "Smoke",
+        ]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "test": lambda _cfg, args: observed.append(args),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "_core", return_value=SimpleNamespace(
+                    registry_all=lambda: {},
+                )), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration",
+                                  return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        args = observed[0]
+        self.assertEqual(args.mode, "unit")
+        self.assertEqual(args.project_dir, "/fixture")
+        self.assertEqual(args.label, "pr-123")
+        self.assertEqual(args.timeout, 500)
+        self.assertEqual(args.remote, "remote-a")
+        self.assertEqual(args.workspace, ["unit-a"])
+        self.assertTrue(args.json)
+        self.assertEqual(args.passthrough, ["--filter", "Smoke"])
+
     def test_registry_wide_setup_rejects_instance_and_label_selectors_before_side_effects(self):
         import sandbox.cli as cli
         import sandbox.commands.config_setup as config_setup

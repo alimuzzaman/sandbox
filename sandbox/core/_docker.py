@@ -80,6 +80,8 @@ def attest_source_mounts(instance: str, server: str,
     This is deliberately a Docker-inspect-only observation.  It must run before
     the ready ``ensure`` path refreshes any state, so incomplete observation is
     a typed refusal rather than a reason to regenerate Compose or retry a boot.
+    The all-containers query also lets the caller distinguish a stopped,
+    otherwise identifiable instance from a Docker state that cannot be read.
     Paths and container details stay internal: callers receive only a stable
     code plus an explicit, non-destructive ``sb apply`` remedy.
     """
@@ -98,7 +100,7 @@ def attest_source_mounts(instance: str, server: str,
     for service in _source_mount_services(server):
         try:
             listed = run(
-                ["docker", "ps", "-q",
+                ["docker", "ps", "-a", "-q",
                  "--filter", f"label=com.docker.compose.project={project}",
                  "--filter", f"label=com.docker.compose.service={service}"],
                 check=False, capture=True, timeout=10,
@@ -124,6 +126,14 @@ def attest_source_mounts(instance: str, server: str,
             return {"ok": False, "code": "instance_mount_state_unavailable"}
         if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
             return {"ok": False, "code": "instance_mount_state_unavailable"}
+        state = rows[0].get("State")
+        if not isinstance(state, Mapping):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        status = state.get("Status")
+        if not isinstance(status, str):
+            return {"ok": False, "code": "instance_mount_state_unavailable"}
+        if status.lower() != "running":
+            return {"ok": False, "code": "instance_runtime_stopped"}
         mounts = rows[0].get("Mounts")
         if not isinstance(mounts, list):
             return {"ok": False, "code": "instance_mount_state_unavailable"}

@@ -853,8 +853,10 @@ For a ready Docker instance, `sb ensure` first attests that every required web
 plane has exactly the read-only self-bind source set generated from
 `defaults.plugins_home` plus that instance's `extra_mounts`. Drift returns
 `instance_mount_drift`; unavailable or malformed Docker inspection returns
-`instance_mount_state_unavailable`. Both refuse before writing registry,
-Compose, environment, snapshots, or project wiring. Run the explicit
+`instance_mount_state_unavailable`; an identified but stopped container set
+returns `instance_runtime_stopped` with `sb up --instance NAME` as the safe
+start command. These refusals happen before writing registry, Compose,
+environment, snapshots, or project wiring. Run the explicit
 `sb apply --project-dir <DIR>` / `apply_config` reconciliation after the state
 is available; Herd has no Docker source-bind attestation.
 

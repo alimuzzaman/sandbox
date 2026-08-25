@@ -129,6 +129,7 @@ select --local/--remote`.
 ./sb status
 ./sb wp --timeout 60 -- plugin list
 ./sb test
+./sb test unit --project-dir <dir> --label <label> --remote <name> --timeout 500 -- --filter Smoke
 ./sb deploy --remote <name> --ensure --expose
 ```
 
@@ -143,6 +144,14 @@ timeout therefore reports completion as unknown—inspect state before retrying,
 or use `--async` for long work. Sandbox never retries a timed-out command
 automatically, and synchronous WP stdout remains raw rather than wrapped in
 JSON.
+
+`./sb test` consumes its Sandbox routing options whether they appear before or
+after the mode. Keep PHPUnit arguments after the `--` delimiter; only those
+tokens are forwarded to the runner.
+
+When a ready instance's containers are stopped, `sb ensure` reports
+`instance_runtime_stopped` instead of presenting it as missing mount evidence;
+start the unchanged stack with `sb up --instance NAME`, then retry ensure.
 
 `./sb ensure --json` redacts every credential-shaped field, so `login_url`
 arrives as `?sandbox_autologin=[REDACTED]`. A local test harness that needs a

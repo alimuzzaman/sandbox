@@ -163,6 +163,113 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
     return False
 
 
+_TEST_ROUTING_OPTIONS = {
+    "--project-dir": True,
+    "--label": True,
+    "--provision-only": False,
+    "--local": False,
+    "--remote": True,
+    "--workspace": True,
+    "--timeout": True,
+    "--output-profile": True,
+    "--json": False,
+}
+
+
+def _normalize_test_routing_options(argv: list[str]) -> list[str]:
+    """Move Sandbox-owned ``test`` options ahead of its optional mode.
+
+    The test parser deliberately uses ``argparse.REMAINDER`` so PHPUnit
+    arguments can be forwarded verbatim after ``--``.  Argparse consequently
+    treats a Sandbox option written after the positional mode as child input:
+    ``sb test unit --project-dir DIR`` used to send ``--project-dir`` to
+    PHPUnit.  Normalize only the known Sandbox options before parsing, and
+    stop at the child delimiter so a PHPUnit flag with the same spelling is
+    never rewritten.
+    """
+    command_index = None
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token == "test":
+            command_index = index
+            break
+        if token in {"--instance", "--label"}:
+            index += 2
+            continue
+        if token.startswith("--instance=") or token.startswith("--label="):
+            index += 1
+            continue
+        index += 1
+    if command_index is None:
+        return argv
+
+    tokens = list(argv)
+    delimiter = next(
+        (index for index in range(command_index + 1, len(tokens))
+         if tokens[index] == "--"),
+        len(tokens),
+    )
+    mode_index = None
+    index = command_index + 1
+    while index < delimiter:
+        token = tokens[index]
+        option = token.split("=", 1)[0] if token.startswith("--") else None
+        takes_value = _TEST_ROUTING_OPTIONS.get(option)
+        if takes_value is not None:
+            if takes_value and "=" not in token:
+                index += 2
+            else:
+                index += 1
+            continue
+        if not token.startswith("-"):
+            mode_index = index
+            break
+        # An unknown option before the mode belongs to argparse's normal
+        # error path. Do not guess at its arity or move anything around it.
+        index += 1
+    if mode_index is None:
+        return argv
+
+    before_mode = tokens[command_index + 1:mode_index]
+    after_mode = tokens[mode_index + 1:delimiter]
+    moved: list[str] = []
+    remaining: list[str] = []
+    index = 0
+    while index < len(after_mode):
+        token = after_mode[index]
+        option = token.split("=", 1)[0] if token.startswith("--") else None
+        takes_value = _TEST_ROUTING_OPTIONS.get(option)
+        if takes_value is None:
+            remaining.append(token)
+            index += 1
+            continue
+        if takes_value and "=" not in token:
+            if index + 1 >= len(after_mode):
+                # Leave a missing value for argparse to report accurately.
+                remaining.append(token)
+                index += 1
+                continue
+            moved.append(token)
+            moved.append(after_mode[index + 1])
+            index += 2
+        else:
+            moved.append(token)
+            index += 1
+
+    normalized = (
+        tokens[:command_index + 1]
+        + before_mode
+        + moved
+        + [tokens[mode_index]]
+        + remaining
+        + tokens[delimiter:]
+    )
+    return normalized
+
+
 def _project_observation_route(args) -> tuple[bool, bool]:
     """Classify the two explicit project-root lifecycle observation routes.
 
@@ -980,7 +1087,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
-    raw_argv = list(sys.argv[1:])
+    raw_argv = _normalize_test_routing_options(list(sys.argv[1:]))
     args = p.parse_args(raw_argv)
     pre_command_label = _global_label_before_subcommand(raw_argv)
     if pre_command_label is not None and args.cmd not in {"domains", "native", "vrdiff"}:

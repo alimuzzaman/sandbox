@@ -791,7 +791,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(remote_checked.call_count, 1)
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
-    @patch("sandbox.commands.hosting._remote_checked", return_value="web | ready\nworker | polling\n")
+    @patch("sandbox.commands.hosting._remote_checked",
+           side_effect=["web\nworker\n", "web | ready\nworker | polling\n"])
     def test_reads_bounded_logs_for_all_declared_host_services(self, remote_checked, _resolve_home):
         manifest = _manifest().replace(
             "      service: web\n",
@@ -807,6 +808,25 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("docker compose", command)
         self.assertIn("-p sandbox-host-example-site-production", command)
         self.assertIn("logs --no-color --tail 75 web worker", command)
+
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._remote_checked",
+           side_effect=["web\n", "web | ready\n"])
+    def test_reads_present_logs_and_reports_missing_declared_service(self, remote_checked, _resolve_home):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        output = hosting_cmd._read_host_logs(validated, {}, lines=50)
+
+        self.assertIn("[missing service: worker]", output)
+        self.assertIn("web | ready", output)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertIn("config --services", commands[0])
+        self.assertIn("logs --no-color --tail 50 web", commands[1])
 
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:

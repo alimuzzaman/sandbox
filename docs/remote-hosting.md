@@ -338,7 +338,9 @@ checks the local Git branch and clean-tree policy declared for the target enviro
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
 Compose/init health checks, validates Caddy, and updates only declared DNS records.
 `logs` reads a bounded snapshot from the hosted web service and declared background
-services; it does not hold an SSH stream open.
+services; it does not hold an SSH stream open. If a declared service is absent from
+the deployed Compose configuration, the output includes a bounded `[missing service:
+NAME]` diagnostic and still returns logs for the services that are present.
 Configure Cloudflare with `./sb connect cloudflare`, which
 stores the token in `~/.zshrc.secrets` (owner-only and outside Git), and record the VPS
 public address with `./sb remote set-origin myvps --ipv4 <address>`.

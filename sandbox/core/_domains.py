@@ -345,6 +345,36 @@ def _proxy_transport_serving(cfg: dict) -> bool:
     return True
 
 
+def _proxy_transport_failure_detail(cfg: dict) -> str:
+    """Explain which managed hostname failed to reach Sandbox Caddy."""
+    for ic in resolve_instances(cfg).values():
+        dom = ic.get("domain")
+        if dom and dom.endswith(f".{_tld(ic)}"):
+            if not _sandbox_proxy_route_serving(
+                    dom, secure=_domain_is_secure(dom, ic), timeout=0.5):
+                listener = _published_listener_check()
+                return (
+                    f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
+                    f"{listener.get('label') or 'published listener evidence unavailable'}. "
+                    f"{listener.get('hint') or 'inspect `./sb domains doctor`.'}"
+                )
+    for entry in _generic_proxy_entries():
+        dom = entry.get("domain")
+        if dom and dom.endswith(f".{_generic_tld(entry)}"):
+            if not _sandbox_proxy_route_serving(
+                    dom, secure=_is_https_url(entry.get("url")), timeout=0.5):
+                listener = _published_listener_check()
+                return (
+                    f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
+                    f"{listener.get('label') or 'published listener evidence unavailable'}. "
+                    f"{listener.get('hint') or 'inspect `./sb domains doctor`.'}"
+                )
+    return (
+        "clean hostname probe did not reach Sandbox Caddy; inspect "
+        "`./sb domains doctor` for listener and resolver evidence"
+    )
+
+
 def _caddyfile_has_route(domain: str, text: str | None = None) -> bool:
     """True if the Caddyfile carries a site block for <domain> (http or https)."""
     if not domain:
@@ -1445,9 +1475,7 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
     # config and therefore take the transport-health gate below.
     if up and cfg and not _proxy_transport_serving(cfg):
         up = False
-        detail = ("the proxy container is running, but the clean hostname probe "
-                  "was answered by another listener; localhost:<port> remains "
-                  "available")
+        detail = _proxy_transport_failure_detail(cfg)
     if not up:
         if _proxy_container_running():
             info(f"proxy is running but the config reload failed: "
@@ -1778,9 +1806,7 @@ def proxy_up(cfg: dict) -> bool:
         up, detail = proxy_apply()
     if up and cfg and not _proxy_transport_serving(cfg):
         up = False
-        detail = ("the proxy container is running, but the clean hostname probe "
-                  "was answered by another listener; localhost:<port> remains "
-                  "available")
+        detail = _proxy_transport_failure_detail(cfg)
     if not up:
         info(f"clean URL ingress did not start{': ' + detail if detail else '.'}")
     return up

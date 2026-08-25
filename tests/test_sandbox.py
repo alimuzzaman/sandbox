@@ -463,6 +463,22 @@ class TestProxyTransportHealth(unittest.TestCase):
                                   return_value=False):
             self.assertFalse(domains_core._proxy_transport_serving({}))
 
+    def test_proxy_transport_failure_detail_preserves_listener_recovery_evidence(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "demo": {"domain": "demo.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries",
+                                  return_value=[]), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               return_value=False), \
+             mock.patch.object(domains_core, "_published_listener_check", return_value={
+                 "label": "proxy published on 127.0.0.77:80 but nginx owns 80",
+                 "hint": "free the port or select an adopted ingress",
+             }):
+            detail = domains_core._proxy_transport_failure_detail({})
+        self.assertIn("demo.tst", detail)
+        self.assertIn("nginx owns 80", detail)
+        self.assertIn("select an adopted ingress", detail)
+
     def test_no_declared_route_does_not_block_proxy_start(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={}), \
              mock.patch.object(domains_core, "_generic_proxy_entries",

@@ -25,6 +25,12 @@ They may use the same VPS, but one is not an implicit substitute for another.
 | Inspect or control those remote jobs from an agent | The co-located `sandbox-NAME` MCP server | Reads durable job status/output and calls the same VPS-side operations without keeping SSH pipes open. | It is a control plane, not a source-sync or deployment mechanism. |
 | Operate a declared public service | `./sb host plan` then `./sb host apply --confirm` | Applies a checked hosting manifest, health checks, Caddy/DNS policy, and declared secrets for an environment. | It is separately confirmation-gated and never inferred from a development deploy or job. |
 
+Use `./sb host status --project-dir DIR --environment ENV --remote NAME --json`
+for a read-only deployment snapshot. It reports the recorded deployed revision,
+the configured service names, and bounded Compose state/health; if the remote
+cannot be observed, the response keeps the revision metadata and returns an
+explicit `health.state=unavailable` reason without mutating the host.
+
 `./sb deploy` is project-scoped. The checkout selected by `--project-dir` is
 the source of truth for the remote deploy repository and the instance it
 ensures. The global `--instance` selector is rejected for this command rather

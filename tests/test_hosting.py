@@ -825,6 +825,41 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("failed to solve: timeout", str(raised.exception))
         self.assertNotIn("secret-target", str(raised.exception))
 
+    def test_host_status_reports_revision_and_bounded_service_health(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {
+            hosting.state_key("myvps", validated): {"commit": "a" * 40},
+        }}
+        rows = '{"Service":"web","State":"running","Health":"healthy"}\n' \
+            '{"Service":"worker","State":"running","Health":"unknown"}\n'
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked", return_value=rows):
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        self.assertEqual(result["deployed_revision"], "a" * 40)
+        self.assertEqual(result["health"], {"state": "ready"})
+        self.assertEqual([item["service"] for item in result["services"]], ["web", "worker"])
+
+    def test_host_status_fails_closed_to_unavailable_without_mutation(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked",
+                          side_effect=RuntimeError("ssh unavailable")):
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        self.assertEqual(result["health"]["state"], "unavailable")
+        self.assertIn("ssh unavailable", result["health"]["reason"])
+        self.assertEqual(state["hosts"], {})
+
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_stale_buildkit_snapshot_recovers_with_a_no_cache_rebuild(self, remote_checked, _info):

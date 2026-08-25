@@ -492,6 +492,66 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
     return "".join(chunks)
 
 
+def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
+                         state: dict) -> dict:
+    """Read deployed revision and bounded Compose health without mutation."""
+    key = hosting.state_key(remote_name, validated)
+    recorded = dict((state.get("hosts") or {}).get(key) or {})
+    services = [
+        validated["compose"]["service"],
+        *validated["compose"].get("background_services", []),
+    ]
+    result = {
+        "project": validated["project"],
+        "environment": validated["environment"],
+        "remote": remote_name,
+        "deployed_revision": recorded.get("commit"),
+        "state_record": "present" if recorded else "missing",
+        "services": [],
+        "health": {"state": "unavailable", "reason": "remote status not observed"},
+    }
+    if not entry.get("provisioned"):
+        result["health"] = {"state": "unavailable", "reason": "remote is not provisioned"}
+        return result
+    try:
+        home = remote.resolve_sandbox_home(entry)
+        source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
+        runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+        prefix = _compose_prefix(
+            validated, source_dir,
+            f"{runtime_dir}/compose.override.yml",
+            f"{runtime_dir}/environment.env",
+        )
+        raw = _remote_checked(entry, f"{prefix} ps --format json", timeout=60)
+        rows = []
+        for line in (raw or "").splitlines():
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(item, dict):
+                rows.append(item)
+        observed = {str(item.get("Service")): item for item in rows
+                    if item.get("Service")}
+        for service in services:
+            item = observed.get(service) or {}
+            result["services"].append({
+                "service": service,
+                "state": item.get("State") or "unknown",
+                "health": item.get("Health") or "unknown",
+            })
+        if not rows:
+            result["health"] = {"state": "unknown", "reason": "Compose returned no service rows"}
+        elif all(item["state"] == "running" and item["health"] in {"healthy", "unknown"}
+                 for item in result["services"]):
+            result["health"] = {"state": "ready"}
+        else:
+            result["health"] = {"state": "degraded", "reason": "one or more services are not running/healthy"}
+    except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        result["health"] = {"state": "unavailable", "reason": remote.redact_text(str(exc))[:500]}
+    return result
+
+
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
                           state: dict, ttl_seconds: int | None) -> dict:
     config = validated.get("autologin")
@@ -858,7 +918,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, apply, and login-url")
+        die("--remote is required for host plan, status, apply, logs, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -871,6 +931,19 @@ def cmd_host(cfg, args) -> None:
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
+    if args.action == "status":
+        result = _host_runtime_status(validated, entry, args.remote, state)
+        if args.json:
+            print(json.dumps({"ok": True, **result}, sort_keys=True))
+        else:
+            print(f"{result['project']} / {result['environment']} ({result['remote']})")
+            print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
+            print(f"  health: {result['health']['state']}")
+            for service in result["services"]:
+                print(f"  {service['service']}: {service['state']} ({service['health']})")
+            if result["health"].get("reason"):
+                print(f"  reason: {result['health']['reason']}")
+        return
     if args.action == "logs":
         if not entry.get("provisioned"):
             die(f"remote '{args.remote}' is not provisioned")

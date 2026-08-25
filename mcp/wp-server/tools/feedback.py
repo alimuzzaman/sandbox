@@ -58,6 +58,12 @@ def feedback_list(
     max_bytes: int = 1_000_000,
     retention_days: int = 30,
     confirm: bool = False,
+    reviewer: str = "codex",
+    reason: str | None = None,
+    evidence: list[str] | None = None,
+    confidence: str = "medium",
+    duplicate_of: str | None = None,
+    status: str | None = None,
 ) -> dict:
     """Read or manage feedback through one bounded MCP registration.
 
@@ -67,7 +73,7 @@ def feedback_list(
     prefixes fail closed with ``feedback_id_ambiguous``.
 
     The manifest intentionally keeps the existing two-tool registration for
-    compatibility.  ``action`` provides show/export/retention/prune without
+    compatibility.  ``action`` provides show/export/counts/review/retention/prune without
     adding an unadvertised third registration; direct helper functions below
     are available to a future manifest seam.
     """
@@ -86,6 +92,7 @@ def feedback_list(
             max_bytes=max_bytes,
             category=category,
             severity=severity,
+            status=status,
             source=source,
             project=project,
             project_dir=project_dir,
@@ -93,12 +100,35 @@ def feedback_list(
             since=since,
             until=until,
         )
+    if action == "counts":
+        return service.counts(
+            category=category,
+            severity=severity,
+            status=status,
+            source=source,
+            project=project,
+            project_dir=project_dir,
+            remote=remote,
+            since=since,
+            until=until,
+        )
+    if action == "review":
+        return service.review(
+            feedback_id or "",
+            status=status or "",
+            reviewer=reviewer,
+            reason=reason or "",
+            evidence=evidence or [],
+            confidence=confidence,
+            duplicate_of=duplicate_of,
+        )
     if action == "retention":
         return service.retention(
             retention_days=retention_days,
             limit=limit,
             category=category,
             severity=severity,
+            status=status,
             project=project,
             project_dir=project_dir,
         )
@@ -109,6 +139,7 @@ def feedback_list(
             confirm=confirm,
             category=category,
             severity=severity,
+            status=status,
             project=project,
             project_dir=project_dir,
         )
@@ -123,7 +154,7 @@ def feedback_list(
             "data": {},
             "error": {"code": "invalid_feedback", "message": "action is invalid"},
         }
-    if all(value is None for value in (cursor, category, severity, source, project,
+    if all(value is None for value in (cursor, category, severity, status, source, project,
                                        project_dir, remote, since, until)):
         # Preserve the original call shape for old injected service doubles.
         return service.list(limit)
@@ -132,6 +163,7 @@ def feedback_list(
         cursor,
         category=category,
         severity=severity,
+        status=status,
         source=source,
         project=project,
         project_dir=project_dir,
@@ -159,6 +191,11 @@ def feedback_retention(**kwargs) -> dict:
 def feedback_prune(**kwargs) -> dict:
     """Compatibility helper for a future separately registered prune tool."""
     return _service().prune(**kwargs)
+
+
+def feedback_review(feedback_id: str, **kwargs) -> dict:
+    """Compatibility helper for updating one feedback closure."""
+    return _service().review(feedback_id, **kwargs)
 
 
 def register(server, dependencies) -> None:

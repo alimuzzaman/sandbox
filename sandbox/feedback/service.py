@@ -16,12 +16,22 @@ from sandbox.services.redaction import redact_text
 
 CATEGORIES = frozenset({"bug", "incident", "idea", "usability", "other"})
 SEVERITIES = frozenset({"low", "medium", "high", "critical"})
+REVIEW_STATUSES = frozenset({
+    "unreviewed", "open", "in_progress", "resolved", "verified", "blocked",
+    "duplicate", "invalid", "wont_fix", "not_applicable",
+})
+REVIEW_CONFIDENCES = frozenset({"low", "medium", "high"})
 MAX_LIMIT = 100
 MAX_CURSOR_LENGTH = 512
 MAX_EXPORT_BYTES = 1_000_000
+MAX_REVIEW_REASON = 500
+MAX_REVIEW_EVIDENCE_ITEMS = 8
+MAX_REVIEW_EVIDENCE = 240
+MAX_REVIEW_LINE_BYTES = 16_384
 _SAFE_SOURCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,79}$")
 _SAFE_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,79}$")
+_SAFE_REVIEWER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,79}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _FEEDBACK_ID = re.compile(r"[a-f0-9]{32}\Z")
@@ -145,7 +155,16 @@ def _filter_value(value: Any, field: str, *, maximum: int = 160) -> str | None:
     return value.strip()
 
 
-def _matches(record: dict[str, Any], filters: dict[str, Any]) -> bool:
+def _matches(
+    record: dict[str, Any],
+    filters: dict[str, Any],
+    review: dict[str, Any] | None = None,
+) -> bool:
+    expected_status = filters.get("status")
+    if expected_status is not None:
+        actual_status = review.get("status") if isinstance(review, dict) else "unreviewed"
+        if actual_status != expected_status:
+            return False
     for key in ("category", "severity", "source", "remote"):
         expected = filters.get(key)
         if expected is not None and record.get(key) != expected:
@@ -167,6 +186,78 @@ def _matches(record: dict[str, Any], filters: dict[str, Any]) -> bool:
     if until is not None and (created is None or created > until):
         return False
     return True
+
+
+def _normalise_review_event(value: Any) -> dict[str, Any]:
+    """Validate and project one untrusted append-only closure event."""
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("invalid feedback review event")
+    feedback_id = value.get("feedback_id")
+    if not isinstance(feedback_id, str) or not _FEEDBACK_ID.fullmatch(feedback_id):
+        raise ValueError("invalid feedback review id")
+    status = value.get("status")
+    if not isinstance(status, str) or status not in REVIEW_STATUSES:
+        raise ValueError("invalid feedback review status")
+    closure = value.get("closure")
+    if not isinstance(closure, dict):
+        raise ValueError("invalid feedback closure")
+    reviewed_at = closure.get("reviewed_at")
+    if _parse_timestamp(reviewed_at) is None:
+        raise ValueError("invalid feedback review timestamp")
+    reviewer = closure.get("reviewer")
+    if not isinstance(reviewer, str) or not _SAFE_REVIEWER.fullmatch(reviewer.strip()):
+        raise ValueError("invalid feedback reviewer")
+    reason_value = closure.get("reason")
+    if not isinstance(reason_value, str):
+        raise ValueError("invalid feedback review reason")
+    reason, _ = _sanitize_text(
+        reason_value, "review reason", maximum=MAX_REVIEW_REASON, required=True,
+    )
+    evidence_value = closure.get("evidence", [])
+    if not isinstance(evidence_value, list) or len(evidence_value) > MAX_REVIEW_EVIDENCE_ITEMS:
+        raise ValueError("invalid feedback review evidence")
+    evidence: list[str] = []
+    for item in evidence_value:
+        if not isinstance(item, str):
+            raise ValueError("invalid feedback review evidence")
+        clean, _ = _sanitize_text(
+            item, "review evidence", maximum=MAX_REVIEW_EVIDENCE, required=True,
+        )
+        evidence.append(clean)
+    confidence = closure.get("confidence", "medium")
+    if not isinstance(confidence, str) or confidence not in REVIEW_CONFIDENCES:
+        raise ValueError("invalid feedback review confidence")
+    duplicate_of = closure.get("duplicate_of")
+    if duplicate_of is not None and (
+        not isinstance(duplicate_of, str) or not _FEEDBACK_ID.fullmatch(duplicate_of)
+    ):
+        raise ValueError("invalid duplicate feedback id")
+    clean_closure: dict[str, Any] = {
+        "reviewed_at": reviewed_at,
+        "reviewer": reviewer.strip(),
+        "reason": reason,
+        "evidence": evidence,
+        "confidence": confidence,
+    }
+    if duplicate_of is not None:
+        clean_closure["duplicate_of"] = duplicate_of
+    return {
+        "schema_version": 1,
+        "feedback_id": feedback_id,
+        "status": status,
+        "closure": clean_closure,
+    }
+
+
+def _public_review(value: Any) -> tuple[str, dict[str, Any] | None]:
+    """Return the bounded status/closure projection for a record response."""
+    if not isinstance(value, dict):
+        return "unreviewed", None
+    try:
+        event = _normalise_review_event(value)
+    except (FeedbackError, ValueError, TypeError):
+        return "unreviewed", None
+    return event["status"], dict(event["closure"])
 
 
 class FeedbackStore:
@@ -217,6 +308,76 @@ class FeedbackStore:
             raise
         return record
 
+    @property
+    def review_path(self) -> Path:
+        """Append-only review journal kept beside immutable report records."""
+        return self.root / "closures.jsonl"
+
+    def append_review(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Append one validated closure event without rewriting reports."""
+        normalised = _normalise_review_event(event)
+        self._prepare()
+        line = json.dumps(normalised, sort_keys=True, separators=(",", ":")) + "\n"
+        encoded = line.encode("utf-8")
+        if len(encoded) > MAX_REVIEW_LINE_BYTES:
+            raise FeedbackError("feedback review event is too large")
+        descriptor = os.open(
+            self.review_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            written = os.write(descriptor, encoded)
+            if written != len(encoded):
+                raise OSError("feedback review event was only partially written")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return normalised
+
+    def latest_reviews(self) -> tuple[dict[str, dict[str, Any]], int]:
+        """Read the latest valid closure event for each ID and count bad lines."""
+        path = self.review_path
+        if not path.exists():
+            return {}, 0
+        if path.is_symlink() or not path.is_file():
+            return {}, 1
+        latest: dict[str, dict[str, Any]] = {}
+        invalid = 0
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                while True:
+                    raw = handle.readline(MAX_REVIEW_LINE_BYTES + 1)
+                    if not raw:
+                        break
+                    if len(raw.encode("utf-8", errors="ignore")) > MAX_REVIEW_LINE_BYTES:
+                        invalid += 1
+                        if not raw.endswith("\n"):
+                            while raw and not raw.endswith("\n"):
+                                raw = handle.readline(MAX_REVIEW_LINE_BYTES + 1)
+                        continue
+                    try:
+                        value = _normalise_review_event(json.loads(raw))
+                    except (OSError, UnicodeError, ValueError, TypeError, FeedbackError, json.JSONDecodeError):
+                        invalid += 1
+                        continue
+                    latest[value["feedback_id"]] = value
+        except (OSError, UnicodeError) as exc:
+            raise FeedbackError("feedback review log is unavailable", "feedback_unavailable") from exc
+        return latest, invalid
+
+    def records(self) -> tuple[list[dict[str, Any]], int]:
+        """Return all valid reports and the number withheld as invalid."""
+        records: list[dict[str, Any]] = []
+        invalid = 0
+        for path in self._paths():
+            try:
+                records.append(self._read(path))
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                invalid += 1
+        return records, invalid
+
     def _paths(self) -> list[Path]:
         try:
             return sorted(self.root.glob("*.json"), key=lambda item: item.name, reverse=True)
@@ -238,6 +399,7 @@ class FeedbackStore:
         *,
         cursor: str | None = None,
         filters: dict[str, Any] | None = None,
+        reviews: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _validate_limit(limit)
         cursor_name = _decode_cursor(cursor)
@@ -261,7 +423,8 @@ class FeedbackStore:
                 # display limit.  This is intentionally independent of paging.
                 invalid += 1
                 continue
-            if index < start or not _matches(value, filters):
+            review = (reviews or {}).get(value.get("feedback_id"))
+            if index < start or not _matches(value, filters, review):
                 continue
             if len(records) < limit:
                 records.append(value)
@@ -334,6 +497,7 @@ class FeedbackStore:
         *,
         limit: int = MAX_LIMIT,
         filters: dict[str, Any] | None = None,
+        reviews: dict[str, dict[str, Any]] | None = None,
     ) -> list[tuple[Path, dict[str, Any]]]:
         _validate_limit(limit)
         selected: list[tuple[Path, dict[str, Any]]] = []
@@ -343,7 +507,8 @@ class FeedbackStore:
             except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                 continue
             created = _parse_timestamp(value.get("created_at"))
-            if created is not None and created < cutoff and _matches(value, filters or {}):
+            review = (reviews or {}).get(value.get("feedback_id"))
+            if created is not None and created < cutoff and _matches(value, filters or {}, review):
                 selected.append((path, value))
                 if len(selected) >= limit:
                     break
@@ -371,6 +536,7 @@ class FeedbackService:
         *,
         category: str | None = None,
         severity: str | None = None,
+        status: str | None = None,
         source: str | None = None,
         remote: str | None = None,
         project: str | None = None,
@@ -382,9 +548,12 @@ class FeedbackService:
             raise FeedbackError(f"category must be one of: {', '.join(sorted(CATEGORIES))}")
         if severity is not None and (not isinstance(severity, str) or severity not in SEVERITIES):
             raise FeedbackError(f"severity must be one of: {', '.join(sorted(SEVERITIES))}")
+        if status is not None and (not isinstance(status, str) or status not in REVIEW_STATUSES):
+            raise FeedbackError(f"status must be one of: {', '.join(sorted(REVIEW_STATUSES))}")
         values = {
             "category": _filter_value(category, "category"),
             "severity": _filter_value(severity, "severity"),
+            "status": _filter_value(status, "status"),
             "source": _filter_value(source, "source"),
             "remote": _filter_value(remote, "remote"),
         }
@@ -425,7 +594,12 @@ class FeedbackService:
         return output
 
     @staticmethod
-    def _export_record(record: dict[str, Any]) -> dict[str, Any]:
+    def _export_record(
+        record: dict[str, Any],
+        *,
+        review: dict[str, Any] | None = None,
+        embedded_review: bool = False,
+    ) -> dict[str, Any]:
         """Project a record into a bounded, path-free export representation."""
         output: dict[str, Any] = {"schema_version": 1}
         for key, maximum in (("feedback_id", 32), ("created_at", 40), ("category", 20),
@@ -455,12 +629,29 @@ class FeedbackService:
                 output["project"] = safe_project
         output["redacted"] = bool(record.get("redacted"))
         output["trust"] = "untrusted_data"
+        if review is None and embedded_review:
+            candidate_status = record.get("status")
+            candidate_closure = record.get("closure")
+            if candidate_status in REVIEW_STATUSES and isinstance(candidate_closure, dict):
+                review = {
+                    "schema_version": 1,
+                    "feedback_id": record.get("feedback_id"),
+                    "status": candidate_status,
+                    "closure": candidate_closure,
+                }
+        status, closure = _public_review(review)
+        output["status"] = status
+        output["closure"] = closure
         return output
 
     @staticmethod
-    def _display_record(record: dict[str, Any]) -> dict[str, Any]:
+    def _display_record(
+        record: dict[str, Any],
+        *,
+        review: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return only supported fields; never pass through legacy keys."""
-        output = FeedbackService._export_record(record)
+        output = FeedbackService._export_record(record, review=review)
         # Preserve the established record shape for records without project
         # context while keeping the value strictly bounded to ``None``.
         output.setdefault("project", None)
@@ -513,7 +704,10 @@ class FeedbackService:
                 "trust": "untrusted_data",
             }
             self.store.save(record)
-            return self._result(True, "submit", "recorded", data={"feedback": record})
+            return self._result(
+                True, "submit", "recorded",
+                data={"feedback": self._display_record(record)},
+            )
         except FeedbackError as exc:
             return self._result(False, "submit", "refused", error=exc)
         except OSError:
@@ -529,6 +723,7 @@ class FeedbackService:
         *,
         category: str | None = None,
         severity: str | None = None,
+        status: str | None = None,
         source: str | None = None,
         remote: str | None = None,
         project: str | None = None,
@@ -539,14 +734,21 @@ class FeedbackService:
         try:
             _validate_limit(limit)
             filters = self._filters(
-                category=category, severity=severity, source=source, remote=remote,
+                category=category, severity=severity, status=status, source=source, remote=remote,
                 project=project, project_dir=project_dir, since=since, until=until,
             )
-            page = self.store.query(limit, cursor=cursor, filters=filters)
+            reviews, invalid_reviews = self.store.latest_reviews()
+            page = self.store.query(limit, cursor=cursor, filters=filters, reviews=reviews)
             return self._result(True, "list", "complete", data={
-                "feedback": [self._display_record(record) for record in page["records"]],
+                "feedback": [
+                    self._display_record(
+                        record, review=reviews.get(record.get("feedback_id")),
+                    )
+                    for record in page["records"]
+                ],
                 "count": len(page["records"]),
                 "invalid_record_count": page["invalid_record_count"],
+                "invalid_review_count": invalid_reviews,
                 "cursor": cursor,
                 "next_cursor": page["next_cursor"],
                 "has_more": page["has_more"],
@@ -561,8 +763,13 @@ class FeedbackService:
             record = self.store.resolve(feedback_id)
             if record is None:
                 raise FeedbackError("feedback record was not found", "feedback_not_found")
+            reviews, invalid_reviews = self.store.latest_reviews()
             return self._result(True, "show", "complete", data={
-                "feedback": self._display_record(record), "trust": "untrusted_data",
+                "feedback": self._display_record(
+                    record, review=reviews.get(record.get("feedback_id")),
+                ),
+                "invalid_review_count": invalid_reviews,
+                "trust": "untrusted_data",
             })
         except FeedbackError as exc:
             return self._result(False, "show", "failed", error=exc)
@@ -571,6 +778,149 @@ class FeedbackService:
         result = self.show(feedback_id)
         result["action"] = "detail"
         return result
+
+    def review(
+        self,
+        feedback_id: str,
+        *,
+        status: str,
+        reviewer: str = "codex",
+        reason: str,
+        evidence: list[str] | None = None,
+        confidence: str = "medium",
+        duplicate_of: str | None = None,
+        reviewed_at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        """Append a closure decision for an existing report."""
+        try:
+            record = self.store.resolve(feedback_id)
+            if record is None:
+                raise FeedbackError("feedback record was not found", "feedback_not_found")
+            if not isinstance(status, str) or status not in REVIEW_STATUSES:
+                raise FeedbackError(
+                    f"status must be one of: {', '.join(sorted(REVIEW_STATUSES))}",
+                )
+            if not isinstance(reviewer, str) or not _SAFE_REVIEWER.fullmatch(reviewer.strip()):
+                raise FeedbackError("reviewer contains unsupported characters")
+            clean_reason, _ = _sanitize_text(
+                reason, "reason", maximum=MAX_REVIEW_REASON, required=True,
+            )
+            if evidence is None:
+                evidence = []
+            if not isinstance(evidence, list) or len(evidence) > MAX_REVIEW_EVIDENCE_ITEMS:
+                raise FeedbackError(
+                    f"evidence must contain at most {MAX_REVIEW_EVIDENCE_ITEMS} items",
+                )
+            clean_evidence: list[str] = []
+            for item in evidence:
+                clean_item, _ = _sanitize_text(
+                    item, "evidence", maximum=MAX_REVIEW_EVIDENCE, required=True,
+                )
+                clean_evidence.append(clean_item)
+            if not isinstance(confidence, str) or confidence not in REVIEW_CONFIDENCES:
+                raise FeedbackError(
+                    f"confidence must be one of: {', '.join(sorted(REVIEW_CONFIDENCES))}",
+                )
+            if reviewed_at is None:
+                reviewed_value = _timestamp(self.clock())
+            elif isinstance(reviewed_at, datetime):
+                reviewed_value = _timestamp(reviewed_at)
+            elif isinstance(reviewed_at, str):
+                parsed = _parse_timestamp(reviewed_at.strip())
+                if parsed is None:
+                    raise FeedbackError("reviewed_at must be an ISO-8601 UTC timestamp")
+                reviewed_value = _timestamp(parsed)
+            else:
+                raise FeedbackError("reviewed_at is invalid")
+            canonical_duplicate: str | None = None
+            if duplicate_of is not None:
+                duplicate = self.store.resolve(duplicate_of)
+                if duplicate is None:
+                    raise FeedbackError("duplicate feedback record was not found", "feedback_not_found")
+                canonical_duplicate = duplicate.get("feedback_id")
+                if canonical_duplicate == record.get("feedback_id"):
+                    raise FeedbackError("a feedback record cannot duplicate itself")
+            closure: dict[str, Any] = {
+                "reviewed_at": reviewed_value,
+                "reviewer": reviewer.strip(),
+                "reason": clean_reason,
+                "evidence": clean_evidence,
+                "confidence": confidence,
+            }
+            if canonical_duplicate is not None:
+                closure["duplicate_of"] = canonical_duplicate
+            event = self.store.append_review({
+                "schema_version": 1,
+                "feedback_id": record["feedback_id"],
+                "status": status,
+                "closure": closure,
+            })
+            return self._result(True, "review", "updated", data={
+                "feedback": self._display_record(record, review=event),
+                "review": event,
+                "trust": "untrusted_data",
+            })
+        except FeedbackError as exc:
+            return self._result(False, "review", "failed", error=exc)
+        except OSError:
+            return self._result(
+                False, "review", "failed",
+                error=FeedbackError("feedback log is unavailable", "feedback_unavailable"),
+            )
+
+    def counts(
+        self,
+        *,
+        category: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+        source: str | None = None,
+        remote: str | None = None,
+        project: str | None = None,
+        project_dir: str | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return global status counts over the valid retained feedback set."""
+        try:
+            filters = self._filters(
+                category=category, severity=severity, status=status, source=source,
+                remote=remote, project=project, project_dir=project_dir,
+                since=since, until=until,
+            )
+            reviews, invalid_reviews = self.store.latest_reviews()
+            records, invalid_records = self.store.records()
+            by_status = {name: 0 for name in sorted(REVIEW_STATUSES)}
+            by_category = {name: 0 for name in sorted(CATEGORIES)}
+            by_severity = {name: 0 for name in sorted(SEVERITIES)}
+            matched = 0
+            for record in records:
+                review = reviews.get(record.get("feedback_id"))
+                if not _matches(record, filters, review):
+                    continue
+                matched += 1
+                actual_status = review.get("status") if isinstance(review, dict) else "unreviewed"
+                by_status[actual_status] = by_status.get(actual_status, 0) + 1
+                if record.get("category") in by_category:
+                    by_category[record["category"]] += 1
+                if record.get("severity") in by_severity:
+                    by_severity[record["severity"]] += 1
+            reviewed = matched - by_status.get("unreviewed", 0)
+            return self._result(True, "counts", "complete", data={
+                "count": matched,
+                "total": len(records),
+                "reviewed": reviewed,
+                "unreviewed": by_status.get("unreviewed", 0),
+                "by_status": by_status,
+                "by_category": by_category,
+                "by_severity": by_severity,
+                "invalid_record_count": invalid_records,
+                "invalid_review_count": invalid_reviews,
+                "filters": self._public_filters(filters),
+                "trust": "untrusted_data",
+            })
+        except FeedbackError as exc:
+            return self._result(False, "counts", "failed", error=exc)
 
     def export(
         self,
@@ -581,6 +931,7 @@ class FeedbackService:
         max_bytes: int = MAX_EXPORT_BYTES,
         category: str | None = None,
         severity: str | None = None,
+        status: str | None = None,
         source: str | None = None,
         remote: str | None = None,
         project: str | None = None,
@@ -595,7 +946,7 @@ class FeedbackService:
             if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_EXPORT_BYTES:
                 raise FeedbackError(f"max_bytes must be between 1 and {MAX_EXPORT_BYTES}")
             page_result = self.list(
-                limit, cursor, category=category, severity=severity, source=source,
+                limit, cursor, category=category, severity=severity, status=status, source=source,
                 remote=remote, project=project, project_dir=project_dir,
                 since=since, until=until,
             )
@@ -603,7 +954,10 @@ class FeedbackService:
                 page_result["action"] = "export"
                 return page_result
             page = page_result["data"]
-            records = [self._export_record(record) for record in page["feedback"]]
+            records = [
+                self._export_record(record, embedded_review=True)
+                for record in page["feedback"]
+            ]
             if format == "jsonl":
                 content = "".join(
                     json.dumps(
@@ -641,6 +995,7 @@ class FeedbackService:
         limit: int = MAX_LIMIT,
         category: str | None = None,
         severity: str | None = None,
+        status: str | None = None,
         project: str | None = None,
         project_dir: str | None = None,
     ) -> dict[str, Any]:
@@ -653,21 +1008,28 @@ class FeedbackService:
                 raise FeedbackError("retention_days must be between 0 and 3650")
             _validate_limit(limit)
             filters = self._filters(
-                category=category, severity=severity, project=project, project_dir=project_dir,
+                category=category, severity=severity, status=status,
+                project=project, project_dir=project_dir,
             )
             now = self.clock()
             if now.tzinfo is None:
                 raise FeedbackError("feedback clock must return a timezone-aware timestamp")
             cutoff = now.astimezone(timezone.utc) - timedelta(days=retention_days)
+            reviews, invalid_reviews = self.store.latest_reviews()
             candidates = [
-                self._export_record(record)
-                for _path, record in self.store.candidates(cutoff, limit=limit, filters=filters)
+                self._export_record(
+                    record, review=reviews.get(record.get("feedback_id")),
+                )
+                for _path, record in self.store.candidates(
+                    cutoff, limit=limit, filters=filters, reviews=reviews,
+                )
             ]
             return self._result(True, "retention", "planned", data={
                 "retention_days": retention_days,
                 "cutoff": _timestamp(cutoff),
                 "candidates": candidates,
                 "count": len(candidates),
+                "invalid_review_count": invalid_reviews,
                 "deletion": "disabled_by_default",
                 "requires_confirmation": True,
                 "trust": "untrusted_data",
@@ -686,6 +1048,7 @@ class FeedbackService:
         confirm: bool = False,
         category: str | None = None,
         severity: str | None = None,
+        status: str | None = None,
         project: str | None = None,
         project_dir: str | None = None,
     ) -> dict[str, Any]:
@@ -701,22 +1064,32 @@ class FeedbackService:
                 raise FeedbackError("retention_days must be between 0 and 3650")
             _validate_limit(limit)
             filters = self._filters(
-                category=category, severity=severity, project=project, project_dir=project_dir,
+                category=category, severity=severity, status=status,
+                project=project, project_dir=project_dir,
             )
             now = self.clock()
             if now.tzinfo is None:
                 raise FeedbackError("feedback clock must return a timezone-aware timestamp")
             cutoff = now.astimezone(timezone.utc) - timedelta(days=retention_days)
-            candidates = list(self.store.candidates(cutoff, limit=limit, filters=filters))
+            reviews, invalid_reviews = self.store.latest_reviews()
+            candidates = list(self.store.candidates(
+                cutoff, limit=limit, filters=filters, reviews=reviews,
+            ))
             return self._result(True, "prune", "planned", data={
                 "retention_days": retention_days,
                 "cutoff": _timestamp(cutoff),
-                "candidates": [self._export_record(record) for _path, record in candidates],
+                "candidates": [
+                    self._export_record(
+                        record, review=reviews.get(record.get("feedback_id")),
+                    )
+                    for _path, record in candidates
+                ],
                 "count": len(candidates),
                 "deleted": 0,
                 "requested_confirmation": bool(confirm),
                 "requires_confirmation": False,
                 "deletion": "disabled_append_only",
+                "invalid_review_count": invalid_reviews,
                 "trust": "untrusted_data",
             })
         except FeedbackError as exc:

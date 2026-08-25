@@ -59,6 +59,105 @@ class TestFeedbackService(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(stored[0].stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(stored[0].parent.stat().st_mode), 0o700)
 
+    def test_new_records_are_unreviewed_and_reviews_are_append_only(self):
+        submitted = self.service.submit("needs review")
+        self.assertTrue(submitted["ok"])
+        feedback = submitted["data"]["feedback"]
+        self.assertEqual(feedback["status"], "unreviewed")
+        self.assertIsNone(feedback["closure"])
+        self.assertFalse(self.service.store.review_path.exists())
+
+        reviewed = self.service.review(
+            feedback["feedback_id"],
+            status="resolved",
+            reviewer="codex",
+            reason="Source and regression tests prove the fix.",
+            evidence=["commit:abc1234", "tests:test_feedback"],
+            confidence="high",
+        )
+        self.assertTrue(reviewed["ok"])
+        self.assertEqual(reviewed["data"]["feedback"]["status"], "resolved")
+        self.assertEqual(
+            reviewed["data"]["feedback"]["closure"]["evidence"],
+            ["commit:abc1234", "tests:test_feedback"],
+        )
+        self.assertEqual(
+            len(list((self.root / "feedback").glob("*.json"))), 1,
+        )
+        self.assertEqual(stat.S_IMODE(self.service.store.review_path.stat().st_mode), 0o600)
+
+        listed = self.service.list(10)
+        self.assertEqual(listed["data"]["feedback"][0]["status"], "resolved")
+        self.assertEqual(listed["data"]["invalid_review_count"], 0)
+        exported = self.service.export(10)
+        self.assertTrue(exported["ok"])
+        self.assertEqual(exported["data"]["feedback"][0]["status"], "resolved")
+
+    def test_review_redacts_reason_and_counts_statuses_with_filters(self):
+        first = self.service.submit("first", category="bug", severity="high")
+        second = self.service.submit("second", category="idea", severity="low")
+        self.assertTrue(first["ok"] and second["ok"])
+        first_id = first["data"]["feedback"]["feedback_id"]
+        second_id = second["data"]["feedback"]["feedback_id"]
+        self.assertTrue(self.service.review(
+            first_id,
+            status="blocked",
+            reason="Waiting for token=redacted-value",
+            evidence=["host:scaleway-sandbox"],
+            confidence="medium",
+        )["ok"])
+        self.assertTrue(self.service.review(
+            second_id,
+            status="verified",
+            reason="Independent acceptance evidence is present.",
+            evidence=["tests:test_feedback"],
+            confidence="high",
+        )["ok"])
+
+        counts = self.service.counts()
+        self.assertTrue(counts["ok"])
+        self.assertEqual(counts["data"]["count"], 2)
+        self.assertEqual(counts["data"]["reviewed"], 2)
+        self.assertEqual(counts["data"]["unreviewed"], 0)
+        self.assertEqual(counts["data"]["by_status"]["blocked"], 1)
+        self.assertEqual(counts["data"]["by_status"]["verified"], 1)
+        self.assertEqual(counts["data"]["by_category"]["bug"], 1)
+        self.assertNotIn("redacted-value", json.dumps(counts))
+
+        filtered = self.service.list(10, status="blocked")
+        self.assertEqual([item["feedback_id"] for item in filtered["data"]["feedback"]], [first_id])
+        filtered_counts = self.service.counts(status="verified")
+        self.assertEqual(filtered_counts["data"]["count"], 1)
+        self.assertEqual(filtered_counts["data"]["by_status"]["verified"], 1)
+
+    def test_invalid_review_lines_are_withheld_and_latest_event_wins(self):
+        submitted = self.service.submit("event history")
+        feedback_id = submitted["data"]["feedback"]["feedback_id"]
+        self.assertTrue(self.service.review(
+            feedback_id, status="open", reason="Initial triage", confidence="low",
+        )["ok"])
+        self.assertTrue(self.service.review(
+            feedback_id, status="in_progress", reason="Work is underway", confidence="medium",
+        )["ok"])
+        with self.service.store.review_path.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+        listed = self.service.list(10)
+        self.assertEqual(listed["data"]["feedback"][0]["status"], "in_progress")
+        self.assertEqual(listed["data"]["invalid_review_count"], 1)
+
+    def test_cli_parser_exposes_review_and_counts_actions(self):
+        from sandbox.commands.feedback import configure_parser
+
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        parsed = parser.parse_args([
+            "review", "a" * 32, "--status", "verified", "--reason", "accepted",
+            "--evidence", "tests:test_feedback", "--json",
+        ])
+        self.assertEqual(parsed.action, "review")
+        self.assertEqual(parsed.status, "verified")
+        self.assertEqual(parser.parse_args(["counts"]).action, "counts")
+
     def test_list_is_newest_first_and_withholds_invalid_records(self):
         first = self.service.submit("first", category="bug")
         self.assertTrue(first["ok"])

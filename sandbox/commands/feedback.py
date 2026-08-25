@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 
 from sandbox.feedback.context import feedback_service
+from sandbox.feedback.service import REVIEW_CONFIDENCES, REVIEW_STATUSES
 from sandbox.registry import CommandSpec, register_specs
 
 
 def configure_parser(parser) -> None:
     parser.description = "Submit or inspect durable Sandbox feedback"
     parser.add_argument(
-        "action", choices=("submit", "list", "show", "detail", "export", "retention", "prune"),
+        "action", choices=(
+            "submit", "list", "show", "detail", "export", "counts", "review",
+            "retention", "prune",
+        ),
     )
     parser.add_argument(
         "feedback_id", nargs="?",
@@ -25,6 +29,7 @@ def configure_parser(parser) -> None:
     parser.add_argument("--details", default="")
     parser.add_argument("--category", choices=("bug", "incident", "idea", "usability", "other"))
     parser.add_argument("--severity", choices=("low", "medium", "high", "critical"))
+    parser.add_argument("--status", choices=tuple(sorted(REVIEW_STATUSES)))
     parser.add_argument("--source")
     parser.add_argument("--project-dir")
     parser.add_argument("--project-name")
@@ -41,6 +46,11 @@ def configure_parser(parser) -> None:
     parser.add_argument("--format", choices=("json", "jsonl"), default="json")
     parser.add_argument("--max-bytes", type=int, default=1_000_000)
     parser.add_argument("--retention-days", type=int, default=30)
+    parser.add_argument("--reviewer", default="codex")
+    parser.add_argument("--reason")
+    parser.add_argument("--evidence", action="append")
+    parser.add_argument("--confidence", choices=tuple(sorted(REVIEW_CONFIDENCES)), default="medium")
+    parser.add_argument("--duplicate-of")
     parser.add_argument(
         "--confirm", action="store_true",
         help="explicitly request a prune plan; records remain append-only",
@@ -72,6 +82,21 @@ def _emit(payload: dict, as_json: bool) -> None:
         print(f"  {record.get('summary')}")
         if record.get("details"):
             print(f"  {record.get('details')}")
+        print(f"  status: {record.get('status', 'unreviewed')}")
+        return
+    if payload.get("action") == "review":
+        record = data.get("feedback") or {}
+        print(f"feedback review: {record.get('feedback_id')}")
+        print(f"  status: {record.get('status', 'unreviewed')}")
+        return
+    if payload.get("action") == "counts":
+        print(f"feedback counts: {data.get('count', 0)} record(s)")
+        for status, count in (data.get("by_status") or {}).items():
+            print(f"  {status}: {count}")
+        if data.get("invalid_record_count"):
+            print(f"  invalid records withheld: {data['invalid_record_count']}")
+        if data.get("invalid_review_count"):
+            print(f"  invalid reviews withheld: {data['invalid_review_count']}")
         return
     if payload.get("action") == "export":
         # Export content is already bounded and path-free by the service.
@@ -89,10 +114,13 @@ def _emit(payload: dict, as_json: bool) -> None:
     for record in data.get("feedback") or ():
         print(
             f"  {record.get('created_at')} {record.get('feedback_id')} "
-            f"{record.get('severity')}/{record.get('category')} {record.get('summary')}"
+            f"{record.get('severity')}/{record.get('category')} "
+            f"[{record.get('status', 'unreviewed')}] {record.get('summary')}"
         )
     if data.get("invalid_record_count"):
         print(f"  invalid records withheld: {data['invalid_record_count']}")
+    if data.get("invalid_review_count"):
+        print(f"  invalid reviews withheld: {data['invalid_review_count']}")
 
 
 def cmd_feedback(_cfg, args) -> None:
@@ -129,6 +157,7 @@ def cmd_feedback(_cfg, args) -> None:
             max_bytes=getattr(args, "max_bytes", 1_000_000),
             category=getattr(args, "category", None),
             severity=getattr(args, "severity", None),
+            status=getattr(args, "status", None),
             source=getattr(args, "source", None),
             remote=getattr(args, "remote", None),
             project=getattr(args, "project_filter", None),
@@ -136,12 +165,37 @@ def cmd_feedback(_cfg, args) -> None:
             since=getattr(args, "since", None),
             until=getattr(args, "until", None),
         )
+    elif action == "counts":
+        payload = service.counts(
+            category=getattr(args, "category", None),
+            severity=getattr(args, "severity", None),
+            status=getattr(args, "status", None),
+            source=getattr(args, "source", None),
+            remote=getattr(args, "remote", None),
+            project=getattr(args, "project_filter", None),
+            project_dir=getattr(args, "project_dir", None),
+            since=getattr(args, "since", None),
+            until=getattr(args, "until", None),
+        )
+    elif action == "review":
+        payload = service.review(
+            getattr(args, "feedback_id", None)
+            or getattr(args, "feedback_id_option", None)
+            or "",
+            status=getattr(args, "status", None) or "",
+            reviewer=getattr(args, "reviewer", "codex"),
+            reason=getattr(args, "reason", None) or "",
+            evidence=getattr(args, "evidence", None) or [],
+            confidence=getattr(args, "confidence", "medium"),
+            duplicate_of=getattr(args, "duplicate_of", None),
+        )
     elif action == "retention":
         payload = service.retention(
             retention_days=getattr(args, "retention_days", 30),
             limit=args.limit,
             category=getattr(args, "category", None),
             severity=getattr(args, "severity", None),
+            status=getattr(args, "status", None),
             project=getattr(args, "project_filter", None),
             project_dir=getattr(args, "project_dir", None),
         )
@@ -152,6 +206,7 @@ def cmd_feedback(_cfg, args) -> None:
             confirm=bool(getattr(args, "confirm", False)),
             category=getattr(args, "category", None),
             severity=getattr(args, "severity", None),
+            status=getattr(args, "status", None),
             project=getattr(args, "project_filter", None),
             project_dir=getattr(args, "project_dir", None),
         )
@@ -162,6 +217,7 @@ def cmd_feedback(_cfg, args) -> None:
             "cursor": getattr(args, "cursor", None),
             "category": getattr(args, "category", None),
             "severity": getattr(args, "severity", None),
+            "status": getattr(args, "status", None),
             "source": getattr(args, "source", None),
             "remote": getattr(args, "remote", None),
             "project": getattr(args, "project_filter", None),

@@ -7,7 +7,9 @@ into safe reusable capabilities.
 
 Sandbox keeps machine-local feedback as immutable owner-only JSON records under
 `$SANDBOX_HOME/runtime/feedback/`. The log is global, survives project cleanup, and
-is not committed or uploaded by the command.
+is not committed or uploaded by the command. Review decisions are appended to the
+owner-only `closures.jsonl` journal beside those records; report files are never
+rewritten.
 
 Submit feedback from the CLI:
 
@@ -35,6 +37,38 @@ prefix of 8-32 characters:
 sb feedback show 0123abcd --json
 sb feedback detail 0123abcd --json
 ```
+
+Every response includes a `status` and `closure` field. New reports are
+`unreviewed` with a null closure. A review appends a bounded, redacted closure
+event, and reads use the latest valid event for that feedback ID:
+
+```bash
+sb feedback review 0123abcd \
+  --status resolved \
+  --reason "Regression test and source review confirm the fix." \
+  --evidence "commit:abc1234" \
+  --evidence "tests:test_feedback" \
+  --confidence high \
+  --json
+```
+
+Supported statuses are `unreviewed`, `open`, `in_progress`, `resolved`, `verified`,
+`blocked`, `duplicate`, `invalid`, `wont_fix`, and `not_applicable`. A status is a
+review classification, not authority to deploy, delete, or change another system.
+`resolved` means implementation evidence exists; `verified` additionally requires
+independent acceptance evidence. Use `blocked` when the next verification step is
+not currently possible, and record why in the closure.
+
+Get global counts without manually paging the ledger:
+
+```bash
+sb feedback counts --json
+sb feedback counts --status open --json
+```
+
+The counts response reports valid record totals, `by_status`, category/severity
+breakdowns, and invalid report/review lines withheld from display. Use `--status`
+with `list` or `export` to inspect one review class.
 
 An invalid reference fails as `invalid_feedback`; a prefix matching no valid record
 returns `feedback_not_found`; a prefix matching more than one distinct canonical ID

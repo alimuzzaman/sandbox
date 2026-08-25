@@ -2,9 +2,9 @@
 
 Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb feedback list --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **604**; reviewed/assigned status: **604**; unreviewed: **0**; invalid records withheld: **0**.
+- Total records: **605**; reviewed/assigned status: **605**; unreviewed: **0**; invalid records withheld: **0**.
 - Active remediation: **384** — P0: 1, P1: 207, P2: 168, P3: 8.
-- Verification/closure follow-up: **220** — resolved: 122, verified: 68, duplicate: 10, not_applicable: 20, wont_fix: 0, invalid: 0.
+- Verification/closure follow-up: **221** — resolved: 122, verified: 68, duplicate: 10, not_applicable: 21, wont_fix: 0, invalid: 0.
 
 - Active remediation includes open, in-progress, blocked, and unreviewed records; closure follow-up includes resolved, verified, duplicate, not_applicable, wont-fix, and invalid records.
 - Rank order: active remediation first (P0 to P3), then closure follow-up. Within a tier, in-progress/blocked/unreviewed work precedes open work; severity, previously reviewed stable rank, freshness, and stable ID break ties. Existing reviewed tiers are retained; new records are assigned by the priority policy below.
@@ -624,3 +624,4 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 602 | closure | P3 | not_applicable | low | e35b5a7eb09066b2932b19fd908b81a9 | status from Sandbox checkout has no local instance context |
 | 603 | closure | P3 | not_applicable | low | 1dc1e1a6851fbddd186c29450fe06bc2 | feedback JSON piping can surface BrokenPipeError when downstream parser exits |
 | 604 | closure | P3 | not_applicable | low | ce1f7d87ad17d203062620621a8127bf | feedback list returns records that show cannot resolve by ID |
+| 605 | closure | P3 | not_applicable | low | d870ea64eadd9bc5cbb8efbcc51abef1 | operator verification used repository path as Sandbox home |

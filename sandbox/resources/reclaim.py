@@ -567,9 +567,9 @@ def tier_candidates(
     candidates, which are a subset of ``all``.
     """
     rank = tier_rank(tier)
+    complete = _engine_complete(inventory)
     entries = tuple(inventory.get("entries") or ())
     if entries and isinstance(entries[0], Mapping):
-        complete = _engine_complete(inventory)
         leases = inventory.get("leases") or {}
         entries = tuple(
             classify_entry(item, now=now, hosted_sites=hosted_sites,
@@ -621,6 +621,18 @@ def tier_candidates(
 
     for volume in sorted(inventory.get("volumes") or (),
                          key=lambda item: str(item.get("name") or "")):
+        # A volume can only be proven unused when the complete container
+        # inventory is available. A partial/failed engine probe must never
+        # turn an absent mount row into an orphan candidate.
+        if not complete:
+            name = str(volume.get("name") or "")
+            skipped.append({
+                "kind": "volume", "locator": name, "display_name": name,
+                "class": "VOLUME",
+                "reason": "container_inventory_unavailable",
+                "bytes": volume.get("size_bytes"),
+            })
+            continue
         decision = classify_volume(
             volume, reclaimable_workspaces=reclaimable_names.keys(),
             present_workspaces=present_names,
@@ -922,12 +934,19 @@ def build_report(
         if isinstance(item, Mapping)
     )
     present = {entry.name for entry in entries}
-    volumes = [
-        classify_volume(item, reclaimable_workspaces=(),
-                        present_workspaces=present).to_dict()
-        for item in block.get("volumes") or ()
-        if isinstance(item, Mapping)
-    ]
+    volumes = []
+    for item in block.get("volumes") or ():
+        if not isinstance(item, Mapping):
+            continue
+        decision = classify_volume(
+            item, reclaimable_workspaces=(), present_workspaces=present,
+        )
+        if not complete:
+            decision = replace(
+                decision, eligible=False,
+                reason="container_inventory_unavailable",
+            )
+        volumes.append(decision.to_dict())
     eligible = [item for item in volumes if item["eligible"]]
     return {
         "deployment_root": block.get("deployment_root"),

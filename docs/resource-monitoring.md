@@ -336,6 +336,11 @@ entries are reported `UNKNOWN` with reason `container_inventory_unavailable`
 and zero candidates at every tier. That is deliberate: a fast report never
 authorises a deletion.
 
+The same fail-closed rule applies to any partial or unavailable engine probe:
+workspace-scoped package volumes are reported as protected with
+`container_inventory_unavailable` until the container inventory is complete.
+An absent mount row in incomplete evidence never authorises a volume deletion.
+
 ### Tiers
 
 | Tier | Adds |

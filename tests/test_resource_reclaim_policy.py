@@ -185,6 +185,34 @@ class TestVolumeProtection(unittest.TestCase):
         self.assertTrue(decision.eligible)
         self.assertEqual(decision.reason, "workspace_scoped_volume_orphaned")
 
+    def test_incomplete_container_inventory_never_plans_workspace_volume(self):
+        inventory = {
+            "entries": [entry("gone-workspace-11")],
+            "volumes": [{
+                "name": "sandbox-gone-workspace-11_app-node-modules",
+                "size_bytes": 5,
+                "mounted_running": False,
+            }],
+            "scratch": [], "leases": {}, "hosted_sites": [],
+            "status": "partial", "engine_complete": False,
+        }
+        for tier in reclaim.TIERS:
+            selection = reclaim.tier_candidates(inventory, tier, now=NOW)
+            self.assertEqual(selection.candidates, ())
+            volume = next(
+                item for item in selection.skipped
+                if item["kind"] == "volume"
+            )
+            self.assertEqual(volume["reason"],
+                             "container_inventory_unavailable")
+
+        report = reclaim.build_report(inventory, None, now=NOW)
+        self.assertEqual(report["volumes"]["eligible"], 0)
+        self.assertEqual(
+            report["volumes"]["records"][0]["reason"],
+            "container_inventory_unavailable",
+        )
+
     def test_mounted_workspace_volume_is_refused(self):
         decision = reclaim.classify_volume(
             {"name": "sandbox-x-workspace-11_app-node-modules",

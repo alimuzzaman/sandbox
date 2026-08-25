@@ -406,11 +406,15 @@ def _cmd_list(args, as_json: bool) -> None:
     remotes = sr.list_remotes()
     rows = []
     for name, entry in sorted(remotes.items()):
-        reachable = sr.check_reachable(entry)
+        reachability = sr.check_reachable_diagnostic(entry)
         rows.append({
             "name": name,
             "ssh_configured": bool(entry.get("ssh")),
-            "reachable": reachable,
+            "reachable": bool(reachability.get("reachable")),
+            "reachability": {
+                "state": reachability.get("state", "probe_unavailable"),
+                "latency_ms": reachability.get("latency_ms"),
+            },
             "provisioned": bool(entry.get("provisioned")),
             "provider": _provider_label(entry),
         })
@@ -423,7 +427,8 @@ def _cmd_list(args, as_json: bool) -> None:
     for r in rows:
         reach = "reachable" if r["reachable"] else "unreachable"
         prov = "provisioned" if r["provisioned"] else "not provisioned"
-        print(f"  {r['name']}  {reach}, {prov}, provider {r['provider']}")
+        state = r["reachability"]["state"]
+        print(f"  {r['name']}  {reach} ({state}), {prov}, provider {r['provider']}")
 
 
 def _cmd_set_origin(args, as_json: bool) -> None:

@@ -101,6 +101,11 @@ remotes:
 infer transport, behavior, or billing. Edit it directly in the machine-local config when
 the annotation changes.
 
+Remote-list JSON also includes a safe `reachability` state (`reachable`, `timeout`,
+`authentication_failed`, `dns_failed`, `connection_refused`, `network_unreachable`,
+`unreachable`, or `probe_unavailable`) and bounded probe latency. The state is
+diagnostic metadata only; SSH targets and probe output are never returned.
+
 `provision` asks whether you want Tailscale instead of public HTTPS when run
 interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
 `--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit

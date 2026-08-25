@@ -65,6 +65,8 @@ _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _APPLEDOUBLE_BASENAME_PREFIX = "._"
 _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
 _NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS = 300
+REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS = 15
+REMOTE_REACHABILITY_TIMEOUT_SECONDS = 20
 
 
 def is_appledouble_basename(value: str | os.PathLike) -> bool:
@@ -577,34 +579,70 @@ def scp_run(remote: dict, local_path: str, remote_path: str,
     )
 
 
-def check_reachable(remote: dict) -> bool:
-    """Run one strict, read-only SSH liveness probe.
+def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
+    """Run one strict, read-only SSH liveness probe with safe diagnostics.
 
     Reachability is intentionally independent from the normal multiplexed
     transport.  A stale or broken ControlMaster must not turn a healthy host
     into a false negative (or make the probe create a socket as a side effect),
     so this path invokes exactly one ``ssh ... true`` with multiplexing disabled
-    and a ten-second client bound.  It never falls back to ``ssh_run``.
+    and a bounded client/connect timeout. It never falls back to ``ssh_run``.
+    Only a stable state and measured latency are returned; SSH output and
+    targets never cross this boundary.
     """
+    started = time.monotonic()
     try:
         parts = remote_ssh_parts(remote)
-        args = [
-            "ssh",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "ConnectionAttempts=1",
-            "-o", "ControlMaster=no",
-        ]
-        if parts["port"]:
-            args.extend(["-p", str(parts["port"])])
-        args.extend([parts["target"], "true"])
+    except (OSError, TypeError, ValueError):
+        return {"reachable": False, "state": "invalid_target", "latency_ms": None}
+    args = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={REMOTE_REACHABILITY_CONNECT_TIMEOUT_SECONDS}",
+        "-o", "ConnectionAttempts=1",
+        "-o", "ControlMaster=no",
+    ]
+    if parts["port"]:
+        args.extend(["-p", str(parts["port"])])
+    args.extend([parts["target"], "true"])
+    try:
         res = subprocess.run(
-            args, capture_output=True, text=True, timeout=10, check=False,
+            args, capture_output=True, text=True,
+            timeout=REMOTE_REACHABILITY_TIMEOUT_SECONDS, check=False,
         )
-        return res.returncode == 0
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError,
-            OSError, TypeError, ValueError):
-        return False
+    except subprocess.TimeoutExpired:
+        return {
+            "reachable": False,
+            "state": "timeout",
+            "latency_ms": REMOTE_REACHABILITY_TIMEOUT_SECONDS * 1000,
+        }
+    except (subprocess.SubprocessError, OSError):
+        return {
+            "reachable": False,
+            "state": "probe_unavailable",
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        }
+    latency_ms = round((time.monotonic() - started) * 1000)
+    if res.returncode == 0:
+        state = "reachable"
+    else:
+        diagnostic = f"{res.stderr or ''} {res.stdout or ''}".lower()
+        if "permission denied" in diagnostic or "authentication" in diagnostic:
+            state = "authentication_failed"
+        elif "could not resolve" in diagnostic or "name or service not known" in diagnostic:
+            state = "dns_failed"
+        elif "connection refused" in diagnostic:
+            state = "connection_refused"
+        elif "no route" in diagnostic or "network is unreachable" in diagnostic:
+            state = "network_unreachable"
+        else:
+            state = "unreachable"
+    return {"reachable": state == "reachable", "state": state, "latency_ms": latency_ms}
+
+
+def check_reachable(remote: dict) -> bool:
+    """Return only the boolean compatibility view of the liveness probe."""
+    return bool(check_reachable_diagnostic(remote).get("reachable"))
 
 
 def remote_doctor_checks(remote: dict) -> list[dict]:

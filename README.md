@@ -561,8 +561,10 @@ It derives from a boolean-only classification of raw input before redaction;
 any producer-supplied status is discarded. That classification never emits the
 raw URL or token; a validated URL is emitted only by explicit `--reveal-login`.
 Remote reachability checks are read-only and strict: one non-multiplexed
-`ssh ... true` probe, bounded to ten seconds, with no stateful transport
-fallback.
+`ssh ... true` probe, bounded to a 15-second connect timeout and 20-second
+overall timeout, with no stateful transport fallback. `./sb remote list --json`
+also reports a safe reachability state and measured latency so a timeout is not
+collapsed into a generic unreachable result.
 
 `./sb mcp --project-dir .` remains available for an MCP-capable client. It is
 runtime-scoped: generic Compose projects do not load WordPress tools, and

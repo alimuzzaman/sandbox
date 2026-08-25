@@ -128,7 +128,10 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
         }
         output = StringIO()
         with patch.object(sr, "list_remotes", return_value=remotes), \
-             patch.object(sr, "check_reachable", side_effect=(True, False)), \
+             patch.object(sr, "check_reachable_diagnostic", side_effect=(
+                 {"reachable": True, "state": "reachable", "latency_ms": 10},
+                 {"reachable": False, "state": "timeout", "latency_ms": 20_000},
+             )), \
              redirect_stdout(output):
             remote_cmd._cmd_list(types.SimpleNamespace(), True)
 
@@ -137,8 +140,10 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
             "ok": True,
             "remotes": [
                 {"name": "alpha", "ssh_configured": True, "reachable": True,
+                 "reachability": {"state": "reachable", "latency_ms": 10},
                  "provisioned": False, "provider": "unknown"},
                 {"name": "zeta", "ssh_configured": True, "reachable": False,
+                 "reachability": {"state": "timeout", "latency_ms": 20_000},
                  "provisioned": True, "provider": "unknown"},
             ],
             "error": None,
@@ -160,7 +165,9 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
         }
         output = StringIO()
         with patch.object(sr, "list_remotes", return_value=remotes), \
-             patch.object(sr, "check_reachable", return_value=False), \
+             patch.object(sr, "check_reachable_diagnostic", return_value={
+                 "reachable": False, "state": "unreachable", "latency_ms": 1,
+             }), \
              redirect_stdout(output):
             remote_cmd._cmd_list(types.SimpleNamespace(), True)
 
@@ -188,7 +195,9 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
         }
         output = StringIO()
         with patch.object(sr, "list_remotes", return_value=remotes), \
-             patch.object(sr, "check_reachable", return_value=True), \
+             patch.object(sr, "check_reachable_diagnostic", return_value={
+                 "reachable": True, "state": "reachable", "latency_ms": 1,
+             }), \
              redirect_stdout(output):
             remote_cmd._cmd_list(types.SimpleNamespace(), False)
 
@@ -549,7 +558,7 @@ class TestCheckReachable(unittest.TestCase):
             [
                 "ssh",
                 "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
+                "-o", "ConnectTimeout=15",
                 "-o", "ConnectionAttempts=1",
                 "-o", "ControlMaster=no",
                 "ubuntu@1.2.3.4",
@@ -557,7 +566,7 @@ class TestCheckReachable(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=20,
             check=False,
         )
 
@@ -577,9 +586,17 @@ class TestCheckReachable(unittest.TestCase):
         mock_run.return_value = _completed(returncode=255, stderr="Connection refused")
         self.assertFalse(sr.check_reachable({"ssh": "ubuntu@1.2.3.4"}))
 
-    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10))
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=20))
     def test_false_on_timeout(self, mock_run):
         self.assertFalse(sr.check_reachable({"ssh": "ubuntu@1.2.3.4"}))
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=20))
+    def test_diagnostic_distinguishes_timeout_without_target_or_output(self, mock_run):
+        self.assertEqual(
+            sr.check_reachable_diagnostic({"ssh": "ubuntu@1.2.3.4"}),
+            {"reachable": False, "state": "timeout", "latency_ms": 20_000},
+        )
+        mock_run.assert_called_once()
 
     @patch("subprocess.run", side_effect=OSError("ssh unavailable"))
     def test_false_on_ssh_os_error(self, mock_run):
@@ -1219,7 +1236,9 @@ class TestCmdRemoteAdd(unittest.TestCase):
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
                 args = MagicMock()
-                with patch.object(sr, "check_reachable", return_value=True), \
+                with patch.object(sr, "check_reachable_diagnostic", return_value={
+                    "reachable": True, "state": "reachable", "latency_ms": 1,
+                }), \
                      patch("builtins.print") as mock_print:
                     remote_cmd._cmd_list(args, as_json=True)
                 output = mock_print.call_args[0][0]

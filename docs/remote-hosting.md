@@ -654,3 +654,22 @@ The HTTPS endpoint was then registered at its `/mcp` streamable-HTTP route and
 successfully ran `fs_read`, `visit`, `wp_cli`, and `run_tests` against the VPS-side
 `html-social-share-buttons` project. `specs/014-remote-vps-hosting/quickstart.md`
 is satisfied for the public-HTTPS path.
+### Runtime intent and remote instance recovery
+
+The primary `sandbox.config.{json,yml,yaml}` file is deployed as a separate
+runtime-intent layer even when it is gitignored or `deploy --source-ref` pins
+an immutable commit. Machine-only `sandbox.config.override.*` files are never
+transferred. Deploy and preview reconcile the resulting bind mounts before
+activation, and activation refuses to create a symlink unless the selected
+container can see the exact deploy target.
+
+Remote instance inventory and teardown are explicit and name-scoped:
+
+```bash
+./sb instances --remote scaleway-sandbox --json
+./sb instance delete <exact-instance-name> --remote scaleway-sandbox --yes
+```
+
+Use the inventory instead of guessing a runtime directory. Deletion targets
+one validated instance name and lets the remote Sandbox CLI remove its own
+runtime, volume, config block, and registry identity.

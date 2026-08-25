@@ -28,6 +28,42 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_remote_instance_control_flags_reach_registered_handlers(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        invocations = (
+            (["sb", "instances", "--remote", "remote-a", "--json"],
+             "instances", None),
+            (["sb", "instance", "delete", "preview-a", "--remote", "remote-a",
+              "--yes"], "instance", "delete"),
+        )
+        for argv, command, action in invocations:
+            observed = []
+            with self.subTest(argv=argv), \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(cli, "COMMANDS", {
+                        command: lambda _cfg, args: observed.append(args),
+                    }), \
+                    mock.patch.object(cli, "load_config", return_value={}), \
+                    mock.patch.object(cli, "resolve_instances", return_value={}), \
+                    mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                    mock.patch.object(cli, "_core", return_value=SimpleNamespace(
+                        registry_all=lambda: {},
+                    )), \
+                    mock.patch.object(migrate, "maybe_auto_migrate"), \
+                    mock.patch.object(migrate, "finalize_auto_migration",
+                                      return_value=False), \
+                    mock.patch.object(cli, "write_compose_files"), \
+                    mock.patch.object(cli, "write_env_for_compose"):
+                cli.main()
+
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0].remote, "remote-a")
+            self.assertFalse(observed[0].local)
+            if action is not None:
+                self.assertEqual(observed[0].action, action)
+
     def test_registry_wide_setup_rejects_instance_and_label_selectors_before_side_effects(self):
         import sandbox.cli as cli
         import sandbox.commands.config_setup as config_setup

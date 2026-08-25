@@ -386,6 +386,15 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="filter to one project root's instance(s) — useful once a root "
              "owns more than one labelled instance")
     isc.add_argument("--json", action="store_true", help="print the instance inventory as JSON")
+    instances_target = isc.add_mutually_exclusive_group()
+    instances_target.add_argument(
+        "--local", action="store_true",
+        help="list instances on this machine (the default)",
+    )
+    instances_target.add_argument(
+        "--remote", metavar="NAME",
+        help="list instances on one registered provisioned remote",
+    )
 
     sub.add_parser("dashboard",
         help="Interactive TUI to view + manage all instances")
@@ -764,6 +773,16 @@ Per-project (each plugin carries its own sandbox.config.json):
     ins.add_argument("name")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
+    instance_target = ins.add_mutually_exclusive_group()
+    instance_target.add_argument(
+        "--local", action="store_true",
+        help="operate on an instance on this machine (the default)",
+    )
+    instance_target.add_argument(
+        "--remote", metavar="NAME",
+        help="operate on one exact instance name on a registered remote; "
+             "currently supported for delete",
+    )
 
     sec = sub.add_parser("secure",
         help="Upgrade an instance to trusted https://<name>.tst (opt-in)")

@@ -119,6 +119,30 @@ def _write_mail_muplugin(instance: str) -> None:
     )
 
 
+def _write_loopback_muplugin(instance: str) -> None:
+    """Route the exact localhost home origin through Docker's host gateway."""
+    mu_dir = _ensure_muplugins_dir(instance)
+    (mu_dir / "00-sandbox-loopback.php").write_text(
+        "<?php\n"
+        "/* Sandbox: make the browser-facing localhost origin reachable from Docker. */\n"
+        "add_action( 'http_api_curl', function ( $handle, $request, $url ) {\n"
+        "    $home = wp_parse_url( home_url() );\n"
+        "    $dest = wp_parse_url( $url );\n"
+        "    if ( ! is_array( $home ) || ! is_array( $dest )\n"
+        "         || 'localhost' !== ( $home['host'] ?? '' )\n"
+        "         || 'localhost' !== ( $dest['host'] ?? '' )\n"
+        "         || empty( $home['port'] ) || (int) $home['port'] !== (int) ( $dest['port'] ?? 0 ) ) {\n"
+        "        return;\n"
+        "    }\n"
+        "    $gateway = gethostbyname( 'host.docker.internal' );\n"
+        "    if ( 'host.docker.internal' === $gateway || ! filter_var( $gateway, FILTER_VALIDATE_IP ) ) {\n"
+        "        return;\n"
+        "    }\n"
+        "    curl_setopt( $handle, CURLOPT_RESOLVE, array( 'localhost:' . (int) $home['port'] . ':' . $gateway ) );\n"
+        "}, 10, 3 );\n"
+    )
+
+
 def _write_debug_muplugins(instance: str) -> None:
     """Drop the dump()/dd() + Query Monitor capture mu-plugins (spec 007).
 

@@ -126,6 +126,10 @@ class TestSourceMountAttestation(unittest.TestCase):
 
         self.assertFalse(missing_plugins_home.exists())
         self.assertEqual(result["error"]["code"], "instance_mount_state_unavailable")
+        self.assertIn("name=fixture", result["error"]["message"])
+        self.assertIn(
+            "sb instance delete fixture --yes", result["error"]["message"],
+        )
         self.assertFalse(result["mutated"])
         state.registry_put.assert_not_called()
         attest.assert_not_called()
@@ -207,6 +211,70 @@ class TestSourceMountAttestation(unittest.TestCase):
                     cfg, str(root), {"plugins": [str(readable)]},
                 ))
 
+    def test_remote_plugin_and_theme_archives_are_not_host_mount_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugins_home = root / "plugins-home"
+            plugins_home.mkdir()
+            cfg = {"defaults": {"plugins_home": str(plugins_home)}}
+            policy = _instances._desired_source_mounts(cfg, str(root), {
+                "plugins": [
+                    "https://downloads.wordpress.org/plugin/query-monitor.zip",
+                ],
+                "themes": [
+                    "https://downloads.wordpress.org/theme/twentytwentyfive.zip",
+                ],
+                "plugins_resolved": {
+                    "remote": {"source": {
+                        "kind": "zip",
+                        "value": "https://example.test/remote.zip",
+                    }},
+                },
+            })
+            self.assertEqual(policy, [str(plugins_home.resolve())])
+
+    def test_ready_ensure_attests_normally_with_remote_theme_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugins_home = root / "plugins-home"
+            plugins_home.mkdir()
+
+            class State:
+                ConfigError = RuntimeError
+
+                @staticmethod
+                @contextlib.contextmanager
+                def project_lock(_value):
+                    yield
+
+                @staticmethod
+                def load_project_config(_project, label=None):
+                    return {
+                        "root": str(root), "server": "apache",
+                        "themes": [
+                            "https://downloads.wordpress.org/theme/example.zip",
+                        ],
+                    }
+
+                @staticmethod
+                def registry_get(_root, label=None):
+                    return {
+                        "instance": "fixture", "status": "ready",
+                        "server": "apache",
+                    }
+
+            with mock.patch.object(_instances, "_core", return_value=State()), \
+                    mock.patch.object(_instances, "attest_source_mounts",
+                                      return_value={"ok": False,
+                                                    "code": "instance_mount_drift"}) as attest, \
+                    mock.patch.object(_instances, "_resolve_port_conflicts",
+                                      side_effect=AssertionError):
+                result = _instances.ensure_instance(
+                    {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                )
+            self.assertEqual(result["error"]["code"], "instance_mount_drift")
+            self.assertEqual(attest.call_args.args[2], [str(plugins_home.resolve())])
+
     def test_missing_or_unreadable_plugins_home_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -259,12 +327,60 @@ class TestSourceMountAttestation(unittest.TestCase):
                 )
 
             self.assertEqual(result["error"]["code"], "instance_mount_state_unavailable")
+            self.assertIn(
+                "sb instance delete fixture --yes", result["error"]["message"],
+            )
             self.assertFalse(result["mutated"])
             attest.assert_not_called()
             State.registry_put.assert_not_called()
 
     def test_herd_bypasses_docker_observation(self):
         self.assertEqual(_docker.attest_source_mounts("fixture", "herd", []), {"ok": True})
+
+
+class TestApplyRuntimeDependencies(unittest.TestCase):
+    def test_running_database_satisfies_non_destructive_apply_preflight(self):
+        result = _Result(0, json.dumps([
+            {"Service": "db", "State": "running"},
+            {"Service": "wp", "State": "exited"},
+        ]))
+        with mock.patch.object(_instances, "compose", return_value=result):
+            _instances._assert_apply_runtime_dependencies("fixture", "nginx")
+
+    def test_missing_database_blocks_before_apply_state_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            class State:
+                ConfigError = RuntimeError
+
+                @staticmethod
+                @contextlib.contextmanager
+                def project_lock(_value):
+                    yield
+
+                @staticmethod
+                def load_project_config(_project, label=None):
+                    return {"root": str(root), "server": "nginx"}
+
+                @staticmethod
+                def registry_get(_root, label=None):
+                    return {
+                        "instance": "fixture", "label": "default",
+                        "wordpress_port": 8188, "db_port": 3318,
+                        "mailpit_port": 8125, "server": "nginx",
+                    }
+
+            ps = _Result(0, json.dumps([
+                {"Service": "wp", "State": "running"},
+            ]))
+            with mock.patch.object(_instances, "_core", return_value=State()), \
+                    mock.patch.object(_instances, "compose", return_value=ps), \
+                    mock.patch.object(_instances, "_local_yaml",
+                                      side_effect=AssertionError("state write path reached")):
+                with self.assertRaisesRegex(
+                        RuntimeError, "required database service 'db' is missing"):
+                    _instances.apply_config({}, str(root))
 
 
 if __name__ == "__main__":

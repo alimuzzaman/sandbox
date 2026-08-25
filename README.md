@@ -622,6 +622,10 @@ view and drive instances with:
 ./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default
 ./sb instance resume <name>   # start a provisioned instance and wait for readiness
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)
+
+# Remote inventory and exact-name teardown (never glob remote runtime paths):
+./sb instances --remote <name> --json
+./sb instance delete <exact-instance-name> --remote <name> --yes
 ```
 
 The macOS desktop shell reuses this loopback dashboard and adds a narrowly scoped

@@ -909,10 +909,27 @@ def activate_remote_plugin(remote: dict, target_path: str, instance: str,
     wp_plugins = f"{home}/runtime/wp-{instance}/wp-content/plugins"
     plugin_path = f"{wp_plugins}/{plugin_slug}"
     sb = remote_sb_path(remote)
+    target_php = json.dumps(str(target_path))
+    probe = (
+        f"{shlex.quote(sb)} --instance {shlex.quote(instance)} wp eval "
+        f"{shlex.quote(f'exit( is_dir( {target_php} ) ? 0 : 42 );')} "
+        "--skip-plugins --skip-themes"
+    )
+    probe_res = ssh_run(remote, probe, timeout=60)
+    if probe_res.returncode != 0:
+        raise RuntimeError(
+            "remote plugin source mount is unavailable: "
+            f"instance={instance}, target={target_path}, plugin={plugin_slug}; "
+            "transfer the primary sandbox descriptor and run "
+            "`sb apply --project-dir <remote-project-dir>` before activation"
+        )
     cmd = (
         "set -e; "
         f"mkdir -p {shlex.quote(wp_plugins)}; "
-        f"rm -rf {shlex.quote(plugin_path)}; "
+        f"if [ -e {shlex.quote(plugin_path)} ] && "
+        f"[ ! -L {shlex.quote(plugin_path)} ]; then "
+        f"echo 'refusing to replace a materialized plugin directory' >&2; exit 65; fi; "
+        f"rm -f {shlex.quote(plugin_path)}; "
         f"ln -s {shlex.quote(target_path)} {shlex.quote(plugin_path)}; "
         f"cd {shlex.quote(target_path)}; "
         f"{shlex.quote(sb)} --instance {shlex.quote(instance)} "
@@ -924,6 +941,38 @@ def activate_remote_plugin(remote: dict, target_path: str, instance: str,
             f"could not activate remote plugin {plugin_slug}: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
+
+
+def list_remote_instances(remote: dict, target_path: str | None = None) -> list[dict]:
+    """Return the bounded public instance inventory from one selected remote."""
+    sb = remote_sb_path(remote)
+    project_arg = (
+        f" --project-dir {shlex.quote(target_path)}" if target_path else ""
+    )
+    res = ssh_run(
+        remote,
+        f"{shlex.quote(sb)} instances{project_arg} --json",
+        timeout=60,
+    )
+    data = _last_json(res.stdout or "")
+    rows = data.get("instances") if isinstance(data, dict) else None
+    if res.returncode != 0 or not isinstance(rows, list):
+        raise RuntimeError(
+            "could not list remote Sandbox instances: "
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
+        )
+    # A remote is an untrusted document boundary. Keep the inventory schema
+    # explicit so autologin URLs, bearer-equivalent tokens, or future private
+    # runtime fields cannot be relayed into durable controller output.
+    public_fields = {
+        "name", "running", "status", "wordpress_port", "mailpit_port",
+        "url", "admin_url", "domain", "server", "mcp_server", "project",
+        "label", "focus",
+    }
+    return [
+        {key: value for key, value in row.items() if key in public_fields}
+        for row in rows if isinstance(row, dict)
+    ]
 
 
 def default_instance_domain(label: str, project_slug: str,
@@ -1120,20 +1169,7 @@ def delete_remote_instance_for_label(remote: dict, target_path: str, label: str)
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or ""):
         raise ValueError("invalid remote Sandbox instance label")
-    sb = remote_sb_path(remote)
-    command = (
-        f"{shlex.quote(sb)} instances --project-dir {shlex.quote(target_path)} --json"
-    )
-    res = ssh_run(remote, command, timeout=30)
-    data = _last_json(res.stdout or "")
-    if res.returncode != 0 or not isinstance(data, dict):
-        raise RuntimeError(
-            "could not list remote instances for preview rollback: "
-            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
-        )
-    rows = data.get("instances")
-    if not isinstance(rows, list):
-        raise RuntimeError("remote instance inventory returned no instances list")
+    rows = list_remote_instances(remote, target_path)
     instance = next(
         (row.get("name") for row in rows
          if isinstance(row, dict) and row.get("label") == label),

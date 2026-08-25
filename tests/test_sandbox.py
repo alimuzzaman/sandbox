@@ -822,6 +822,15 @@ class TestPluginConfigMap(unittest.TestCase):
         r = self._resolve({"plugins": {"qm": False}})["qm"]
         self.assertFalse(r["active"]); self.assertFalse(r["on_demand"])
 
+    def test_project_false_preserves_built_in_mcp_adapter_zip_source(self):
+        resolved = self._load_project_doc({
+            "plugins": {"mcp-adapter": False},
+        })["plugins_resolved"]["mcp-adapter"]
+        self.assertEqual(resolved["source"]["kind"], "zip")
+        self.assertIn("github.com/WordPress/mcp-adapter", resolved["source"]["value"])
+        self.assertFalse(resolved["active"])
+        self.assertFalse(resolved["on_demand"])
+
     def test_project_path_defaults_active(self):
         # a bare path in the PROJECT (opted-in) -> source set, state defaults ACTIVE
         r = self._resolve({"plugins": {"my-addon": "."}})["my-addon"]

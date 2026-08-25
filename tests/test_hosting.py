@@ -10,8 +10,9 @@ import time
 import types
 import unittest
 import urllib.error
+from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1332,6 +1333,48 @@ class TestCloudflareClient(unittest.TestCase):
 
 
 class TestRemotePreviewIdentity(unittest.TestCase):
+    def test_preview_transfers_ignored_descriptor_before_remote_ensure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            args = types.SimpleNamespace(
+                action="create", json=True, confirm=True, ttl_hours=24,
+                remote="preview", project_dir=str(root), name=None,
+                base_domain="sandbox.asb.bd",
+            )
+            config_core = MagicMock()
+            config_core.load_project_config.return_value = {
+                "root": str(root), "slug": "demo",
+            }
+            entry = {"provisioned": True, "origin_ipv4": "203.0.113.10"}
+            with patch.object(preview, "_load_state",
+                              return_value={"version": 1, "previews": {}}), \
+                 patch.object(preview.core, "_core", return_value=config_core), \
+                 patch.object(preview.remote, "get_remote", return_value=entry), \
+                 patch.object(preview, "preflight_project_capability",
+                              return_value=None), \
+                 patch.object(preview.remote, "current_branch", return_value="latest"), \
+                 patch.object(preview, "preview_identity",
+                              return_value=("preview-id", "preview-label")), \
+                 patch.object(preview.remote, "ensure_deploy_repo",
+                              return_value="/srv/demo"), \
+                 patch.object(preview.remote, "push_commits", return_value="abc123"), \
+                 patch.object(preview.remote, "reset_target_to"), \
+                 patch.object(preview.remote, "capture_uncommitted",
+                              return_value=("", [])), \
+                 patch.object(preview.remote, "apply_uncommitted") as overlay, \
+                 patch.object(preview.remote, "ensure_remote_instance",
+                              side_effect=RuntimeError("stop after overlay")), \
+                 patch.object(preview.remote, "delete_remote_instance_for_label"), \
+                 patch("builtins.print"):
+                with self.assertRaises(SystemExit):
+                    preview.cmd_preview(None, args)
+            overlay.assert_called_once_with(
+                entry, "/srv/demo", root, "", ["sandbox.config.json"],
+            )
+
     def test_preview_rolls_back_a_partial_instance_when_ensure_fails(self):
         args = types.SimpleNamespace(
             action="create", json=True, confirm=True, ttl_hours=24,
@@ -1360,6 +1403,46 @@ class TestRemotePreviewIdentity(unittest.TestCase):
                 preview.cmd_preview(None, args)
 
         cleanup.assert_called_once_with(entry, "/srv/demo", "preview-label")
+
+    def test_preview_failure_json_always_names_label_and_instance(self):
+        args = types.SimpleNamespace(
+            action="create", json=True, confirm=True, ttl_hours=24,
+            remote="preview", project_dir="/tmp/project", name=None,
+            base_domain="sandbox.asb.bd",
+        )
+        config_core = MagicMock()
+        config_core.load_project_config.return_value = {
+            "root": "/tmp/project", "slug": "demo",
+        }
+        instance = {"instance": "preview-demo", "wordpress_port": 8188}
+        output = io.StringIO()
+        with patch.object(preview, "_load_state",
+                          return_value={"version": 1, "previews": {}}), \
+             patch.object(preview.core, "_core", return_value=config_core), \
+             patch.object(preview.remote, "get_remote", return_value={
+                 "provisioned": True, "origin_ipv4": "203.0.113.10"}), \
+             patch.object(preview, "preflight_project_capability", return_value=None), \
+             patch.object(preview.remote, "current_branch", return_value="latest"), \
+             patch.object(preview, "preview_identity",
+                          return_value=("preview-id", "preview-label")), \
+             patch.object(preview.remote, "ensure_deploy_repo",
+                          return_value="/srv/demo"), \
+             patch.object(preview.remote, "push_commits", return_value="abc123"), \
+             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(preview.remote, "apply_uncommitted"), \
+             patch.object(preview.remote, "ensure_remote_instance",
+                          return_value=instance), \
+             patch.object(preview.remote, "reconcile_remote_instance",
+                          side_effect=RuntimeError("apply failed")), \
+             patch.object(preview.remote, "delete_remote_instance"), \
+             redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                preview.cmd_preview(None, args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["preview"], {
+            "label": "preview-label", "instance": "preview-demo",
+        })
 
     def test_preview_create_loads_project_config_from_core_facade(self):
         args = types.SimpleNamespace(
@@ -1394,6 +1477,8 @@ class TestRemotePreviewIdentity(unittest.TestCase):
              patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
              patch.object(preview.remote, "apply_uncommitted"), \
              patch.object(preview.remote, "ensure_remote_instance", return_value=instance), \
+             patch.object(preview.remote, "reconcile_remote_instance",
+                          return_value=instance) as reconciled, \
              patch.object(preview.remote, "activate_remote_plugin"), \
              patch.object(preview.remote, "configure_instance_https_route"), \
              patch.object(preview.remote, "set_remote_instance_url"), \
@@ -1408,6 +1493,10 @@ class TestRemotePreviewIdentity(unittest.TestCase):
         )
 
         config_core.load_project_config.assert_called_once_with("/tmp/project")
+        reconciled.assert_called_once_with(
+            {"provisioned": True, "origin_ipv4": "203.0.113.10"},
+            "/srv/demo", ANY,
+        )
 
     def test_preview_identity_is_stable_and_namespaced(self):
         first = preview.preview_identity("/tmp/example", "fix/login", "login")
@@ -1415,6 +1504,15 @@ class TestRemotePreviewIdentity(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first[0].startswith("login-"))
         self.assertTrue(first[1].startswith("preview-"))
+
+    def test_preview_human_success_names_instance_and_label(self):
+        message = preview._ready_message({
+            "url": "https://preview.example.test",
+            "instance": "preview-demo",
+            "expires_at": "2026-08-26T00:00:00+00:00",
+        }, "preview-label")
+        self.assertIn("instance preview-demo", message)
+        self.assertIn("label preview-label", message)
 
     def test_preview_domain_is_dns_safe(self):
         domain = preview.preview_domain("login-1234abcd", "My Plugin", "sandbox.asb.bd")

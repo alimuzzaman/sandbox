@@ -834,7 +834,9 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
         if _entry == ".":
             _src = root_p
-        elif isinstance(_entry, str) and ("/" in _entry or _entry.startswith((".", "~"))):
+        elif (isinstance(_entry, str)
+              and not _remote_package_source(_entry)
+              and ("/" in _entry or _entry.startswith((".", "~")))):
             _src = Path(_entry).expanduser()
             if not _src.is_absolute():
                 _src = (root_p / _entry).resolve()
@@ -887,6 +889,14 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
+def _remote_package_source(value: object) -> bool:
+    """True for supported network package declarations, never host paths."""
+    return bool(
+        isinstance(value, str)
+        and re.match(r"^https?://", value.strip(), flags=re.IGNORECASE)
+    )
+
+
 def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | None:
     """Derive the current project-config source policy without creating paths."""
     defaults = cfg.get("defaults", {}) or {}
@@ -918,7 +928,9 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
         for entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
             if entry == ".":
                 add_if_external(root_path)
-            elif isinstance(entry, str) and ("/" in entry or entry.startswith((".", "~"))):
+            elif (isinstance(entry, str)
+                  and not _remote_package_source(entry)
+                  and ("/" in entry or entry.startswith((".", "~")))):
                 add_if_external(entry)
         for value in (pconf.get("mappings") or {}).values():
             add_if_external(value)
@@ -933,16 +945,67 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
     return list(dict.fromkeys(sources))
 
 
-def _mount_attestation_refusal(code: object) -> dict:
+def _assert_apply_runtime_dependencies(name: str, server: str,
+                                       error_factory=RuntimeError) -> None:
+    """Fail before apply state writes when its existing database is unavailable."""
+    if server == "herd":
+        return
+    result = compose(
+        "ps", "--format", "json", instance=name, check=False, capture=True,
+    )
+    if getattr(result, "returncode", 1) != 0:
+        raise error_factory(
+            f"apply blocked for instance '{name}': runtime dependency state is "
+            "unavailable; no state was changed. Run `sb status --instance "
+            f"{name} --json` and restore the existing runtime before retrying."
+        )
+    rows = []
+    raw = (getattr(result, "stdout", "") or "").strip()
+    try:
+        decoded = json.loads(raw) if raw else []
+        rows = decoded if isinstance(decoded, list) else [decoded]
+    except (TypeError, ValueError):
+        for line in raw.splitlines():
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    states = {
+        str(row.get("Service")): str(row.get("State", "")).lower()
+        for row in rows if isinstance(row, dict) and row.get("Service")
+    }
+    if states.get("db") != "running":
+        observed = states.get("db") or "missing"
+        raise error_factory(
+            f"apply blocked for instance '{name}': required database service "
+            f"'db' is {observed}; no state was changed and `sb apply` will not "
+            "create or replace its database volume. Inspect `sb status "
+            f"--instance {name} --json` and restore the existing database "
+            "runtime or snapshot before retrying."
+        )
+
+
+def _mount_attestation_refusal(code: object, project_dir: str,
+                               instance_name: str,
+                               label: str = "default") -> dict:
     """Return a bounded ready-path refusal with an explicit safe remedy."""
     if code not in {"instance_mount_drift", "instance_mount_state_unavailable"}:
         code = "instance_mount_state_unavailable"
+    selector = f" --label {label}" if label != "default" else ""
+    remedy = f"sb apply --project-dir {project_dir}{selector}"
     message = (
         "live Sandbox source mounts do not match the declared policy; "
-        "run `sb apply --project-dir <project-dir>` to reconcile"
+        f"run `{remedy}` to reconcile"
         if code == "instance_mount_drift" else
         "live Sandbox source mount state is unavailable; "
-        "run `sb apply --project-dir <project-dir>` after Docker state is available"
+        f"instance identity is name={instance_name}, project={project_dir}, "
+        f"label={label}; "
+        f"if the runtime still exists run `{remedy}`, otherwise delete the stale "
+        f"record with `sb instance delete {instance_name} --yes` "
+        "(add `--remote NAME` "
+        "when operating a remote host)"
     )
     return {"ok": False, "mutated": False,
             "error": {"code": code, "message": message}}
@@ -1072,7 +1135,10 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     {"ok": False, "code": "instance_mount_state_unavailable"}
                 )
                 if not attestation.get("ok"):
-                    return _mount_attestation_refusal(attestation.get("code"))
+                    return _mount_attestation_refusal(
+                        attestation.get("code"), root,
+                        str(existing.get("instance") or "unknown"), label,
+                    )
             # A reachable setup screen is not proof that WordPress completed
             # its database install.  Observe install state while the project
             # lock is held, before acquiring the global port-allocation lock:
@@ -1312,6 +1378,9 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         }
         server = _valid_server(pconf.get("server") or existing.get("server")
                                or "nginx")
+        _assert_apply_runtime_dependencies(
+            name, server, error_factory=sc.ConfigError,
+        )
 
         # Detect whether multisite is being turned on now (was off in the live
         # block) so we can run the convert after the recreate.
@@ -1420,6 +1489,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
             # nothing, but keep them guaranteed-present like cmd_up does).
             if wp_dir(name).exists():
                 _write_mail_muplugin(name)
+                _write_loopback_muplugin(name)
                 _write_dl_cache_muplugin(name)
                 _write_ondemand_muplugin(name)   # spec 010 — on-demand local plugin sourcing
                 _write_host_runtime_muplugins(name)  # specs 003/007 — host-file runtime tools

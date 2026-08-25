@@ -574,6 +574,66 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertNotIn("secret-token", output.getvalue())
 
 
+class TestRemoteInstanceControl(unittest.TestCase):
+    def test_remote_inventory_uses_selected_remote_without_local_rows(self):
+        import sandbox.commands.instances_cmd as commands
+
+        args = types.SimpleNamespace(
+            remote="remote-a", local=False, project_dir=None, json=True,
+        )
+        entry = {"provisioned": True}
+        output = io.StringIO()
+        with mock.patch("sandbox.core._remote.get_remote", return_value=entry), \
+                mock.patch("sandbox.core._remote.list_remote_instances",
+                           return_value=[{"name": "preview-a", "label": "qa"}]), \
+                mock.patch.object(commands, "collect_instance_rows") as local_rows, \
+                contextlib.redirect_stdout(output):
+            commands.cmd_instances({}, args)
+        local_rows.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["remote"], "remote-a")
+
+    def test_remote_inventory_omits_autologin_and_bearer_equivalent_fields(self):
+        import sandbox.core._remote as remote
+
+        response = types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"ok": True, "instances": [{
+                "name": "preview-a", "label": "qa", "status": "ready",
+                "url": "https://preview.example.test",
+                "login_url": (
+                    "https://preview.example.test/?sandbox_autologin=secret-token"
+                ),
+                "autologin_token": "secret-token",
+                "bearer_token": "bearer-secret",
+            }]}) + "\n",
+            stderr="",
+        )
+        with mock.patch.object(remote, "remote_sb_path", return_value="/srv/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=response):
+            rows = remote.list_remote_instances({"ssh": "host"})
+
+        self.assertEqual(rows, [{
+            "name": "preview-a", "label": "qa", "status": "ready",
+            "url": "https://preview.example.test",
+        }])
+        self.assertNotIn("secret-token", json.dumps(rows))
+        self.assertNotIn("bearer-secret", json.dumps(rows))
+
+    def test_remote_delete_requires_exact_name_and_yes(self):
+        import sandbox.commands.instances_cmd as commands
+
+        args = types.SimpleNamespace(
+            action="delete", name="preview-a", yes=True,
+            remote="remote-a", local=False,
+        )
+        entry = {"provisioned": True}
+        with mock.patch("sandbox.core._remote.get_remote", return_value=entry), \
+                mock.patch("sandbox.core._remote.delete_remote_instance") as delete, \
+                contextlib.redirect_stdout(io.StringIO()):
+            commands.cmd_instance({}, args)
+        delete.assert_called_once_with(entry, "preview-a")
+
+
 class TestStatusJsonRedaction(unittest.TestCase):
     def _status_args(self):
         return types.SimpleNamespace(json=True, resolved_instance="fixture")

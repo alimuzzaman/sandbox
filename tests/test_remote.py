@@ -2300,6 +2300,21 @@ class TestDeployEnsureExpose(unittest.TestCase):
             "/usr/local/bin/sb --instance demo-default wp plugin activate demo",
             command,
         )
+        self.assertIn("rm -f", command)
+        self.assertNotIn("rm -rf", command)
+
+    def test_remote_plugin_activation_refuses_an_unmounted_source(self):
+        remote = {"ssh": "ubuntu@example.test"}
+        missing = subprocess.CompletedProcess([], 42, stdout="", stderr="")
+        with patch.object(sr, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(sr, "remote_sb_path", return_value="/usr/local/bin/sb"), \
+             patch.object(sr, "ssh_run", return_value=missing) as run:
+            with self.assertRaisesRegex(
+                    RuntimeError, "instance=demo-default, target=/srv/deploy/demo"):
+                sr.activate_remote_plugin(
+                    remote, "/srv/deploy/demo", "demo-default", "demo"
+                )
+        self.assertEqual(run.call_count, 1)
 
     def test_default_instance_domain_uses_hyphenated_label_and_slug(self):
         self.assertEqual(
@@ -2388,6 +2403,33 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
+
+    def test_source_ref_still_transfers_ignored_primary_descriptor(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            args = MagicMock(
+                project_dir=str(root), remote="myvps", source_ref="v1.0.0",
+                json=True, ensure=False, expose=False, pro_plugins=False,
+            )
+            sc = deploy_cmd._core()
+            entry = {"ssh": "ubuntu@1.2.3.4", "provisioned": True}
+            with patch.object(sc, "load_project_config", return_value={
+                    "root": str(root), "slug": "demo", "kind": "wordpress"}), \
+                 patch.object(sr, "get_remote", return_value=entry), \
+                 patch.object(sr, "resolve_source_ref", return_value="a" * 40), \
+                 patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                 patch.object(sr, "push_commits", return_value="a" * 40), \
+                 patch.object(sr, "reset_target_to"), \
+                 patch.object(sr, "apply_uncommitted", return_value=1) as overlay, \
+                 patch("builtins.print"):
+                deploy_cmd.cmd_deploy(None, args)
+            overlay.assert_called_once_with(
+                entry, "/remote/demo", root, "", ["sandbox.config.json"],
+            )
 
     def _expose_with_aliases(self, *, alias_arg, project_aliases=None,
                              existing_routes=(), prune=False):

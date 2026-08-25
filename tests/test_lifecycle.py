@@ -7,7 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, call
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -22,16 +22,41 @@ class TestWordPressCoreDownload(unittest.TestCase):
     @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
     def test_download_repairs_docroot_ownership_first(self, _is_herd, compose, wpcli):
         args = ["core", "download", "--force", "--version=7.0"]
+        compose.return_value.returncode = 0
 
         lifecycle._download_wordpress_core("preview-demo", args)
 
-        compose.assert_called_once_with(
+        self.assertEqual(compose.call_args_list, [
+            call(
+                "exec", "-T", "wp", "sh", "-c",
+                "test -f /var/www/html/wp-includes/version.php && "
+                "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
+                "|| test -f /var/www/html/wp-includes/Requests/Requests.php; }",
+                instance="preview-demo", check=False, capture=True, timeout=5,
+            ),
+            call(
             "exec", "-T", "wp", "chown", "-R", "www-data:www-data",
             "/var/www/html", instance="preview-demo", check=True,
-        )
+            ),
+        ])
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
         )
+
+    @patch("sandbox.commands.lifecycle.time.sleep")
+    @patch("sandbox.commands.lifecycle.time.monotonic",
+           side_effect=[0, 1, 31])
+    @patch("sandbox.commands.lifecycle.wpcli")
+    @patch("sandbox.commands.lifecycle.compose")
+    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
+    def test_download_fails_before_wpcli_when_image_seed_never_completes(
+            self, _is_herd, compose, wpcli, _clock, _sleep):
+        compose.return_value = SimpleNamespace(returncode=1)
+        with self.assertRaisesRegex(RuntimeError, "document root is still incomplete"):
+            lifecycle._download_wordpress_core(
+                "preview-demo", ["core", "download", "--force"]
+            )
+        wpcli.assert_not_called()
 
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
@@ -70,6 +95,20 @@ class TestMuPluginDirectoryPreparation(unittest.TestCase):
 
 
 class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
+    def test_loopback_muplugin_preserves_url_and_routes_curl_via_host_gateway(self):
+        import sandbox.core._provision as provision
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(provision, "_ensure_muplugins_dir",
+                             return_value=Path(directory)):
+            provision._write_loopback_muplugin("preview-demo")
+
+            rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+        self.assertIn("CURLOPT_RESOLVE", rendered)
+        self.assertIn("host.docker.internal", rendered)
+        self.assertIn("'localhost' !== ( $dest['host']", rendered)
+        self.assertNotIn("update_option", rendered)
+
     def test_shared_reconciler_writes_abilities_and_debug_plugins(self):
         import sandbox.core._provision as provision
 

@@ -648,6 +648,16 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     # auto-enables).
     opted_in = set(native_map) | set(override_map) | set(label_map)
     merged_map = _merge_plugin_maps(*layers)
+    # Built-in entries are a source fallback only for slugs that a real layer
+    # declared. A state-only declaration such as `"mcp-adapter": false`
+    # therefore retains the built-in GitHub ZIP without injecting every
+    # scaffold default into projects that intentionally use a smaller map.
+    default_map, _legacy, _self_entry = _normalize_plugins({
+        "plugins": DEFAULTS["plugins"],
+    })
+    for slug, entry in list(merged_map.items()):
+        if entry.get("source", _UNSET) is _UNSET and slug in default_map:
+            merged_map[slug] = _merge_plugin_entry(default_map[slug], entry)
     merged["plugins_resolved"] = {
         slug: _resolve_plugin_entry(e, slug in opted_in)
         for slug, e in merged_map.items()

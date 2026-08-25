@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 import io
 import threading
+import time
 from contextlib import redirect_stdout, redirect_stderr
 
 
@@ -25,7 +26,8 @@ from sandbox.core import (
     _pin_wp_constants_in_config, _remove_obsolete_builder_authoring_assets,
     _tld, _web_services, _write_host_runtime_muplugins,
     _write_dl_cache_muplugin, _write_licensing_muplugin, _write_local_yaml,
-    _write_mail_muplugin, _write_ondemand_muplugin, _write_snapshot_muplugin,
+    _write_mail_muplugin, _write_loopback_muplugin, _write_ondemand_muplugin,
+    _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
     info, mcp_server_name, ok, plugins_dir,
     proxy_available, resolve_instances, run, save_local_app_password,
@@ -91,6 +93,7 @@ def cmd_up(cfg: dict, args) -> None:
     if wp_dir(inst).exists():
         _prepare_mu_plugin_directory(inst)
         _write_mail_muplugin(inst)
+        _write_loopback_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
@@ -585,6 +588,23 @@ def _download_wordpress_core(instance: str, args: list[str]) -> None:
     appear to hang while its output pipe fills.
     """
     if not _is_herd_instance(instance):
+        deadline = time.monotonic() + 30
+        while True:
+            seeded = compose(
+                "exec", "-T", "wp", "sh", "-c",
+                "test -f /var/www/html/wp-includes/version.php && "
+                "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
+                "|| test -f /var/www/html/wp-includes/Requests/Requests.php; }",
+                instance=instance, check=False, capture=True, timeout=5,
+            )
+            if getattr(seeded, "returncode", 1) == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "WordPress image bootstrap did not finish within 30s; "
+                    "the document root is still incomplete"
+                )
+            time.sleep(0.25)
         compose(
             "exec", "-T", "wp", "chown", "-R", "www-data:www-data",
             "/var/www/html", instance=instance, check=True,
@@ -746,6 +766,7 @@ def cmd_install(cfg, args) -> None:
     # host there, and the mu-plugin would break host mail instead.
     if server != "herd":
         _write_mail_muplugin(inst)
+        _write_loopback_muplugin(inst)
         # Cache plugin/theme zip downloads (Templately FSI etc.) — the cache dir
         # is only mounted on docker tiers, so the mu-plugin no-ops on herd anyway.
         _write_dl_cache_muplugin(inst)

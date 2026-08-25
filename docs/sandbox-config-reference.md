@@ -344,6 +344,24 @@ file path.
 }
 ```
 
+A state-only declaration inherits a lower-precedence source for the same slug.
+For example, `"mcp-adapter": false` retains Sandbox's built-in GitHub ZIP
+source and changes only the state to installed-but-inactive. It does not turn
+`mcp-adapter` into a WordPress.org lookup, and `false` does not mean
+"disabled" or "skip installation." Use `onDemand: true` when installation
+must be deferred.
+
+HTTP(S) plugin and theme ZIP declarations are network package sources, not
+local filesystem mappings. They never participate in Docker source-mount
+attestation. Relative paths, absolute paths, `~` paths, and `.` remain local
+sources and must exist and be readable before a ready instance can be reused.
+
+`sb apply` reconciles only the web tier with `--no-deps`; it never creates
+or replaces the database volume. Before writing generated config, apply proves
+that the existing `db` service is running. A missing or stopped database is
+reported as a runtime-dependency failure with the exact instance identity,
+instead of falling through to a misleading unresolved-plugin error.
+
 All fields are optional; omitted fields take the defaults above.
 
 ### Test modes

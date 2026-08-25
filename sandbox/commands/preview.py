@@ -57,6 +57,13 @@ def preview_domain(preview_id: str, project_slug: str, base_domain: str) -> str:
     return f"{preview_id[:31]}-{slug[:30]}.{base}"
 
 
+def _ready_message(row: dict, label: str) -> str:
+    return (
+        f"remote preview ready: {row['url']} "
+        f"(instance {row['instance']}, label {label}, expires {row['expires_at']})"
+    )
+
+
 def _zone_for_hostname(client, hostname: str) -> dict:
     labels = hostname.split(".")
     errors = []
@@ -166,8 +173,17 @@ def cmd_preview(cfg, args) -> None:
         sha = remote.push_commits(entry, root, target, branch)
         remote.reset_target_to(entry, target, sha)
         dirty, untracked = remote.capture_uncommitted(root)
+        untracked = list(dict.fromkeys([
+            *untracked, *remote.deploy_project_descriptor_files(root),
+        ]))
         remote.apply_uncommitted(entry, target, root, dirty, untracked)
         instance = remote.ensure_remote_instance(entry, target, label)
+        reconciled = remote.reconcile_remote_instance(entry, target, label)
+        if reconciled.get("instance") != instance.get("instance"):
+            raise RuntimeError(
+                "remote preview apply selected a different instance than ensure"
+            )
+        instance.update(reconciled)
         remote.activate_remote_plugin(entry, target, instance["instance"], project.get("slug") or remote.deploy_target_slug(root))
         domain = preview_domain(preview_id, remote.deploy_target_slug(root), args.base_domain)
         client = cloudflare.Client()
@@ -203,7 +219,19 @@ def cmd_preview(cfg, args) -> None:
                 remote.delete_remote_instance_for_label(entry, target, label)
             except (RuntimeError, ValueError):
                 pass
-        die(str(exc))
+        identity = {
+            "label": label,
+            "instance": instance.get("instance") if isinstance(instance, dict) else None,
+        }
+        message = (
+            "remote preview create failed "
+            f"(label={identity['label'] or 'unknown'}, "
+            f"instance={identity['instance'] or 'not-returned'}): {exc}"
+        )
+        if args.json:
+            print(json.dumps({"ok": False, "preview": identity, "error": message}))
+            raise SystemExit(1)
+        die(message)
     expiry = datetime.now(timezone.utc) + timedelta(hours=args.ttl_hours)
     row = {"id": preview_id, "remote": args.remote, "project_root": str(root),
            "instance": instance["instance"], "domain": domain, "url": url,
@@ -215,7 +243,7 @@ def cmd_preview(cfg, args) -> None:
     if args.json:
         print(json.dumps({"ok": True, "preview": row}))
     else:
-        ok(f"remote preview ready: {url} (expires {row['expires_at']})")
+        ok(_ready_message(row, label))
 
 
 register({"preview": cmd_preview})

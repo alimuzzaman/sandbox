@@ -405,6 +405,8 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 instances, "_write_local_yaml",
                 side_effect=lambda value: persisted.update(value),
             ))
+            stack.enter_context(patch.object(
+                instances, "_assert_apply_runtime_dependencies"))
             stack.enter_context(patch.object(instances, "_build_instance_block", return_value=block))
             stack.enter_context(patch.object(
                 instances, "prepare_php_extension_runtime", return_value=fake_prepared))
@@ -429,7 +431,8 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(
                 instances, "site_url", return_value="http://localhost:8188"))
             for helper in (
-                "_write_mail_muplugin", "_write_dl_cache_muplugin",
+                "_write_mail_muplugin", "_write_loopback_muplugin",
+                "_write_dl_cache_muplugin",
                 "_write_ondemand_muplugin", "_write_host_runtime_muplugins",
                 "_write_licensing_muplugin", "_remove_obsolete_builder_authoring_assets",
             ):
@@ -509,6 +512,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "_capture_apply_rollback_state", return_value={}), \
                 patch.object(instances, "_local_yaml", return_value={"instances": {"fixture": {}}}), \
                 patch.object(instances, "_write_local_yaml"), \
+                patch.object(instances, "_assert_apply_runtime_dependencies"), \
                 patch.object(instances, "_build_instance_block", return_value=block), \
                 patch.object(instances, "prepare_php_extension_runtime", return_value=None), \
                 patch.object(instances, "load_config", return_value={}), \
@@ -827,6 +831,8 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                                     "db_port": 3318, "mailpit_port": 8125,
                                     "php_extensions": block["php_extensions"],
                                     **old_extension_identity}}))
+                    stack.enter_context(patch.object(
+                        instances, "_assert_apply_runtime_dependencies"))
                     stack.enter_context(patch.object(instances, "_build_instance_block", return_value=block))
                     stack.enter_context(patch.object(instances, "prepare_php_extension_runtime", return_value=fake_prepared))
                     stack.enter_context(patch.object(
@@ -847,6 +853,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch.object(instances, "_reconcile_wp_core", return_value={}))
                     stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
                     stack.enter_context(patch.object(instances, "_write_mail_muplugin"))
+                    stack.enter_context(patch.object(instances, "_write_loopback_muplugin"))
                     stack.enter_context(patch.object(instances, "_write_dl_cache_muplugin"))
                     stack.enter_context(patch.object(instances, "_write_ondemand_muplugin"))
                     stack.enter_context(patch.object(instances, "_write_host_runtime_muplugins"))

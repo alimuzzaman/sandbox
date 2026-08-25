@@ -690,6 +690,23 @@ def cmd_instance(cfg, args) -> None:
     action = args.action
     name = args.name
 
+    remote_name = getattr(args, "remote", None)
+    if remote_name and not getattr(args, "local", False):
+        if action != "delete":
+            die("remote instance control currently supports only delete")
+        from sandbox.core import _remote as remote_runtime
+        entry = remote_runtime.get_remote(remote_name)
+        if not entry or not entry.get("provisioned"):
+            die(f"remote '{remote_name}' is not registered and provisioned")
+        if not args.yes:
+            die("remote instance deletion requires --yes")
+        try:
+            remote_runtime.delete_remote_instance(entry, name)
+        except (RuntimeError, ValueError) as exc:
+            die(str(exc))
+        ok(f"Remote instance '{name}' deleted from '{remote_name}'.")
+        return
+
     if action in {"suspend", "resume"}:
         owner = _core().registry_find_instance(name)
         if not owner or not owner.get("root"):
@@ -827,6 +844,27 @@ def cmd_instances(cfg, args) -> None:
     """List defined instances + their status and ports. --project-dir filters
     to one project root — useful once a root owns more than one labelled
     instance (multi-instance-per-root)."""
+    remote_name = getattr(args, "remote", None)
+    if remote_name and not getattr(args, "local", False):
+        from sandbox.core import _remote as remote_runtime
+        entry = remote_runtime.get_remote(remote_name)
+        if not entry or not entry.get("provisioned"):
+            die(f"remote '{remote_name}' is not registered and provisioned")
+        try:
+            rows = remote_runtime.list_remote_instances(entry)
+        except RuntimeError as exc:
+            die(str(exc))
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": True, "remote": remote_name, "instances": rows}))
+        else:
+            print(f"Remote instances on '{remote_name}':")
+            for row in rows:
+                print(
+                    f"  {row.get('name', '?')}  label={row.get('label', 'default')} "
+                    f"status={row.get('status', 'unknown')}  url={row.get('url', '')}"
+                )
+        return
+
     rows = collect_instance_rows(cfg)
     project_dir = getattr(args, "project_dir", None)
     if project_dir:

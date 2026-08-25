@@ -76,3 +76,10 @@ Under constitution principle VI, disabling this path in place counts as removal.
 requires recorded live parity of the replacement plus explicit human approval. Guard tests
 live in `tests/test_clean_url_default_policy.py`; they fail if the helper becomes a stub
 again, if the NOPASSWD target moves back into the repo, or if the default mode changes.
+When clean routing is unavailable and WordPress uses the browser-facing
+`http://localhost:<port>` fallback, Sandbox installs a generated loopback
+MU plugin. It keeps `home_url()` unchanged for the browser, while cURL
+requests to that exact localhost origin resolve through
+`host.docker.internal`. This allows `wp_remote_get( home_url() )` without
+making a public or LAN address canonical. Other localhost ports and hostnames
+are not rewritten.

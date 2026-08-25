@@ -126,6 +126,7 @@ def cmd_deploy(cfg, args) -> None:
             source_ref=source_ref, resolved_sha=resolved_source,
         )
         sr.reset_target_to(entry, target, pushed_sha)
+        descriptor_files = sr.deploy_project_descriptor_files(root)
         if resolved_source is None:
             diff_text, untracked = sr.capture_uncommitted(root)
             # The canonical project descriptor is runtime intent, not a
@@ -133,11 +134,17 @@ def cmd_deploy(cfg, args) -> None:
             # Git; without it a ready remote fast-path cannot reconstruct the
             # deployed plugin bind mount.
             untracked = list(dict.fromkeys([
-                *untracked, *sr.deploy_project_descriptor_files(root),
+                *untracked, *descriptor_files,
             ]))
             applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
         else:
-            applied = 0
+            # The commit remains immutable; the primary Sandbox descriptor is
+            # a separately declared runtime-intent layer. Projects commonly
+            # keep it gitignored, but the remote still needs it to reconstruct
+            # the exact bind mounts before activation.
+            applied = sr.apply_uncommitted(
+                entry, target, root, "", descriptor_files,
+            ) if descriptor_files else 0
         # Pro plugins are a HOST-level catalog, not project state: mirror them
         # before the instance boots so its On-Demand page lists the same slugs
         # the local machine offers. Fail-soft — a project deploy stays valid

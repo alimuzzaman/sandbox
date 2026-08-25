@@ -347,6 +347,10 @@ def _proxy_transport_serving(cfg: dict) -> bool:
 
 def _proxy_transport_failure_detail(cfg: dict) -> str:
     """Explain which managed hostname failed to reach Sandbox Caddy."""
+    fallback_hint = (
+        "inspect `./sb domains ingress status --json` and "
+        "`./sb doctor --instance <name>`."
+    )
     for ic in resolve_instances(cfg).values():
         dom = ic.get("domain")
         if dom and dom.endswith(f".{_tld(ic)}"):
@@ -356,7 +360,7 @@ def _proxy_transport_failure_detail(cfg: dict) -> str:
                 return (
                     f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
                     f"{listener.get('label') or 'published listener evidence unavailable'}. "
-                    f"{listener.get('hint') or 'inspect `./sb domains doctor`.'}"
+                    f"{listener.get('hint') or fallback_hint}"
                 )
     for entry in _generic_proxy_entries():
         dom = entry.get("domain")
@@ -367,11 +371,11 @@ def _proxy_transport_failure_detail(cfg: dict) -> str:
                 return (
                     f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
                     f"{listener.get('label') or 'published listener evidence unavailable'}. "
-                    f"{listener.get('hint') or 'inspect `./sb domains doctor`.'}"
+                    f"{listener.get('hint') or fallback_hint}"
                 )
     return (
         "clean hostname probe did not reach Sandbox Caddy; inspect "
-        "`./sb domains doctor` for listener and resolver evidence"
+        f"{fallback_hint} for listener and resolver evidence"
     )
 
 

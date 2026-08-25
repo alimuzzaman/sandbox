@@ -479,6 +479,20 @@ class TestProxyTransportHealth(unittest.TestCase):
         self.assertIn("nginx owns 80", detail)
         self.assertIn("select an adopted ingress", detail)
 
+    def test_proxy_transport_failure_detail_uses_real_diagnostic_commands(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "demo": {"domain": "demo.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries",
+                                  return_value=[]), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               return_value=False), \
+             mock.patch.object(domains_core, "_published_listener_check",
+                               return_value={"label": "", "hint": ""}):
+            detail = domains_core._proxy_transport_failure_detail({})
+        self.assertIn("./sb domains ingress status --json", detail)
+        self.assertIn("./sb doctor --instance <name>", detail)
+        self.assertNotIn("./sb domains doctor", detail)
+
     def test_no_declared_route_does_not_block_proxy_start(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={}), \
              mock.patch.object(domains_core, "_generic_proxy_entries",

@@ -572,15 +572,20 @@ image tag at all:
 
 | server | image (php pinned) | where `wpVersion` acts |
 |---|---|---|
-| `apache` | `wordpress:php<php>` | `wp core download --version=<wp>` at install |
-| `nginx` | `wordpress:php<php>-fpm` | `wp core download --version=<wp>` at install |
-| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | `wp core download --version=<wp>` at install |
-| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | host `wp core download --version=<wp>` at install |
+| `apache` | `wordpress:php<php>` | `wp core download --version=<wp>` at install; unpinned uses the direct official latest archive |
+| `nginx` | `wordpress:php<php>-fpm` | `wp core download --version=<wp>` at install; unpinned uses the direct official latest archive |
+| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | `wp core download --version=<wp>` at install; unpinned uses the direct official latest archive |
+| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | host `wp core download --version=<wp>` at install; unpinned uses the direct official latest archive |
 
 The WP version is deliberately kept OUT of the image tag (the @wordpress/env
 approach): a PHP-only base image plus an in-container core download avoids
 `manifest unknown` errors for patch-level tags Docker Hub never published
 (`wordpress:6.9.4-php8.1`), and keeps every server stack on ONE bootstrap path.
+When `wpVersion` is omitted, that bootstrap passes
+`https://wordpress.org/latest.tar.gz` directly to WP-CLI instead of first
+calling the WordPress.org version-check API; WP-CLI still performs its normal
+archive and checksum handling. A pinned `wpVersion` continues to use the
+version-specific WP-CLI download and cache path.
 
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The

@@ -190,6 +190,7 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
 
     def test_install_reconciles_host_runtime_muplugins_after_core_download(self):
         events = []
+        download_args = []
         args = SimpleNamespace(resolved_instance="preview-demo")
         runtime = {
             "server": "herd", "domain": "preview-demo.test",
@@ -203,7 +204,9 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
                 patch.object(lifecycle, "resolve_instances", return_value={
                     "preview-demo": runtime}), \
                 patch.object(lifecycle, "_download_wordpress_core",
-                             side_effect=lambda *_args: events.append("download")), \
+                             side_effect=lambda _instance, download: (
+                                 download_args.append(download), events.append("download")
+                             )[-1]), \
                 patch.object(lifecycle, "wpcli", return_value=result), \
                 patch.object(lifecycle, "_prepare_mu_plugin_directory",
                              side_effect=lambda *_args: events.append("prepare")), \
@@ -218,6 +221,9 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
             lifecycle.cmd_install({}, args)
 
         self.assertLess(events.index("download"), events.index("prepare"))
+        self.assertEqual(download_args, [[
+            "core", "download", lifecycle.WORDPRESS_LATEST_DOWNLOAD_URL, "--force"
+        ]])
         self.assertEqual(events.count("host-plugins"), 1)
         self.assertLess(events.index("prepare"), events.index("host-plugins"))
 

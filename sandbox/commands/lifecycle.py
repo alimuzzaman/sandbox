@@ -43,6 +43,9 @@ from sandbox.application.context import (
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
+WORDPRESS_LATEST_DOWNLOAD_URL = "https://wordpress.org/latest.tar.gz"
+
+
 def _target_is_remote(target) -> bool:
     """Return whether target resolution selected the remote adapter."""
     return getattr(target, "kind", None) == "remote"
@@ -698,7 +701,13 @@ def cmd_install(cfg, args) -> None:
         )
     else:
         info("downloading WordPress core (latest)…")
-        _download_wordpress_core(inst, ["core", "download", "--force"])
+        # Avoid WP-CLI's version-check API for the unpinned path.  The direct
+        # official archive is stable, supports the same en_US tarball, and
+        # lets WP-CLI verify the downloaded archive without a second
+        # version-check request that commonly times out on disposable hosts.
+        _download_wordpress_core(
+            inst, ["core", "download", WORDPRESS_LATEST_DOWNLOAD_URL, "--force"]
+        )
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:
         info("generating wp-config.php…")

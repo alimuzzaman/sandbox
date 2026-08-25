@@ -3288,6 +3288,43 @@ class RemoteResourceAdapter:
             hashlib.sha256(seed.encode()).hexdigest()[:24],
         )
 
+    def authoritative_target(self, *, budget_seconds: float = 10) -> StorageTarget:
+        """Resolve the host identity used by persisted remote cleanup plans.
+
+        ``target()`` must remain a cheap, side-effect-free fallback for
+        transport setup.  A cleanup plan, however, is bound to the identity
+        emitted by the host probe (which includes the host's device and
+        Sandbox home).  Refresh that identity through the cache-only probe
+        when a new client process has not observed the host yet.
+        """
+        if self._target is not None:
+            return self._target
+        from .service import ResourceError
+
+        try:
+            snapshot = self.observe(
+                thorough=False,
+                budget_seconds=max(float(budget_seconds), 1.0),
+                progress=None,
+                deep=False,
+                directory_cache="cache_only",
+            )
+        except (
+            ResourceError, OSError, RuntimeError, KeyError, TypeError, ValueError,
+        ) as exc:
+            raise ResourceError(
+                "remote target identity could not be measured",
+                "remote_target_unavailable",
+                retryable=True,
+            ) from exc
+        if snapshot.capacity is None:
+            raise ResourceError(
+                "remote target identity could not be measured",
+                "remote_target_unavailable",
+                retryable=True,
+            )
+        return snapshot.target
+
     def _request(self, entry: dict, request: dict, timeout: float) -> ProcessResult:
         """Submit a typed service request; never open SSH in production.
 

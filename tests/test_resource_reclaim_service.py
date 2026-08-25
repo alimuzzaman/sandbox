@@ -198,6 +198,25 @@ class TestExecution(ServiceCase):
                          ["/deploy/a-workspace-1"])
         self.assertIn("expected_mtime", sent[0])
 
+    def test_remote_plan_cleanup_resolves_authoritative_target_before_begin(self):
+        fallback = StorageTarget("remote", "fixture", "b" * 24)
+
+        class RemoteLike(FakeProvider):
+            def target(self):
+                return fallback
+
+            def authoritative_target(self):
+                return TARGET
+
+        provider = RemoteLike()
+        service = ReclaimService(provider, self.store)
+        plan_id = service.plan("safe")["data"]["plan_id"]
+        payload = ReclaimService(provider, self.store).cleanup(
+            plan_id=plan_id, confirm=True,
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "completed")
+
     def test_partial_removal_is_never_counted_as_reclaimed(self):
         provider = FakeProvider(outcomes=[{
             "seq": 1, "locator": "/deploy/a-workspace-1", "status": "failed",

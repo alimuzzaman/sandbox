@@ -290,6 +290,12 @@ Do not confirm a plan until its candidates and exclusions have been reviewed.
 Use a disposable fixture for mutating validation; monitoring and planning are
 safe against permanent hosts.
 
+Remote plans are bound to the host identity emitted by the authenticated probe.
+When applying a plan from a fresh client process, Sandbox performs a bounded
+cache-only identity probe before comparing the persisted target; a failed probe
+refuses the apply as `remote_target_unavailable` rather than using a client-side
+fallback identity or touching the host.
+
 ## Tiered reclamation of deployment storage
 
 `--scope cache|stale` reclaims engine and cache resources. `--tier safe|tmp|all`

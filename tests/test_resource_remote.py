@@ -78,6 +78,35 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertIn('"managed_host":true', calls[0][1])
         self.assertIn('"remote_name":"remote-a"', calls[0][1])
 
+    def test_authoritative_target_uses_bounded_cache_only_probe(self):
+        calls = []
+        payload = {
+            "identity": "remote-identity",
+            "capacity": {
+                "total_bytes": 100, "used_bytes": 80,
+                "available_bytes": 20, "reserved_bytes": 0,
+            },
+            "resources": [],
+            "category_outcomes": [],
+        }
+
+        def service(_remote, _command, *, input_data=None, timeout=0):
+            calls.append((json.loads(input_data), timeout))
+            return ProcessResult(("control",), 0, json.dumps(payload), "")
+
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            service_request=service,
+            clock=lambda: NOW,
+        )
+        target = adapter.authoritative_target(budget_seconds=4)
+        self.assertEqual(target.identity, "remote-identity")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0][0]["deep"])
+        self.assertEqual(calls[0][0]["directory_cache"], "cache_only")
+        self.assertEqual(calls[0][1], 9)
+
     def test_remote_program_covers_lifecycle_host_engine_and_exact_cache_evidence(self):
         program = _program({
             "action": "observe",

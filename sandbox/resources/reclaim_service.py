@@ -69,6 +69,14 @@ class ReclaimService:
     def target(self) -> StorageTarget:
         if self._target is not None:
             return self._target
+        # Remote adapters have a deterministic client-side fallback identity
+        # before the host probe runs, but cleanup plans are keyed to the
+        # authoritative host identity returned by that probe.  Let providers
+        # that can resolve it do so before PlanStore.begin() compares a plan
+        # target; otherwise a fresh process would reject its own remote plan.
+        authoritative = getattr(self.provider, "authoritative_target", None)
+        if callable(authoritative):
+            return authoritative()
         return self.provider.target()
 
     def _evidence(self, *, budget_seconds: float,
@@ -802,6 +810,12 @@ class _RemoteReclaimProvider:
         self.adapter = adapter
 
     def target(self) -> StorageTarget:
+        return self.adapter.target()
+
+    def authoritative_target(self) -> StorageTarget:
+        resolver = getattr(self.adapter, "authoritative_target", None)
+        if callable(resolver):
+            return resolver()
         return self.adapter.target()
 
     def inventory(self, *, budget_seconds: float,

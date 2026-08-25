@@ -10,6 +10,8 @@ def configure_parser(parser) -> None:
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--interval", type=int, default=15)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true",
+                        help="emit machine-readable status/scan output")
 
 
 def cmd_activation(cfg, args) -> None:

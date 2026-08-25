@@ -1,4 +1,5 @@
 import json
+import argparse
 import threading
 import time
 import tempfile
@@ -85,6 +86,14 @@ class ActivationRaceTests(unittest.TestCase):
 
 
 class ActivationCatalogTests(unittest.TestCase):
+    def test_activation_parser_accepts_json_after_subcommand(self):
+        from sandbox.commands.activation import configure_parser
+
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        args = parser.parse_args(["status", "--json"])
+        self.assertTrue(args.json)
+
     def test_catalog_allowlist_and_exclusions(self):
         from sandbox.activation.catalog import build_catalog
         records, wp = _records()

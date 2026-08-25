@@ -655,6 +655,7 @@ readable again.
 
 ```bash
 ./sb activation status
+./sb activation status --json
 ./sb activation scan --dry-run
 ./sb activation enable
 ./sb activation disable

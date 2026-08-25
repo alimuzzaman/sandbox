@@ -191,7 +191,7 @@ def cmd_domains(cfg, args) -> None:
         # "" before .endswith — the bare default doesn't cover an explicit None.
         http_doms = [ic["domain"] for ic in resolve_instances(cfg).values()
                      if (ic.get("domain") or "").endswith(f".{_tld(ic)}")
-                     and not _cert_paths(ic["domain"])[0].exists()]
+                     and not _domain_is_secure(ic["domain"], ic)]
         running = _proxy_container_running()
         print(f"  Proxy: {'✓ running' if running else '○ not running'} on "
               f"{PROXY_BIND_IP}  ·  default URLs are plain http (no port, no cert)")

@@ -253,9 +253,9 @@ def _proxy_container_running() -> bool:
     return res.returncode == 0 and bool((res.stdout or "").strip())
 
 
-def _sandbox_proxy_active(domain: str) -> bool:
+def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
     """True when the proxy is running AND has a route for this domain — i.e.
-    https://<domain> actually serves. Used by site_url()."""
+    the selected http(s)://<domain> actually serves. Used by site_url()."""
     if not _caddyfile_has_route(domain):
         return False
     if not _proxy_container_running():
@@ -266,31 +266,37 @@ def _sandbox_proxy_active(domain: str) -> bool:
     # URL that never reached Caddy.  A bounded response-header probe is the
     # final authority: even an upstream 4xx/5xx is useful evidence when the
     # response is Caddy's, while a foreign listener is rejected.
-    return _sandbox_proxy_route_serving(domain)
+    return _sandbox_proxy_route_serving(domain, secure=secure)
 
 
-def _sandbox_proxy_route_serving(domain: str, *, timeout: float = 1.5) -> bool:
+def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
+                                 timeout: float = 1.5) -> bool:
     """Return whether a request for ``domain`` is answered by Sandbox Caddy.
 
-    This deliberately checks the ``Server`` header rather than requiring a
-    WordPress 2xx: a live Caddy route can legitimately surface a backend 4xx or
-    5xx, but a foreign wildcard listener must never make ``site_url`` publish a
-    hostname that browsers cannot use.  The probe bypasses ambient HTTP proxy
-    settings and accepts Sandbox's local mkcert certificate.
+    This deliberately checks Caddy's ``Server``/``Via`` headers rather than
+    requiring a WordPress 2xx: a live Caddy route can legitimately surface a
+    backend redirect or 4xx/5xx, but a foreign wildcard listener must never make
+    ``site_url`` publish a hostname that browsers cannot use. The probe bypasses
+    ambient HTTP proxy settings and accepts Sandbox's local mkcert certificate.
     """
     from urllib.error import HTTPError
-    from urllib.request import Request, build_opener, ProxyHandler
+    from urllib.request import (HTTPRedirectHandler, Request, build_opener,
+                                ProxyHandler)
     import ssl
 
-    cert, _ = _cert_paths(domain)
-    scheme = "https" if cert.exists() else "http"
+    scheme = "https" if secure else "http"
     request = Request(
         f"{scheme}://{domain}/",
         headers={"User-Agent": "sandbox-proxy-health"},
         method="HEAD",
     )
     context = ssl._create_unverified_context() if scheme == "https" else None
-    handlers = [ProxyHandler({})]
+
+    class _NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    handlers = [ProxyHandler({}), _NoRedirect()]
     if context is not None:
         from urllib.request import HTTPSHandler
         handlers.append(HTTPSHandler(context=context))
@@ -302,7 +308,13 @@ def _sandbox_proxy_route_serving(domain: str, *, timeout: float = 1.5) -> bool:
     except (OSError, ValueError):
         return False
     try:
-        return "caddy" in str(response.headers.get("Server", "")).lower()
+        server = str(response.headers.get("Server", "")).lower()
+        via = str(response.headers.get("Via", "")).lower()
+        # OrbStack's HTTPS interception also adds ``Via: 1.0 Caddy`` to its
+        # BaseHTTP response. Sandbox Caddy's reverse-proxy response is
+        # ``Via: 1.1 Caddy`` (or advertises itself as Server: Caddy), so keep
+        # the probe strict enough not to bless the foreign helper.
+        return "caddy" in server or via.startswith("1.1 caddy")
     finally:
         # urllib keeps the socket/file descriptor open until the response is
         # garbage-collected.  Health checks run for every managed hostname at
@@ -321,12 +333,14 @@ def _proxy_transport_serving(cfg: dict) -> bool:
     for ic in resolve_instances(cfg).values():
         dom = ic.get("domain")
         if dom and dom.endswith(f".{_tld(ic)}"):
-            if not _sandbox_proxy_route_serving(dom, timeout=0.5):
+            if not _sandbox_proxy_route_serving(
+                    dom, secure=_domain_is_secure(dom, ic), timeout=0.5):
                 return False
     for entry in _generic_proxy_entries():
         dom = entry.get("domain")
         if dom and dom.endswith(f".{_generic_tld(entry)}"):
-            if not _sandbox_proxy_route_serving(dom, timeout=0.5):
+            if not _sandbox_proxy_route_serving(
+                    dom, secure=_is_https_url(entry.get("url")), timeout=0.5):
                 return False
     return True
 
@@ -512,6 +526,35 @@ def _cert_paths(domain: str) -> tuple[Path, Path]:
             PROXY_CERTS_DIR / f"{domain}-key.pem")
 
 
+def _is_https_url(value) -> bool:
+    """True only for an explicitly persisted HTTPS URL.
+
+    Certificate files are artifacts, not intent. They survive a failed
+    recreate, a provider fallback, and manual cleanup, so their mere presence
+    must never turn the default HTTP route into an HTTPS redirect.
+    """
+    return isinstance(value, str) and value.strip().lower().startswith("https://")
+
+
+def _domain_is_secure(domain: str, inst_cfg: dict | None = None) -> bool:
+    """Return whether ``domain`` was explicitly promoted to HTTPS.
+
+    The resolved project config intentionally does not carry the registry's
+    presentation URL. Check both views so Caddy, health probes, and
+    ``site_url`` share one source of truth. A stale cert alone is never enough.
+    """
+    if inst_cfg and _is_https_url(inst_cfg.get("url")):
+        return True
+    try:
+        return any(
+            item.get("domain") == domain and _is_https_url(item.get("url"))
+            for item in registry_all().values()
+            if isinstance(item, dict)
+        )
+    except Exception:
+        return False
+
+
 def _ca_installed() -> bool:
     """True only if the mkcert CA is actually TRUSTED by the OS — not merely
     present on disk. (A rootCA.pem on disk that isn't trusted in the keychain is
@@ -675,10 +718,13 @@ volumes:
 
 
 def _caddy_block(domain: str, port: int, wildcard: bool = False,
-                 cert_domain: str | None = None, activation_route=None) -> str:
+                 cert_domain: str | None = None, activation_route=None,
+                 secure: bool = False) -> str:
     """One Caddy site block. Default is plain http://<domain> (no port, no cert
     — zero CA-trust fragility, browsers never warn on http). If this domain has
-    been secured (a mkcert cert exists), serve https + bounce http→https.
+    been explicitly secured, serve https + bounce http→https. A cert file by
+    itself is not intent: stale certs must not make a normal `.tst` route
+    inaccessible on hosts whose HTTPS port is intercepted.
 
     When `wildcard` is set (subdomain multisite), the site address list also
     includes `*.<domain>` so every sub-site host (sub1.<domain>) reverse-
@@ -699,7 +745,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     }}
 '''
     hosts = [domain, _wildcard_san(domain)] if wildcard else [domain]
-    if cert.exists() and key.exists():
+    if secure and cert.exists() and key.exists():
         return "\n".join(
             f"""http://{host} {{
     redir https://{{host}}{{uri}} 308
@@ -797,13 +843,15 @@ def regen_caddyfile(cfg: dict) -> None:
         port = ic.get("wordpress_port")
         if routed:
             # No cert minting here — default is plain http. _caddy_block emits an
-            # https block only if a cert already exists (i.e. `./sb secure` ran).
+            # https block only when the registry/config explicitly says that
+            # `./sb secure` promoted this instance; stale cert files are ignored.
             # Subdomain multisite also needs a wildcard `*.<name>.tst` block so each
             # sub-site host proxies to the same port.
             wildcard = _multisite_mode(ic) == "subdomain"
             blocks.append(_caddy_block(
                 dom, ic["wordpress_port"], wildcard=wildcard,
                 activation_route=activation_catalog.for_host(dom),
+                secure=_domain_is_secure(dom, ic),
             ))
         # Declared aliases get their own site block on the same port. They are
         # emitted even when the instance has no routed .tst domain: the proxy
@@ -813,13 +861,16 @@ def regen_caddyfile(cfg: dict) -> None:
         if port:
             for alias in instance_aliases(ic):
                 blocks.append(_caddy_block(alias, port,
-                                           cert_domain=dom if routed else None))
+                                           cert_domain=dom if routed else None,
+                                           secure=_domain_is_secure(dom, ic)
+                                           if routed else False))
     for entry in _generic_proxy_entries():
         dom = entry.get("domain")
         port = entry.get("http_port")
         if dom and port and dom.endswith(f".{_generic_tld(entry)}"):
             blocks.append(_caddy_block(
                 dom, int(port), activation_route=activation_catalog.for_host(dom),
+                secure=_is_https_url(entry.get("url")),
             ))
     # Replace atomically. Docker Desktop can retain a stale view of a bind
     # mounted file after in-place truncation; an inode replacement makes the
@@ -959,7 +1010,7 @@ def reload_proxy() -> bool:
 
 def site_url(inst_cfg: dict) -> str:
     """Browser URL for an instance. Precedence:
-      • https://<domain>        — proxy serves it AND it's been secured (cert)
+      • https://<domain>        — proxy serves it AND registry says HTTPS
       • http://<domain>         — proxy serves this .tst domain (clean, no port)
       • http://<domain>         — legacy Valet proxy (no port)
       • http://localhost:<port> — domain set but proxy NOT serving it, or no domain
@@ -980,11 +1031,9 @@ def site_url(inst_cfg: dict) -> str:
     if inst_cfg.get("server") == "herd" and dom:
         return f"https://{dom}"
     if dom and dom.endswith(f".{_tld(inst_cfg)}"):
-        if _sandbox_proxy_active(dom):
-            if isinstance(verified, str) and verified.startswith(("http://", "https://")):
-                return verified
-            cert, _ = _cert_paths(dom)
-            return (f"https://{dom}" if cert.exists() else f"http://{dom}")
+        secure = _domain_is_secure(dom, inst_cfg)
+        if _sandbox_proxy_active(dom, secure=secure):
+            return f"{'https' if secure else 'http'}://{dom}"
         # A persisted clean URL is only a historical observation.  Once the
         # proxy is intercepted or stopped, return the reachable published port
         # instead of handing callers a stale .tst/.orb.local-style hostname.
@@ -1496,6 +1545,10 @@ def proxy_setup(cfg, tld=None) -> bool:
             # per instance, so `sb secure` covers every name it answers on.
             sans += instance_aliases(ic)
             _mint_cert(dom, extra_sans=sans or None)
+            owner = registry_find_instance(name) or {}
+            if owner.get("root"):
+                registry_put(owner["root"], label=owner.get("label", "default"),
+                             domain=dom, url=f"https://{dom}")
     regen_caddyfile(cfg)
     if not reload_proxy():
         info("proxy reload failed (is Docker running?).")
@@ -1580,6 +1633,10 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     sans = [_wildcard_san(domain)] if _multisite_mode(ic) == "subdomain" else []
     sans += instance_aliases(ic)
     _mint_cert(domain, extra_sans=sans or None)
+    owner = registry_find_instance(name) or {}
+    if owner.get("root"):
+        registry_put(owner["root"], label=owner.get("label", "default"),
+                     domain=domain, url=f"https://{domain}")
     regen_caddyfile(cfg)
     reload_proxy()
     return True
@@ -1654,7 +1711,8 @@ def _assign_generic_domains(tld=None) -> list[str]:
             domain = entry.get("domain") or f"{entry['instance']}.{chosen_tld}"
             if not entry.get("domain"):
                 changed.append(domain)
-            url = f"https://{domain}" if _cert_paths(domain)[0].exists() else f"http://{domain}"
+            url = (f"https://{domain}" if _is_https_url(entry.get("url"))
+                   else f"http://{domain}")
             registry_put(entry["root"], label=entry.get("label", "default"),
                          domain=domain, tld=chosen_tld, url=url)
         return changed
@@ -1703,11 +1761,7 @@ def proxy_up(cfg: dict) -> bool:
     """
     if _adoption_selected(cfg):
         instances = tuple(resolve_instances(cfg).values())
-        secure = any(
-            str(item.get("url") or "").startswith("https://")
-            or (item.get("domain") and _cert_paths(item["domain"])[0].exists())
-            for item in instances
-        )
+        secure = any(_is_https_url(item.get("url")) for item in instances)
         lifecycle = clean_url_lifecycle_handoff(
             cfg, "up", protocols=("https",) if secure else ("http",),
         )

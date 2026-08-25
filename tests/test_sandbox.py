@@ -349,7 +349,8 @@ class TestCaddyBlocks(unittest.TestCase):
             cert.write_text("cert")
             key.write_text("key")
             with mock.patch.object(domains_core, "_cert_paths", return_value=(cert, key)):
-                rendered = core._caddy_block("example.tst", 8123, wildcard=True)
+                rendered = core._caddy_block("example.tst", 8123, wildcard=True,
+                                             secure=True)
 
         self.assertIn("http://example.tst {", rendered)
         self.assertIn("http://*.example.tst {", rendered)
@@ -357,6 +358,49 @@ class TestCaddyBlocks(unittest.TestCase):
         self.assertIn("\n*.example.tst {\n", rendered)
         self.assertNotIn("example.tst *.example.tst", rendered)
         self.assertNotIn("http://example.tst *.example.tst", rendered)
+
+    def test_stale_certificate_does_not_force_https_redirect(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "example.tst.pem"
+            key = Path(td) / "example.tst-key.pem"
+            cert.write_text("stale cert")
+            key.write_text("stale key")
+            with mock.patch.object(domains_core, "_cert_paths", return_value=(cert, key)):
+                rendered = core._caddy_block("example.tst", 8123)
+
+        self.assertIn("http://example.tst {", rendered)
+        self.assertIn("reverse_proxy host.docker.internal:8123", rendered)
+        self.assertNotIn("redir https://{host}{uri} 308", rendered)
+        self.assertNotIn("\ntls /certs/example.tst.pem", rendered)
+
+    def test_regen_uses_registry_url_instead_of_stale_certificate(self):
+        with tempfile.TemporaryDirectory() as td:
+            proxy_dir = Path(td) / "proxy"
+            caddyfile = proxy_dir / "Caddyfile"
+            cert = Path(td) / "demo.tst.pem"
+            key = Path(td) / "demo.tst-key.pem"
+            cert.write_text("stale cert")
+            key.write_text("stale key")
+            instances = {"demo": {
+                "domain": "demo.tst", "tld": "tst", "wordpress_port": 8123,
+            }}
+            registry = {"demo": {
+                "instance": "demo", "domain": "demo.tst",
+                "url": "http://localhost:8123", "root": "/tmp/demo",
+            }}
+            with mock.patch.object(domains_core, "PROXY_DIR", proxy_dir), \
+                 mock.patch.object(domains_core, "PROXY_CADDYFILE", caddyfile), \
+                 mock.patch.object(domains_core, "resolve_instances",
+                                   return_value=instances), \
+                 mock.patch.object(domains_core, "registry_all",
+                                   return_value=registry), \
+                 mock.patch.object(domains_core, "_cert_paths",
+                                   return_value=(cert, key)):
+                domains_core.regen_caddyfile({})
+            rendered = caddyfile.read_text()
+
+        self.assertIn("http://demo.tst {", rendered)
+        self.assertNotIn("redir https://{host}{uri} 308", rendered)
 
     def test_regen_caddyfile_includes_generic_compose_route(self):
         with tempfile.TemporaryDirectory() as td:
@@ -377,6 +421,41 @@ class TestCaddyBlocks(unittest.TestCase):
 
 
 class TestProxyTransportHealth(unittest.TestCase):
+    def test_proxy_probe_accepts_caddy_via_header_without_following_backend_redirect(self):
+        class Response:
+            headers = {"Server": "nginx/1.27", "Via": "1.1 Caddy"}
+
+            def close(self):
+                pass
+
+        class Opener:
+            def __init__(self):
+                self.request = None
+
+            def open(self, request, timeout):
+                self.request = request
+                return Response()
+
+        opener = Opener()
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertTrue(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=False))
+        self.assertEqual(opener.request.full_url, "http://demo.tst/")
+
+    def test_proxy_probe_rejects_orbstack_via_header(self):
+        class Response:
+            headers = {"Server": "BaseHTTP/0.6 Python/3.14",
+                       "Via": "1.0 Caddy"}
+
+            def close(self):
+                pass
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertFalse(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=True))
+
     def test_foreign_wildcard_response_blocks_clean_url_claim(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={
                 "demo": {"domain": "demo.tst", "tld": "tst"},

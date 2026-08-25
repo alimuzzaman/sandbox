@@ -136,7 +136,7 @@ class TestAliasCaddyRoutes(unittest.TestCase):
 
             with mock.patch.object(domains_core, "_cert_paths", cert_paths):
                 rendered = core._caddy_block("cdn.tst", 8123,
-                                             cert_domain="demo.tst")
+                                             cert_domain="demo.tst", secure=True)
         self.assertIn("\ncdn.tst {\n", rendered)
         self.assertIn("tls /certs/demo.tst.pem /certs/demo.tst-key.pem", rendered)
         self.assertIn("redir https://{host}{uri} 308", rendered)

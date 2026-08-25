@@ -35,7 +35,7 @@ CLI_CAPABILITIES = {
     "install": "wordpress.cli", "shell": "wordpress.exec",
     "doctor": "wordpress.cli", "server": "wordpress.cli",
     "xdebug": "wordpress.exec", "introspect": "wordpress.cli",
-    "wp": "wordpress.cli", "seed": "wordpress.cli", "visit": "wordpress.rest",
+    "wp": "wordpress.cli", "seed": "wordpress.cli",
     "snapshot": "wordpress.snapshot", "restore": "wordpress.restore",
     "reset": "wordpress.reset", "clean": "wordpress.cli",
     "dump": "wordpress.cli", "qm": "wordpress.cli",

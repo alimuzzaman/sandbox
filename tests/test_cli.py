@@ -495,6 +495,9 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(cli.CLI_CAPABILITIES["wp"], "wordpress.cli")
         self.assertEqual(cli.CLI_CAPABILITIES["snapshot"], "wordpress.snapshot")
         self.assertEqual(cli.CLI_CAPABILITIES["shell"], "wordpress.exec")
+        # Browser inspection is URL-scoped and works for generic Compose too;
+        # it must not be rejected by a WordPress-only REST capability gate.
+        self.assertNotIn("visit", cli.CLI_CAPABILITIES)
         self.assertNotIn("up", cli.CLI_CAPABILITIES)
         self.assertNotIn("open", cli.CLI_CAPABILITIES)
 

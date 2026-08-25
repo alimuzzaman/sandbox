@@ -316,8 +316,9 @@ speckit-refine → Sol High validation → speckit-specify → speckit-clarify
 → speckit-plan → speckit-tasks → speckit-analyze → speckit-implement
 ```
 
-**Verify a UI flow.** `visit` opens a real admin or frontend URL and returns a
-screenshot, DOM, and console errors without you switching tabs.
+**Verify a UI flow.** `visit` is URL-scoped (WordPress or generic Compose), opens
+a real admin or frontend URL, and returns a screenshot, DOM, and console errors
+without you switching tabs.
 
 ### The two underlying patterns
 

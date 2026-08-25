@@ -188,11 +188,9 @@ class TestDiffAgainstBaseline(unittest.TestCase):
 
 class TestResolvePluginCheckConfig(unittest.TestCase):
     # There is no `pluginCheck.slug` override key -- Plugin Check always
-    # checks the project's OWN resolved plugin slug (self-check only,
-    # matching the reference implementation, which hardcodes its own
-    # plugin's name as a literal rather than reading it from ANY config
-    # key). "slug" always comes from the top-level `slug` / project dir
-    # name via _project_slug, same as legacy plugins:["."] self-entries.
+    # checks the project's OWN resolved plugin slug (self-check only). A
+    # canonical plugin-map self-path key is preferred; the top-level `slug` /
+    # project-dir fallback remains for descriptors without that map.
 
     def test_uses_the_root_level_slug_when_present(self):
         # Real example: templately-modular-rewrite/sandbox.config.json
@@ -201,6 +199,32 @@ class TestResolvePluginCheckConfig(unittest.TestCase):
         resolved = pc._resolve_plugin_check_config(
             {"slug": "templately", "root": "/some/project", "pluginCheck": {}})
         self.assertEqual(resolved["slug"], "templately")
+
+    def test_self_path_plugin_map_key_wins_over_isolation_slug(self):
+        # Disposable review directories may use a unique top-level slug while
+        # the project plugin map still installs the real plugin under its own
+        # slug. Plugin Check must target that installed key, not the directory.
+        resolved = pc._resolve_plugin_check_config({
+            "slug": "review-instance-123",
+            "root": "/tmp/review-instance-123",
+            "plugins_resolved": {
+                "real-plugin": {
+                    "source": {"kind": "path", "value": "."},
+                    "active": True,
+                },
+            },
+            "pluginCheck": {},
+        })
+        self.assertEqual(resolved["slug"], "real-plugin")
+
+    def test_absolute_self_path_plugin_map_key_is_supported(self):
+        resolved = pc._resolve_plugin_check_config({
+            "slug": "review-instance-123",
+            "root": "/tmp/review-instance-123",
+            "plugins": {"real-plugin": "/tmp/review-instance-123"},
+            "pluginCheck": {},
+        })
+        self.assertEqual(resolved["slug"], "real-plugin")
 
     def test_no_root_level_slug_falls_back_to_directory_name(self):
         resolved = pc._resolve_plugin_check_config(

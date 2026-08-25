@@ -58,14 +58,12 @@ def _read_distignore_directories(root: Path) -> list[str]:
 def _resolve_plugin_check_config(pconf: dict) -> dict:
     """Read + validate the `pluginCheck` section of a project's resolved config.
 
-    There is no `pluginCheck.slug` override key — Plugin Check always checks
-    the project's OWN resolved plugin slug, via the exact same `_project_slug`
-    resolution legacy `plugins: ["."]` self-entries already use
-    (sandbox.config.json's root-level `slug`, or the project directory name).
-    This is inherently a self-check tool (the reference implementation this
-    was ported from hardcodes its own plugin's name as a literal, not a
-    config value); a project checking a DIFFERENT plugin than its own isn't a
-    real scenario this needs to support, so there's no override to add.
+    There is no `pluginCheck.slug` override key. When the canonical plugin map
+    declares a path entry for the project root (the normal `"my-plugin": "."`
+    form), that map key is the authoritative install slug. This matters for
+    disposable review directories whose root name/top-level `slug` is unique
+    only for isolation. If no self-path entry exists, retain the historical
+    top-level `slug`/directory-name fallback.
 
     `excludeDirectories` falls back to `.distignore` (see
     `_read_distignore_directories`) when the project hasn't set its own list
@@ -75,13 +73,54 @@ def _resolve_plugin_check_config(pconf: dict) -> dict:
     edge case rare enough not to need a dedicated escape hatch yet)."""
     sc = _core()
     pc = pconf.get("pluginCheck") or {}
+    root = Path(pconf["root"]).expanduser().resolve()
+
+    # Prefer the canonical slug-keyed map's self-path entry. The normalized
+    # form is available on every current descriptor, while the raw map fallback
+    # keeps this helper useful for older/direct callers in unit tests.
+    candidates: list[str] = []
+
+    def is_self_path(value: object) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        try:
+            source = Path(value).expanduser()
+            if not source.is_absolute():
+                source = root / source
+            return source.resolve() == root
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    resolved = pconf.get("plugins_resolved")
+    if isinstance(resolved, dict):
+        for candidate, entry in resolved.items():
+            source = entry.get("source") if isinstance(entry, dict) else None
+            if (isinstance(candidate, str) and isinstance(source, dict)
+                    and source.get("kind") == "path"
+                    and is_self_path(source.get("value"))):
+                candidates.append(candidate)
+    if not candidates and isinstance(pconf.get("plugins"), dict):
+        for candidate, value in pconf["plugins"].items():
+            if isinstance(candidate, str) and is_self_path(value):
+                candidates.append(candidate)
+
     try:
-        slug = sc._project_slug(pconf.get("slug"), Path(pconf["root"]).name)
+        configured_slug = pconf.get("slug")
+        if isinstance(configured_slug, str) and configured_slug in candidates:
+            slug = sc._project_slug(configured_slug, configured_slug)
+        elif len(candidates) == 1:
+            slug = sc._project_slug(candidates[0], candidates[0])
+        elif len(candidates) > 1:
+            names = ", ".join(sorted(candidates))
+            die("could not resolve one Plugin Check target: multiple project "
+                f"self-path plugin keys ({names}); keep one map entry for `.`")
+        else:
+            slug = sc._project_slug(configured_slug, root.name)
     except sc.ConfigError as e:
         die(f"could not resolve a plugin slug for Plugin Check: {e}")
     exclude_directories = list(pc.get("excludeDirectories") or [])
     if not exclude_directories:
-        exclude_directories = _read_distignore_directories(Path(pconf["root"]))
+        exclude_directories = _read_distignore_directories(root)
     return {
         "slug": slug,
         "exclude_directories": exclude_directories,

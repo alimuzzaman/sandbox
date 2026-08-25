@@ -18,16 +18,19 @@ resolved slug (see below), not a separately-configured value.
 | `baselineFile` | `str` | `"plugin-check-baseline.json"` | Path (relative to project root) to the committed baseline file (spec FR-005). |
 
 **Which plugin is checked** (spec FR-002, amended twice — see spec.md and research.md for
-the full history): always `_project_slug(pconf.get("slug"), root.name)` — the project's
-resolved top-level `slug` (already used elsewhere for legacy `plugins: ["."]`
-self-entries), falling back to the project directory name. No separate
-`pluginCheck.slug` setting exists to override this; Plugin Check is a self-check tool
-only, matching the reference implementation's own hardcoded-self-name behavior.
+the full history): first select the one canonical `plugins_resolved` entry whose path
+source resolves to the project root (normally `"my-plugin": "."`), and use that map key
+as the install slug. This preserves the installed plugin identity when an isolated review
+directory has a unique top-level `slug`. If no self-path entry exists, use
+`_project_slug(pconf.get("slug"), root.name)` — the resolved top-level slug, falling back
+to the project directory name. No separate `pluginCheck.slug` setting exists to override
+this; Plugin Check remains a self-check tool.
 
 Validation rules:
-- An unresolvable slug (the project directory name doesn't look like a valid WP plugin
-  slug, and neither does an explicit top-level `slug`) → `die()` with `_project_slug`'s
-  own validation message, before any instance/docker work happens (fail fast, cheap).
+- An unresolvable slug (no valid self-path map key, and the project directory name or
+  explicit top-level `slug` doesn't look like a valid WP plugin slug) → `die()` with
+  `_project_slug`'s own validation message, before any instance/docker work happens (fail
+  fast, cheap). Multiple self-path keys are an actionable ambiguity error.
 - A non-empty `excludeDirectories` list takes priority over `.distignore`; an absent or
   empty list falls back to that file. The resulting entries are joined with `,` for the
   `--exclude-directories` flag, exactly as the reference implementation does (no

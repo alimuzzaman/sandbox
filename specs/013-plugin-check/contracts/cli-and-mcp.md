@@ -66,7 +66,8 @@ on timeout/parse failure).
 
 ```jsonc
 {
-  "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
+  "slug": "my-plugin",                          // fallback/project identity
+  "plugins": {"my-plugin": "."},                // canonical self-plugin install key
   "pluginCheck": {
     "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default "<slug>.php"
@@ -76,11 +77,13 @@ on timeout/parse failure).
 ```
 
 There is no `pluginCheck.slug` key — the checked plugin is ALWAYS the project's own
-resolved slug (the top-level `slug` above, or the project directory name if that's
-unset), the same resolution legacy `plugins: ["."]` self-entries already use. A project
-whose directory name (and top-level `slug`, if set) doesn't look like a valid WP plugin
-slug gets a clear `die()` message — the command must never guess or silently no-op, but
-it also never asks for a value the project has typically already declared elsewhere.
+resolved install. A canonical `plugins` map entry whose path is the project root (normally
+`"my-plugin": "."`) supplies the authoritative install slug; this prevents an isolated
+review directory's unique top-level `slug` from being passed to WordPress. Without a
+self-path entry, use the top-level `slug` above or the project directory name, matching
+legacy `plugins: ["."]` resolution. A project with multiple self-path keys gets a clear
+ambiguity error; if no candidate looks like a valid WP plugin slug, the command must fail
+before instance/docker work rather than guess or silently no-op.
 The `pluginCheck` object itself is optional: omitting it uses the derived version-file
 and baseline-file defaults plus `.distignore` entries (or no exclusions when the file is
 absent). A first run with no baseline is a successful non-gating result with

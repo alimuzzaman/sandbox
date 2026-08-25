@@ -39,7 +39,8 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
 ```jsonc
 // sandbox.config.json
 {
-  "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
+  "slug": "my-plugin",                          // fallback/project identity
+  "plugins": {"my-plugin": "."},                // canonical self-plugin install key
   "pluginCheck": {
     "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default: "<slug>.php"
@@ -49,12 +50,13 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
 ```
 
 There is no `pluginCheck.slug` key — the checked plugin is ALWAYS the project's own
-resolved slug (the top-level `slug`, or the project directory name if that's unset), the
-same resolution legacy `plugins: ["."]` self-entries already use. Plugin Check is a
-self-check tool only, matching the reference implementation this was ported from (which
-hardcodes its own plugin's name as a literal, with no config concept of checking a
-different plugin at all). A directory name/slug that doesn't look like a valid WP plugin
-slug still gets a clear `die()` message rather than a silent guess.
+resolved install. When the canonical `plugins` map has a path entry for the project root
+(normally `"my-plugin": "."`), its map key is the authoritative WordPress plugin slug.
+This preserves the real plugin identity when a disposable review directory uses a unique
+top-level `slug` only for isolation. If no self-path map entry exists, Plugin Check falls
+back to the top-level `slug`, then the project directory name (the same legacy
+`plugins: ["."]` resolution). A directory name/slug that doesn't look like a valid WP
+plugin slug still gets a clear `die()` message rather than a silent guess.
 
 The `pluginCheck` object itself is optional. With no object, Plugin Check still runs
 using the resolved project slug, `<slug>.php`, and `plugin-check-baseline.json`; it uses
@@ -144,8 +146,9 @@ Both interfaces return the identical JSON shape:
   than its own at all (it hardcodes its own plugin's name as a literal). Kept adding
   speculative override capability for a scenario nothing actually needs would have
   been unjustified complexity, so the key was removed entirely — Plugin Check always
-  checks the project's own resolved slug (top-level `slug`, or the project directory
-  name), full stop.
+  checks the project's own resolved install: a canonical self-path plugin-map key when
+  present, then top-level `slug` or the project directory name. This keeps isolated
+  review roots from being mistaken for the installed plugin slug.
 - **`.distignore` auto-detection** (found via a real live run, see §6): the reference
   hardcoded its own `EXCLUDE_DIRECTORIES` list, commented as mirroring `.distignore` —
   meaning it was already being kept in sync BY HAND with a file that could have been

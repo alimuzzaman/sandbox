@@ -891,6 +891,15 @@ warns about drift.
    web tier. Constants survive via `WORDPRESS_CONFIG_EXTRA`; the DB volume is
    untouched, so **no data loss**. A `phpVersion` change takes effect here (the
    web image is recreated).
+
+   If reconciliation fails after the web tier is touched, apply restores the
+   persisted config and generated Compose artifact, then restores the prior web
+   lifecycle state. A web tier that was stopped before apply is stopped again
+   without a reachability wait; a tier that was running is recreated and checked
+   for reachability. If that pre-apply state cannot be observed, apply uses the
+   existing best-effort running-tier recovery path and reports any rollback
+   failure explicitly.
+
 3. Re-syncs plugin/theme symlinks + installs (idempotent).
 4. Runs `wp core multisite-convert` if multisite was **newly** enabled
    (idempotent — skips an already-converted network). Switching an existing

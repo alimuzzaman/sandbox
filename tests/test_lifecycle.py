@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import sandbox.commands.lifecycle as lifecycle  # noqa: E402
+import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
 
 
@@ -70,6 +71,32 @@ class TestWordPressCoreDownload(unittest.TestCase):
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
         )
+
+
+class TestApplyRollbackLifecycleState(unittest.TestCase):
+    def test_rollback_preserves_a_previously_stopped_web_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compose_path = Path(directory) / "compose.yml"
+            snapshot = {
+                "local": {},
+                "compose_path": compose_path,
+                "compose_exists": False,
+                "compose_bytes": None,
+                "runtime": {"server": "nginx", "wordpress_port": 8188},
+                "runtime_running": False,
+            }
+            stopped = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch.object(instances, "_write_local_yaml"), \
+                 patch.object(instances, "compose", return_value=stopped) as compose, \
+                 patch.object(instances, "_wait_reachable") as wait:
+                result = instances._restore_apply_rollback_state(snapshot, "demo")
+
+        self.assertTrue(result["ok"])
+        compose.assert_called_once_with(
+            "stop", "wp", "nginx", instance="demo", check=False,
+            capture=True, timeout=30,
+        )
+        wait.assert_not_called()
 
 
 class TestMuPluginDirectoryPreparation(unittest.TestCase):

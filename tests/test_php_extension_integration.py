@@ -463,14 +463,16 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
         self._assert_named_db_volume_contract(docker, runtime_root, root)
         self.assertEqual(result["status"], "ready")
-        self.assertTrue(compose_calls)
-        argv = compose_calls[0][0]
+        runtime_calls = [call for call in compose_calls
+                         if call[0][:2] != ("ps", "--format")]
+        self.assertTrue(runtime_calls)
+        argv = runtime_calls[0][0]
         self.assertEqual(argv[:4], ("up", "-d", "--no-deps", "--force-recreate"))
         self.assertIn("wp", argv)
         self.assertIn("nginx", argv)
         self.assertNotIn("db", argv)
         self.assertNotIn("mailpit", argv)
-        for args, _kwargs in compose_calls:
+        for args, _kwargs in runtime_calls:
             self.assertNotIn("down", args)
             self.assertNotIn("-v", args)
         # The in-place apply command owns only web services; DB and uploads
@@ -820,7 +822,15 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
 
             def fake_compose(*args, **kwargs):
                 compose_calls.append((args, kwargs))
-                if len(compose_calls) == 1:
+                if args[:2] == ("ps", "--format"):
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout='{"Service":"wp","State":"running"}\n'
+                                '{"Service":"nginx","State":"running"}\n',
+                        stderr="",
+                    )
+                if len([call for call in compose_calls
+                        if call[0][:2] != ("ps", "--format")]) == 1:
                     return SimpleNamespace(returncode=0, stdout="", stderr="")
                 if rollback_ok:
                     return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -899,13 +909,15 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 for path, expected in sentinel_bytes.items():
                     self.assertTrue(path.exists(), path)
                     self.assertEqual(path.read_bytes(), expected, path)
+                runtime_calls = [call for call in compose_calls
+                                 if call[0][:2] != ("ps", "--format")]
                 if fail_before_runtime:
-                    self.assertEqual(compose_calls, [])
+                    self.assertEqual(runtime_calls, [])
                     self.assertIn("before web reconcile", str(raised.exception))
                     self.assertIn("rollback=succeeded", str(raised.exception))
                 else:
-                    self.assertGreaterEqual(len(compose_calls), 2)
-                    for args, kwargs in compose_calls:
+                    self.assertGreaterEqual(len(runtime_calls), 2)
+                    for args, kwargs in runtime_calls:
                         self.assertEqual(args[:4], ("up", "-d", "--no-deps", "--force-recreate"))
                         self.assertIn("wp", args)
                         self.assertIn("nginx", args)

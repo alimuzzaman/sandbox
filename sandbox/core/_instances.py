@@ -1609,6 +1609,30 @@ def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
     compose_path = compose_file(name)
     compose_exists = compose_path.is_file()
     compose_bytes = compose_path.read_bytes() if compose_exists else None
+    # Preserve the prior web-tier lifecycle state.  Apply owns only the web
+    # services, so rollback must not turn a deliberately stopped disposable
+    # instance into a newly-started one (or wait for reachability that was not
+    # part of the pre-apply state).  A failed read is kept as ``None`` so the
+    # existing best-effort restart path remains the conservative fallback.
+    runtime_running = None
+    try:
+        probe = compose("ps", "--format", "json", instance=name,
+                        check=False, capture=True, timeout=15)
+        if getattr(probe, "returncode", 1) == 0:
+            rows = []
+            for line in (getattr(probe, "stdout", "") or "").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except (TypeError, ValueError):
+                    continue
+            runtime_running = any(
+                isinstance(row, dict)
+                and row.get("Service") in {"wp", "nginx"}
+                and row.get("State") == "running"
+                for row in rows
+            )
+    except Exception:
+        runtime_running = None
     return {
         "local": copy.deepcopy(local),
         "compose_path": compose_path,
@@ -1616,6 +1640,7 @@ def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
         "compose_bytes": compose_bytes,
         "runtime": copy.deepcopy(prior_runtime or prev_block or {}),
         "registry": copy.deepcopy(existing),
+        "runtime_running": runtime_running,
     }
 
 
@@ -1651,16 +1676,22 @@ def _restore_apply_rollback_state(snapshot: dict, name: str,
         if old_server == "nginx":
             services.append("nginx")
         try:
-            result = compose("up", "-d", "--no-deps", "--force-recreate",
-                             *services, instance=name, check=False,
-                             capture=True)
+            was_running = snapshot.get("runtime_running")
+            if was_running is False:
+                result = compose("stop", *services, instance=name, check=False,
+                                 capture=True, timeout=30)
+            else:
+                result = compose("up", "-d", "--no-deps", "--force-recreate",
+                                 *services, instance=name, check=False,
+                                 capture=True)
             returncode = getattr(result, "returncode", 0)
             if returncode not in (None, 0):
                 detail = (getattr(result, "stderr", "") or
                           getattr(result, "stdout", "") or
                           f"exit {returncode}").strip()
                 errors.append(f"runtime rollback failed: {detail[:240]}")
-            elif runtime.get("wordpress_port") and not _wait_reachable(runtime):
+            elif was_running is not False and runtime.get("wordpress_port") \
+                    and not _wait_reachable(runtime):
                 errors.append("runtime rollback failed: restored web tier did not become reachable")
         except Exception as exc:
             errors.append(f"runtime rollback failed: {str(exc)[:240]}")

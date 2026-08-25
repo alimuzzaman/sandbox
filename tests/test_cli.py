@@ -845,6 +845,20 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(out.getvalue(), "https://example.test\n")
         self.assertIn("docker compose", err.getvalue())
 
+    def test_wp_strips_documented_separator_before_wp_cli(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture", passthrough=["--", "plugin", "list"],
+            run_async=False,
+        )
+        result = SimpleNamespace(returncode=0, stdout="plugin\n", stderr="")
+        with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(command, "wpcli", return_value=result) as wpcli, \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            command.cmd_wp({}, args)
+        self.assertEqual(wpcli.call_args.args[0], ["plugin", "list"])
+
     def test_wp_timeout_parser_rejects_async_combination_before_instance_work(self):
         r = run_sb("wp", "--async", "--timeout", "5", "--", "option", "get", "siteurl")
         self.assertEqual(r.returncode, 2)

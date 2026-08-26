@@ -11,6 +11,7 @@ baseline only after the cleanup receipt is complete.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -162,8 +163,19 @@ def resolve_archive_provenance(
     }
 
 
-def _safe_runtime_config(sandbox_home: Path) -> dict[str, object]:
+def _safe_runtime_config(sandbox_home: Path, *, instance: str | None = None) -> dict[str, object]:
     """Return bounded runtime defaults with no machine-global inputs."""
+
+    # Separate archive runs also have separate SANDBOX_HOME trees, so the
+    # normal per-home allocator cannot serialize their published ports.  Give
+    # each internally generated review identity its own three-port lane before
+    # ``ensure_instance`` starts; the allocator can still advance within the
+    # lane if an unrelated host listener occupies one of them.  This prevents
+    # two simultaneous disposable reviews from racing on the shared defaults.
+    port_lane = int(hashlib.sha256((instance or "archive").encode("utf-8")).hexdigest()[:6], 16) % 1000
+    wordpress_port = 18000 + port_lane
+    db_port = 19000 + port_lane
+    mailpit_port = 20000 + port_lane
 
     return {
         "version": "0.1.0",
@@ -172,9 +184,9 @@ def _safe_runtime_config(sandbox_home: Path) -> dict[str, object]:
             "github_org": "",
         },
         "runtime": {
-            "wordpress_port": 8188,
-            "db_port": 3318,
-            "mailpit_port": 8125,
+            "wordpress_port": wordpress_port,
+            "db_port": db_port,
+            "mailpit_port": mailpit_port,
             "wordpress_image": "wordpress:latest",
             "mariadb_image": "mariadb:latest",
             "wpcli_image": "wordpress:cli",
@@ -532,7 +544,7 @@ def run_archive_child(
             _run_wp_plugin_check,
         )
 
-        safe_cfg = _safe_runtime_config(sandbox_home)
+        safe_cfg = _safe_runtime_config(sandbox_home, instance=instance)
         isolated_pconf = _isolated_project_config(
             descriptor,
             review_root=review_root,

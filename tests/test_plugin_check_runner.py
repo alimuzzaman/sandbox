@@ -14,6 +14,7 @@ from unittest.mock import patch
 from sandbox.plugin_check.runner import (  # noqa: E402
     ArchiveRunnerError,
     RESULT_PREFIX,
+    _safe_runtime_config,
     _isolated_project_config,
     launch_archive_runner,
     resolve_archive_provenance,
@@ -89,6 +90,14 @@ class TestArchiveProvenance(unittest.TestCase):
 
 
 class TestArchiveRunnerLaunch(unittest.TestCase):
+    def test_safe_runtime_config_uses_distinct_port_lanes_per_review(self):
+        first = _safe_runtime_config(Path("/tmp/archive-one"), instance="plugin-check-r1")
+        second = _safe_runtime_config(Path("/tmp/archive-two"), instance="plugin-check-r2")
+        first_ports = {first["runtime"][key] for key in ("wordpress_port", "db_port", "mailpit_port")}
+        second_ports = {second["runtime"][key] for key in ("wordpress_port", "db_port", "mailpit_port")}
+        self.assertTrue(first_ports.isdisjoint(second_ports))
+        self.assertTrue(all(18000 <= first["runtime"][key] < 21000 for key in ("wordpress_port", "db_port", "mailpit_port")))
+
     def test_isolated_project_config_has_only_descriptor_plugins(self):
         descriptor = {
             "plugins": {"attacker": {"path": "/outside"}},

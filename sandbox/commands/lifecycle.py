@@ -79,6 +79,46 @@ def _remote_ensure_reachability(remote_name: str, remote: dict) -> dict | None:
     }
 
 
+def _remote_instance_unavailable(
+    message: str,
+    *,
+    target: Mapping[str, object],
+) -> dict | None:
+    """Return a typed read-only result when the remote has no instance.
+
+    A remote status observation must not turn a missing project instance into
+    an implicit ensure/create request.  The co-located CLI still exits nonzero
+    for this normal state, so normalize only its stable missing-instance
+    diagnostic at the transport boundary.  Keep the remote path out of the
+    public envelope; the selected workspace identity is sufficient evidence.
+    """
+    if not isinstance(message, str):
+        return None
+    normalized = " ".join(message.split()).lower()
+    if "no sandbox instance for project directory" not in normalized:
+        return None
+    return {
+        "ok": False,
+        "status": "unavailable",
+        "error": {
+            "code": "remote_instance_unavailable",
+            "message": "the selected remote workspace has no registered instance",
+        },
+        "feasibility": {
+            "state": "blocked",
+            "reason": "remote_instance_missing",
+            "read_only": True,
+            "mutation_required": True,
+        },
+        "observation": {
+            "freshness": "unavailable",
+            "source": "remote_status",
+            "stale": True,
+        },
+        "target": dict(target),
+    }
+
+
 def _compose_up(
     instance: str,
     services: tuple[str, ...] | list[str],
@@ -623,6 +663,12 @@ def _direct_remote_lifecycle(remote_name: str, instance: str,
     except (TypeError, ValueError):
         payload = None
     if not isinstance(payload, Mapping) and result.returncode != 0:
+        unavailable = _remote_instance_unavailable(
+            result.stderr or result.stdout or "",
+            target=target,
+        )
+        if unavailable is not None:
+            return unavailable
         die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
     if isinstance(payload, Mapping) and result.returncode != 0:
         payload = dict(payload)
@@ -723,6 +769,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         except (TypeError, ValueError):
             payload = None
         if not isinstance(payload, Mapping) and result.returncode != 0:
+            unavailable = _remote_instance_unavailable(
+                result.stderr or result.stdout or "",
+                target={"remote": target.remote_name, "workspace": target.workspace_label},
+            )
+            if unavailable is not None:
+                return unavailable
             die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
         if isinstance(payload, Mapping) and result.returncode != 0:
             payload = dict(payload)

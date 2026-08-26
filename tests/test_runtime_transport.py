@@ -806,6 +806,31 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(payload["exit_code"], 1)
         self.assertEqual(payload["php_extensions"]["issues"][0]["code"], "missing")
 
+    def test_status_json_preserves_remote_missing_instance_feasibility(self):
+        import sandbox.commands.lifecycle as commands
+
+        remote_result = {
+            "ok": False,
+            "status": "unavailable",
+            "error": {
+                "code": "remote_instance_unavailable",
+                "message": "the selected remote workspace has no registered instance",
+            },
+            "feasibility": {
+                "state": "blocked",
+                "reason": "remote_instance_missing",
+                "read_only": True,
+                "mutation_required": True,
+            },
+        }
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result):
+            payload = self._capture_failed_status(commands, {}, self._status_args())
+
+        self.assertEqual(payload["error"]["code"], "remote_instance_unavailable")
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertTrue(payload["feasibility"]["read_only"])
+        self.assertTrue(payload["feasibility"]["mutation_required"])
+
     def test_status_json_fails_closed_on_inconsistent_remote_zero_exit(self):
         import sandbox.commands.lifecycle as commands
 
@@ -844,6 +869,50 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertFalse(forwarded["ok"])
         self.assertEqual(forwarded["exit_code"], 1)
         self.assertEqual(forwarded["php_extensions"], document["php_extensions"])
+
+    def test_remote_missing_instance_status_is_typed_read_only_unavailability(self):
+        import sandbox.commands.lifecycle as commands
+        import sandbox.core._remote as remote
+
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"},
+            remote_name="fixture-remote", project_root="/tmp/project",
+            workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        result = types.SimpleNamespace(
+            returncode=1, stdout="",
+            stderr=(
+                "error: no sandbox instance for project directory "
+                "/srv/sandbox/deploy-src/project-workspace; run `sb ensure ...`\n"
+            ),
+        )
+        args = types.SimpleNamespace(
+            remote="fixture-remote", local=False, project_dir="/tmp/project",
+            workspace="default",
+        )
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "remote_workspace_path",
+                                  return_value="/srv/project"), \
+                mock.patch.object(remote, "remote_sb_path",
+                                  return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result):
+            observed = commands._remote_lifecycle({}, args, "status")
+
+        self.assertFalse(observed["ok"])
+        self.assertEqual(observed["status"], "unavailable")
+        self.assertEqual(observed["error"]["code"], "remote_instance_unavailable")
+        self.assertEqual(observed["feasibility"], {
+            "state": "blocked",
+            "reason": "remote_instance_missing",
+            "read_only": True,
+            "mutation_required": True,
+        })
+        self.assertEqual(observed["target"], {
+            "remote": "fixture-remote", "workspace": "default",
+        })
+        self.assertNotIn("/srv/sandbox", json.dumps(observed))
 
     def test_direct_remote_instance_status_uses_explicit_inner_selector(self):
         import sandbox.commands.lifecycle as commands

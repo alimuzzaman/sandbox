@@ -167,6 +167,11 @@ result. For remote hosts use `remote service diagnostics --processes`.
 When the remote instance name is already known, the remote `status`/`logs`
 forms above target that inner instance directly and do not require a local
 checkout or prepared workspace.
+When a project-root remote status has no registered instance, `--json` returns
+`status: "unavailable"` with `error.code: "remote_instance_unavailable"` and a
+`feasibility` object (`read_only: true`, `mutation_required: true`). This is a
+read-only observation; it never creates an instance or treats the missing
+record as a successful/empty status.
 For durable submissions, pass a stable `--request-id` so an uncertain caller
 can replay the same request without creating a duplicate. A request ID cannot
 turn a direct local or internal `--in-instance` invocation into a durable job;

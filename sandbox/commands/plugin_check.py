@@ -346,7 +346,10 @@ def _archive_failure(
 def _archive_run_id() -> str:
     """Mint a short, lowercase run identity for the isolated target."""
 
-    return f"archive-{uuid.uuid4().hex[:12]}"
+    # Keep ``plugin-check-`` + this identity within Sandbox's 24-character
+    # instance-name budget.  That makes the derived Compose/registry name
+    # deterministic while retaining 40 bits of uniqueness for concurrent runs.
+    return uuid.uuid4().hex[:10]
 
 
 def _archive_report_meta(result: Mapping[str, object], *, baseline_total: int,

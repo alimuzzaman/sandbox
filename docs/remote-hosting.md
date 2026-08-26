@@ -43,6 +43,12 @@ a 120-second minimum and a 3600-second cap. A push timeout is reported as a
 handled, command-free error; inspect the remote deployment state before replaying
 because the final state is unknown.
 
+If the managed remote branch has moved independently, deploy fails with the stable
+`remote_branch_diverged` error code. Sandbox never force-pushes that branch. Inspect
+the remote branch and explicitly reconcile it with the intended local source before
+retrying; the refusal is reported separately from an SSH or unknown Git failure so a
+caller does not blindly replay a conflicting deployment.
+
 Each deploy resets the remote checkout to the pushed revision and removes only
 untracked, non-ignored files before applying the current uncommitted layer. The
 reset is supervised on the remote for 120 seconds with a 15-second termination

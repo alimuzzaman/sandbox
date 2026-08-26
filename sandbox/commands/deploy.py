@@ -45,6 +45,13 @@ def _fail(remote_name: str | None, message: str, as_json: bool,
     die(sr.redact_ssh_connection(message))
 
 
+def _deploy_error_code(error: BaseException, source_ref: str | None) -> str:
+    """Map known safe deploy failures to stable machine-readable codes."""
+    if isinstance(error, sr.RemoteBranchDiverged):
+        return sr.RemoteBranchDiverged.error_code
+    return "source_not_immutable" if source_ref else "deploy_failed"
+
+
 def _require_instance_field(instance: dict, field: str):
     value = instance.get(field)
     if value in (None, ""):
@@ -330,7 +337,7 @@ def cmd_deploy(cfg, args) -> None:
         result = {"ok": False, "remote": remote_name,
                  "remote_selection": "explicit",
                  "source_ref": source_ref, "resolved_commit": None,
-                 "error_code": "source_not_immutable" if source_ref else "deploy_failed",
+                 "error_code": _deploy_error_code(e, source_ref),
                  "pushed_commit": None, "uncommitted_files_applied": 0,
                  "instance": None, "url": None,
             "error": sr.redact_ssh_connection(str(e), entry)}

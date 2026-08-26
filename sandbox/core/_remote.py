@@ -89,6 +89,40 @@ class RemotePushTimeout(RuntimeError):
         )
 
 
+class RemoteBranchDiverged(RuntimeError):
+    """Safe, actionable failure when the managed remote branch moved ahead.
+
+    Deploy is intentionally one-way and never force-pushes a remote branch.
+    Keeping this as a distinct exception lets the CLI/MCP caller choose the
+    explicit reconciliation workflow without exposing Git's remote command or
+    accidentally treating the refusal as an unknown transport failure.
+    """
+
+    error_code = "remote_branch_diverged"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "remote deploy branch diverged; no branch update was applied; "
+            "inspect the remote branch and explicitly reconcile it before "
+            "retrying (force-push is disabled)"
+        )
+
+
+def _is_remote_branch_diverged(result) -> bool:
+    """Recognize Git's non-fast-forward rejection without trusting raw output."""
+    value = (
+        getattr(result, "stderr", "") or getattr(result, "stdout", "") or ""
+    )
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value).lower()
+    return any(pattern in text for pattern in (
+        "non-fast-forward",
+        "fetch first",
+        "remote contains work that you do not have locally",
+    ))
+
+
 def normalize_remote_push_timeout(value: object) -> int:
     """Validate one bounded local Git-push timeout in seconds."""
     if (isinstance(value, bool) or not isinstance(value, int)
@@ -1520,6 +1554,8 @@ def push_commits(
     except subprocess.TimeoutExpired:
         raise RemotePushTimeout(push_timeout) from None
     if res.returncode != 0:
+        if _is_remote_branch_diverged(res):
+            raise RemoteBranchDiverged()
         raise RuntimeError(
             f"git push to remote failed: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"

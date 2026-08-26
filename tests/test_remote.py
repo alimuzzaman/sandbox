@@ -899,6 +899,33 @@ class TestPushCommits(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 2)
 
     @patch("subprocess.run")
+    def test_non_fast_forward_push_has_a_safe_typed_failure(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="a" * 40 + "\n"),
+            _completed(
+                returncode=1,
+                stderr=(
+                    "! [rejected] latest -> latest (non-fast-forward)\n"
+                    "error: failed to push some refs; fetch first\n"
+                ),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                with self.assertRaises(sr.RemoteBranchDiverged) as raised:
+                    sr.push_commits(
+                        {"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                        "/home/ubuntu/sandbox/deploy-src/proj", "latest",
+                    )
+        self.assertEqual(
+            str(raised.exception),
+            "remote deploy branch diverged; no branch update was applied; "
+            "inspect the remote branch and explicitly reconcile it before "
+            "retrying (force-push is disabled)",
+        )
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("subprocess.run")
     @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=PermissionError("denied"))
     def test_push_uses_direct_ssh_when_control_directory_preparation_fails(
         self, mock_ensure, mock_run):
@@ -2469,6 +2496,37 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch("builtins.print"):
                     deploy_cmd.cmd_deploy(None, args)
                 self.assertEqual(push.call_args.kwargs["push_timeout"], 900)
+
+    def test_json_deploy_reports_remote_branch_divergence(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock(
+                    project_dir=str(root), remote="myvps", source_ref=None,
+                    json=True, ensure=False, expose=False, pro_plugins=False,
+                    deploy_timeout=120, include=None, plugin_slug=None,
+                )
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value={
+                        "root": str(root), "slug": "demo", "kind": "wordpress"}), \
+                     patch.object(deploy_cmd, "preflight_project_capability", return_value=None), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="latest"), \
+                     patch.object(sr, "push_commits",
+                                  side_effect=sr.RemoteBranchDiverged()), \
+                     patch("builtins.print") as printed:
+                    with self.assertRaises(SystemExit) as raised:
+                        deploy_cmd.cmd_deploy(None, args)
+                self.assertEqual(raised.exception.code, 1)
+                result = json.loads(printed.call_args.args[0])
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error_code"], "remote_branch_diverged")
+                self.assertIn("force-push is disabled", result["error"])
 
     def test_deploy_rejects_global_instance_selector_before_remote_mutation(self):
         with tempfile.TemporaryDirectory() as d:

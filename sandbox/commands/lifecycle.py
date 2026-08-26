@@ -79,7 +79,12 @@ def _remote_ensure_reachability(remote_name: str, remote: dict) -> dict | None:
     }
 
 
-def _compose_up(instance: str, services: tuple[str, ...] | list[str]) -> object:
+def _compose_up(
+    instance: str,
+    services: tuple[str, ...] | list[str],
+    *,
+    quiet: bool = False,
+) -> object:
     """Start one managed stack and classify stale-network failures.
 
     Compose normally streams its own diagnostics, but a missing network can
@@ -96,6 +101,8 @@ def _compose_up(instance: str, services: tuple[str, ...] | list[str]) -> object:
     if isinstance(returncode, bool) or not isinstance(returncode, int):
         returncode = 0
     if returncode == 0:
+        if quiet:
+            return result
         for stream, to_stderr in (
             (getattr(result, "stdout", ""), False),
             (getattr(result, "stderr", ""), True),
@@ -130,12 +137,23 @@ def _compose_up(instance: str, services: tuple[str, ...] | list[str]) -> object:
 
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
+    json_output = bool(getattr(args, "json", False))
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("kind") == "compose":
         result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "start", label=owner.get("label", "default")))
         if isinstance(result, OperationError):
             die(result.message)
-        ok(f"Generic Compose: {result.data.get('url', '')}")
+        url = result.data.get("url", "")
+        if json_output:
+            print(json.dumps({
+                "ok": True,
+                "command": "up",
+                "instance": inst,
+                "runtime": "compose",
+                "url": url,
+            }, sort_keys=True))
+        else:
+            ok(f"Generic Compose: {url}")
         return
     inst_cfg = resolve_instances(cfg)[inst]
     if inst_cfg.get("server") == "herd":
@@ -144,7 +162,17 @@ def cmd_up(cfg: dict, args) -> None:
         if wp_dir(inst).exists():
             _write_host_runtime_muplugins(inst)
             _remove_obsolete_builder_authoring_assets(inst)
-        ok(f"WordPress: {site_url(inst_cfg)}  (host-served by Herd)")
+        url = site_url(inst_cfg)
+        if json_output:
+            print(json.dumps({
+                "ok": True,
+                "command": "up",
+                "instance": inst,
+                "runtime": "herd",
+                "url": url,
+            }, sort_keys=True))
+        else:
+            ok(f"WordPress: {url}  (host-served by Herd)")
         return
     # Clean-URL reconciliation is owned by the composed ingress/resolver
     # lifecycle.  Never invoke the unreceipted aggregate proxy on instance up.
@@ -152,7 +180,11 @@ def cmd_up(cfg: dict, args) -> None:
     # removes stale sidecars left behind after switching web-server modes
     # (for example an old nginx service), so repeated setup cannot accumulate
     # orphan containers.
-    _compose_up(inst, _web_services(inst_cfg.get("server", "nginx")))
+    services = _web_services(inst_cfg.get("server", "nginx"))
+    if json_output:
+        _compose_up(inst, services, quiet=True)
+    else:
+        _compose_up(inst, services)
     if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
         # Verify the image that just started before any project/WP wiring is
         # allowed to run.  The probe is standalone PHP and does not touch the
@@ -205,8 +237,20 @@ def cmd_up(cfg: dict, args) -> None:
                 save_local_bridge_token(_tok, instance=inst)
             _write_snapshot_muplugin(inst, _tok)
             _ensure_bridge_server()
-    ok(f"WordPress: {site_url(inst_cfg)}")
-    ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
+    url = site_url(inst_cfg)
+    mailpit_url = f"http://localhost:{inst_cfg['mailpit_port']}"
+    if json_output:
+        print(json.dumps({
+            "ok": True,
+            "command": "up",
+            "instance": inst,
+            "runtime": "wordpress",
+            "url": url,
+            "mailpit_url": mailpit_url,
+        }, sort_keys=True))
+    else:
+        ok(f"WordPress: {url}")
+        ok(f"Mailpit:   {mailpit_url}")
 
 
 def _prepare_mu_plugin_directory(instance: str) -> None:
@@ -1426,7 +1470,11 @@ def configure_parser(sub) -> None:
     own both its handlers and parser definitions, so future lifecycle flags
     do not grow the central composition root.
     """
-    sub.add_parser("up", help="Boot the docker stack")
+    up = sub.add_parser("up", help="Boot the docker stack")
+    up.add_argument(
+        "--json", action="store_true",
+        help="emit one machine-readable success envelope",
+    )
     sub.add_parser("down", help="Stop the stack")
     status = sub.add_parser("status", help="Show container + project status")
     status.add_argument(

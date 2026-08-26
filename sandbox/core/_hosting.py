@@ -220,6 +220,27 @@ def _environment_choices(environments: dict) -> str:
     return ", ".join(visible) or "(none)"
 
 
+def environment_names(project_dir: str | Path) -> tuple[str, ...]:
+    """Return declared hosting environment names in deterministic order.
+
+    This is a read-only discovery helper for callers that explicitly want to
+    validate every environment.  Individual validation still goes through
+    :func:`validate_manifest`, so this helper never turns discovery into a
+    deploy or secret-resolution operation.
+    """
+    _root, manifest = load_manifest(project_dir)
+    environments = manifest.get("environments")
+    if not isinstance(environments, dict) or not environments:
+        raise HostingError("manifest requires a non-empty environments mapping")
+    names = tuple(sorted(
+        (name for name in environments if isinstance(name, str)),
+        key=lambda value: _environment_display_name(value),
+    ))
+    if len(names) != len(environments):
+        raise HostingError("manifest environment names must be strings")
+    return names
+
+
 def _environment_values(value: object, name: str) -> dict[str, str]:
     if value is None:
         return {}

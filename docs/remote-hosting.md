@@ -393,6 +393,17 @@ Sandbox does not infer a default environment. If a selection is missing or unkno
 validation lists a bounded, escaped set of the declared names so the choice can be
 corrected without exposing manifest text as terminal control sequences.
 
+For a read-only inventory of a multi-environment manifest, use the explicit
+`--all` mode with `validate`:
+
+```bash
+./sb host validate --project-dir /path/to/site --all --json
+```
+
+The result contains one bounded validation document per declared environment and a
+top-level `ok` value. It exits non-zero if any environment is invalid. `--all` cannot
+be combined with `--environment` and is rejected for mutating or remote actions.
+
 ```bash
 ./sb host validate --project-dir /path/to/site
 ./sb host plan --project-dir /path/to/site --environment production --remote myvps

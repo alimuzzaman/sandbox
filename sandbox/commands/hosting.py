@@ -31,6 +31,23 @@ def _emit(data: dict, as_json: bool) -> None:
         print(f"  {route['mode']}: {route['hostname']}{suffix}")
 
 
+def _validate_all_environments(project_dir: str | Path) -> list[dict]:
+    """Validate every declared environment without contacting a remote.
+
+    Each result keeps its own success/error state so callers can fix one
+    environment without losing the evidence for the others.  Validation is
+    intentionally still performed one environment at a time through the
+    canonical manifest validator.
+    """
+    results: list[dict] = []
+    for name in hosting.environment_names(project_dir):
+        try:
+            results.append({"ok": True, **hosting.validate_manifest(project_dir, name)})
+        except hosting.HostingError as exc:
+            results.append({"ok": False, "environment": name, "error": str(exc)})
+    return results
+
+
 def _zone_for_hostname(client, hostname: str) -> dict:
     """Find the closest Cloudflare zone without assuming a public suffix list."""
     labels = hostname.removeprefix("*.").split(".")
@@ -1116,6 +1133,30 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
 
 def cmd_host(cfg, args) -> None:
+    if getattr(args, "all", False):
+        if args.action != "validate":
+            die("--all is only valid with `host validate`; no command was executed")
+        if getattr(args, "environment", None):
+            die("--all cannot be combined with --environment; no command was executed")
+        try:
+            results = _validate_all_environments(args.project_dir or ".")
+        except hosting.HostingError as exc:
+            die(str(exc))
+        all_ok = all(result.get("ok") is True for result in results)
+        payload = {"ok": all_ok, "action": "validate", "environments": results}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(f"validated {len(results)} hosting environments")
+            for result in results:
+                name = result.get("environment", "<unknown>")
+                if result.get("ok"):
+                    print(f"  {name}: ok")
+                else:
+                    print(f"  {name}: invalid ({result.get('error', 'validation failed')})")
+        if not all_ok:
+            raise SystemExit(1)
+        return
     try:
         validated = hosting.validate_manifest(args.project_dir or ".", args.environment)
     except hosting.HostingError as exc:

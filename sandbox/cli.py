@@ -853,6 +853,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
+    host_p.add_argument("--all", action="store_true",
+        help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
     host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",

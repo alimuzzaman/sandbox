@@ -94,6 +94,13 @@ class TestHostingManifest(unittest.TestCase):
             result = hosting.validate_manifest(directory)
         self.assertEqual(result["environment"], "production")
 
+    def test_environment_names_are_deterministic_for_all_validation(self):
+        with self._write(_manifest_with_environments(["production", "development"])) as directory:
+            self.assertEqual(
+                hosting.environment_names(directory),
+                ("development", "production"),
+            )
+
     def test_validates_deploy_derived_environment(self):
         with self._write(_manifest_with_derived_revision()) as directory:
             result = hosting.validate_manifest(directory)
@@ -1149,6 +1156,22 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("commit", plan["runtime"])
         self.assertNotIn("value", plan["runtime"]["derived_environment"][0])
 
+    def test_host_validate_all_emits_one_result_per_environment(self):
+        with self._write(_manifest_with_environments(["production", "development"])) as directory:
+            args = types.SimpleNamespace(
+                action="validate", project_dir=directory, environment=None,
+                all=True, json=True,
+            )
+            with patch("builtins.print") as printed:
+                hosting_cmd.cmd_host(None, args)
+
+        payload = json.loads(printed.call_args.args[0])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [item["environment"] for item in payload["environments"]],
+            ["development", "production"],
+        )
+        self.assertTrue(all(item["ok"] for item in payload["environments"]))
     def test_host_apply_json_returns_sanitized_revision_evidence(self):
         revision = "d" * 40
         with self._write(_manifest_with_derived_revision()) as directory:

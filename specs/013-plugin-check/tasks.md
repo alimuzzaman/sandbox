@@ -333,9 +333,10 @@ note; the source-tree Plugin Check path remains unchanged.
   provenance, inactive-target proofs, retained reports, complete seven-plane
   cleanup receipts, and a direct source/archive `(file, rule)` identity
   regression plus a live source/archive parity run with matching four ERROR
-  identities. The repository-wide regression is still a separate open gate: a
-  bounded isolated run executed 3,371 tests (7 failures, 3 errors,
-  18 skips) after omitting the unbounded `test_resource_remote` module; the
-  failures are existing architecture/runtime-transport baseline drift, not an
-  archive acceptance pass. Keep T041 open until that baseline is reconciled and
-  source/archive finding-key parity has a clean end-to-end proof.
+  identities. The repository-wide gate is still separate: a bounded run
+  executed 3,298 tests with 19 skips and passed after omitting the unbounded
+  `test_resource_remote`, optional `test_server_transport`, and separately
+  verified `test_cli` modules. The full CLI slice (82 tests) and audit-agent
+  slice (25 tests) also passed. Keep T041 open only until remote-resource
+  acceptance is bounded and the optional MCP transport environment is tested;
+  source/archive finding-key parity itself is complete.

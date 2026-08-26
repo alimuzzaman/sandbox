@@ -303,6 +303,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                                      reveal_login=True)
         with mock.patch("sandbox.application.context.durable_job_dependencies",
                         return_value={"target_service": service}), \
+                mock.patch.object(commands, "_remote_ensure_reachability",
+                                  return_value=None), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
                 mock.patch.object(remote, "prepare_remote_workspace",
@@ -335,6 +337,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                                      reveal_login=True)
         with mock.patch("sandbox.application.context.durable_job_dependencies",
                         return_value={"target_service": service}), \
+                mock.patch.object(commands, "_remote_ensure_reachability",
+                                  return_value=None), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
                 mock.patch.object(remote, "prepare_remote_workspace",
@@ -1009,6 +1013,8 @@ class TestStatusJsonRedaction(unittest.TestCase):
                                      project_dir="/tmp/project", workspace="default")
         with mock.patch("sandbox.application.context.durable_job_dependencies",
                         return_value={"target_service": service}), \
+                mock.patch.object(commands, "_remote_ensure_reachability",
+                                  return_value=None), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
                 mock.patch.object(remote, "prepare_remote_workspace",

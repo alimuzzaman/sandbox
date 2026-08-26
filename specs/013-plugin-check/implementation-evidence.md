@@ -68,9 +68,13 @@ Drive, recovery, commit, or push action occurred.
   the fixture side-effect sentinel absent, no review registry/runtime paths,
   and no matching Docker containers, networks, or volumes. The stale exact
   archive-test stacks from earlier debugging were also removed by exact name.
-- A full isolated unittest discovery (excluding only the unbounded
-  `test_resource_remote` module) executed 3,371 tests and ended with 7
-  failures, 3 errors, and 18 skips. The failures are existing architecture,
-  CLI-baseline, and runtime-transport drift; this is recorded as an open
-  repository gate, not as archive acceptance success. The earlier unbounded
-  discovery was stopped after it entered that resource-scan module.
+- The bounded repository regression was rerun after the archive and baseline
+  fixes: 3,298 tests passed with 19 skips. It excluded only the unbounded
+  `test_resource_remote` module, the optional `test_server_transport` module
+  (its MCP dependencies are not installed in `.cli-venv`), and the full
+  `test_cli` module, which was independently rerun at 82 tests and passed.
+  The audit-agent pair was independently rerun at 25 tests and passed. The
+  previously reported architecture, command-inventory, modularity,
+  status-envelope, and remote-ensure fixture failures are therefore cleared.
+  T041 remains open only for a bounded remote-resource acceptance and the
+  optional MCP transport environment; this is not an archive-path failure.

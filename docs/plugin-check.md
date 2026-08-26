@@ -186,8 +186,11 @@ checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
 and failure evidence. The CLI integration and disposable acceptance are now
 complete. Focused and live regressions prove source-tree and archive paths
-produce the same `(file, rule)` baseline identity. The exact-archive feedback
-records remain open only until the full repository regression gate is clean.
+produce the same `(file, rule)` baseline identity; the two direct exact-archive
+feedback records are independently verified. A separate repository release
+gate still tracks bounded remote-resource acceptance and the optional MCP
+transport environment. The post-install bootstrap-integrity idea remains a
+separate blocked item until it has its own runtime smoke proof.
 
 ## 5. What changed porting from the reference implementation
 

@@ -1000,7 +1000,9 @@ def _assert_apply_runtime_dependencies(name: str, server: str,
             "create or replace its database volume. Inspect `sb status "
             f"--instance {name} --json` and restore the existing database "
             f"runtime with `sb up --instance {name}` or restore a snapshot "
-            "before retrying."
+            "before retrying. For a disposable review stack, use `sb ensure "
+            "--project-dir <project-dir> --label recovery --create --local` "
+            "to provision a separate database without replacing this one."
         )
 
 

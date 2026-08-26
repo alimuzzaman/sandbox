@@ -668,6 +668,13 @@ Extension failures use the stable codes `missing`, `version_mismatch`,
 `sb apply` rebuilds only
 the WordPress web tier (`wp` plus nginx when selected); DB, Mailpit, uploads,
 snapshots, and project files are preserved.
+
+If apply finds that an existing instance has no running `db` service, it fails
+closed and does not create or replace the database volume. Restore that named
+instance with `sb up --instance NAME` or a snapshot. For a disposable review,
+use a new label instead: `sb ensure --project-dir DIR --label recovery
+--create --local`; this provisions a separate database without touching the
+stale instance.
 Status JSON omits credential-like fields and redacts `sandbox_autologin` values.
 
 ## Host driver (`server: "herd"`)

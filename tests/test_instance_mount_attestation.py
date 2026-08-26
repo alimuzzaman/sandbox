@@ -398,7 +398,9 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
                     mock.patch.object(_instances, "_local_yaml",
                                       side_effect=AssertionError("state write path reached")):
                 with self.assertRaisesRegex(
-                        RuntimeError, "required database service 'db' is missing"):
+                        RuntimeError,
+                        "required database service 'db' is missing.*"
+                        "sb ensure --project-dir <project-dir> --label recovery"):
                     _instances.apply_config({}, str(root))
 
 

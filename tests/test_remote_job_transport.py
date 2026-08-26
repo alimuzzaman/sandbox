@@ -614,6 +614,10 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["health"], "unreachable")
         self.assertEqual(result["lifecycle"], "unknown")
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["code"], "remote_job_transport_error")
+        self.assertEqual(result["operation"], "job-status")
+        self.assertEqual(result["acceptance"], None)
 
     def test_output_controls_and_matrix_deploy_once(self):
         calls = []

@@ -768,9 +768,17 @@ class RemoteJobTransport:
                                 "workspace": result.get("workspace_label")}
             return result
         except RemoteJobTransportError as exc:
-            return {"ok": False, "job_id": job_id, "lifecycle": "unknown",
-                    "health": "unreachable", "target": {"kind": "remote", "remote": remote_name},
-                    "error": str(exc)}
+            # Preserve the legacy lifecycle/health fields while carrying the
+            # bounded typed envelope through status callers. This distinguishes
+            # an unobservable job from terminal success without exposing raw
+            # SSH/controller diagnostics.
+            payload = exc.to_payload(remote=remote_name, operation="job-status")
+            payload.update({
+                "job_id": job_id,
+                "lifecycle": "unknown",
+                "health": "unreachable",
+            })
+            return payload
 
     def list(self, remote_name: str, *, limit: int = 50, project_dir: str | None = None,
              project_identity: str | None = None, workspace: str | None = None,

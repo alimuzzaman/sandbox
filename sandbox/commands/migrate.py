@@ -611,6 +611,19 @@ def finalize_auto_migration(cfg) -> bool:
 def cmd_home(cfg, args) -> None:
     target = getattr(args, "dir", None)
     if not target:
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "ok": True,
+                "command": "home",
+                "base": str(BASE),
+                "runtime": str(RUNTIME_DIR),
+                "runtime_present": _state_present(RUNTIME_DIR),
+                "config": str(CONFIG_FILE),
+                "config_exists": CONFIG_FILE.exists(),
+                "feedback": str(RUNTIME_DIR / "feedback"),
+                "feedback_exists": (RUNTIME_DIR / "feedback").exists(),
+            }, sort_keys=True))
+            return
         info(f"SANDBOX_HOME base: {BASE}")
         info(f"  runtime: {RUNTIME_DIR}  (present: {_state_present(RUNTIME_DIR)})")
         info(f"  config : {CONFIG_FILE}  (exists: {CONFIG_FILE.exists()})")

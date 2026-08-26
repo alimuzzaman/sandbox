@@ -508,6 +508,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help=argparse.SUPPRESS)  # internal: post-move re-exec pass
     hm = sub.add_parser("home",
         help="Show the $SANDBOX_HOME base, or relocate it: `./sb home <dir>`")
+    hm.add_argument("--json", action="store_true",
+        help="emit the base, runtime, config, and feedback paths as JSON")
     hm.add_argument("dir", nargs="?", help="new base directory to relocate to")
 
 

@@ -11,6 +11,7 @@ RUNTIME_DECLARATIONS = (
      "adoptable": True},
     {"adapter_id": "ubuntu-nspawn", "modes": ("managed_native",),
      "platforms": ("ubuntu-24.04",), "isolation": "managed_container",
+     "capabilities": ("outbound_credential_mediation",),
      "support_tier": "implemented_unproven", "evidence_id": None,
      "adoptable": False},
     {"adapter_id": "herd", "modes": ("incumbent_native",),

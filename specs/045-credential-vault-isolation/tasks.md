@@ -33,8 +33,8 @@ release. The final acceptance tasks depend on all four stories.
 **Goal**: Establish safe feature-owned fixtures and registration points without
 introducing a secret value or changing an existing runtime default.
 
-- [ ] T001 [P] Add feature-owned contract-test fixture metadata with only fake references and redacted expected values in `tests/fixtures/credential_vault/README.md`
-- [ ] T002 [P] Register the new capability and contract module names through the existing manifest/registry extension points in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`, preserving `implemented_unproven` and `adoptable=false` until evidence exists
+- [x] T001 [P] Add feature-owned contract-test fixture metadata with only fake references and redacted expected values in `tests/fixtures/credential_vault/README.md`. **DONE:** fixture contains no credential value and remains safe before the live proof gate.
+- [x] T002 [P] Register the new capability and contract module names through the existing manifest/registry extension points in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`, preserving `implemented_unproven` and `adoptable=false` until evidence exists. **DONE:** `outbound_credential_mediation` is declared for managed-native only; no runtime path is enabled.
 
 ## Phase 2: Foundational
 

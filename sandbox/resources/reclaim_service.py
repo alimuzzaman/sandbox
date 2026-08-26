@@ -561,7 +561,9 @@ class ReclaimService:
     def _load_for_execution(self, plan_id: str, target: StorageTarget):
         """Begin a plan, resuming one that a previous run left in progress."""
         try:
-            return self.plan_store.begin(plan_id, target), False
+            return self.plan_store.begin(
+                plan_id, target, expected_scopes=policy.TIERS,
+            ), False
         except ResourcePlanError as exc:
             if getattr(exc, "code", "") != "plan_already_used":
                 raise

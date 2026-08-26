@@ -275,6 +275,11 @@ Plans expire after 15 minutes, bind to one host identity, and store internal
 locators only in owner-readable records under
 `$SANDBOX_HOME/runtime/resource-plans/`.
 
+Plan kinds are separate: `cache` and `stale` belong to `resources cleanup`,
+while `safe`, `tmp`, and `all` belong to `workspace reap`. Passing a plan from
+the other operation returns `plan_kind_mismatch` before target comparison or
+any host mutation.
+
 ## Apply a reviewed plan
 
 Confirmation is mandatory:

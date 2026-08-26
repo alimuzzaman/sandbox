@@ -54,6 +54,17 @@ class TestPlanStore(unittest.TestCase):
         with self.assertRaisesRegex(ResourcePlanError, "already"):
             self.store.begin(self.plan.plan_id, target())
 
+    def test_expected_scope_rejects_a_plan_from_another_cleanup_operation(self):
+        self.store.save(self.plan)
+
+        with self.assertRaisesRegex(ResourcePlanError, "plan kind") as raised:
+            self.store.begin(
+                self.plan.plan_id, target(),
+                expected_scopes={"safe", "tmp", "all"},
+            )
+
+        self.assertEqual(raised.exception.code, "plan_kind_mismatch")
+
     def test_unknown_and_invalid_ids_fail_closed(self):
         with self.assertRaises(ResourcePlanError):
             self.store.load("../../bad")

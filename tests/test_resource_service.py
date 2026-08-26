@@ -14,6 +14,7 @@ from sandbox.resources.attribution import (
     reconcile_attribution,
 )
 from sandbox.resources.models import (
+    CleanupPlan,
     CleanupItemOutcome,
     ResourceObservation,
 )
@@ -535,6 +536,20 @@ class TestResourceService(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "confirmation_required")
         self.assertEqual(adapter.observe_calls, [])
+
+    def test_cleanup_rejects_a_workspace_reap_plan_with_typed_kind_error(self):
+        adapter = FakeAdapter()
+        service = self.service(adapter)
+        plan = CleanupPlan.create(
+            target(), "safe", (), (), now=self.now,
+        )
+        service.plan_store.save(plan)
+
+        payload = service.cleanup(plan.plan_id, confirm=True)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "plan_kind_mismatch")
+        self.assertEqual(adapter.removed, [])
 
     def test_cleanup_revalidates_and_skips_changed_candidate(self):
         cache = observation("cache", size_bytes=500)

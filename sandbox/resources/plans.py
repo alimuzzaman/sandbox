@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Callable
+from typing import Callable, Iterable
 
 from .models import CleanupPlan, CleanupRun, StorageTarget, utc_now
 
@@ -100,10 +100,16 @@ class PlanStore:
         with self._locked():
             return self._read(self._path(plan_id))
 
-    def begin(self, plan_id: str, target: StorageTarget) -> CleanupPlan:
+    def begin(self, plan_id: str, target: StorageTarget,
+              *, expected_scopes: Iterable[str] | None = None) -> CleanupPlan:
         with self._locked():
             path = self._path(plan_id)
             plan = self._read(path)
+            if expected_scopes is not None and plan.scope not in frozenset(expected_scopes):
+                raise ResourcePlanError(
+                    "plan kind does not match the selected cleanup operation",
+                    "plan_kind_mismatch",
+                )
             if plan.target != target:
                 raise ResourcePlanError(
                     "plan target does not match the selected host",

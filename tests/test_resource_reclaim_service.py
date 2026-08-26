@@ -7,6 +7,7 @@ rather than re-implemented in a mock.
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import tempfile
@@ -14,7 +15,7 @@ import time
 import unittest
 
 from sandbox.resources.context import PlanStore
-from sandbox.resources.models import StorageTarget
+from sandbox.resources.models import CleanupPlan, StorageTarget
 from sandbox.resources.reclaim_service import ReclaimService
 from sandbox.resources.remote import LocalProbeAdapter
 
@@ -185,6 +186,19 @@ class TestExecution(ServiceCase):
         payload = self.service(FakeProvider()).cleanup(confirm=True)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "invalid_tier")
+
+    def test_cleanup_rejects_a_resource_scope_plan_with_typed_kind_error(self):
+        plan = CleanupPlan.create(
+            TARGET, "cache", (), (), now=datetime.now(timezone.utc),
+        )
+        self.store.save(plan)
+
+        payload = self.service(FakeProvider()).cleanup(
+            plan_id=plan.plan_id, confirm=True,
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "plan_kind_mismatch")
 
     def test_cleanup_executes_the_reviewed_candidate_set(self):
         provider = FakeProvider()

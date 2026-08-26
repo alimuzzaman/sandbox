@@ -566,7 +566,9 @@ class ResourceService:
                     "target identity changed during measurement",
                     "target_identity_changed",
                 )
-            plan = self.plan_store.begin(plan_id, target)
+            plan = self.plan_store.begin(
+                plan_id, target, expected_scopes={"cache", "stale"},
+            )
         except (ResourcePlanError, ResourceError, OSError, RuntimeError) as exc:
             error = exc if isinstance(exc, (ResourcePlanError, ResourceError)) else ResourceError(
                 "cleanup target could not be resolved", "cleanup_failed",

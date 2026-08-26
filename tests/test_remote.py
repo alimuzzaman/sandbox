@@ -1727,14 +1727,22 @@ class TestRemoteDoctorChecks(unittest.TestCase):
 
 
 class TestMcpHttpsTransportArguments(unittest.TestCase):
+    def _run_mcp_with_fake_runtime(self, args):
+        """Keep argv-construction tests independent of the optional MCP venv."""
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory)
+            (venv / "bin").mkdir()
+            (venv / "bin" / "python").touch()
+            with patch.object(integ_cmd, "MCP_VENV", venv), patch("os.execv") as execv:
+                integ_cmd.cmd_mcp(None, args)
+            return execv.call_args.args[1]
+
     def test_cmd_mcp_forwards_public_url_to_the_server(self):
         args = types.SimpleNamespace(
             transport="streamable-http", bind="127.0.0.1", port=9174,
             token="test-token", public_url="https://sandbox.example.com",
         )
-        with patch("os.execv") as execv:
-            integ_cmd.cmd_mcp(None, args)
-        argv = execv.call_args.args[1]
+        argv = self._run_mcp_with_fake_runtime(args)
         self.assertEqual(argv[-2:], ["--public-url", "https://sandbox.example.com"])
 
     def test_cmd_mcp_allows_remote_environment_token_without_argv(self):
@@ -1742,10 +1750,8 @@ class TestMcpHttpsTransportArguments(unittest.TestCase):
             transport="streamable-http", bind="127.0.0.1", port=9174,
             token=None, public_url=None, project_dir=None,
         )
-        with patch.dict(os.environ, {"SANDBOX_REMOTE_MCP_TOKEN": "environment-secret"}), \
-             patch("os.execv") as execv:
-            integ_cmd.cmd_mcp(None, args)
-        argv = execv.call_args.args[1]
+        with patch.dict(os.environ, {"SANDBOX_REMOTE_MCP_TOKEN": "environment-secret"}):
+            argv = self._run_mcp_with_fake_runtime(args)
         self.assertNotIn("--token", argv)
         self.assertNotIn("environment-secret", argv)
 

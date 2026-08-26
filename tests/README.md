@@ -46,6 +46,9 @@ execution paths; none run the Sandbox Python package tests.
 skips cleanly if the MCP venv isn't built (`./sb mcp-install`). Registry tests
 isolate state via the `SANDBOX_RUNTIME` env var.
 
+The remote MCP transport argument tests use a temporary executable placeholder,
+so they cover command construction without requiring the optional MCP venv.
+
 ## Plugin tests ("from the instance")
 
 For its `auto` and `integration` modes, `sb test --project-dir <plugin>`

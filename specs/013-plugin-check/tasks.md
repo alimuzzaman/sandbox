@@ -308,7 +308,7 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
   `SANDBOX_HOME` and `SANDBOX_PROJECT_ROOTS`, forced local Compose, inactive
   read-only target, active pinned Plugin Check only, invoking-UID readability,
   and no inherited global config, secrets, aliases, domains, or hooks.
-- [ ] T038 Implement the owner-only journal, idempotent cleanup/recovery service,
+- [x] T038 Implement the owner-only journal, idempotent cleanup/recovery service,
   per-plane absence checks, retained unknown-state receipt, and fault-injection
   tests for descriptor, journal, registry, boot, check, report, and every cleanup
   boundary.

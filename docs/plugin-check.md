@@ -145,6 +145,14 @@ plugin inactive/read-only, and activates only the pinned Plugin Check entry.
 It does not start the runtime or rewrite the caller baseline; journaled cleanup
 and CLI integration remain separate gates.
 
+The journal and cleanup primitives are implemented in
+`sandbox/plugin_check/journal.py`. A mode-0600 journal records lifecycle intent
+before each phase, and cleanup checks container, network, volume, runtime,
+registry, extraction, and retained-report planes independently. Any failed or
+unproven plane is retained as `unknown` with `recovery_required: true`; retrying
+the same callbacks through `recover_archive_cleanup` is idempotent. These
+primitives still do not choose Docker/registry operations themselves.
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,

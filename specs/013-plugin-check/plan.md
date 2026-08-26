@@ -22,8 +22,8 @@ project-specific inputs (plugin slug, exclude-directories, version-header file) 
 The source-tree implementation above is complete for its existing contract.
 Exact archive checking is a separate, not-yet-authorized extension described in
 `archive-mode-design.md`. The pure host preflight, deterministic fixture corpus,
-and run-local target/config builder are now implemented as the first three gated
-tasks; the CLI remains
+run-local target/config builder, and owner-only journal/cleanup primitives are
+now implemented as the first four gated tasks; the CLI remains
 disabled until the remaining tasks prove hostile-ZIP limits,
 single-descriptor extraction, run-local inherited-state isolation, inactive
 static-only target execution, pinned checker provenance, retained owner-only

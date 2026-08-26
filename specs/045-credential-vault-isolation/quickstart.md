@@ -62,6 +62,26 @@ The implementation quickstart must exercise at least:
 | Missing or drifted native proof | Capability reports blocked/unproven; no workload entry |
 | Hostile guest inspection | Zero credential bytes on enumerated exposure surfaces |
 
+## Foundational local evidence
+
+The contract-only slice is available for review without enabling the managed
+runtime or resolving a real credential:
+
+```sh
+python3 -m unittest tests.test_credential_capability_report \
+  tests.test_credential_binding tests.test_credential_resolver
+python3 -m unittest tests.test_native_ownership tests.test_native_network_reservation \
+  tests.test_managed_plan tests.test_managed_native_adapter tests.test_isolation_credentials \
+  tests.test_native_destroy tests.test_native_recovery
+```
+
+The first command currently passes 19 tests and the regression command passes
+53 tests. These are local model/repository/source-policy checks only. They do
+not close the Ubuntu 24.04 predecessor proof gate, start a broker, or authorize
+credential-bearing use. The capability remains `implemented_unproven` with
+`adoptable=false` until T003 and the later hostile live matrix are independently
+verified.
+
 ## Regression evidence
 
 Run the narrow unit/contract suites for the new resolver, binding, broker,

@@ -1083,7 +1083,13 @@ Valet, and POSIX status truthfully reports shared-host/lower isolation.
 Mode/adapter changes are refused once an instance contains data. Export/recreate/import is a
 separate future workflow; ordinary `ensure` and `apply` never migrate between runtimes.
 Use `./sb native support --json` and `./sb native preflight --project-dir . --json` before
-selection. See [native-runtime-isolation.md](native-runtime-isolation.md).
+selection. Use `./sb native credential-status --json` to inspect the separate
+managed Credential Vault declaration and status-only binding projection. It is
+read-only and remains blocked while support is `implemented_unproven` or
+`adoptable` is false. No credential value, source content, lease, or
+authorization header is accepted or returned by this command. See
+[native-runtime-isolation.md](native-runtime-isolation.md) and
+[credential-vault.md](credential-vault.md).
 
 ## Where it's consumed
 

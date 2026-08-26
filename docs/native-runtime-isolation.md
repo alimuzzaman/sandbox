@@ -2,7 +2,9 @@
 
 Sandbox keeps Compose as the default WordPress runtime. Native execution is opt-in from a
 gitignored machine override and is never selected from detection alone. `./sb native
-support --json` is the authoritative support advertisement.
+support --json` is the authoritative support advertisement. The separate
+`./sb native credential-status --json` report is the status-only, fail-closed
+surface for the managed Credential Vault; it does not enable the capability.
 
 ## Runtime classes
 
@@ -75,6 +77,20 @@ validated without following links, transferred through a fixed helper verb, inst
 the guest's private `/run/credentials/sandbox/`, and removed from staging in a `finally`
 path. Secret bytes never appear in argv, environment, helper output, ownership state, status,
 recovery records, or evidence.
+
+The managed Credential Vault is a separate proof-gated path for an explicit
+application-layer HTTPS request. It binds one opaque registered source to one
+exact instance/host/port/method/path and applies only a registered bearer or
+API-key profile at the trusted broker boundary. The guest never receives the
+credential. `native credential-status` reports only status, exact non-secret
+scope, lifecycle, expiry, and proof/refusal fields. The report stays
+`implemented_unproven`/`adoptable=false` until the authorized Ubuntu live
+matrix and hostile no-leak/revoke/restart evidence pass. See
+[credential-vault.md](credential-vault.md).
+
+The existing owner-only native credential store remains a plaintext-at-rest
+residual risk. It is not silently upgraded by the Vault contracts, and the
+fixed privileged helper still never receives Vault credential bytes.
 
 ## Incumbent limitations and route ownership
 

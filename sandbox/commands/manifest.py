@@ -16,6 +16,8 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.data",
     "sandbox.commands.wp",
     "sandbox.commands.domains",
+    # Native owns the managed-runtime support/preflight surface, including the
+    # secret-free Credential Vault capability/binding status report.
     "sandbox.commands.native",
     "sandbox.commands.net",
     "sandbox.commands.debug",

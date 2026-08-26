@@ -979,6 +979,26 @@ def runtime_service(cfg):
                           backends=backends, resolve_persisted=persisted_selection)
 
 
+def managed_native_credential_repository():
+    """Open existing managed-native binding metadata for read-only status.
+
+    The application context owns Sandbox state-path composition. Returning
+    ``None`` for an absent state file avoids creating a global directory during
+    a status-only command; ``CredentialRepository`` uses the repository's
+    read-only snapshot path for an existing file.
+    """
+    import sandbox_core as sc
+    from pathlib import Path
+
+    from sandbox.runtimes.managed.credential_repository import CredentialRepository
+    from sandbox.runtimes.managed.repository import NativeRepository
+
+    path = Path(sc.sandbox_base()) / "runtime" / "native" / "state.json"
+    if not path.is_file():
+        return None
+    return CredentialRepository(NativeRepository(path))
+
+
 def wordpress_runtime_service(cfg):
     """Backward-compatible name for the shared runtime composition root."""
     return runtime_service(cfg)

@@ -42,10 +42,10 @@ introducing a secret value or changing an existing runtime default.
 opaque resolver, binding, persistence, and contract seams used by every story.
 
 - [ ] T003 Run the authorized Ubuntu 24.04 managed-native hostile, grant/revoke, exhaustion, warm-start, cleanup, and end-to-end acceptance matrix and update only its evidence records in `specs/039-native-runtime-adoption/evidence/README.md` and `specs/039-native-runtime-adoption/evidence/`
-- [ ] T004 Define the broker-only opaque reference resolver and one-use lease interface, including registered-source ownership checks and no plaintext-return operation, in `sandbox/isolation/credential_resolver.py`
-- [ ] T005 Add immutable exact-scope binding and lifecycle models with canonicalization, state transitions, expiry, and version/CAS invariants in `sandbox/isolation/credential_binding.py`
-- [ ] T006 Add durable binding metadata persistence that stores references/digests/state only and uses the existing repository/locking authority in `sandbox/runtimes/managed/credential_repository.py`
-- [ ] T007 [P] Add foundational unit and contract coverage for resolver refusal, binding canonicalization, secret-free serialization, CAS conflicts, and state transitions in `tests/test_credential_binding.py` and `tests/test_credential_resolver.py`
+- [x] T004 Define the broker-only opaque reference resolver and one-use lease interface, including registered-source ownership checks and no plaintext-return operation, in `sandbox/isolation/credential_resolver.py`. **DONE:** leases require a ready binding, registered owner-only source, and one callback use; direct `resolve()` is a stable refusal and bytes cannot be returned as the callback result.
+- [x] T005 Add immutable exact-scope binding and lifecycle models with canonicalization, state transitions, expiry, and version/CAS invariants in `sandbox/isolation/credential_binding.py`. **DONE:** HTTPS/443, DNS, exact path/method, approved auth forms, digest, state, revoke/expiry, and versioned update invariants are enforced without secret-bearing repr/serialization.
+- [x] T006 Add durable binding metadata persistence that stores references/digests/state only and uses the existing repository/locking authority in `sandbox/runtimes/managed/credential_repository.py`. **DONE:** `credential_bindings` is an additive NativeRepository section with owner checks, atomic CAS updates, closed-state removal, and no credential value fields.
+- [x] T007 [P] Add foundational unit and contract coverage for resolver refusal, binding canonicalization, secret-free serialization, CAS conflicts, and state transitions in `tests/test_credential_binding.py` and `tests/test_credential_resolver.py`. **DONE:** 11 focused tests pass; existing managed-native/secret/isolation ownership suites also pass.
 
 ## Phase 3: User Story 1 — Bind an approved credential to one outbound operation (P1)
 
@@ -103,10 +103,10 @@ effective proof, and missing or drifted gates block the capability.
 stale-digest, and drifted-runtime cases; only the proven matching case admits
 credential use.
 
-- [ ] T024 [P] [US4] Define secret-free capability/proof report models for support tier, evidence identity, prerequisites, effective observations, digests, binding states, and refusal reasons in `sandbox/isolation/capability_report.py`
-- [ ] T025 [US4] Expose capability and binding status through the existing command/manifest extension points in `sandbox/commands/native.py` and `sandbox/commands/manifest.py`
+- [x] T024 [P] [US4] Define secret-free capability/proof report models for support tier, evidence identity, prerequisites, effective observations, digests, binding states, and refusal reasons in `sandbox/isolation/capability_report.py`. **DONE:** proven/unproven/blocked/unavailable tiers, evidence identity, status-only binding projections, digest checks, and fail-closed admission are modeled without source references or values.
+- [x] T025 [US4] Expose capability and binding status through the existing command/manifest extension points in `sandbox/commands/native.py` and `sandbox/commands/manifest.py`. **DONE:** `sb native credential-status --json` is a non-mutating, fail-closed report; it reads existing binding metadata only through the repository authority and never creates/migrates state.
 - [ ] T026 [US4] Add pre-start and bounded periodic lifecycle hooks that close credential admission on proof drift without weakening unrelated default-deny network controls in `sandbox/runtimes/managed/adapter.py` and `sandbox/runtimes/managed/credential_health.py`
-- [ ] T027 [US4] Add report/refusal/health tests for `implemented_unproven`, missing evidence, drift, stale policy, unsupported runtime, and proven effective state in `tests/test_credential_capability_report.py`
+- [x] T027 [US4] Add report/refusal/health tests for `implemented_unproven`, missing evidence, drift, stale policy, unsupported runtime, and proven effective state in `tests/test_credential_capability_report.py`. **DONE:** report tests cover blocked/unavailable tiers, missing proof, stale/drifted health observations, unsupported runtime identity, and proven round-trip admission.
 
 ## Phase 7: Polish and cross-cutting acceptance
 
@@ -115,7 +115,7 @@ release decision without staging unrelated user work.
 
 - [ ] T028 [P] Run the focused resolver, binding, broker, lifecycle, report, secret, and isolation unittest suites and record commands/results in `specs/045-credential-vault-isolation/quickstart.md`
 - [ ] T029 Extend the authorized live native acceptance harness with exact binding, hostile no-leak, revoke, restart, exhaustion, cleanup, and timing checks in `tests/live_native_acceptance.py`
-- [ ] T030 Update the managed-native capability, isolation, and operator documentation with the explicit refusal boundaries and at-rest residual risk in `docs/native-runtime-isolation.md`, `docs/sandbox-config-reference.md`, and `docs/credential-vault.md`
+- [x] T030 Update the managed-native capability, isolation, and operator documentation with the explicit refusal boundaries and at-rest residual risk in `docs/native-runtime-isolation.md`, `docs/sandbox-config-reference.md`, and `docs/credential-vault.md`. **DONE:** status command, unsupported runtimes, exact request boundary, residual at-rest risk, and proof-gated refusal rules are documented.
 - [ ] T031 Complete an independent security/source/evidence review of the implementation against `specs/045-credential-vault-isolation/contracts/`, update the evidence ID and support tier only if every predecessor and feature gate passes, and record the decision in `specs/045-credential-vault-isolation/quickstart.md`
 
 ## Phase 9: Authorized-proof harness preparation

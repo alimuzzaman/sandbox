@@ -70,10 +70,10 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 48 | active | P1 | blocked | medium | fb3f67c8f3b583854058d53a5cc02a19 | Workspace remote revision check stays mismatched after successful service migration |
 | 49 | active | P1 | blocked | medium | 00bad5d45624a2451bc59bd62d816b7a | Disposable source instance cannot start when a declared Docker network has disappeared |
 | 50 | active | P1 | blocked | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
-| 51 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
-| 52 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |
-| 53 | active | P1 | open | high | 319480dd089a1225a40ad8a602838165 | Learning host apply blocked by remote SSH timeout |
-| 54 | active | P1 | open | high | b9815b2565193466965db85343ad26c2 | Repeated silent remote status probes block direct-host acceptance observation |
+| 51 | active | P1 | blocked | high | b9815b2565193466965db85343ad26c2 | Repeated silent remote status probes block direct-host acceptance observation |
+| 52 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
+| 53 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |
+| 54 | active | P1 | open | high | 319480dd089a1225a40ad8a602838165 | Learning host apply blocked by remote SSH timeout |
 | 55 | active | P1 | open | high | dcb1070b7240de1233c7c509a6d54c49 | Remote network pressure remains high at 31 active managed networks |
 | 56 | active | P1 | open | high | c841bc711c53936d6a6ce94cfe7200e7 | Remote control updated; network pressure remains high |
 | 57 | active | P1 | open | high | 600d2def1a44dde2e811a79e01b9aa25 | Remote network pressure remains high at 31 active managed networks |

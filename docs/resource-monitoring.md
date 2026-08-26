@@ -409,6 +409,12 @@ path, bytes, mtime, class, tier, and reason — plus everything it skipped and
 why. `cleanup` without `--plan-id` creates and executes a plan in one call (the
 one-click path) and still stores the plan id.
 
+The CLI treats a plan budget as an end-to-end deadline, including startup and
+the remote control transport grace window. A remote plan therefore receives a
+slightly smaller provider budget so the caller gets either the complete plan or
+a typed timed-out envelope before the requested deadline; it never waits past
+the budget without evidence.
+
 Execution is resumable and idempotent. An interrupted run leaves its plan
 `in_progress`; re-running the same plan id resumes it and reports `resumed:
 true`. A completed plan id is refused (`plan_already_used`); re-running the same

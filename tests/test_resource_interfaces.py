@@ -336,6 +336,116 @@ class TestResourceInterfaces(unittest.TestCase):
         compose_writer.assert_not_called()
         env_writer.assert_not_called()
 
+    def test_cli_plan_reserves_remote_transport_grace_inside_end_to_end_budget(self):
+        from sandbox import cli
+        from sandbox.commands import resources
+
+        service = RecordingService()
+        output = io.StringIO()
+        argv = [
+            "sb", "resources", "plan", "--scope", "cache",
+            "--remote", "remote-a", "--budget", "30", "--json",
+        ]
+        with patch.object(sys, "argv", argv), \
+             patch.object(cli, "load_config", return_value={}), \
+             patch.object(cli, "resolve_instances", return_value={}), \
+             patch.object(cli, "_cwd_instance", return_value=None), \
+             patch.object(cli, "_core", return_value=SimpleNamespace(
+                 registry_all=lambda: {},
+             )), \
+             patch.object(cli, "write_compose_files"), \
+             patch.object(cli, "write_env_for_compose"), \
+             patch.object(resources, "resource_service", return_value=service), \
+             patch.object(resources.time, "monotonic", return_value=106.0), \
+             redirect_stdout(output):
+            cli.main(invocation_started_monotonic=100.0)
+
+        self.assertEqual(service.calls, [("plan", "cache", False, 19.0)])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["data"]["budget_seconds"], 30.0)
+
+    def test_cli_plan_returns_typed_timeout_before_dispatch(self):
+        from sandbox import cli
+        from sandbox.commands import resources
+
+        output = io.StringIO()
+        argv = [
+            "sb", "resources", "plan", "--scope", "cache",
+            "--remote", "remote-a", "--budget", "30", "--json",
+        ]
+        with patch.object(sys, "argv", argv), \
+             patch.object(cli, "load_config", return_value={}), \
+             patch.object(cli, "resolve_instances", return_value={}), \
+             patch.object(cli, "_cwd_instance", return_value=None), \
+             patch.object(cli, "_core", return_value=SimpleNamespace(
+                 registry_all=lambda: {},
+             )), \
+             patch.object(cli, "write_compose_files"), \
+             patch.object(cli, "write_env_for_compose"), \
+             patch.object(resources, "resource_service") as service_factory, \
+             patch.object(resources.time, "monotonic", return_value=131.0), \
+             redirect_stdout(output), self.assertRaises(SystemExit):
+            cli.main(invocation_started_monotonic=100.0)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["action"], "plan")
+        self.assertEqual(payload["status"], "timed_out")
+        self.assertEqual(payload["error"]["code"], "overall_budget_exhausted")
+        service_factory.assert_not_called()
+
+    def test_tier_plan_reserves_remote_transport_grace_inside_end_to_end_budget(self):
+        from sandbox.commands import resources
+
+        class TierService:
+            def __init__(self):
+                self.calls = []
+
+            def plan(self, tier, *, budget_seconds):
+                self.calls.append((tier, budget_seconds))
+                return {
+                    "schema_version": 1, "ok": True, "action": "plan",
+                    "status": "planned", "target": {
+                        "kind": "remote", "name": "remote-a",
+                    },
+                    "data": {"plan_id": "b" * 32}, "error": None,
+                }
+
+        service = TierService()
+        args = self.parser().parse_args([
+            "plan", "--tier", "tmp", "--remote", "remote-a",
+            "--budget", "30", "--json",
+        ])
+        args._invocation_deadline_monotonic = 130.0
+        output = io.StringIO()
+        with patch("sandbox.resources.context.reclaim_service", return_value=service), \
+             patch.object(resources.time, "monotonic", return_value=106.0), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+
+        self.assertEqual(service.calls, [("tmp", 19.0)])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["data"]["budget_seconds"], 30.0)
+
+    def test_tier_plan_returns_typed_timeout_before_dispatch(self):
+        from sandbox.commands import resources
+
+        args = self.parser().parse_args([
+            "plan", "--tier", "tmp", "--remote", "remote-a",
+            "--budget", "30", "--json",
+        ])
+        args._invocation_deadline_monotonic = 130.0
+        output = io.StringIO()
+        with patch("sandbox.resources.context.reclaim_service") as factory, \
+             patch.object(resources.time, "monotonic", return_value=131.0), \
+             redirect_stdout(output), self.assertRaises(SystemExit):
+            resources.cmd_resources({}, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["action"], "plan")
+        self.assertEqual(payload["status"], "timed_out")
+        self.assertEqual(payload["error"]["code"], "overall_budget_exhausted")
+        factory.assert_not_called()
+
     def test_resource_plan_and_cleanup_keep_runtime_file_writes(self):
         from sandbox import cli
         from sandbox.commands import resources
@@ -356,6 +466,7 @@ class TestResourceInterfaces(unittest.TestCase):
                      patch.object(cli, "write_compose_files") as compose_writer, \
                      patch.object(cli, "write_env_for_compose") as env_writer, \
                      patch.object(resources, "resource_service", return_value=service), \
+                     patch.object(resources.time, "monotonic", return_value=100.0), \
                      redirect_stdout(io.StringIO()):
                     cli.main(invocation_started_monotonic=100.0)
 

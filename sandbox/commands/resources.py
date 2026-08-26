@@ -14,6 +14,13 @@ from sandbox.resources.models import redact
 from sandbox.resources.monitor import record_path, resolve_policy
 
 
+# The remote resource endpoint gets a bounded supervisor grace window after
+# the provider budget. Reserve that window inside the CLI's end-to-end plan
+# deadline so a synchronous caller receives a typed result before its own
+# requested budget expires.
+_REMOTE_PLAN_TRANSPORT_GRACE_SECONDS = 5.0
+
+
 def _remaining_status_budget(args, requested_budget: float) -> float:
     """Return provider time left in the CLI's end-to-end status budget."""
     deadline = getattr(args, "_invocation_deadline_monotonic", None)
@@ -37,12 +44,12 @@ def _restore_requested_budget(payload: dict, requested_budget: float) -> None:
         data["budget_seconds"] = float(requested_budget)
 
 
-def _budget_exhausted_payload(requested_budget: float) -> dict:
+def _budget_exhausted_payload(requested_budget: float, action: str = "status") -> dict:
     from sandbox.resources.service import ResourceError, result
 
     return result(
         False,
-        "status",
+        action,
         status="timed_out",
         data={"budget_seconds": float(requested_budget)},
         error=ResourceError(
@@ -817,16 +824,40 @@ def _tier_action(args) -> bool:
 def _run_tier(args) -> dict:
     from sandbox.resources.context import reclaim_service
 
+    requested_budget = (
+        args.budget if args.budget is not None
+        else 60 if args.action == "plan" else 900
+    )
+    remaining_budget = _remaining_status_budget(args, requested_budget)
+    if args.action == "plan" and getattr(args, "remote", None) and getattr(
+        args, "_invocation_deadline_monotonic", None
+    ) is not None:
+        remaining_budget -= _REMOTE_PLAN_TRANSPORT_GRACE_SECONDS
+    if remaining_budget <= 0:
+        return _budget_exhausted_payload(requested_budget, action=args.action)
+
+    # Reclaim-service construction can resolve a remote and consume startup
+    # time, so re-check the end-to-end budget before dispatching the provider.
     service = reclaim_service(getattr(args, "remote", None))
+    remaining_budget = _remaining_status_budget(args, requested_budget)
     if args.action == "plan":
-        return service.plan(
+        if getattr(args, "remote", None) and getattr(
+            args, "_invocation_deadline_monotonic", None
+        ) is not None:
+            remaining_budget -= _REMOTE_PLAN_TRANSPORT_GRACE_SECONDS
+        if remaining_budget <= 0:
+            return _budget_exhausted_payload(requested_budget, action=args.action)
+        payload = service.plan(
             args.tier,
-            budget_seconds=args.budget if args.budget is not None else 60,
+            budget_seconds=remaining_budget,
         )
+        data = payload.get("data")
+        if isinstance(data, dict):
+            data["budget_seconds"] = float(requested_budget)
+        return payload
     return service.cleanup(
         tier=args.tier, plan_id=getattr(args, "plan_id", None),
-        confirm=bool(args.confirm),
-        budget_seconds=args.budget if args.budget is not None else 900,
+        confirm=bool(args.confirm), budget_seconds=remaining_budget,
     )
 
 
@@ -955,7 +986,6 @@ def cmd_resources(_cfg, args) -> None:
         )
         _restore_requested_budget(payload, requested_budget)
     elif action == "plan":
-        service = resource_service(getattr(args, "remote", None))
         if args.cancelled:
             from sandbox.resources.service import ResourceError, result
             payload = result(
@@ -985,12 +1015,35 @@ def cmd_resources(_cfg, args) -> None:
                 error=ResourceError("--scope is required", "invalid_scope"),
             )
         else:
+            requested_budget = args.budget if args.budget is not None else 60
+            remaining_budget = _remaining_status_budget(args, requested_budget)
+            if remaining_budget <= 0:
+                _emit(
+                    _budget_exhausted_payload(requested_budget, action="plan"),
+                    bool(args.json),
+                )
+                raise SystemExit(1)
+            plan_budget = remaining_budget
+            if getattr(args, "remote", None) and getattr(
+                args, "_invocation_deadline_monotonic", None
+            ) is not None:
+                plan_budget = remaining_budget - _REMOTE_PLAN_TRANSPORT_GRACE_SECONDS
+                if plan_budget <= 0:
+                    _emit(
+                        _budget_exhausted_payload(requested_budget, action="plan"),
+                        bool(args.json),
+                    )
+                    raise SystemExit(1)
+            service = resource_service(getattr(args, "remote", None))
             payload = service.plan(
                 args.scope,
                 thorough=bool(args.thorough),
-                budget_seconds=args.budget if args.budget is not None else 60,
+                budget_seconds=plan_budget,
                 progress=progress,
             )
+            data = payload.get("data")
+            if isinstance(data, dict):
+                data["budget_seconds"] = float(requested_budget)
     else:
         service = resource_service(getattr(args, "remote", None))
         if args.cancelled:

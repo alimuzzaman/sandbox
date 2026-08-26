@@ -1216,16 +1216,21 @@ Per-project (each plugin carries its own sandbox.config.json):
         from sandbox.commands.migrate import maybe_auto_migrate
         maybe_auto_migrate()
 
-    # Resource status owns an end-to-end request budget.  The executable
-    # captures this timestamp before importing the CLI so parser, config, and
-    # dispatch startup consume the same budget as the provider.
-    if args.cmd == "resources" and getattr(args, "action", None) == "status":
-        requested_budget = (
-            args.budget if getattr(args, "budget", None) is not None
-            else 10 if getattr(args, "fast", False)
-            else 900 if getattr(args, "refresh", False)
-            else 15
-        )
+    # Resource status and plan own an end-to-end request budget.  The
+    # executable captures this timestamp before importing the CLI so parser,
+    # config, and dispatch startup consume the same budget as the provider.
+    if args.cmd == "resources" and getattr(args, "action", None) in {"status", "plan"}:
+        if getattr(args, "action", None) == "plan":
+            requested_budget = (
+                args.budget if getattr(args, "budget", None) is not None else 60
+            )
+        else:
+            requested_budget = (
+                args.budget if getattr(args, "budget", None) is not None
+                else 10 if getattr(args, "fast", False)
+                else 900 if getattr(args, "refresh", False)
+                else 15
+            )
         args._invocation_deadline_monotonic = (
             float(invocation_started_monotonic) + float(requested_budget)
         )

@@ -517,10 +517,13 @@ service. Unknown and overlapping values are shown as unknown/non-additive rather
 treated as safe cleanup candidates.
 
 The dashboard uses a loopback HTTP BFF with one in-flight refresh per resource and
-completion-based polling (30 seconds after the previous refresh finishes). It does not
-open a WebSocket: the expensive operation is the host inventory itself, so a push
-channel would not make that scan cheaper. A future event stream can be added behind
-the same single-flight cache if remote services begin emitting incremental changes.
+completion-based polling (30 seconds after the previous refresh finishes). Remote
+summaries load independently from the slower local-instance status probes, so a
+configured remote appears in the host rail promptly; its full inventory remains lazy
+and bounded. It does not open a WebSocket: the expensive operation is the host
+inventory itself, so a push channel would not make that scan cheaper. A future event
+stream can be added behind the same single-flight cache if remote services begin
+emitting incremental changes.
 
 For the exceptional case where an operator must run a command directly on a host,
 use the explicit CLI escape hatch. It is never used internally and is not exposed as

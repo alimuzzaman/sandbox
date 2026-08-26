@@ -3,7 +3,7 @@
 
 import { $ } from "./dom";
 import { store } from "./state";
-import { fetchData, fetchUsage, fetchRemote } from "./api";
+import { fetchData, fetchRemotes, fetchUsage, fetchRemote } from "./api";
 import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
@@ -56,7 +56,33 @@ async function performRefresh(): Promise<void> {
   store.sync.error = null;
   renderDetail(false);
   try {
-    store.data = await fetchData();
+    // Remote summaries are registry-local and cheap; local instance rows may
+    // require one Compose probe per registered project. Fetch them separately
+    // so the remote rail can render while the slower local inventory finishes.
+    let remoteSummariesLoaded = false;
+    const remoteSummaries = fetchRemotes().then(({ remotes }) => {
+      remoteSummariesLoaded = true;
+      store.data = { ...store.data, remotes };
+      renderSidebar(false);
+      renderDetail(false);
+    });
+    const localData = fetchData().then(data => {
+      store.data = {
+        ...data,
+        remotes: remoteSummariesLoaded ? store.data.remotes : data.remotes,
+      };
+      renderSidebar(false);
+      renderDetail(false);
+    });
+    const results = await Promise.allSettled([remoteSummaries, localData]);
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failures.length === results.length) throw failures[0].reason;
+    if (failures.length) {
+      const failure = failures[0].reason;
+      store.sync.error = failure instanceof Error ? failure.message : "Refresh incomplete";
+    }
     const route = currentRoute();
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);

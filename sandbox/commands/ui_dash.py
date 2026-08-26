@@ -20,6 +20,28 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 
 
+def _remote_summary_rows() -> list[dict]:
+    """Return the lightweight remote list used by the dashboard rail.
+
+    Local instance running-state probes can take several seconds on a machine
+    with many registered projects. Remote availability is already present in
+    the local registry, so it must be available without waiting for those
+    probes or for a remote inventory scan.
+    """
+    import sandbox.core._remote as remote_core
+
+    return [
+        {
+            "name": name,
+            "provisioned": bool(entry.get("provisioned")),
+            "control_ready": bool(
+                entry.get("control_url") and entry.get("bearer_token")
+            ),
+        }
+        for name, entry in sorted(remote_core.list_remotes().items())
+    ]
+
+
 
 def cmd_dashboard(cfg, args) -> None:
     from sandbox.commands.instances_cmd import cmd_instances
@@ -89,7 +111,6 @@ def cmd_web(cfg, args) -> None:
                 return self._send(403, json.dumps({"error": "forbidden"}))
 
             if path == "/api/instances":
-                import sandbox.core._remote as remote_core
                 cfg = load_config()
                 # Per-project model: the "plugins" list is the set of projects
                 # the registry tracks (each project dir = its plugin), not a
@@ -104,11 +125,12 @@ def cmd_web(cfg, args) -> None:
                     "servers": list(SERVERS),
                     "seeds": _web_list_seeds(),
                     "domains_ready": domains_ready(),
-                    "remotes": [{"name": name,
-                                 "provisioned": bool(entry.get("provisioned")),
-                                 "control_ready": bool(entry.get("control_url") and entry.get("bearer_token"))}
-                                for name, entry in sorted(remote_core.list_remotes().items())],
+                    "remotes": _remote_summary_rows(),
                 }))
+            if path == "/api/remotes":
+                return self._send(200, json.dumps({
+                    "remotes": _remote_summary_rows(),
+                }), no_store=True)
             if path.startswith("/api/remote/"):
                 import sandbox.core._remote as remote_core
                 name = unquote(path[len("/api/remote/"):])

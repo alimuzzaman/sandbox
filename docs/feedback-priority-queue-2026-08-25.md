@@ -74,19 +74,19 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 52 | active | P1 | blocked | high | dcb1070b7240de1233c7c509a6d54c49 | Remote network pressure remains high at 31 active managed networks |
 | 53 | active | P1 | blocked | high | c841bc711c53936d6a6ce94cfe7200e7 | Remote control updated; network pressure remains high |
 | 54 | active | P1 | blocked | high | 600d2def1a44dde2e811a79e01b9aa25 | Remote network pressure remains high at 31 active managed networks |
-| 55 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
-| 56 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |
-| 57 | active | P1 | open | high | 319480dd089a1225a40ad8a602838165 | Learning host apply blocked by remote SSH timeout |
-| 58 | active | P1 | open | high | fe5c3e02c95f5df8a1abfbda61ce9aff | Remote normalization retry hit acceptance transaction expiry |
-| 59 | active | P1 | open | high | 6f0b87cd91d110adcdd8e94c1037458d | Remote detached exec fails with supervisor_launch_failed |
-| 60 | active | P1 | open | high | b8fcedf19c65046b16ecd8d61877ad6c | Confirmed remote provision returned no receipt and service health timed out |
-| 61 | active | P1 | open | high | 9bb7aea1a679db7233e18f8fbf31c841 | T120 evaluator full log and remote benchmark workflow gaps |
-| 62 | active | P1 | open | high | 968d8f7a4416f26099ca49bff0b61b0b | Remote T120 bootstrap blocked by exhausted Docker subnet pools |
-| 63 | active | P1 | open | high | 20c0829c9145fb5a0ead2849d13e258b | Remote preview project mapping breaks after exact source sync |
-| 64 | active | P1 | open | high | a941c144b268fcb1f090deb46b75255d | Local E2E fixture became unreachable during Playwright |
-| 65 | active | P1 | open | high | 52b78220ec4255f8d680b707ca409980 | Exact-head xSpeed PR review plugin activation fails in disposable Sandbox |
-| 66 | active | P1 | open | high | 9290217a7686140b82bdad36fa84fb55 | Detached deploy output follow hung during process identity inspection |
-| 67 | active | P1 | open | high | 388324ebc557a5eb27571b62ef26689c | Repeated learning host apply SSH timeout |
+| 55 | active | P1 | blocked | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |
+| 56 | active | P1 | blocked | high | 319480dd089a1225a40ad8a602838165 | Learning host apply blocked by remote SSH timeout |
+| 57 | active | P1 | blocked | high | 388324ebc557a5eb27571b62ef26689c | Repeated learning host apply SSH timeout |
+| 58 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
+| 59 | active | P1 | open | high | fe5c3e02c95f5df8a1abfbda61ce9aff | Remote normalization retry hit acceptance transaction expiry |
+| 60 | active | P1 | open | high | 6f0b87cd91d110adcdd8e94c1037458d | Remote detached exec fails with supervisor_launch_failed |
+| 61 | active | P1 | open | high | b8fcedf19c65046b16ecd8d61877ad6c | Confirmed remote provision returned no receipt and service health timed out |
+| 62 | active | P1 | open | high | 9bb7aea1a679db7233e18f8fbf31c841 | T120 evaluator full log and remote benchmark workflow gaps |
+| 63 | active | P1 | open | high | 968d8f7a4416f26099ca49bff0b61b0b | Remote T120 bootstrap blocked by exhausted Docker subnet pools |
+| 64 | active | P1 | open | high | 20c0829c9145fb5a0ead2849d13e258b | Remote preview project mapping breaks after exact source sync |
+| 65 | active | P1 | open | high | a941c144b268fcb1f090deb46b75255d | Local E2E fixture became unreachable during Playwright |
+| 66 | active | P1 | open | high | 52b78220ec4255f8d680b707ca409980 | Exact-head xSpeed PR review plugin activation fails in disposable Sandbox |
+| 67 | active | P1 | open | high | 9290217a7686140b82bdad36fa84fb55 | Detached deploy output follow hung during process identity inspection |
 | 68 | active | P1 | open | high | 9e9e30aa23570f8d7f50438d155b4cf9 | Fresh Sandbox cannot activate exact-head xSpeed PR source |
 | 69 | active | P1 | open | high | db34582b727bfea7d94ba446b681b9cc | Ox Alpha returned empty content for Lenzora implementation session |
 | 70 | active | P1 | open | high | cd7025da758c2f5dc564dcc320748195 | Ox Alpha autonomous Sandbox worker stopped after repeated empty model responses |

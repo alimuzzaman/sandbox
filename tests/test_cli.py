@@ -667,6 +667,24 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("no sandbox instance", out)
         self.assertNotIn("instance: main", out)
 
+    def test_json_status_missing_context_emits_one_structured_error(self):
+        r = run_sb("status", "--json")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(r.stderr, "")
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload, {
+            "ok": False,
+            "error": {
+                "code": "instance_context_missing",
+                "hint": (
+                    "cd into a registered project, or run `sb init` / `sb ensure` "
+                    "to create one. Use `sb instances --json` for the global "
+                    "inventory, or pass `--instance NAME` for a known instance."
+                ),
+                "message": "no sandbox instance for this directory.",
+            },
+        })
+
     def test_registry_wide_command_runs_anywhere(self):
         # `instances` is registry-wide → works from any directory.
         r = run_sb("instances")

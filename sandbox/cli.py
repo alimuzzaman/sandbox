@@ -183,6 +183,17 @@ def _explicit_global_option(argv: list[str], option: str) -> bool:
     return False
 
 
+def _die_status_resolution(args, code: str, message: str, hint: str) -> None:
+    """Return a parseable context error for machine-readable local status."""
+    if args.cmd == "status" and getattr(args, "json", False):
+        print(json.dumps({
+            "ok": False,
+            "error": {"code": code, "message": message, "hint": hint},
+        }, sort_keys=True))
+        raise SystemExit(2)
+    die(f"{message} {hint}", 2)
+
+
 _TEST_ROUTING_OPTIONS = {
     "--project-dir": True,
     "--label": True,
@@ -1418,11 +1429,22 @@ Per-project (each plugin carries its own sandbox.config.json):
                 owned = []
             if len(owned) > 1:
                 labels = ", ".join(e["label"] for e in owned)
-                die(f"project has {len(owned)} instances ({labels}); pass --label.")
+                _die_status_resolution(
+                    args,
+                    "instance_context_ambiguous",
+                    f"project has {len(owned)} instances ({labels});",
+                    "pass --label to select one.",
+                )
             _known = ", ".join(sorted(instances))
-            die("no sandbox instance for this directory. cd into a registered "
-                "project, or run `sb init` / `sb ensure` to create one."
-                + (f"\nKnown instances: {_known}" if _known else ""))
+            message = "no sandbox instance for this directory."
+            hint = (
+                "cd into a registered project, or run `sb init` / `sb ensure` "
+                "to create one."
+            )
+            if _known:
+                hint += " Use `sb instances --json` for the global inventory, " \
+                        "or pass `--instance NAME` for a known instance."
+            _die_status_resolution(args, "instance_context_missing", message, hint)
     elif inner_local_observation and explicit and chosen not in instances:
         # A named selector remains an explicit selector even when the staged
         # root owns a valid default.  Preserve the ordinary unknown-instance

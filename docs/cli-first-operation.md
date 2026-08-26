@@ -32,6 +32,11 @@ If the instance name is already known, `sb status --instance NAME` and
 `sb logs --instance NAME` select it directly from any working directory; the
 controller does not consult the current directory as a fallback.
 
+When local `sb status --json` has no registered project context, it emits one
+`instance_context_missing` error document and exits 2. Use
+`sb instances --json` for the global inventory, or pass `--instance NAME` for a
+known instance; it never guesses a default.
+
 When a clean-URL project status is non-ready, the command also performs a
 bounded published-listener check. If the proxy endpoint is down, the result
 names that condition and points to `./sb domains up` (or the owning service) so

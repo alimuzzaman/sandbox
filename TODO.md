@@ -27,9 +27,10 @@ Next tasks, in order:
    is `timeout`.
 2. **P1 — close async WP-CLI acceptance design.** Decompose Spec 004 T021 into
    a fast local acceptance row, a detached Docker start path, retained job
-   receipt, and a measured `<2s` gate. Compare a warm worker/session and a
-   lightweight launcher before changing the public contract; preserve the
-   current path as the compatibility fallback until parity tests pass.
+   receipt, and a measured `<2s` gate. The CLI and MCP boundaries now use
+   finite launch budgets and return `acceptance_unknown` when the envelope is
+   not proven; preserve the current `compose run -d` path as the compatibility
+   fallback until cold/warm, duplicate-request, and all-tier parity tests pass.
 3. **P1 — define a bounded remote WP-CLI/preview contract.** Specify exact
    instance selection, package staging, authorization, output limits, and
    receipts for `sb wp --remote`/preview operations. Do not implement through

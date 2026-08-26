@@ -104,8 +104,8 @@ class TestArchiveRunnerLaunch(unittest.TestCase):
             plugin_path=Path("/tmp/review/extracted/demo-plugin"),
             plugin_slug="demo-plugin",
         )
-        self.assertEqual(set(config["plugins_resolved"]), {"demo-plugin", "plugin-check"})
-        self.assertFalse(config["plugins_resolved"]["demo-plugin"]["active"])
+        self.assertEqual(set(config["plugins_resolved"]), {"plugin-check"})
+        self.assertEqual(config["plugins"], ["/tmp/review/extracted/demo-plugin"])
         self.assertTrue(config["plugins_resolved"]["plugin-check"]["active"])
         self.assertEqual(config["wpVersion"], "6.8.2")
         self.assertEqual(config["phpVersion"], "8.3")
@@ -206,6 +206,7 @@ class TestArchiveRunnerLaunch(unittest.TestCase):
             finding_output = SimpleNamespace(returncode=0, stdout="[]", stderr="")
             with patch.object(core, "ensure_instance", return_value={"instance": target.review_instance}), \
                     patch.object(core, "wpcli", side_effect=[inactive]), \
+                    patch.object(core, "plugins_dir", return_value=target.sandbox_home / "wp" / "wp-content" / "plugins"), \
                     patch.object(core, "compose_file", return_value=root / "missing-compose.yml"), \
                     patch.object(legacy_core, "registry_remove"), \
                     patch.object(command, "wpcli", return_value=finding_output):

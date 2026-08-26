@@ -210,11 +210,6 @@ def _isolated_project_config(
     """
 
     resolved: dict[str, dict[str, object]] = {
-        plugin_slug: {
-            "source": {"kind": "path", "value": str(plugin_path)},
-            "active": False,
-            "on_demand": False,
-        },
         "plugin-check": {
             "source": {
                 "kind": "zip",
@@ -238,7 +233,12 @@ def _isolated_project_config(
         "source": "archive-descriptor",
         "kind": "wordpress",
         "slug": plugin_slug,
-        "plugins": {plugin_slug: ".", "plugin-check": "plugin-check"},
+        # The archive tree is mounted explicitly and linked into the WP
+        # plugin directory after core install.  Keeping it out of
+        # ``plugins_resolved`` prevents the normal provisioning reconciler
+        # from issuing a failing ``plugin deactivate`` for a plugin whose
+        # non-slug entrypoint is intentionally inactive.
+        "plugins": [str(plugin_path)],
         "plugins_resolved": resolved,
         "themes": [],
         "mappings": {},
@@ -527,6 +527,19 @@ def run_archive_child(
         if actual_instance != instance:
             raise ArchiveRunnerError("archive_isolation_failed", "review instance identity drifted")
 
+        def attach_target() -> object:
+            # The host builder already mounted the extracted tree read-only
+            # through the descriptor's absolute path.  Add exactly one
+            # inactive symlink after WordPress core provisioning; this avoids
+            # the normal managed-plugin reconciler trying to deactivate a
+            # non-standard main filename during boot.
+            from sandbox.core._provision import _force_symlink
+            plugin_dir = core.plugins_dir(actual_instance)
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            _force_symlink(plugin_dir / plugin_slug, plugin_path)
+            return str(plugin_dir / plugin_slug)
+
+        journal.execute_phase("target", attach_target)
         active = core.wpcli(
             ["plugin", "is-active", plugin_slug],
             instance=actual_instance,

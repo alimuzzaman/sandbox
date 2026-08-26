@@ -1,7 +1,9 @@
 # Quickstart: Credential Vault and Isolation Proof
 
-This is a validation-oriented quickstart for the first implementation. It does
-not claim that the planned credential commands exist yet.
+This is a validation-oriented quickstart for the first implementation. The
+explicit broker, upstream, lifecycle, health, audit, and consumer contracts
+exist locally, but the capability is not enabled until the live proof gate
+closes.
 
 ## Preconditions
 
@@ -32,13 +34,18 @@ Run it only on an authorized supported host with its documented instance and
 cleanup prerequisites. A partial or missing hostile/grant/revoke/exhaustion/
 warm-start/cleanup result is a blocked feature, not a passing result.
 
-## Planned binding flow
+## Local contract flow
 
-The implementation must document the final CLI/MCP names before enabling them.
-The flow is intentionally explicit:
+There is intentionally no public plaintext credential command. An integration
+composes `managed_native_credential_broker(...)` with a registered resolver,
+exact repository lookup, proof, egress, and an upstream transport. A reviewed
+consumer uses `ExplicitCredentialConsumer`; lifecycle uses
+`CredentialBrokerSupervisor`, `CredentialHealthMonitor`, and
+`CredentialRecoveryService`:
 
 1. Inspect a non-secret capability/proof report.
-2. Create a binding from an existing opaque reference and exact request scope.
+2. Create a version-one `credential_pending` binding from an existing opaque
+   reference and exact request scope.
 3. Start or reconcile the broker; observe `credential_pending` until source,
    policy, egress, broker, and effective-isolation proofs match.
 4. Send a request through the reviewed guest client contract.
@@ -62,7 +69,7 @@ The implementation quickstart must exercise at least:
 | Missing or drifted native proof | Capability reports blocked/unproven; no workload entry |
 | Hostile guest inspection | Zero credential bytes on enumerated exposure surfaces |
 
-## Foundational local evidence
+## Foundational and broker local evidence
 
 The contract-only slice is available for review without enabling the managed
 runtime or resolving a real credential:
@@ -75,12 +82,15 @@ python3 -m unittest tests.test_native_ownership tests.test_native_network_reserv
   tests.test_native_destroy tests.test_native_recovery
 ```
 
-The first command currently passes 19 tests and the regression command passes
-53 tests. These are local model/repository/source-policy checks only. They do
-not close the Ubuntu 24.04 predecessor proof gate, start a broker, or authorize
-credential-bearing use. The capability remains `implemented_unproven` with
-`adoptable=false` until T003 and the later hostile live matrix are independently
-verified.
+The focused Credential Vault command currently passes 62 tests, including the
+request broker, pinned HTTPS seam, egress intersection, resolver, consumer,
+lease transfer, lifecycle/recovery, health, audit, no-leak, capability, and
+repository contracts. The existing managed-native/secret/isolation regression
+commands also pass in this checkout. These are local model/repository/source
+policy checks only. They do not close the Ubuntu 24.04 predecessor proof gate,
+start a broker service, or authorize credential-bearing use. The capability
+remains `implemented_unproven` with `adoptable=false` until T003 and the later
+hostile live matrix are independently verified.
 
 ## Regression evidence
 
@@ -89,3 +99,8 @@ lifecycle, report, and hostile-probe seams, followed by the existing secret,
 isolation, managed-native, and CLI suites. The final acceptance report must
 include commands, host/runtime identity, evidence ID, elapsed bounds, and cleanup
 result. It must not substitute local Compose tests for managed-native proof.
+
+The standalone credential-broker service/root-helper lifecycle (T022), the
+authorized live extension (T029), and the independent release review (T031)
+remain explicitly open. No support tier or evidence ID may be promoted from
+this local result.

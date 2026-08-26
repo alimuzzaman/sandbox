@@ -23,12 +23,11 @@ The source-tree implementation above is complete for its existing contract.
 Exact archive checking is a separate extension described in
 `archive-mode-design.md`. The pure host preflight, deterministic fixture corpus,
 run-local target/config builder, owner-only journal/cleanup primitives, finding/
-baseline/artifact helpers, and CLI integration are implemented as the gated tasks;
-the remaining acceptance work must prove hostile-ZIP limits, single-descriptor
-extraction, run-local inherited-state isolation, inactive static-only target
-execution, pinned checker provenance, retained owner-only artifacts, and durable
-per-plane cleanup/recovery on a disposable live runtime. The extension is CLI-only;
-the current MCP tool remains source-tree-only until parity is tested.
+baseline/artifact helpers, and CLI integration are implemented. A fixed live
+runtime, concurrent live matrix, and fault-injected recovery run passed on
+2026-08-26; the repository-wide regression baseline and source/archive key parity
+remain open. The extension is CLI-only; the current MCP tool remains source-tree-
+only until parity is tested.
 
 ## Technical Context
 

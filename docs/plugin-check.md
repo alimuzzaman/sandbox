@@ -124,9 +124,9 @@ Both interfaces return the identical JSON shape:
 
 ## Exact-release archive mode (runtime-gated)
 
-The exact-release archive CLI is implemented behind an explicit `--archive` flag;
-final disposable live acceptance is still required before the related feedback can
-be closed:
+The exact-release archive CLI is implemented behind an explicit `--archive` flag.
+The disposable live acceptance matrix is complete; the repository-wide regression
+baseline remains a separate open gate before the related feedback is closed:
 
 ```bash
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
@@ -184,10 +184,9 @@ same-descriptor hashing/extraction, run-local `SANDBOX_HOME`, an owner-only
 cleanup journal, per-plane absence receipt, retained artifacts, and pinned
 checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
-and failure evidence. Do not treat the preflight layer as permission to add
-`--archive` or close the exact-archive feedback records; the CLI integration is
-present, but isolated runtime, cleanup/recovery, and disposable live acceptance are
-still required.
+and failure evidence. The CLI integration and disposable acceptance are now
+complete, but the exact-archive feedback records remain open until the full
+repository regression gate and source/archive key-parity proof are clean.
 
 ## 5. What changed porting from the reference implementation
 

@@ -7,8 +7,8 @@
 ```
 
 The exact-release archive extension is intentionally separate from the source-tree
-contract. Its CLI-only shape is implemented; final disposable live acceptance remains
-open:
+contract. Its CLI-only shape and disposable live acceptance are implemented; the
+repository-wide regression gate remains open:
 
 ```text
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]

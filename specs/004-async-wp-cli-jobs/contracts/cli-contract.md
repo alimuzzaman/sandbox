@@ -61,7 +61,12 @@ orphaned. `.sb-jobs/` is the same directory on host
 and container via the bind-mount (gotcha #3 — same absolute path inside the
 container), so the host reader and the wrapper resolve identical files (F7).
 
-- **Docker**: `compose run -d --name <job-name> --entrypoint sh wpcli -c 'echo $$ > …pid; wp <args> > …log 2>&1; echo $? > …status'`. The container itself is the cancellation boundary.
+- **Docker**: when the running web service has the shipped WP-CLI binary,
+  `compose exec -d -u www-data -T wp sh -c 'echo $$ > …pid; wp <args> > …log 2>&1; echo $? > …status'`
+  reuses that container for fast acceptance. Older/stopped/LiteSpeed instances
+  fall back to `compose run -d --name <job-name> --entrypoint sh wpcli -c …`;
+  the fallback container is the cancellation boundary. Both paths use the
+  same bind-mounted `.sb-jobs` artifacts and shell-quoted argv.
 - **Herd**: Python spawns `sh -c '<same wrapper>'` from `<wp_root>` with
   `start_new_session=True` and records the returned wrapper PID immediately.
 - Args shell-quoted per token (`shlex.quote`).

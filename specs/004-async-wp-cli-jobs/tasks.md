@@ -18,7 +18,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 2: Foundational
 
 - [x] T003 Log-slice reader (`offset`/`limit`, `truncated`; `limit=-1` ⇒ whole file) in `job_status`.
-- [x] T004 Launch wrappers — **Docker**: `compose run -d --entrypoint sh wpcli` (the wpcli service is run-style, not `exec`-able; container kill reaps the whole process tree, so no `setsid` needed there); **herd**: `setsid` + backgrounded host `wp`. Each writes `$$`→`.pid`, runs `wp`, `$?`→`.status`; args `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root, same files host + container (gotcha #3).
+- [x] T004 Launch wrappers — **Docker**: reuse the running web service with `compose exec -d -u www-data -T wp sh -c …` when the shipped WP-CLI binary is present; retain `compose run -d --entrypoint sh wpcli` as the compatibility fallback (the fallback container is the cancellation boundary). **Herd**: Python `start_new_session=True` + host `wp`. Each writes `$$`→`.pid`, runs `wp`, `$?`→`.status`; args `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root, same files host + container (gotcha #3).
 
 ## Phase 3: US1 — Long command doesn't block (P1)
 
@@ -64,12 +64,22 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 - MCP tools (`wp_cli_async`, `wp_cli_job`, `wp_cli_job_kill`) become callable after a
   Claude Code restart (gotcha #4); the CLI path + the shared `job_status`/`kill_job`
   logic they call are live-verified.
-- The async-start latency is the docker `compose run` container-create cost (~7s, fixed)
-  — it does NOT scale with command duration, which is the property that matters.
+- The historical fallback async-start latency was the Docker `compose run`
+  container-create cost (~7s, fixed). The built-in Docker path now uses
+  `compose exec -d` against the already-running web service; fresh `<2s`
+  timing evidence is still required before SC-001 is marked complete.
 
 ## Phase 9: Convergence
 
 - [ ] T021 Reduce or otherwise redesign Docker async-job acceptance so it meets SC-001's under-2-second target; the recorded ~7-second `compose run -d` acceptance is a partial implementation of SC-001 (partial).
+
+  Progress 2026-08-26: Apache/Nginx jobs now use the already-running web
+  service via `compose exec -d` when the built-in WP-CLI binary is present.
+  Shared-container polling/cancellation is covered by an internal launcher
+  marker and wrapper TERM trap; `wp db …`, LiteSpeed, older images, and
+  unavailable web services retain the `compose run -d` fallback. This is a
+  source/test improvement only; no live timing or all-tier parity claim is
+  recorded yet.
 
   Bounded implementation tasks:
 
@@ -86,7 +96,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   - [ ] T021d Add focused unit/fixture tests for cold and warm paths, duplicate
     request IDs, cancellation, retained output, and cleanup. Keep the current
     `compose run -d` implementation as a compatibility fallback until parity
-    is proven.
+    is proven for every server tier.
   - [ ] T021e Run the same disposable Docker acceptance matrix used by T005,
     T007, T010, and T013, then record measured `<2s` evidence or a precise
     residual blocker. No remote or production mutation is part of T021.

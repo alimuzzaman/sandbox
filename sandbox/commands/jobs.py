@@ -43,6 +43,25 @@ def _job_paths(instance: str, jid: str) -> tuple[Path, Path, Path]:
     return tuple(job_dir / f"job_{jid}.{suffix}" for suffix in ("log", "status", "pid"))
 
 
+def _job_launcher_path(instance: str, jid: str) -> Path:
+    """Return the internal launcher marker for a Docker job.
+
+    The marker distinguishes a job running in the shared web container from a
+    legacy one-shot `wpcli` container.  It is deliberately not part of the
+    public status payload; it only lets polling/cancellation choose the same
+    process boundary that accepted the job.
+    """
+    return _job_dir(instance, create=False) / f"job_{jid}.launcher"
+
+
+def _job_launcher_mode(instance: str, jid: str) -> str | None:
+    try:
+        mode = _job_launcher_path(instance, jid).read_text(errors="replace").strip()
+    except OSError:
+        return None
+    return mode or None
+
+
 def _known_job(paths: tuple[Path, Path, Path]) -> bool:
     return any(path.exists() for path in paths)
 
@@ -92,10 +111,65 @@ def _docker_job_running(instance: str, jid: str) -> bool | None:
     return None
 
 
+def _docker_exec_job_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    """Observe a job launched inside the already-running web container.
+
+    A shared-container job has no per-job Docker object to inspect.  Probe its
+    wrapper PID through the same `compose exec` boundary instead.  Transport
+    failures stay unknown; a normal `kill -0` miss means the wrapper is gone.
+    """
+    pid = _read_group_pid(pid_file)
+    if pid is None:
+        return None
+    try:
+        result = compose(
+            "exec", "-T", "wp", "sh", "-c", f"kill -0 {pid}",
+            instance=instance, check=False, capture=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) == 0:
+        return True
+    detail = ((getattr(result, "stdout", "") or "") +
+              (getattr(result, "stderr", "") or "")).lower()
+    if any(marker in detail for marker in (
+            "cannot connect", "error response from daemon", "timed out",
+            "timeout", "connection refused")):
+        return None
+    return False
+
+
+def _kill_docker_exec_job(instance: str, jid: str, pid_file: Path) -> bool | None:
+    """Ask the shared web container to terminate one wrapper process.
+
+    The wrapper installs a TERM trap and owns the WP-CLI child, so signalling
+    this PID does not require removing or restarting the web container.
+    """
+    pid = _read_group_pid(pid_file)
+    if pid is None:
+        return None
+    try:
+        result = compose(
+            "exec", "-T", "wp", "sh", "-c", f"kill -TERM {pid}",
+            instance=instance, check=False, capture=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) == 0:
+        return True
+    detail = ((getattr(result, "stdout", "") or "") +
+              (getattr(result, "stderr", "") or "")).lower()
+    if "no such process" in detail or "not found" in detail:
+        return False
+    return None
+
+
 def _job_process_running(instance: str, jid: str, pid_file: Path) -> bool | None:
     if _is_herd_instance(instance):
         pid = _read_group_pid(pid_file)
         return _herd_group_running(pid) if pid is not None else None
+    if _job_launcher_mode(instance, jid) == "web-exec":
+        return _docker_exec_job_running(instance, jid, pid_file)
     return _docker_job_running(instance, jid)
 
 
@@ -146,17 +220,50 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
         # racing the shell's first instruction.
         _job_paths(instance, jid)[2].write_text(str(process.pid))
     else:
+        # Apache and Nginx web services mount the shipped wp-cli phar at
+        # /usr/local/bin/wp.  Reuse that already-running container so async
+        # acceptance does not pay the per-job `compose run` container-create
+        # cost.  Older instances, LiteSpeed, and stopped web services do not
+        # necessarily have that binary; retain the run-style wpcli fallback
+        # until the new path has parity evidence for those cases.
         wrapper = (
-            f"echo $$ > /var/www/html/.sb-jobs/job_{jid}.pid; "
-            f"wp {quoted} > /var/www/html/.sb-jobs/job_{jid}.log 2>&1; "
-            f"echo $? > /var/www/html/.sb-jobs/job_{jid}.status"
+            "job_root=/var/www/html; "
+            "if [ -d /var/www/vhosts/localhost/html/.sb-jobs ]; then "
+            "job_root=/var/www/vhosts/localhost/html; fi; "
+            f"echo $$ > \"$job_root/.sb-jobs/job_{jid}.pid\"; "
+            # Keep the child under a shell-owned PID so a shared-container
+            # cancellation can signal the wrapper and have it reap WP-CLI.
+            "trap 'kill -TERM \"$child\" 2>/dev/null || true; "
+            "wait \"$child\" 2>/dev/null || true; exit 143' TERM INT; "
+            f"wp {quoted} > \"$job_root/.sb-jobs/job_{jid}.log\" 2>&1 & "
+            "child=$!; wait \"$child\"; rc=$?; "
+            f"echo \"$rc\" > \"$job_root/.sb-jobs/job_{jid}.status\""
         )
-        # wpcli is a run-style service; entrypoint is `wp`, override to sh (gotcha #6).
-        compose("run", "-d", "--name", _job_name(instance, jid),
-                "--entrypoint", "sh", "wpcli", "-c", wrapper, instance=instance)
-        # ``compose run -d`` has accepted the detached container by this point.
-        # The empty log is the durable running marker until the wrapper writes
-        # its PID and first output.
+        # `wp db ...` needs the mysql client that only the dedicated wpcli
+        # image carries; keep that command family on the run-style service
+        # even when the web container has the built-in phar.
+        use_builtin = (
+            bool(wp_args) and wp_args[0] != "db" and
+            _wp_has_builtin_cli(instance)
+        )
+        if use_builtin:
+            # `exec -d` is the lightweight detached launcher.  The web
+            # container is the cancellation boundary for this path; the
+            # wrapper's PID remains an internal observation handle.
+            compose("exec", "-d", "-u", "www-data", "-T", "wp", "sh", "-c",
+                    wrapper, instance=instance)
+            _job_launcher_path(instance, jid).write_text("web-exec\n")
+        else:
+            # wpcli is a run-style service; entrypoint is `wp`, override to sh
+            # (gotcha #6). This compatibility path starts dependencies when
+            # the web service is unavailable.
+            compose("run", "-d", "--name", _job_name(instance, jid),
+                    "--entrypoint", "sh", "wpcli", "-c", wrapper,
+                    instance=instance)
+            _job_launcher_path(instance, jid).write_text("run\n")
+        # The launcher has accepted the detached shell by this point. The
+        # empty log is the durable running marker until the wrapper writes its
+        # PID and first output.
         _job_paths(instance, jid)[0].touch(exist_ok=True)
     return jid
 
@@ -218,6 +325,22 @@ def kill_job(instance: str, jid: str) -> dict:
         while _herd_group_running(pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         terminated = not _herd_group_running(pid)
+    elif _job_launcher_mode(instance, jid) == "web-exec":
+        requested = _kill_docker_exec_job(instance, jid, pid_file)
+        if requested is False:
+            _record_terminal(st, _JOB_ORPHAN_EXIT)
+            return {"job_id": jid, "status": "completed", "exit_code": _JOB_ORPHAN_EXIT,
+                    "killed": False}
+        if requested is not True:
+            return {"job_id": jid, "status": "running", "killed": False,
+                    "error": "job termination request could not be verified"}
+        pid = _read_group_pid(pid_file)
+        deadline = time.monotonic() + 2
+        while pid is not None and time.monotonic() < deadline:
+            if _docker_exec_job_running(instance, jid, pid_file) is False:
+                break
+            time.sleep(0.05)
+        terminated = pid is not None and _docker_exec_job_running(instance, jid, pid_file) is False
     else:
         result = subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
                                 check=False, capture_output=True, text=True)
@@ -250,7 +373,7 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
                 continue
             newest = max(path.stat().st_mtime for path in paths if path.exists())
             if now - newest > max_age:
-                for path in paths:
+                for path in (*paths, _job_launcher_path(instance, jid)):
                     path.unlink(missing_ok=True)
                 n += 1
         except OSError:

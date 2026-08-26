@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -52,6 +53,101 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertNotIn("setsid", popen.call_args.args[0])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(self._paths(jid)[2].read_text(), "4242")
+
+    def test_docker_launch_reuses_running_web_container_when_builtin_cli_exists(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", return_value=True), \
+                patch.object(jobs.secrets, "token_hex", return_value="a" * 16), \
+                patch.object(jobs, "compose") as compose:
+            jid = jobs.launch_job(self.instance, ["option", "get", "siteurl"])
+
+        self.assertEqual(jid, "a" * 16)
+        compose.assert_called_once()
+        args = compose.call_args.args
+        self.assertEqual(args[:7], ("exec", "-d", "-u", "www-data", "-T", "wp", "sh"))
+        self.assertEqual(args[7], "-c")
+        wrapper = args[8]
+        self.assertIn("job_root=/var/www/html", wrapper)
+        self.assertIn("/var/www/vhosts/localhost/html/.sb-jobs", wrapper)
+        self.assertIn("wp option get siteurl", wrapper)
+        self.assertTrue(self._paths(jid)[0].exists())
+
+    def test_docker_launch_keeps_run_fallback_without_builtin_cli(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", return_value=False), \
+                patch.object(jobs.secrets, "token_hex", return_value="b" * 16), \
+                patch.object(jobs, "compose") as compose:
+            jid = jobs.launch_job(self.instance, ["option", "get", "siteurl"])
+
+        self.assertEqual(jid, "b" * 16)
+        compose.assert_called_once()
+        args = compose.call_args.args
+        self.assertEqual(args[:4], ("run", "-d", "--name", jobs._job_name(self.instance, jid)))
+        self.assertEqual(args[4:8], ("--entrypoint", "sh", "wpcli", "-c"))
+        self.assertIn("/var/www/vhosts/localhost/html/.sb-jobs", args[8])
+        self.assertTrue(self._paths(jid)[0].exists())
+
+    def test_docker_db_job_keeps_mysql_client_fallback(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", side_effect=AssertionError("db must not probe web cli")), \
+                patch.object(jobs.secrets, "token_hex", return_value="e" * 16), \
+                patch.object(jobs, "compose") as compose:
+            jid = jobs.launch_job(self.instance, ["db", "query", "SELECT 1"])
+
+        self.assertEqual(jid, "e" * 16)
+        self.assertEqual(compose.call_args.args[:4],
+                         ("run", "-d", "--name", jobs._job_name(self.instance, jid)))
+
+    def test_docker_wrapper_is_valid_shell_and_quotes_argv(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", return_value=True), \
+                patch.object(jobs.secrets, "token_hex", return_value="f" * 16), \
+                patch.object(jobs, "compose") as compose:
+            jobs.launch_job(self.instance, ["eval", "echo 'quoted; value'"])
+
+        wrapper = compose.call_args.args[8]
+        checked = subprocess.run(["sh", "-n", "-c", wrapper],
+                                 capture_output=True, text=True, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_status_probes_shared_container_pid_for_exec_launcher(self):
+        jid = "c" * 16
+        log, status, pid = self._paths(jid)
+        log.touch()
+        pid.write_text("4242")
+        self.job_dir.mkdir(parents=True, exist_ok=True)
+        (self.job_dir / f"job_{jid}.launcher").write_text("web-exec\n")
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "compose", return_value=result) as compose, \
+                patch.object(jobs, "_docker_job_running", side_effect=AssertionError("used container lookup")):
+            state = jobs.job_status(self.instance, jid)
+
+        self.assertEqual(state["status"], "running")
+        self.assertEqual(compose.call_args.args[:6],
+                         ("exec", "-T", "wp", "sh", "-c", "kill -0 4242"))
+
+    def test_kill_shared_container_job_signals_wrapper_and_verifies_exit(self):
+        jid = "d" * 16
+        log, status, pid = self._paths(jid)
+        log.touch()
+        pid.write_text("4242")
+        (self.job_dir / f"job_{jid}.launcher").write_text("web-exec\n")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_kill_docker_exec_job", return_value=True) as kill, \
+                patch.object(jobs, "_docker_exec_job_running", side_effect=[True, False, False]), \
+                patch.object(jobs.time, "sleep"):
+            result = jobs.kill_job(self.instance, jid)
+
+        kill.assert_called_once_with(self.instance, jid, pid)
+        self.assertTrue(result["killed"])
+        self.assertEqual(status.read_text(), "143")
 
     def test_unknown_kill_is_a_noop_without_creating_artifacts(self):
         jid = "b" * 16
@@ -133,11 +229,13 @@ class TestWpCliJobs(unittest.TestCase):
         running = "a" * 15 + "b"
         terminal_paths = self._paths(terminal)
         running_paths = self._paths(running)
+        terminal_launcher = self.job_dir / f"job_{terminal}.launcher"
+        terminal_launcher.write_text("web-exec\n")
         for path in terminal_paths:
             path.write_text("0" if path.suffix == ".status" else "old")
         running_paths[0].write_text("still running")
         old = time.time() - jobs._JOB_MAX_AGE - 1
-        for path in (*terminal_paths, running_paths[0]):
+        for path in (*terminal_paths, terminal_launcher, running_paths[0]):
             os.utime(path, (old, old))
 
         with patch.object(jobs, "wp_dir", return_value=self.root), \
@@ -147,6 +245,7 @@ class TestWpCliJobs(unittest.TestCase):
 
         self.assertEqual(removed, 1)
         self.assertFalse(any(path.exists() for path in terminal_paths))
+        self.assertFalse(terminal_launcher.exists())
         self.assertTrue(running_paths[0].exists())
 
     def test_ordinary_list_runs_the_terminal_group_retention_sweep(self):

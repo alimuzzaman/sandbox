@@ -2,16 +2,33 @@
 
 ## Decision: detached launch per driver
 
-- **Docker**: `docker compose exec -d -w <ABSPATH> wpcli sh -c '<wrapper>'` — `-d` backgrounds inside the container and returns immediately.
-- **Herd (host)**: `cd <wp_root> && nohup sh -c '<wrapper>' >/dev/null 2>&1 & echo $!` using the instance's pinned `php<MM>` + `wp` shims.
+- **Docker**: use `docker compose exec -d -u www-data -T wp sh -c '<wrapper>'`
+  when the running web service has the shipped WP-CLI binary. This reuses the
+  service and returns at container-exec acceptance speed. Older/stopped or
+  LiteSpeed instances use the compatibility `compose run -d wpcli` launcher.
+- **Herd (host)**: Python starts `sh -c '<wrapper>'` with
+  `start_new_session=True`, using the instance's pinned `php<MM>` + `wp`
+  shims.
 - **Rationale**: both reuse the existing driver helpers; neither blocks the caller.
 - **Alternatives**: a long-poll sync call with a big timeout (still blocks, still caps); a daemon/queue (overkill for dev).
 
 ## Decision: wrapper self-reports its PID (enables cancel)
 
-- The launch wrapper is started with **`setsid`** so its `$$` is the process-**group** leader; it writes `echo $$ > .sb-jobs/job_<id>.pid` first, runs `wp …`, then `echo $? > .sb-jobs/job_<id>.status` on exit.
-- **Cancel** sends `kill -TERM -$(cat …pid)` (negative PID = the whole group), so the child `wp`/`php` processes are terminated too — no orphans (analysis F6). Container: via `compose exec`; herd: directly.
-- **Rationale**: detached `compose exec -d` doesn't cleanly surface the inner PID, so the start response returns **no `pid`** (analysis F5); the self-reported group-leader `$$` in `.pid` is the reliable cancel handle. `setsid` guarantees `$$` == PGID.
+- The launch wrapper writes `echo $$ > .sb-jobs/job_<id>.pid` first, runs
+  `wp …`, then `echo $? > .sb-jobs/job_<id>.status` on exit. The shared Docker
+  wrapper runs WP-CLI as a child under a TERM trap, so cancellation can signal
+  the wrapper without restarting the web container; the compatibility Docker
+  path remains container-scoped. Herd uses Python's
+  `start_new_session=True`, making the wrapper a process-group leader.
+- **Cancel** signals the shared Docker wrapper through `compose exec` or force
+  removes the compatibility job container. Herd sends `kill -TERM -$(cat …pid)`
+  (negative PID = the whole group), so child `wp`/`php` processes are
+  terminated too — no orphans (analysis F6).
+- **Rationale**: detached `compose exec -d` doesn't cleanly surface the inner
+  PID, so the start response returns **no `pid`** (analysis F5); the
+  self-reported wrapper PID in `.pid` is the reliable cancel handle. A private
+  `.launcher` marker records whether the job uses the shared web container or
+  the compatibility run container.
 - **Alternatives**: `exec wp` (makes `$$`==wp but then can't capture the exit code); parse `docker top` (brittle); no-cancel (rejected — clarification put cancel in v1).
 
 ## Decision: file-based state machine (no DB/registry)

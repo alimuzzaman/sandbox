@@ -118,8 +118,12 @@ Sources reconciled in this pass:
 
 ### Remote/runtime and migration evidence
 
-- [ ] **Async WP-CLI acceptance under 2 seconds** — redesign or document the
-  Docker start path to satisfy `specs/004-async-wp-cli-jobs/tasks.md:T021`.
+- [ ] **Async WP-CLI acceptance under 2 seconds** — the source path now reuses
+  the running Apache/Nginx web container with `compose exec -d` when its
+  built-in WP-CLI is present; DB/LiteSpeed/older or unavailable instances keep
+  the `compose run -d` fallback. Finish the measured cold/warm Docker matrix,
+  receipt/duplicate-request contract, and all-tier cancellation parity in
+  `specs/004-async-wp-cli-jobs/tasks.md:T021` before claiming SC-001.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and

@@ -371,9 +371,10 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
             # because its first output is older than the retention window.
             if _reconcile_job(instance, jid, paths) != "completed":
                 continue
-            newest = max(path.stat().st_mtime for path in paths if path.exists())
+            artifacts = (*paths, _job_launcher_path(instance, jid))
+            newest = max(path.stat().st_mtime for path in artifacts if path.exists())
             if now - newest > max_age:
-                for path in (*paths, _job_launcher_path(instance, jid)):
+                for path in artifacts:
                     path.unlink(missing_ok=True)
                 n += 1
         except OSError:

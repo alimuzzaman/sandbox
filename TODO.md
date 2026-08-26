@@ -14,7 +14,7 @@ contract. Keep remote, credential, production, and evidence-limited records
 blocked until their required live proof is available.
 
 Current ledger snapshot (from `./sb feedback counts --json`): **619 total**,
-**98 blocked**, **102 verified**, **265 resolved**, **72 duplicate**, and
+**97 blocked**, **103 verified**, **265 resolved**, **72 duplicate**, and
 **82 not applicable**. All 619 records are reviewed; no record is treated as
 implementation authority.
 

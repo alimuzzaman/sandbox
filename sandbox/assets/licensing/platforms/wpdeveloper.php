@@ -98,7 +98,7 @@ $sandbox_wpd_seed = function () {
     $keywords = array(
         'better-payment', 'betterdocs', 'betterlinks', 'embedpress',
         'essential-addons', 'essential-blocks', 'notificationx',
-        'wp-scheduled-posts', 'schedulepress',
+        'wp-scheduled-posts', 'schedulepress', 'xspeed-pro',
     );
     $set = function ($prefix) {
         $lic = $prefix . '_license';

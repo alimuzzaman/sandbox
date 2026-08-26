@@ -39,6 +39,10 @@ GitHub org: `WPDevelopers`. Repos default to `WPDevelopers/<slug>` unless the
 | **XSpeed** | `xspeed` | `xspeed` | Free |
 | | `xspeed-pro` | `xspeed-pro` | Pro |
 
+The Sandbox WPDeveloper keyless activation loader includes the exact
+`xspeed-pro` Pro slug in its scoped allowlist. The free `xspeed` slug is not
+matched, so activation does not broaden to unrelated or free plugins.
+
 Other known slug↔repo mismatches from the old catalog/notes (verify before use):
 `wowstore` repo → **`productx`** slug.
 

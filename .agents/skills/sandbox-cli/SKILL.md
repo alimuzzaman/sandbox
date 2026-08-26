@@ -294,6 +294,7 @@ sb ensure                       # create/start/reconcile the local instance
 sb status                       # runtime state and URL
 sb logs                         # public service logs
 sb exec -- <argv...>            # explicit argv in the declared service
+sb exec --project-dir DIR -- <argv...>  # select a registered project from any cwd
 sb deploy --remote <name> --ensure --expose
 ```
 
@@ -305,6 +306,9 @@ reconcile an existing named instance.
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
 test'`.
+When the command is launched outside the checkout, add `--project-dir DIR` so
+the project-owned instance is resolved rather than the caller's current
+directory.
 
 If a Compose service must install dependencies or generate clients before its
 health endpoint is ready, declare a bounded `compose.startupTimeoutSeconds`.

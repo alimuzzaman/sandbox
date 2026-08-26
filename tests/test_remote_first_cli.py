@@ -88,7 +88,8 @@ class RemoteFirstCliTests(unittest.TestCase):
                 patch("sandbox.core._remote.get_remote"), \
                 patch("sandbox.core._remote.remote_sb_path"), \
                 patch("sys.stdout", StringIO()):
-            cmd_exec(None, self._args(remote="named-vps", workspace="qa", detach=True))
+            cmd_exec(None, self._args(remote="named-vps", workspace="qa", project_dir="/review", detach=True))
+        self.assertEqual(requests[0].project_dir, "/review")
         self.assertEqual(requests[0].remote, "named-vps")
         self.assertEqual(requests[0].workspace, "qa")
         self.assertEqual(requests[0].required_capability, "job.exec")
@@ -209,6 +210,7 @@ class RemoteFirstCliTests(unittest.TestCase):
         parser = __import__("argparse").ArgumentParser()
         configure_exec_parser(parser)
         args = parser.parse_args(["--request-id", "exec-parser-1", "--", "echo", "ok"])
+        self.assertIsNone(args.project_dir)
         self.assertEqual(args.request_id, "exec-parser-1")
         self.assertFalse(args.local)
         self.assertIsNone(args.remote)
@@ -219,7 +221,7 @@ class RemoteFirstCliTests(unittest.TestCase):
         result = subprocess.run([str(__import__("pathlib").Path(__file__).parent.parent / "sb"),
                                  "exec", "--help"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for option in ("--local", "--remote", "--workspace", "--timeout", "--request-id"):
+        for option in ("--project-dir", "--local", "--remote", "--workspace", "--timeout", "--request-id"):
             self.assertIn(option, result.stdout)
 
     def test_detached_human_output_includes_target_workspace_and_deadline_source(self):

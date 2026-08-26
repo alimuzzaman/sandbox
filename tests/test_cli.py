@@ -1010,6 +1010,40 @@ class TestResolutionGate(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no sandbox instance", r.stderr + r.stdout)
 
+    def test_exec_project_dir_resolves_registered_instance_outside_project_cwd(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        argv = ["sb", "exec", "--project-dir", "/fixture", "--", "npm", "test"]
+        core = SimpleNamespace(
+            registry_all=lambda: {},
+            find_project_root=lambda path: Path(path),
+            registry_list_for_root=lambda _root: [{"instance": "fixture", "label": "default"}],
+        )
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "exec": lambda _cfg, args: observed.append(args),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", side_effect=AssertionError("controller cwd consulted")), \
+                mock.patch.object(cli, "resolve_registered_instance",
+                                  return_value={"instance": "fixture", "label": "default"}) as resolve_root, \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].resolved_instance, "fixture")
+        self.assertEqual(observed[0].project_dir, "/fixture")
+        self.assertEqual(observed[0].command, ["--", "npm", "test"])
+        resolve_root.assert_called_once_with("/fixture", label=None)
+
     def test_test_command_lists_explicit_modes(self):
         r = run_sb("test", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)

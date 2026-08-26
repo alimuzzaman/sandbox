@@ -551,6 +551,7 @@ Use the same runtime operations without an MCP client:
 ./sb ensure                       # start/reconcile local instance
 ./sb ensure --json --reveal-login # ...and emit a usable admin autologin URL
 ./sb exec -- sh -lc 'npm test'    # generic Compose projects only
+./sb exec --project-dir <dir> -- sh -lc 'npm test'  # select project from any cwd
 ./sb deploy --remote <name> --ensure --expose
 ```
 

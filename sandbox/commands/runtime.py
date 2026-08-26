@@ -102,6 +102,8 @@ def _public_command_catalog(invocation: str) -> list[dict[str, str]]:
 
 def configure_exec_parser(parser) -> None:
     parser.description = "Run an argv list in a generic Compose public service."
+    parser.add_argument("--project-dir", default=None,
+                        help="project directory whose registered instance should run (default: current directory)")
     parser.add_argument("command", nargs="...", help="argv after --; shell text is not inferred")
     parser.add_argument("--json", action="store_true", help="emit the runtime result as JSON")
     target = parser.add_mutually_exclusive_group()
@@ -165,6 +167,7 @@ def configure_guide_parser(parser) -> None:
 
 def cmd_exec(cfg, args) -> None:
     """Execute explicit argv in a generic Compose service without MCP."""
+    project_dir = getattr(args, "project_dir", None) or str(Path.cwd())
     command = list(getattr(args, "command", ()) or ())
     # argparse REMAINDER deliberately retains the conventional separator. It
     # is syntax, not part of the command passed to the container.
@@ -189,7 +192,7 @@ def cmd_exec(cfg, args) -> None:
         from sandbox.jobs.models import TargetRequest
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-                project_dir=str(Path.cwd()), workspace=args.workspace,
+                project_dir=project_dir, workspace=args.workspace,
                 required_capability="job.exec",
             ))
         except TargetResolutionError as exc:
@@ -213,7 +216,7 @@ def cmd_exec(cfg, args) -> None:
         if target is None:
             try:
                 target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-                    project_dir=str(Path.cwd()), local=args.local, remote=args.remote,
+                    project_dir=project_dir, local=args.local, remote=args.remote,
                     workspace=args.workspace,
                     required_capability="job.exec" if args.remote else None,
                 ))
@@ -272,7 +275,7 @@ def cmd_exec(cfg, args) -> None:
         from sandbox.jobs.models import TargetRequest
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-                project_dir=str(Path.cwd()), local=True, workspace=args.workspace,
+                project_dir=project_dir, local=True, workspace=args.workspace,
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")

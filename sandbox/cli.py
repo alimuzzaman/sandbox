@@ -1310,7 +1310,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             bool(getattr(args, "project_dir", None))
             and args.cmd in {
                 "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
-                "plugin-check", "deploy", "wp",
+                "plugin-check", "deploy", "wp", "exec",
             }
         )
         if (inner_local_observation or project_routed_with_root) and not explicit:
@@ -1326,7 +1326,7 @@ Per-project (each plugin carries its own sandbox.config.json):
                 except Exception as exc:
                     die(str(exc), 2)
                 chosen = selected.get("instance") if selected else None
-            elif args.cmd == "wp":
+            elif args.cmd in {"wp", "exec"}:
                 try:
                     selected = resolve_registered_instance(
                         getattr(args, "project_dir", None), label=cwd_label,
@@ -1371,7 +1371,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
     if args.cmd in {"status", "logs"} and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
-    if args.cmd == "wp" and getattr(args, "project_dir", None):
+    if args.cmd in {"wp", "exec"} and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
 
     # Instance-scoped commands operate on ONE instance and require resolution.

@@ -1,7 +1,8 @@
 # Plugin Check exact-archive mode — bounded design
 
-Status: design only. No CLI flag, runtime mutation, or shared image change is
-authorized by this note.
+Status: runtime-gated design. The host-only fixture/preflight layer is landed,
+but no CLI flag, lifecycle mutation, or shared image change is authorized by
+this note.
 
 This design addresses the blocked exact-release feedback records
 `3f0bc71ac86f145ab9480f5972800a63` and
@@ -12,6 +13,11 @@ record `bcdb8d8f647df1652727abbcbf616ed4` remain separate acceptance work.
 This document is an executable design contract, not an implementation approval.
 Archive mode remains disabled until the limits, isolation journal, fixture corpus,
 and acceptance matrix below are implemented and reviewed.
+
+The deterministic fixture corpus and pure single-descriptor preflight are the
+first two gated tasks. They do not boot Sandbox, touch the registry, inspect
+secrets, or mutate a caller project; the remaining disposable-runtime and
+cleanup gates are still open.
 
 Independent Sol High readiness review on 2026-08-26: **not ready for
 implementation**. The review identified missing target identity, inherited-state

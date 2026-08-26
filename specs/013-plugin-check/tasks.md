@@ -297,11 +297,11 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
   isolation, owner-only artifact path, pinned checker provenance, typed errors,
   and the durable cleanup journal/receipt contract. Keep MCP archive support
   deferred until parity is independently proven.
-- [ ] T035 Create a deterministic stdlib-only archive fixture generator and corpus:
+- [x] T035 Create a deterministic stdlib-only archive fixture generator and corpus:
   valid archive with a non-slug main filename, deterministic ERROR/WARNING,
   side-effect sentinel, traversal/duplicate/Unicode/case/drive/UNC/special/
   encrypted/truncated/CRC/root-layout/limit-boundary invalid archives.
-- [ ] T036 Implement pure host preflight using one `O_NOFOLLOW` descriptor for
+- [x] T036 Implement pure host preflight using one `O_NOFOLLOW` descriptor for
   hashing, validation, and streaming extraction; reject every corpus case before
   extraction and emit a stable member-manifest digest.
 - [ ] T037 Implement the isolated archive target/config builder: run-local

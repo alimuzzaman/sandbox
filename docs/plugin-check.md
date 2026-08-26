@@ -113,9 +113,9 @@ Both interfaces return the identical JSON shape:
 }
 ```
 
-## Exact-release archive mode (design-only)
+## Exact-release archive mode (runtime-gated)
 
-The proposed archive command is currently gated and has no CLI implementation:
+The proposed archive command is still gated and has no CLI implementation:
 
 ```bash
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
@@ -128,6 +128,15 @@ registry, descriptor, checkout, and baseline are never reused or overwritten.
 The target plugin stays inactive and read-only; only the pinned Plugin Check
 dependency is active, and runtime hooks are not run.
 
+The host-only preflight layer is implemented in
+`sandbox/plugin_check/archive.py`. It opens one regular input with
+`O_NOFOLLOW`, validates every canonical member, hashes the validated manifest,
+and can stream extraction through the same open descriptor. The deterministic
+stdlib fixture corpus and focused tests live in
+`tests/fixtures/plugin_check_archive.py` and
+`tests/test_plugin_check_archive.py`. This layer has no lifecycle, registry, or
+WordPress side effects.
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,
@@ -135,9 +144,10 @@ same-descriptor hashing/extraction, run-local `SANDBOX_HOME`, an owner-only
 cleanup journal, per-plane absence receipt, retained artifacts, and pinned
 checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
-and failure evidence. Do not treat this design note as permission to add
-`--archive` or close the exact-archive feedback records; fixture, focused tests,
-and disposable live acceptance are still required.
+and failure evidence. Do not treat the preflight layer as permission to add
+`--archive` or close the exact-archive feedback records; isolated runtime,
+cleanup/recovery, CLI integration, and disposable live acceptance are still
+required.
 
 ## 5. What changed porting from the reference implementation
 

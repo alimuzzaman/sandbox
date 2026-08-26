@@ -17,12 +17,13 @@ decorative font choice) — this plan ports that logic to Python, parameterizes 
 project-specific inputs (plugin slug, exclude-directories, version-header file) via
 `sandbox.config.json`, and de-brands the HTML report.
 
-## Exact-release archive extension (design-only)
+## Exact-release archive extension (runtime-gated)
 
 The source-tree implementation above is complete for its existing contract.
 Exact archive checking is a separate, not-yet-authorized extension described in
-`archive-mode-design.md`. It is not ready for implementation until the design
-convergence tasks in `tasks.md` define and prove hostile-ZIP limits,
+`archive-mode-design.md`. The pure host preflight and deterministic fixture
+corpus are now implemented as the first two gated tasks; the CLI remains
+disabled until the remaining tasks prove hostile-ZIP limits,
 single-descriptor extraction, run-local inherited-state isolation, inactive
 static-only target execution, pinned checker provenance, retained owner-only
 artifacts, and durable per-plane cleanup/recovery. The first extension is

@@ -81,7 +81,7 @@ All measured client acceptances were below two seconds. This proves the current
 Nginx shared and database-fallback paths only. Replay-safe duplicate-request
 behavior is covered by the focused fixture suite; LiteSpeed,
 older/stopped-service, and cold-Docker-daemon paths still need evidence before
-SC-001 or all-tier parity can be marked complete. A minimal-config LiteSpeed
-fixture attempted on 2026-08-26 reached container creation but timed out in
-Sandbox's bounded 30-second document-root bootstrap check; no LiteSpeed async
-launch was observed.
+SC-001 or all-tier parity can be marked complete. A disposable LiteSpeed
+attempt on 2026-08-26 reached container creation but timed out in Sandbox's
+bounded 30-second document-root bootstrap check; no LiteSpeed async launch was
+observed.

@@ -125,7 +125,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
     blocker above. Nginx shared and `wp db` fallback paths passed; LiteSpeed,
     older-image/stopped-service, and cold-daemon evidence remain open.
     Duplicate-request behavior is fixture verified, not live-tier parity
-    evidence. A follow-up minimal-config LiteSpeed attempt on 2026-08-26
+    evidence. A follow-up disposable LiteSpeed attempt on 2026-08-26
     reached container creation but failed Sandbox's bounded 30-second
     document-root bootstrap check, so it produced no async-launch sample. This
     is a readiness blocker, not evidence that the `compose run -d` fallback

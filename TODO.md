@@ -33,9 +33,9 @@ Next tasks, in order:
    evidence passes. Stable `--request-id`/`request_id` replay is now implemented
    and fixture-tested; it returns the same job for identical argv, refuses a
    conflicting replay, and reserves an `unknown` inspection handle after an
-   acceptance failure. A minimal-config LiteSpeed attempt on 2026-08-26
-   reached container creation but hit the bounded 30-second document-root
-   bootstrap timeout, so no LiteSpeed acceptance sample exists yet.
+   acceptance failure. A disposable LiteSpeed attempt on 2026-08-26 reached
+   container creation but hit the bounded 30-second document-root bootstrap
+   timeout, so no LiteSpeed acceptance sample exists yet.
 3. **P1 — define a bounded remote WP-CLI/preview contract.** Specify exact
    instance selection, package staging, authorization, output limits, and
    receipts for `sb wp --remote`/preview operations. Do not implement through

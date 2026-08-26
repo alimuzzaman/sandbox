@@ -137,6 +137,14 @@ stdlib fixture corpus and focused tests live in
 `tests/test_plugin_check_archive.py`. This layer has no lifecycle, registry, or
 WordPress side effects.
 
+The run-local target builder is implemented in
+`sandbox/plugin_check/target.py`. It writes a fresh owner-only descriptor under
+`SANDBOX_HOME/runtime/plugin-check/<run-id>/`, exposes only that review project
+through `SANDBOX_PROJECT_ROOTS`, forces local Compose metadata, keeps the archive
+plugin inactive/read-only, and activates only the pinned Plugin Check entry.
+It does not start the runtime or rewrite the caller baseline; journaled cleanup
+and CLI integration remain separate gates.
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,

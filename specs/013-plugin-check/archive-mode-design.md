@@ -14,10 +14,12 @@ This document is an executable design contract, not an implementation approval.
 Archive mode remains disabled until the limits, isolation journal, fixture corpus,
 and acceptance matrix below are implemented and reviewed.
 
-The deterministic fixture corpus and pure single-descriptor preflight are the
-first two gated tasks. They do not boot Sandbox, touch the registry, inspect
-secrets, or mutate a caller project; the remaining disposable-runtime and
-cleanup gates are still open.
+The deterministic fixture corpus, pure single-descriptor preflight, and
+run-local target/config builder are now the first three gated tasks. They do not
+boot Sandbox or touch the registry; the builder writes only owner-controlled
+review state and a generated allowlisted descriptor. It does not inspect
+secrets, inherit global config, or mutate a caller project. The remaining
+disposable-runtime and cleanup gates are still open.
 
 Independent Sol High readiness review on 2026-08-26: **not ready for
 implementation**. The review identified missing target identity, inherited-state

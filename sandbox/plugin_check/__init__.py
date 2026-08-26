@@ -10,6 +10,12 @@ from .archive import (
     open_archive,
     preflight_archive,
 )
+from .target import (
+    ArchiveReviewTarget,
+    ArchiveTargetError,
+    PluginCheckPin,
+    build_archive_review_target,
+)
 
 __all__ = [
     "ArchiveLimits",
@@ -20,4 +26,8 @@ __all__ = [
     "DEFAULT_LIMITS",
     "open_archive",
     "preflight_archive",
+    "ArchiveReviewTarget",
+    "ArchiveTargetError",
+    "PluginCheckPin",
+    "build_archive_review_target",
 ]

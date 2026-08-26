@@ -304,7 +304,7 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
 - [x] T036 Implement pure host preflight using one `O_NOFOLLOW` descriptor for
   hashing, validation, and streaming extraction; reject every corpus case before
   extraction and emit a stable member-manifest digest.
-- [ ] T037 Implement the isolated archive target/config builder: run-local
+- [x] T037 Implement the isolated archive target/config builder: run-local
   `SANDBOX_HOME` and `SANDBOX_PROJECT_ROOTS`, forced local Compose, inactive
   read-only target, active pinned Plugin Check only, invoking-UID readability,
   and no inherited global config, secrets, aliases, domains, or hooks.

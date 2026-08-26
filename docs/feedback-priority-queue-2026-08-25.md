@@ -2,9 +2,9 @@
 
 Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb feedback list --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **607**; reviewed/assigned status: **607**; unreviewed: **0**; invalid records withheld: **0**.
-- Active remediation: **379** — P0: 1, P1: 202, P2: 168, P3: 8.
-- Verification/closure follow-up: **228** — resolved: 122, verified: 74, duplicate: 10, not_applicable: 22, wont_fix: 0, invalid: 0.
+- Total records: **610**; reviewed/assigned status: **610**; unreviewed: **0**; invalid records withheld: **0**.
+- Active remediation: **378** — P0: 1, P1: 201, P2: 168, P3: 8.
+- Verification/closure follow-up: **232** — resolved: 122, verified: 75, duplicate: 11, not_applicable: 24, wont_fix: 0, invalid: 0.
 
 - Active remediation includes open, in-progress, blocked, and unreviewed records; closure follow-up includes resolved, verified, duplicate, not_applicable, wont-fix, and invalid records.
 - Rank order: active remediation first (P0 to P3), then closure follow-up. Within a tier, in-progress/blocked/unreviewed work precedes open work; severity, previously reviewed stable rank, freshness, and stable ID break ties. Existing reviewed tiers are retained; new records are assigned by the priority policy below.
@@ -77,342 +77,342 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 55 | active | P1 | open | high | dde35952937cff4f87cd77549d568878 | Remote job output cannot resolve Sandbox home over SSH |
 | 56 | active | P1 | open | high | b9815b2565193466965db85343ad26c2 | Repeated silent remote status probes block direct-host acceptance observation |
 | 57 | active | P1 | open | high | ed693f7259cc768dd29fb4a01da89d48 | Detached remote exec returned no job result for standalone evaluator state |
-| 58 | active | P1 | open | high | f7e83e9e0dc00d0c08591d45f7eca1f5 | Deploy cannot reconcile diverged managed remote branch |
-| 59 | active | P1 | open | high | dcb1070b7240de1233c7c509a6d54c49 | Remote network pressure remains high at 31 active managed networks |
-| 60 | active | P1 | open | high | c841bc711c53936d6a6ce94cfe7200e7 | Remote control updated; network pressure remains high |
-| 61 | active | P1 | open | high | 600d2def1a44dde2e811a79e01b9aa25 | Remote network pressure remains high at 31 active managed networks |
-| 62 | active | P1 | open | high | fe5c3e02c95f5df8a1abfbda61ce9aff | Remote normalization retry hit acceptance transaction expiry |
-| 63 | active | P1 | open | high | cdb2e1844f9557c118b44f9d36d46f71 | Remote provision leaves obsolete cloudflared after successful completion |
-| 64 | active | P1 | open | high | 6f0b87cd91d110adcdd8e94c1037458d | Remote detached exec fails with supervisor_launch_failed |
-| 65 | active | P1 | open | high | b8fcedf19c65046b16ecd8d61877ad6c | Confirmed remote provision returned no receipt and service health timed out |
-| 66 | active | P1 | open | high | 9bb7aea1a679db7233e18f8fbf31c841 | T120 evaluator full log and remote benchmark workflow gaps |
-| 67 | active | P1 | open | high | 968d8f7a4416f26099ca49bff0b61b0b | Remote T120 bootstrap blocked by exhausted Docker subnet pools |
-| 68 | active | P1 | open | high | 20c0829c9145fb5a0ead2849d13e258b | Remote preview project mapping breaks after exact source sync |
-| 69 | active | P1 | open | high | a941c144b268fcb1f090deb46b75255d | Local E2E fixture became unreachable during Playwright |
-| 70 | active | P1 | open | high | ac945dffe6fc473d30ee91368e301442 | Deploy wrapper accepted an unobservable job after SSH timeout |
-| 71 | active | P1 | open | high | ab89060b777e09db660cec5cb2f40ba1 | Detached job submission hangs and exact workspace job-list returns empty object |
-| 72 | active | P1 | open | high | 52b78220ec4255f8d680b707ca409980 | Exact-head xSpeed PR review plugin activation fails in disposable Sandbox |
-| 73 | active | P1 | open | high | 9290217a7686140b82bdad36fa84fb55 | Detached deploy output follow hung during process identity inspection |
-| 74 | active | P1 | open | high | 3c4f9059a8509b919774072acb8aa63d | Direct-host T126 job-start returned no acceptance payload |
-| 75 | active | P1 | open | high | 38efeba54f4a86c202a045b7cc55020a | Direct-host T124 job-start returned no acceptance payload |
-| 76 | active | P1 | open | high | d7e6cba07d96a9d0d7af2d993b547640 | Direct-host job-start completed without acceptance payload |
-| 77 | active | P1 | open | high | 388324ebc557a5eb27571b62ef26689c | Repeated learning host apply SSH timeout |
-| 78 | active | P1 | open | high | eddb34e41036f7cf38f01ad0a1fc64fc | Repeated T105 r7 status poll returned no payload |
-| 79 | active | P1 | open | high | 05605f7f730e2340d2787b05445da98d | T105 r7 status poll completed without a payload |
-| 80 | active | P1 | open | high | 9e9e30aa23570f8d7f50438d155b4cf9 | Fresh Sandbox cannot activate exact-head xSpeed PR source |
-| 81 | active | P1 | open | high | db34582b727bfea7d94ba446b681b9cc | Ox Alpha returned empty content for Lenzora implementation session |
-| 82 | active | P1 | open | high | cd7025da758c2f5dc564dcc320748195 | Ox Alpha autonomous Sandbox worker stopped after repeated empty model responses |
-| 83 | active | P1 | open | high | 120ce07b624da3c31e6c78f492adc04e | Hermes dashboard cannot resume saved TUI sessions |
-| 84 | active | P1 | open | high | 7ef8c643198daefd31eaa66d7438562a | Hermes public dashboard exposure blocked by obsolete cloudflared |
-| 85 | active | P1 | open | high | 2f6f1ecd91a543023a79414afdf8f939 | Hermes setup fails on fresh v0.18.2 profile creation |
-| 86 | active | P1 | open | high | 5021b7b9e9d71c82c3e9eacb026ca963 | Agent worktree setup switched the shared root branch |
-| 87 | active | P1 | open | high | 0dc659545d6568afe931b2cfe93669f8 | Sandbox feature branch push rejected by GitHub SSH |
-| 88 | active | P1 | open | high | 3321034abad0e4834919d73f8531f3d8 | T120 evaluator report attachment relocated to user feedback storage |
-| 89 | active | P1 | open | high | dc88af801eb6ddafe66aaea5c7d4f0c0 | Terminal output_bytes disagrees with complete retained output |
-| 90 | active | P1 | open | high | 9ff08b134474af5bfc4e85cfad35ab9b | Preview root remains unresolvable with original config |
-| 91 | active | P1 | open | high | fc1bc64c301c8dfe80b2c966e8149f20 | OrbStack stop interrupted Sandbox E2E and teardown |
-| 92 | active | P1 | open | high | 0a5987c9daee5c691b28ed6573c1c68e | T105 r7 retained output long-poll failed |
-| 93 | active | P1 | open | medium | ef04757903cd687e8b2f90bac15501e7 | No CLI path to install/run wp-cli against an existing remote preview instance |
-| 94 | active | P1 | open | medium | af8a2aae8503aedb52d1c02c80d3c55a | Remote status cannot inspect an existing deployed instance without a prepared workspace |
-| 95 | active | P1 | open | medium | 4947b7763ee36b4f7d0fb623f3349b80 | Remote status cannot inspect an existing deployed instance without a prepared workspace |
-| 96 | active | P1 | open | medium | 381ddbc764cadd387082bf9ce4699a13 | Resource scan workspace status is blocked by remote revision mismatch |
-| 97 | active | P1 | open | medium | 5f0ab2b1327aa41ee8d0ed9d1c62cd82 | Remote Sandbox workspace inventory blocked by runtime revision mismatch |
-| 98 | active | P1 | open | medium | 2a58b1355f744e47c292bad84af085e8 | Remote status rejects read-only PR feasibility when no project instance exists |
-| 99 | active | P1 | open | medium | a08b008462a83e6fb5a3c3263e8d7e07 | Remote fast resource status times out with capacity-only evidence |
-| 100 | active | P1 | open | medium | cc723c158ba1e9c9d493f7844ae3e690 | Hosted apply lacks a read-only post-deploy status and revision action |
-| 101 | active | P1 | open | medium | 74e77a060d3b5d9c230cb8a2b125b3a3 | Remote workspace list blocked by runtime revision mismatch |
-| 102 | active | P1 | open | medium | c2490b7c083289421901fb49ad9a3a1e | Remote resource status still times out on deployment retry |
-| 103 | active | P1 | open | medium | be7f222d6f7e9d7a9ea3dc4a9168c63b | Remote resource status times out before host deployment |
-| 104 | active | P1 | open | medium | b3905bbe81f9b2955cc7f5aa74dd6f0a | Remote direct-host job status SSH control timed out |
-| 105 | active | P1 | open | medium | e4ae52d8cc3be928ceb442e7a641e50a | Remote job-status returned no output for active direct-host job |
-| 106 | active | P1 | open | medium | 0aee03170ca08b02e3c46a7ecf666e69 | Remote job output read failed while active job status succeeded |
-| 107 | active | P1 | open | medium | 5fc4d97c873e6e3207b7d0452d782289 | Remote status cannot map local worktree instance |
-| 108 | active | P1 | open | medium | 8b88c87e231e7eedc19d9410289688ca | job-status returned no output after accepted remote job |
-| 109 | active | P1 | open | medium | 89e64f460d9d911ed95002af3a79e7d9 | Remote workspace list is blocked by revision mismatch |
-| 110 | active | P1 | open | medium | 0c10084f7c35220aa1f8028c68790ae4 | Remote unit tests depend on an unbuilt MCP venv |
-| 111 | active | P1 | open | medium | ac8b53198f58568c95045c115ff09824 | Remote Sandbox deploy rejects detached exact-head review worktree |
-| 112 | active | P1 | open | medium | de0c16c505c26abdc44ecb279b0a0df9 | Remote exact-tree deployment rejects detached review worktrees |
-| 113 | active | P1 | open | medium | 2e3b4d35178004728037fcffe49d8d16 | remote sb exec returns accepted job without retrievable completion |
-| 114 | active | P1 | open | medium | 663e516749ac7822692274cbcc6e1cc5 | Remote resource status fast probe timed out |
-| 115 | active | P1 | open | medium | 424a74fbe61106a4d89f65a55f82dcff | Remote exec selected a local durable job and timed out |
-| 116 | active | P1 | open | medium | 2fe446c36654412cca97de2be7105690 | Hosted apply rejects an email-valued configuration entry as a secret source name |
-| 117 | active | P1 | open | medium | f224aadf783352b84eb0159c7f8a9360 | Hermes provider status cannot inspect an already configured remote OpenRouter provider |
-| 118 | active | P1 | open | medium | 99d69b660d4e1160f6c70d6b867619b7 | Remote workspace inventory blocked by revision mismatch |
-| 119 | active | P1 | open | medium | f294f2948147e7248c65714d0ee0f8af | Remote workspace logs do not resolve named workspace |
-| 120 | active | P1 | open | medium | 1ef4334de71d0a937609d2b772520a82 | Hosted deploy status is not inspectable through host command |
-| 121 | active | P1 | open | medium | b41513e955d92bf2a1c408f381d21af2 | Hosted deployment has no status or revision inspection command |
-| 122 | active | P1 | open | medium | 843b42f7fc46db8196117fea019fa6c9 | Local labeled E2E unexpectedly used remote capacity admission |
-| 123 | active | P1 | open | medium | b2177d0ed8b796f1ff0e990e701d5f0c | Fast remote resource status timed out without its promised cached index |
-| 124 | active | P1 | open | medium | 560976950cfd30d5ce8737f9e6df95a8 | Instances command has no remote inventory selector |
-| 125 | active | P1 | open | medium | 72022a6a81166cbd17baae6b88b92839 | Add a deterministic remote test bootstrap profile and phase-aware evidence output |
-| 126 | active | P1 | open | medium | 93bbb08ed676e92604a4f29726ce1aca | Remote resource status returns partial coverage with timed-out categories |
-| 127 | active | P1 | open | medium | 630d251dd4fc61d4f0f4d84d0557fd39 | Remote domain inventory misclassified nested Caddy directives as hostnames |
-| 128 | active | P1 | open | medium | 6c9b438100cbf34b3474ab46d2f0dd8c | Remote output transport failure recurs during direct-host job |
-| 129 | active | P1 | open | medium | ef18692dbbbabe7720bcb5afef2e0de1 | Detached remote exec returned no job identifier |
-| 130 | active | P1 | open | medium | 092392ad9cc9b22ca3aa0ef3fa17f698 | Remote project resolution ignores matching registered instance |
-| 131 | active | P1 | open | medium | 2a7f6e60382ff387a84ce5ea3112baf0 | Remote retained-output read fails for active direct-host job |
-| 132 | active | P1 | open | medium | 92511a2c00128e5120683f5c0386f6ad | workspace create ignores explicit Scaleway remote target |
-| 133 | active | P1 | open | medium | 2374342bd83e0e662a1ce8676c6d3f87 | Local remote selector listed nonexistent VPS instance |
-| 134 | active | P1 | open | medium | fd8affd7d173d7314887800477c4fce4 | Remote job-output read failed for healthy retained job |
-| 135 | active | P1 | open | medium | 2849f90e57e507f07cb218d168cc4058 | Remote instance error listed local registry |
-| 136 | active | P1 | open | medium | 128f35781c4be662f8df875e7683e68d | accepted remote resource scan can remain queued without position after prior retained scan completes |
-| 137 | active | P1 | open | medium | 7a349cf706b132bc63a1edbef1edcdda | Remote deep storage scan timed out before attribution |
-| 138 | active | P1 | open | medium | 9af5c990a7efde8bf2a61d1c8ee31cf7 | Remote storage attribution scan timed out with large unknown bucket |
-| 139 | active | P1 | open | medium | 2d168956422b2f6aeee4ef754bc63b95 | remote exec accepted id cannot be queried |
-| 140 | active | P1 | open | medium | b6e84616c1ed7e21a41136c604a00602 | Hermes host run cannot bootstrap from a private repository without remote GitHub auth |
-| 141 | active | P1 | open | medium | e2cffada572053c0b41500419c79dc40 | Hermes run requires a managed repo despite supporting remote operations |
-| 142 | active | P1 | open | medium | 43f98577513e43026ffdf03d1c6481e8 | Hermes health remains degraded although remote MCP is healthy |
-| 143 | active | P1 | open | medium | e3d8c553b3b24bafeaddde245294ddaf | Thorough remote resource inventory remains partial at 60 seconds |
-| 144 | active | P1 | open | medium | bc1f0f8974b9dd55e241f1f257572530 | reveal-login refused remote ensure records, leaving E2E runners with a placeholder login URL |
-| 145 | active | P1 | open | medium | 6f513cf08218e309dcdc650ae151c94e | Remote Sandbox guide rejects documented local flag |
-| 146 | active | P1 | open | medium | 56bf50f61cf5065710dc5acd608575fa | Remote host operation lacks a brokered exec path |
-| 147 | active | P1 | open | medium | 453aef2840ed33dcffe10cc9c87855b6 | Remote exec rejects standalone evaluator state under /tmp |
-| 148 | active | P1 | open | medium | 704a866370b6c283352e21862e7b7040 | Documented remote Sandbox path is not valid |
-| 149 | active | P1 | open | medium | 3727d6d5ba84090a5c1a5dbbe1e408ee | Doctor crashed before remote diagnostics during protocol-skew investigation |
-| 150 | active | P1 | open | medium | db90e71e7e51c4dcbad486e60c91a627 | sb test and sb apply refuse to work in a detached-HEAD worktree, which is the normal shape for PR review |
-| 151 | active | P1 | open | medium | a45de86b853fe15cc089f5799ebcc98b | preview create does not report the instance name or runtime dir it created, so follow-up work has to guess by glob |
-| 152 | active | P1 | open | medium | 871ee1a12b74738e7885fea98472d654 | job-output cannot retrieve the live metrics stream that job-status reports |
-| 153 | active | P1 | open | medium | 9db422b1be73c60e0e0f5f5f7834de81 | Focused E2E defaults WP-CLI to nonexistent /tmp/wp despite registered Sandbox instance |
-| 154 | active | P1 | open | medium | 9fd4afbcf6bd5efbf7698d9906f02169 | Secret runner reports redaction failure for a successful non-sensitive status probe |
-| 155 | active | P1 | open | medium | b89fe5e677f3b94ba9105e39bffaad27 | Job CLI matrix regression is not isolated from persistent workspace bindings |
-| 156 | active | P1 | open | medium | f535fa1357d42bf2a8dd30737af37fbe | job-status rejects intuitive --job-id flag |
-| 157 | active | P1 | open | medium | 20cc2f0a53ab4bc421f46735c1742cf1 | Sandbox stale WordPress instance cannot be reconciled when database service is missing |
-| 158 | active | P1 | open | medium | 895342edf9b7a8f5b65515a16aed15d7 | Generic Compose deployment rejects valid dotted project directory as WordPress slug |
-| 159 | active | P1 | open | medium | d46a9bb76aa1733ec0f933b278a83c57 | web CSS builder no longer finds modular page shell |
-| 160 | active | P1 | open | medium | ac760c7b02d4b81fe697c6cd15c6001b | Active broken plugin blocks wp plugin replacement recovery |
-| 161 | active | P1 | open | medium | a72307fa19c6d89ec6f8c1cdc901a8b4 | ensure returned empty output without creating review instance |
-| 162 | active | P1 | open | medium | c80f91e0fd2bdb79555d89cb0920c5cd | Exact-head xspeed activation fails when vendor autoload is absent |
-| 163 | active | P1 | open | medium | 7d88045f9c8e92c3fdeded2754a837bc | Applying a valid xspeed sandbox config failed on unresolved inherited plugin |
-| 164 | active | P1 | open | medium | 5fec1a2ad96785ac922e45d1078915a7 | Dev push deploy hook uses wrong Node version |
-| 165 | active | P1 | open | medium | fb21264967c998f7bc20368e961bcc3b | Sandbox CLI deploy fails when pyenv selects unavailable python3.13 |
-| 166 | active | P1 | open | medium | 2c76137a00c63a97e40ff2086dfe89fb | Post-merge Lenzora deploy hook ignores the repository Node version |
-| 167 | active | P1 | open | medium | 56b29b3604b6f4ae1fdee8bef3334daa | Post-merge dev deployment does not bootstrap the required Node version |
-| 168 | active | P1 | open | medium | a3050df7119b8750a6da00837951d014 | Hermes configured status hides absent dashboard |
-| 169 | active | P1 | open | medium | f81f8349985787c6825f0013e0866328 | Host logs discovery timed out after Docker test workload |
-| 170 | active | P1 | open | medium | 2a918e7c8aec57b786fcbf40bd9e0a64 | Post-merge Sandbox deploy hook ignores the project Node pin |
-| 171 | active | P1 | open | medium | d14342c79c4a55b077ab3d5a368e589d | sb ensure changes explicit instance name and omits requested JSON result |
-| 172 | active | P1 | open | medium | 9898984862bc034e50fda397d85afa3f | sb doctor detects a dead proxy port-forward but offers no repair; docker restart sandbox-proxy fixes it |
-| 173 | active | P1 | open | medium | 793c3d1b9b951af0f00424f63a91b554 | job-start help does not enumerate valid execution profiles |
-| 174 | active | P1 | open | medium | 6944e3417b63aecd7cc2dd3f687993c9 | Direct-host job preserved early assertion failure as terminal evidence |
-| 175 | active | P1 | open | medium | 39f83b4daec5c90af74a4125b1329c3e | Read-only jobs lookup cannot resolve isolated registered-project checkout |
-| 176 | active | P1 | open | medium | 718e64637a1a5462c92a11af6a092911 | Batched corrected-job evidence reads timed out at SSH control |
-| 177 | active | P1 | open | medium | a1de4edbe535da9e5ecf4ee4780569f1 | Direct-host job output read failed while job active |
-| 178 | active | P1 | open | medium | 621aeec140a2f92f93b5ab2ccaa11acb | Deploy rejects safe detached deployment snapshot |
-| 179 | active | P1 | open | medium | 499afa9e8fc6a10a625821e2bede72a0 | direct job-start accepted sh wrapper with bash-only pipefail |
-| 180 | active | P1 | open | medium | 4ae20bf73cf57308ece0a8c79a21ad41 | Runtime guide references missing project Sandbox launcher |
-| 181 | active | P1 | open | medium | 7032764f3afc12d1ac55d767c4f18210 | Fresh HSSB WordPress 7.1 E2E provisioning exhausted Docker network pools |
-| 182 | active | P1 | open | medium | e3c10123ab75ea297d49e7aa1d014794 | WordPress runtime cannot execute wp db query because mysql client is missing |
-| 183 | active | P1 | open | medium | 96819c8e948b59b8205afb53d5383041 | Hermes repo sync cannot refresh provisioned Sandbox runtime |
-| 184 | active | P1 | open | medium | 37760be8415b0a79aea9e5775d00a7ea | Hosting command group has no discoverable hosting skill |
-| 185 | active | P1 | open | medium | 34b7e8f69a6ded4368b37fddf8fcf8ed | Repeated sb wp startup exhausts Playwright setup timeout |
-| 186 | active | P1 | open | medium | 5b79bab6434c746598accf35e3c1c474 | Sandbox ensure rejects disposable PR review clone under /tmp |
-| 187 | active | P1 | open | medium | 03f51d2fce72cca73cc499b7d3d30e99 | Free PR checkout cannot be initialized for Sandbox without compose config |
-| 188 | active | P1 | open | medium | 941dacfc126a3e5087fc1783d21df829 | Repeated linked-worktree Node and dependency bootstrap toil |
-| 189 | active | P1 | open | medium | 34088c3da0522f16db1a000046518234 | Herd ability execution probe fatals and wp wrapper prompts noninteractively |
-| 190 | active | P1 | open | medium | eb496b17c1c33e47aaa7e74fde5ea4bf | Feedback JSON list crashes when since filter is used |
-| 191 | active | P1 | open | medium | feacbc91b1d5e2c6c3056ca78dc90eca | Ensure does not recover database after interrupted first provisioning |
-| 192 | active | P1 | open | low | 5ce268c6b6c7e9d8e5cc79312ddfd961 | Remote network-capacity monitor: no managed pool pressure |
-| 193 | active | P1 | open | low | 1e799cd8c24fc081924a8ed99b369fab | Remote network-capacity monitor: no managed pool pressure |
-| 194 | active | P1 | open | low | 1f4372da2337ec163743ffc8af70035c | Remote capacity monitor recovered after runtime refresh |
-| 195 | active | P1 | open | low | b94b737c8813c0fa613d4b4a8f969d26 | Remote network-capacity monitor: ownership incomplete |
-| 196 | active | P1 | open | low | 37643f63e567d44d4fa153062559b911 | Remote network monitor: ownership remains incomplete |
-| 197 | active | P1 | open | low | 756a8df6696e71385fa15134a9992308 | Remote network monitor recovered with incomplete ownership |
-| 198 | active | P1 | open | low | 80b4dea2b687f3ab4c2e3c807bddf34b | Read-only remote resource probe could not measure host capacity |
-| 199 | active | P1 | open | low | 66cca31e474b70b2260eaa41a6dcd317 | Remote resource scan partial despite low network pressure |
-| 200 | active | P1 | open | low | 7a03bd1d37303521466987c81337c254 | Remote network pool pressure classified low |
-| 201 | active | P1 | open | low | dd4f8d96d5e8794d97b21bdc0e68d07a | Remote resource preflight unavailable during feedback triage |
-| 202 | active | P1 | open | low | 3bab1363b29e8a2225e1e760fbdbace2 | Support-floor smoke assertion failed in WP-CLI runtime |
-| 203 | active | P1 | open | low | 2ad74188c8f1636c572542e4f1e5408b | Support-floor content equality assertion failed again |
-| 204 | active | P2 | open | medium | dbb7068f992c1aca082904ce3ef7fa68 | Allow a container to invoke an allowlisted command on the HOST |
-| 205 | active | P2 | open | medium | 5d79047c59d6194588cdab4eae846b00 | Disposable WordPress worktree instance omits reviewed plugin and cannot install project ZIP |
-| 206 | active | P2 | open | medium | 56551456d608b92220dcf52388cbb6f6 | sb wp plugin install cannot bridge an absolute host ZIP path |
-| 207 | active | P2 | open | medium | 711940db2d0c9bbce9ad5130444cc3f9 | Disposable plugin mapping activates before vendor dependencies are installed |
-| 208 | active | P2 | open | medium | fdd88ab7c3b78f3e1b0e694db6c50b0a | pyenv pin 3.12 missing on machine: every sb invocation in sandbox repo fails before argparse |
-| 209 | active | P2 | open | medium | 92966e707ba418e055820f9e3c71f1e4 | sb init did not install or upgrade the configured WordPress project |
-| 210 | active | P2 | open | medium | 5393e210a5f22a86af9b5ad6a409f896 | sb test --local --label does not create a missing isolated test instance |
-| 211 | active | P2 | open | medium | 4ea48c7a73fa466a22fc6a13c0ce9134 | PR review temp worktree rejected by WordPress instance resolver |
-| 212 | active | P2 | open | medium | 2cfab06ff5393a6e759df277fa818dca | secrets run 1800s cap blocks running a long-lived dev server under a brokered secret |
-| 213 | active | P2 | open | medium | 6ae07ae76205e45d8fd6782bee16b212 | Secret-run agent launch surfaced OpenRouter SDK maxPrice schema mismatch |
-| 214 | active | P2 | open | medium | 18c1ac3d3b7821087cc4d6a26bbf632a | Secret broker lacks OpenRouter API key validation profile |
-| 215 | active | P2 | open | medium | 133d878c1f52ca34065d514ee72c76d9 | Registered WordPress project lost its Sandbox instance |
-| 216 | active | P2 | open | medium | 20a2508436ae6be32d8da8ec065ebda6 | Fresh local Sandbox instance loses project association between commands |
-| 217 | active | P2 | open | medium | 6ef03d44b29cf10c87f56f6634e68ca3 | Full unittest discovery aborts: a test invokes the sb parser with the discovery argv |
-| 218 | active | P2 | open | medium | d89c5644b44dc5c7159d6164d62a815d | sb secrets has no delete/unset operation, so stale keys cannot be removed through sanctioned tooling |
-| 219 | active | P2 | open | medium | 7e6374beb19ef30884e78745a4a87281 | Known xSpeed instance name and label guidance conflict |
-| 220 | active | P2 | open | medium | 3f0bc71ac86f145ab9480f5972800a63 | Plugin Check exact ZIP workflow lacks a clear Sandbox path |
-| 221 | active | P2 | open | medium | b2ed6f764e1f61cdacb5b03f32f5e986 | wp eval namespaced cache toggle quoting remains brittle |
-| 222 | active | P2 | open | medium | eb0e3845185bfe348d35ac34a6a156bf | wp eval rejects valid namespaced PHP reflection command |
-| 223 | active | P2 | open | medium | cabb0469159a2357c994c84893fa8c44 | sb host validate requires an undocumented environment selector for multi-environment manifests |
-| 224 | active | P2 | open | medium | 89b94c60c3470010af34126a3f671dc1 | Plugin ZIP aborts on Hamcrest generator template |
-| 225 | active | P2 | open | medium | 171f639a9f4dcd7bea3f502dd6c00a49 | Disposable review worktrees under system temp are rejected |
-| 226 | active | P2 | open | medium | 82ec5d6e863604d66959a64490e07853 | Sandbox WordPress wp command rejects documented project-dir routing |
-| 227 | active | P2 | open | medium | 54ec837a1a5260180308720f43dd8763 | Sandbox rejects valid detached worktree because generated directory basename is not a plugin slug |
-| 228 | active | P2 | open | medium | 7f75fabc5156991f6c33f9bcb2a7caf4 | Disposable project init fails on inherited unresolved optional plugins |
-| 229 | active | P2 | open | medium | c8c82eb12b63fbc8bdde2afc04d909c4 | Deep storage scan completes only with partial inner attribution |
-| 230 | active | P2 | open | medium | 5b07febc49a9eca2944669bb86ca4fb2 | Sandbox isolated worktree setup rejects valid review paths and service targeting is unclear |
-| 231 | active | P2 | open | medium | e8ddb411eb6d706b2959e96ade8e86e8 | feedback list pagination emitted invalid JSON control characters |
-| 232 | active | P2 | open | medium | 028148a48ab7f607d8a32a6ea789fb92 | Hermes public repository clone returns clone_failed during normal checkout |
-| 233 | active | P2 | open | medium | cd9baf02fa2727215178513c323a2ca8 | Hermes repo sync reports missing managed repository for Sandbox |
-| 234 | active | P2 | open | medium | 39d1950882d21545dfa0599f44d9f7b7 | Hermes iteration-cap controller used config get unsupported by pinned Hermes v0.18.2 |
-| 235 | active | P2 | open | medium | 1ff68cf292a169877840db44823f90b0 | Sandbox launcher ignores bundled CLI virtualenv when pyenv 3.12 is missing |
-| 236 | active | P2 | open | medium | d47f53dccc7fce3cbf314211a0932219 | Hermes shared external skill scan omits design-fidelity-diff without a verdict |
-| 237 | active | P2 | open | medium | b1864a6bfe983b15f24a26f7c20a88b2 | Hermes skill registration needs an explicit discovery reload |
-| 238 | active | P2 | open | medium | ee7fa861f1ca6b76b87fc3bab53a84c0 | Hermes public-route adoption cannot resolve Access policies from list response |
-| 239 | active | P2 | open | medium | 7a2cdddbf791a51423e0a713e98997a5 | Hermes OpenRouter setup used unsupported config read command |
-| 240 | active | P2 | open | medium | 9680116c0afdaee8448f2e68421710b3 | Hermes OpenRouter setup command misses os import |
-| 241 | active | P2 | open | medium | d619a2a7c33c4e21073928e29eeef266 | Scoped WordPress core update failed after unpacking version 7.1 |
-| 242 | active | P2 | open | medium | 6687abd93e5d8ca4f8d5d6a56fb7c8fa | CI preflight blocks full Lenzora workflow on Sandbox act runner |
-| 243 | active | P2 | open | medium | 103ae36f12548a7680c414bff2043999 | Sandbox WordPress plugin path contradicts plugin list |
-| 244 | active | P2 | open | medium | 4e7e5f254889298791b77e8ef05d56d8 | Sandbox CLI discoverability gap: no subcommand |
-| 245 | active | P2 | open | medium | c7ea6da8687db97c2dbba94c24316e5a | Guide documents request-id for detached exec but CLI rejects it |
-| 246 | active | P2 | open | medium | 93824bd2ad4bcd66c6628edda9c498dd | doctor rejects standard local project routing flags |
-| 247 | active | P2 | open | medium | e0a9c65980b8f16b2febf7e74f27e649 | sb exec rejects documented request-id option |
-| 248 | active | P2 | open | medium | cd1f7a9858b8e6077c2a7ed8d57b4fff | Fresh Sandbox worktree guide fails when incomplete CLI virtualenv exists |
-| 249 | active | P2 | open | medium | 74d503ab3bef8d3392432e2232760a93 | Full Sandbox suite retains three baseline failures |
-| 250 | active | P2 | open | medium | 423e3e912f87cbf0024837d275a807dd | Sandbox logs does not provide bounded terminal snapshot |
-| 251 | active | P2 | open | medium | e341ae5ea348d7f62794117b309a8ee5 | Spec Kit precheck cannot target amended existing specs |
-| 252 | active | P2 | open | medium | 1034d4ca80006f016554337db1264aae | Fresh ZIP-only fixture contains destination plugin directory |
-| 253 | active | P2 | open | medium | 6496ba60bf80c6cff680d2e95384f23d | Sandbox E2E wrapper hides Playwright failure output after successful provisioning |
-| 254 | active | P2 | open | medium | e3dadfcd00c26989ad4590947f6d1b80 | WP media import does not map project file and pollutes porcelain capture |
-| 255 | active | P2 | open | medium | 6240dc67560ab8cd7ce2188a2c657ab0 | Plugin Check adapter rejects successful output |
-| 256 | active | P2 | open | medium | b32a5250c5a22045c95059da67bcb10c | E2E wrapper omits Playwright failure detail |
-| 257 | active | P2 | open | medium | 25c004af5c238bc706b84ac833594aab | Plugin Check wrapper rejects successful no-error output |
-| 258 | active | P2 | open | medium | bb1f932babd2e4e0c1afebe0621456ee | Restore confirmation flag is not exposed by the CLI parser |
-| 259 | active | P2 | open | medium | 5d9f1c65067dd7cf0079220a4ebc2060 | Host plan omits declared background services |
-| 260 | active | P2 | open | low | c73e13c16883f1ccc416df26f59fb08c | Remote service subcommand usage is not discoverable from remote --help |
-| 261 | active | P2 | open | low | d4a37b6f22edeee8563d7abd943714c4 | Host validate cannot validate every manifest environment in one call |
-| 262 | active | P2 | open | low | 7e6bf32d6bb2a0207fcd612f8d46503e | Remote status requires non-obvious instance selection from isolated worktree |
-| 263 | active | P2 | open | low | a5af1834c48ec3b70080840b061068e1 | Correction: deploy job ledger is local, not remote |
-| 264 | active | P2 | open | low | 74212a8043f83fa50446b94e2f76ccb7 | remote service migrate returned no CLI output despite successful apply |
-| 265 | active | P2 | open | low | f528a47206c7b9d0f1d36dd17ee7def9 | Hosted deployment status cannot resolve deploy-source project directory |
-| 266 | active | P2 | open | low | f200d37deea45ebc6375d5e519302b64 | Remote status command is not discoverable |
-| 267 | active | P2 | open | low | 8d5b6bce700d8ef592e8c4d18cb59248 | shell WP-CLI diagnostics need explicit root allowance |
-| 268 | active | P2 | open | low | 2f2699256f50fcc2520d245b0c2aa8a3 | sb e2e reached Playwright but could not resolve @playwright/test from the project |
-| 269 | active | P2 | open | low | bd617aa4a6c91dafef6ecca7700243ad | Host plan requires explicit remote after successful manifest validation |
-| 270 | active | P2 | open | low | 1440ad3df0c3d1d28c55ec5129a8298e | Sandbox secret inspection fails under the default pyenv selector even though Python 3.13.1 is installed |
-| 271 | active | P2 | open | low | 6bf36b944cf8846af3cfcc33279555d3 | WP plugin list rejected undocumented path field during remote inspection |
-| 272 | active | P2 | open | low | 7c93654b14d054d504caf2b40b2c426e | Evaluator local path glob was not resolved before remote submission |
-| 273 | active | P2 | open | low | 29f0128acae302ae957950feaada51fb | Global sb exec rejects project-dir although workspace accepts it |
-| 274 | active | P2 | open | low | 5bda94d762e7ecea4c82d3060d6b8b19 | Remote list rejects project-dir selector |
-| 275 | active | P2 | open | low | 27a3ebac6330510ef46400ea4a8fbbc9 | Agent runner syntax check used caller cwd instead of runner directory |
-| 276 | active | P2 | open | low | 7ea39dad34d9d23bd530ad7be14f6717 | Hosted log tailing is not discoverable and rejects the common --tail argument |
-| 277 | active | P2 | open | low | 3ce28a2c9f32e370ec93183f2d818d78 | Hermes doctor treats expected pre-install absence as failure |
-| 278 | active | P2 | open | low | ca6c46b208c40d2a16cefe0d7fe5c827 | Project-scoped status should explain missing instance context |
-| 279 | active | P2 | open | low | 301231455c3fca6af640704a630de8cb | Project-mounted WP-CLI paths and E2E cleanup need clearer reporting |
-| 280 | active | P2 | open | low | ac14f1c22e465cd6127e6846fb509fe4 | ensure recovery rejects the instance name returned by ensure create |
-| 281 | active | P2 | open | low | ed61d1e45f5aac0b41a762f3b7dabcc5 | Guide status command fails before first instance creation |
-| 282 | active | P2 | open | low | 64bcf5e5c6ece82d395a5a5a2ebc87f9 | Status cannot inspect unregistered project without an instance |
-| 283 | active | P2 | open | low | f372b16887dd99be160dab62859c2fd3 | Instance deletion preserved unreceipted legacy domain artifacts |
-| 284 | active | P2 | open | low | 135e0014fd2946ecda09abbde70fed8a | Instance deletion preserves unreceipted legacy domain artifacts |
-| 285 | active | P2 | open | low | c50b7e5f00cc9c57f51d66a93f8cf07a | test_modularity baseline runtime_kind_branches is stale (111 vs 115 at HEAD) |
-| 286 | active | P2 | open | low | 319295b97505c5105698076a71ca2431 | Local status requires a registered instance |
-| 287 | active | P2 | open | low | 48369c862e31b1ed4d9a33817f0e014e | Instance status subcommand is unavailable |
-| 288 | active | P2 | open | low | 4bbcf21ce7af47e77fad318f579a2692 | Theme status pass-through gives no guidance for invalid WP-CLI field form |
-| 289 | active | P2 | open | low | 0ca4656a7af7c37503dbe50b27d466a5 | Brokered secret command succeeded but inline tsx evaluation failed on top-level await |
-| 290 | active | P2 | open | low | 3fa2c05db19e2b541435e4c494eb9ceb | Focused unittest module name was missing |
-| 291 | active | P2 | open | low | b1ad1d168ae2a184d0638da7a58f95fd | Nested sb wp rejects project-dir placement during secrets run |
-| 292 | active | P2 | open | low | 3c575e3573915a8a9f12f3d8f3cd5147 | fresh ensure instance lacks Plugin Check despite project PHP validation workflow |
-| 293 | active | P2 | open | low | bd27d2cbbfae7a8b8dd5fdee79450087 | sb wp passthru test command surfaced missing explicit phpunit.xml |
-| 294 | active | P2 | open | low | fa6d5f85dfbf142e90381530730b250a | Sandbox wp cannot target an instance from detached review worktree cwd |
-| 295 | active | P2 | open | low | 81cbcc2283df364ee7d3b6090b2587a4 | WP-CLI help through sb fails because less is missing |
-| 296 | active | P2 | open | low | 6b22c6f6ced583e1b946a6d165598a0d | sb up does not support JSON output unlike status |
-| 297 | active | P2 | open | low | 758ed630bd86503a3ecc7600019f4213 | Temporary PR review worktree cannot resolve existing W3TC instance |
-| 298 | active | P2 | open | low | 1b6c9384b1bce1b4f7bf9e399dfbd571 | License status command rejects documented-style JSON flag |
-| 299 | active | P2 | open | low | bdbd66546d3f0c01289a2c3c34dfb191 | Plugin deactivation reports batch failure for one absent slug after deactivating others |
-| 300 | active | P2 | open | low | d02cc0ff45272ba13559ccab3ba05bcf | sb job-output rejects wait longer than its documented polling use |
-| 301 | active | P2 | open | low | 55f213b00c715e051ac5d91c73bcba6e | Secret-run timeout ceiling is undocumented at agent launch |
-| 302 | active | P2 | open | low | 72d7e41672b419a7ed688f56130e9f4f | secrets run rejects direct Node -e arguments |
-| 303 | active | P2 | open | low | 312999f52f6275df463d3178d1c8cd00 | Secret key inventory flag differs from documented invocation |
-| 304 | active | P2 | open | low | 4932ce6cb034428b9d058372f27b1384 | Focused Hermes test class is not discoverable |
-| 305 | active | P2 | open | low | 26f42e8614d8782fd3247ad1812543a3 | Post-merge sandbox deploy hook ignores repository Node pin |
-| 306 | active | P2 | open | low | d31d50a62fee3d648aa1a0943e5ed38e | Post-merge dev deploy hook ignores repository Node pin |
-| 307 | active | P2 | open | low | 234ae3c23f48e079e884c3f6a42fdd97 | Execution guard rejects temporary test cleanup |
-| 308 | active | P2 | open | low | 5d686f805c040875b70647936c3eb852 | Host status requires hidden environment selection |
-| 309 | active | P2 | open | low | c7148951984491f103e0d106d190b7d5 | Focused test file selection is not discoverable from sb test |
-| 310 | active | P2 | open | low | aff7c116c78be838405d39bdc6f8e502 | Focused Python test invocation used system Python 2.7 |
-| 311 | active | P2 | open | low | b2b1372ef928343fdf27bb60cc0e2793 | WordPress project status omits actionable local bootstrap hint |
-| 312 | active | P2 | open | low | fbdb7ee1c831849bdea6cfce516eec15 | Focused sb test surfaced test fixture constructor error |
-| 313 | active | P2 | open | low | 2affb4b3ad518bb79fca14bfacbc29f8 | Unset optional WP option lookup propagates nonzero status |
-| 314 | active | P2 | open | low | 8683c017651a8a817235498a8fdf0c5b | Spec implementation live-proof preflight lacks a registered instance |
-| 315 | active | P2 | open | low | 5d1cf19beed3520de67e717ccc85dfb9 | New job acceptance flush regression missed io import |
-| 316 | active | P2 | open | low | 8eee850065b3be5e0c9dfabb70a7babd | Ambient python3 invoked Sandbox CLI during focused unittest run |
-| 317 | active | P2 | open | low | 95c4db6a7c6715abf72ccdcff5e68a85 | Local instance JSON flags do not return JSON |
-| 318 | active | P2 | open | low | 32e67b5b5d127bed5e828e3cb7253f2d | Runtime guide advertises unavailable project-local sb path |
-| 319 | active | P2 | open | low | 4aa1e5e9204dea64cfd9b821953fa75c | Top-level sb destroy guidance is inconsistent with the actual instance lifecycle command |
-| 320 | active | P2 | open | low | 02f1514ddbb7e0510f30ec401834f045 | Focused Sandbox test correctly surfaced a project assertion failure |
-| 321 | active | P2 | open | low | 14563ae5e075bcbf90b628efa8cb0cf2 | Test bootstrap failures are interleaved with successful provisioning output |
-| 322 | active | P2 | open | low | 0ac8cb5dabd519d03ee0f27802bb51e3 | WordPress eval-file cannot resolve project-relative test path |
-| 323 | active | P2 | open | low | a62ad5240b0fcd7a7016144f5de814b0 | Status JSON failure is emitted as plain text |
-| 324 | active | P2 | open | low | 2b348f268c95d7335eda13a5166ba505 | Doctor audit result needs distinct diagnostic exit semantics |
-| 325 | active | P2 | open | low | 947f752eeffe6c3220adab1e06a30394 | General research skill lookup failed through sb skill show |
-| 326 | active | P2 | open | low | ab0866d29c12cd197a722f9563020bc0 | Sandbox compose logs option does not accept documented tail argument |
-| 327 | active | P2 | open | low | c444755c51a1eed1d5f23f6a7e47bcc2 | Host validation requires undocumented environment flag for multi-environment manifest |
-| 328 | active | P2 | open | low | 846518da5be863f7c75172fd85bcf451 | Exact ZIP Plugin Check requires archive extraction inside the WordPress container, but the container lacks unzip. |
-| 329 | active | P2 | open | low | c025a7bccd06656ce1cfbaf618442431 | wp option get requires a no-error probe for missing settings |
-| 330 | active | P2 | open | low | 0f197b2fc399d6e0b9fd028ec5bd5037 | wp eval diagnostics surface duplicate critical-error wrapper |
-| 331 | active | P2 | open | low | 4d8151f05e3746744ba612c919f44897 | sb e2e does not preflight the Chromium binary required by the project Playwright version |
-| 332 | active | P2 | open | low | dca83f79ebb8b80d018fd31d8674590e | sb wp eval parse errors are surfaced as a generic critical-site failure |
-| 333 | active | P2 | open | low | 3f916f56a4f8e7079f7ee628c6e4324e | sb wp passthrough rejects an extra wp token with a misleading missing-file error |
-| 334 | active | P2 | open | low | 5a59f5884d8cce77bae26f6cf010a194 | Post-processing resources JSON through Python quoting is fragile |
-| 335 | active | P2 | open | low | 9f7c0552f338a5666ad5a71cc38fd08e | sb exec does not share the WordPress plugin filesystem used by sb wp |
-| 336 | active | P2 | open | low | e093784cb284083b6768ee491beca80d | sb wp eval namespace escaping is easy to over-escape |
-| 337 | active | P2 | open | low | ec4154df6becebdcaec9855c505c6fcf | sb wp eval quoting is easy to over-escape |
-| 338 | active | P2 | open | low | 83017d4ae2ca0e5ad127abe1ea24c8ad | Sandbox WordPress image lacks pager required by wp help |
-| 339 | active | P2 | open | low | b4afad744a9cd27f70125804a973eae0 | Sandbox logs command lacks bounded tail option |
-| 340 | active | P2 | open | low | 91211eae7a0f4e0bc37340f3c8484fe2 | Review worktrees in system temp cannot be used by ensure |
-| 341 | active | P2 | open | low | 70c5b9380bada51469c5cee70cdbf693 | Disposable PR review worktrees under macOS private temp are rejected |
-| 342 | active | P2 | open | low | c5cc5e8182f990d7dde849eeae622d4f | Sandbox guide rejects isolated temp worktree outside configured roots |
-| 343 | active | P2 | open | low | 63779c5a45a19b85bdda6c45f443dff5 | sb wp option get reports missing optional setting as command failure |
-| 344 | active | P2 | open | low | 80ac2e2d134ca374c0fbd422adc651ea | Sandbox CLI is not discoverable from project repositories |
-| 345 | active | P2 | open | low | d60dc6fa62fb623a41ce0afa5dd75133 | sb up lacks JSON output despite CLI-first automation |
-| 346 | active | P2 | open | low | 2f5dd7379b043e0a99c76e1349c97241 | sandbox host logs line cap is undocumented in command context |
-| 347 | active | P2 | open | low | e7a26e0b06f1b3cadf72947933edaefe | Hermes repo sync requires undisclosed confirmation flag |
-| 348 | active | P2 | open | low | ea33c77d504c60a3a7cfb2ee546f7514 | Host logs environment selection is confusing and feedback flag names are undocumented |
-| 349 | active | P2 | open | low | 6649d141452c845129f3ebf59df8e373 | Lenzora edge verification lacks curl in agent shell |
-| 350 | active | P2 | open | low | 05936f990e374823e61c0ceb5f25e5c7 | skill show rejects documented project-dir placement |
-| 351 | active | P2 | open | low | 4d0ef1c0135bcbd0379b9a5ceb2c895d | OpenRouter key profile is unavailable |
-| 352 | active | P2 | open | low | b2eb916facc6ab2539553b5e2ed39823 | Feedback list limit range is absent from CLI skill |
-| 353 | active | P2 | open | low | 60bcd100c479e42b4b9276d59ce8908e | feedback list rejects requested inventory limit |
-| 354 | active | P2 | open | low | 6968a4b592fe4884e182e0f7dd9e5eda | WordPress command rejects documented local execution pattern |
-| 355 | active | P2 | open | low | df47dc48756e87cc10b77fbea8bfe8df | CLI lacks despite discoverability pattern |
-| 356 | active | P2 | open | low | 57736970a6862ed1eb5eb59bab8fa530 | skill show rejects documented project-dir routing |
-| 357 | active | P2 | open | low | 79acef9abd8dad40308d7db0456e28ee | Sandbox home output lacks a machine-readable cursor location |
-| 358 | active | P2 | open | low | 097bcd12421d1c81054aca3028237b3f | Resource timeout regression missed subprocess import |
-| 359 | active | P2 | open | low | a0022ceaf3a6594f4c621b2ab667dce1 | Feedback show rejects ledger ID prefixes |
-| 360 | active | P2 | open | low | 008af940588e7c65225abbbf5251588b | Sandbox WordPress image lacks unzip for exact archive manifest verification |
-| 361 | active | P2 | open | low | 8334692aacd13be9b091b339678a7cad | wp eval-file path is resolved only inside the WordPress container |
-| 362 | active | P2 | open | low | d895fbb72d741555fe90b3577af32efd | WP eval-file wrapper cannot forward script options after documented separators |
-| 363 | active | P2 | open | low | cf3fe2edc59788c8f9604a7cd71f3e3e | Sandbox npm wrapper does not document WP eval-file argument separators |
-| 364 | active | P2 | open | low | 895e206fdb40629cacc88b6b6b648d89 | Sandbox WP option and eval probes provide noisy failure output for absent options and namespace quoting |
-| 365 | active | P2 | open | low | d640f9c6f110d02c52b2bad359c2d67b | WP post-type field capability is not discoverable through Sandbox guide |
-| 366 | active | P2 | open | low | e6a26df9b4d957a591bdc6d072e60bbe | login-url attempted on Basic Auth only environment |
-| 367 | active | P2 | open | low | 7f0e27c15635d96a637b0d48e7a25381 | host login-url protection not visible in command help |
-| 368 | active | P2 | open | low | 7df52abe67e97a43759b449ea6a11c8b | mktemp project suffix produces a slug rejected by sb init |
-| 369 | active | P2 | open | low | 096fdaf53364cbcc86efd49ba25c4d98 | Temporary project under /tmp is refused after macOS canonicalizes it to /private/tmp |
-| 370 | active | P2 | open | low | b2791536ba51a9a1ee0d7f2bb471294e | Disposable plugin fixture under macOS /tmp rejected |
-| 371 | active | P2 | open | low | 35ed60860c8c1d2d034c8d5489d456d8 | feedback list rejects documented over-limit request |
-| 372 | active | P3 | open | low | aa6452605024ed41759ec4f3e8a8050b | Retained remote gate exposed invalid benchmark fixture tree IDs |
-| 373 | active | P3 | open | low | 65d5427835e56f60a2cd0637a40cc2e3 | T118 remote product gate failed on closed-list ordering mismatch |
-| 374 | active | P3 | open | low | ff8b94dc66c07e836837b46a0030abc8 | Keyless WPDeveloper pro activation misses xspeed-pro (keyword list) |
-| 375 | active | P3 | open | low | bcdb8d8f647df1652727abbcbf616ed4 | Plugin replacement can report success before detecting an unusable runtime archive |
-| 376 | active | P3 | open | low | ade1ef130bd7178813711b00c29d3150 | Focused HSSB icon-default PHPUnit run found stale golden and payload-shape expectations |
-| 377 | active | P3 | open | low | d79dcb78281523725565a2e3ad0eed6d | Full HSSB PHPUnit run found nine icon-default expectation mismatches |
-| 378 | active | P3 | open | low | 5dd57aaddca483c747f87f3f0a33f24b | Focused HSSB PHPUnit filter reported four expectation failures |
-| 379 | active | P3 | open | low | 3273804376c6c8d41b079a9fe6b3e15c | T118 lifecycle fixtures exposed cross-realm structuredClone incompatibility with Ajv array consts |
-| 380 | closure | P0 | resolved | critical | 71be94307c0b2dfee1ef2640898bf1a0 | sb host apply exits 0 after a failed deploy, and its rollback can fail silently when the disk is full |
-| 381 | closure | P0 | resolved | critical | 1f094d2f708e7c57cf128ac9635aa5af | Failed deploy leaves wrong remote instance registered |
-| 382 | closure | P0 | resolved | critical | 0b420c9bf187cdce7a9e8be03d44dfda | target inference sent every project's sb ensure to the VPS instead of booting locally |
-| 383 | closure | P0 | resolved | critical | 088652d49fdabbff77311353f251270b | Docker pool rollback restored configuration but left 20 previously running containers stopped |
-| 384 | closure | P0 | resolved | critical | 3ef73e91af2e0fcc11c1c111591e9784 | Apply recreates ownership failure after explicit repair |
-| 385 | closure | P0 | resolved | high | d176d75f2af85574e78aadbc5018fefa | Remote resource status timeout leaks traceback |
-| 386 | closure | P0 | resolved | high | cd84b75dcfc5da657b6b5a95d35e54fb | Remote Docker pool transaction exceeded client timeout and failure envelope exposed encoded command detail |
-| 387 | closure | P0 | resolved | high | 665bb8da6b1d86c8e1754e1c85e94dd0 | Fresh wordpress@1 child-image build fails at mbstring and init resolves the wrong project root |
-| 388 | closure | P0 | resolved | high | 6481185910b63348f5c38308439049ca | A pre-subcommand --label is silently clobbered for six subcommands, targeting the wrong instance |
-| 389 | closure | P0 | resolved | medium | 441022bfe8746ac26fa4b719fa0a7bb4 | Redacted sandbox_autologin URL is indistinguishable from a working one, and check_reachable's 10s budget false-negatives a ~190ms-RTT host |
-| 390 | closure | P0 | verified | critical | 19fe2251d017bb8bbbf0dd6b5d609d26 | Status JSON disclosed an autologin credential |
-| 391 | closure | P0 | verified | critical | a1fc66d41f603894e18bc4092a0a9aba | Deploy ignores instance and provisions wrong project |
-| 392 | closure | P0 | verified | high | e8ab77173bf1be69b65f7d1e65b42d49 | ensure JSON exposes credential-bearing login URL |
-| 393 | closure | P0 | not_applicable | low | 9fbb0f4b05ef8ee1c38fe7216aad1c48 | Full WP 7.1 suite exposed legacy API test state leakage |
+| 58 | active | P1 | open | high | dcb1070b7240de1233c7c509a6d54c49 | Remote network pressure remains high at 31 active managed networks |
+| 59 | active | P1 | open | high | c841bc711c53936d6a6ce94cfe7200e7 | Remote control updated; network pressure remains high |
+| 60 | active | P1 | open | high | 600d2def1a44dde2e811a79e01b9aa25 | Remote network pressure remains high at 31 active managed networks |
+| 61 | active | P1 | open | high | fe5c3e02c95f5df8a1abfbda61ce9aff | Remote normalization retry hit acceptance transaction expiry |
+| 62 | active | P1 | open | high | cdb2e1844f9557c118b44f9d36d46f71 | Remote provision leaves obsolete cloudflared after successful completion |
+| 63 | active | P1 | open | high | 6f0b87cd91d110adcdd8e94c1037458d | Remote detached exec fails with supervisor_launch_failed |
+| 64 | active | P1 | open | high | b8fcedf19c65046b16ecd8d61877ad6c | Confirmed remote provision returned no receipt and service health timed out |
+| 65 | active | P1 | open | high | 9bb7aea1a679db7233e18f8fbf31c841 | T120 evaluator full log and remote benchmark workflow gaps |
+| 66 | active | P1 | open | high | 968d8f7a4416f26099ca49bff0b61b0b | Remote T120 bootstrap blocked by exhausted Docker subnet pools |
+| 67 | active | P1 | open | high | 20c0829c9145fb5a0ead2849d13e258b | Remote preview project mapping breaks after exact source sync |
+| 68 | active | P1 | open | high | a941c144b268fcb1f090deb46b75255d | Local E2E fixture became unreachable during Playwright |
+| 69 | active | P1 | open | high | ac945dffe6fc473d30ee91368e301442 | Deploy wrapper accepted an unobservable job after SSH timeout |
+| 70 | active | P1 | open | high | ab89060b777e09db660cec5cb2f40ba1 | Detached job submission hangs and exact workspace job-list returns empty object |
+| 71 | active | P1 | open | high | 52b78220ec4255f8d680b707ca409980 | Exact-head xSpeed PR review plugin activation fails in disposable Sandbox |
+| 72 | active | P1 | open | high | 9290217a7686140b82bdad36fa84fb55 | Detached deploy output follow hung during process identity inspection |
+| 73 | active | P1 | open | high | 3c4f9059a8509b919774072acb8aa63d | Direct-host T126 job-start returned no acceptance payload |
+| 74 | active | P1 | open | high | 38efeba54f4a86c202a045b7cc55020a | Direct-host T124 job-start returned no acceptance payload |
+| 75 | active | P1 | open | high | d7e6cba07d96a9d0d7af2d993b547640 | Direct-host job-start completed without acceptance payload |
+| 76 | active | P1 | open | high | 388324ebc557a5eb27571b62ef26689c | Repeated learning host apply SSH timeout |
+| 77 | active | P1 | open | high | eddb34e41036f7cf38f01ad0a1fc64fc | Repeated T105 r7 status poll returned no payload |
+| 78 | active | P1 | open | high | 05605f7f730e2340d2787b05445da98d | T105 r7 status poll completed without a payload |
+| 79 | active | P1 | open | high | 9e9e30aa23570f8d7f50438d155b4cf9 | Fresh Sandbox cannot activate exact-head xSpeed PR source |
+| 80 | active | P1 | open | high | db34582b727bfea7d94ba446b681b9cc | Ox Alpha returned empty content for Lenzora implementation session |
+| 81 | active | P1 | open | high | cd7025da758c2f5dc564dcc320748195 | Ox Alpha autonomous Sandbox worker stopped after repeated empty model responses |
+| 82 | active | P1 | open | high | 120ce07b624da3c31e6c78f492adc04e | Hermes dashboard cannot resume saved TUI sessions |
+| 83 | active | P1 | open | high | 7ef8c643198daefd31eaa66d7438562a | Hermes public dashboard exposure blocked by obsolete cloudflared |
+| 84 | active | P1 | open | high | 2f6f1ecd91a543023a79414afdf8f939 | Hermes setup fails on fresh v0.18.2 profile creation |
+| 85 | active | P1 | open | high | 5021b7b9e9d71c82c3e9eacb026ca963 | Agent worktree setup switched the shared root branch |
+| 86 | active | P1 | open | high | 0dc659545d6568afe931b2cfe93669f8 | Sandbox feature branch push rejected by GitHub SSH |
+| 87 | active | P1 | open | high | 3321034abad0e4834919d73f8531f3d8 | T120 evaluator report attachment relocated to user feedback storage |
+| 88 | active | P1 | open | high | dc88af801eb6ddafe66aaea5c7d4f0c0 | Terminal output_bytes disagrees with complete retained output |
+| 89 | active | P1 | open | high | 9ff08b134474af5bfc4e85cfad35ab9b | Preview root remains unresolvable with original config |
+| 90 | active | P1 | open | high | fc1bc64c301c8dfe80b2c966e8149f20 | OrbStack stop interrupted Sandbox E2E and teardown |
+| 91 | active | P1 | open | high | 0a5987c9daee5c691b28ed6573c1c68e | T105 r7 retained output long-poll failed |
+| 92 | active | P1 | open | medium | ef04757903cd687e8b2f90bac15501e7 | No CLI path to install/run wp-cli against an existing remote preview instance |
+| 93 | active | P1 | open | medium | af8a2aae8503aedb52d1c02c80d3c55a | Remote status cannot inspect an existing deployed instance without a prepared workspace |
+| 94 | active | P1 | open | medium | 4947b7763ee36b4f7d0fb623f3349b80 | Remote status cannot inspect an existing deployed instance without a prepared workspace |
+| 95 | active | P1 | open | medium | 381ddbc764cadd387082bf9ce4699a13 | Resource scan workspace status is blocked by remote revision mismatch |
+| 96 | active | P1 | open | medium | 5f0ab2b1327aa41ee8d0ed9d1c62cd82 | Remote Sandbox workspace inventory blocked by runtime revision mismatch |
+| 97 | active | P1 | open | medium | 2a58b1355f744e47c292bad84af085e8 | Remote status rejects read-only PR feasibility when no project instance exists |
+| 98 | active | P1 | open | medium | a08b008462a83e6fb5a3c3263e8d7e07 | Remote fast resource status times out with capacity-only evidence |
+| 99 | active | P1 | open | medium | cc723c158ba1e9c9d493f7844ae3e690 | Hosted apply lacks a read-only post-deploy status and revision action |
+| 100 | active | P1 | open | medium | 74e77a060d3b5d9c230cb8a2b125b3a3 | Remote workspace list blocked by runtime revision mismatch |
+| 101 | active | P1 | open | medium | c2490b7c083289421901fb49ad9a3a1e | Remote resource status still times out on deployment retry |
+| 102 | active | P1 | open | medium | be7f222d6f7e9d7a9ea3dc4a9168c63b | Remote resource status times out before host deployment |
+| 103 | active | P1 | open | medium | b3905bbe81f9b2955cc7f5aa74dd6f0a | Remote direct-host job status SSH control timed out |
+| 104 | active | P1 | open | medium | e4ae52d8cc3be928ceb442e7a641e50a | Remote job-status returned no output for active direct-host job |
+| 105 | active | P1 | open | medium | 0aee03170ca08b02e3c46a7ecf666e69 | Remote job output read failed while active job status succeeded |
+| 106 | active | P1 | open | medium | 5fc4d97c873e6e3207b7d0452d782289 | Remote status cannot map local worktree instance |
+| 107 | active | P1 | open | medium | 8b88c87e231e7eedc19d9410289688ca | job-status returned no output after accepted remote job |
+| 108 | active | P1 | open | medium | 89e64f460d9d911ed95002af3a79e7d9 | Remote workspace list is blocked by revision mismatch |
+| 109 | active | P1 | open | medium | 0c10084f7c35220aa1f8028c68790ae4 | Remote unit tests depend on an unbuilt MCP venv |
+| 110 | active | P1 | open | medium | ac8b53198f58568c95045c115ff09824 | Remote Sandbox deploy rejects detached exact-head review worktree |
+| 111 | active | P1 | open | medium | de0c16c505c26abdc44ecb279b0a0df9 | Remote exact-tree deployment rejects detached review worktrees |
+| 112 | active | P1 | open | medium | 2e3b4d35178004728037fcffe49d8d16 | remote sb exec returns accepted job without retrievable completion |
+| 113 | active | P1 | open | medium | 663e516749ac7822692274cbcc6e1cc5 | Remote resource status fast probe timed out |
+| 114 | active | P1 | open | medium | 424a74fbe61106a4d89f65a55f82dcff | Remote exec selected a local durable job and timed out |
+| 115 | active | P1 | open | medium | 2fe446c36654412cca97de2be7105690 | Hosted apply rejects an email-valued configuration entry as a secret source name |
+| 116 | active | P1 | open | medium | f224aadf783352b84eb0159c7f8a9360 | Hermes provider status cannot inspect an already configured remote OpenRouter provider |
+| 117 | active | P1 | open | medium | 99d69b660d4e1160f6c70d6b867619b7 | Remote workspace inventory blocked by revision mismatch |
+| 118 | active | P1 | open | medium | f294f2948147e7248c65714d0ee0f8af | Remote workspace logs do not resolve named workspace |
+| 119 | active | P1 | open | medium | 1ef4334de71d0a937609d2b772520a82 | Hosted deploy status is not inspectable through host command |
+| 120 | active | P1 | open | medium | b41513e955d92bf2a1c408f381d21af2 | Hosted deployment has no status or revision inspection command |
+| 121 | active | P1 | open | medium | 843b42f7fc46db8196117fea019fa6c9 | Local labeled E2E unexpectedly used remote capacity admission |
+| 122 | active | P1 | open | medium | b2177d0ed8b796f1ff0e990e701d5f0c | Fast remote resource status timed out without its promised cached index |
+| 123 | active | P1 | open | medium | 560976950cfd30d5ce8737f9e6df95a8 | Instances command has no remote inventory selector |
+| 124 | active | P1 | open | medium | 72022a6a81166cbd17baae6b88b92839 | Add a deterministic remote test bootstrap profile and phase-aware evidence output |
+| 125 | active | P1 | open | medium | 93bbb08ed676e92604a4f29726ce1aca | Remote resource status returns partial coverage with timed-out categories |
+| 126 | active | P1 | open | medium | 630d251dd4fc61d4f0f4d84d0557fd39 | Remote domain inventory misclassified nested Caddy directives as hostnames |
+| 127 | active | P1 | open | medium | 6c9b438100cbf34b3474ab46d2f0dd8c | Remote output transport failure recurs during direct-host job |
+| 128 | active | P1 | open | medium | ef18692dbbbabe7720bcb5afef2e0de1 | Detached remote exec returned no job identifier |
+| 129 | active | P1 | open | medium | 092392ad9cc9b22ca3aa0ef3fa17f698 | Remote project resolution ignores matching registered instance |
+| 130 | active | P1 | open | medium | 2a7f6e60382ff387a84ce5ea3112baf0 | Remote retained-output read fails for active direct-host job |
+| 131 | active | P1 | open | medium | 92511a2c00128e5120683f5c0386f6ad | workspace create ignores explicit Scaleway remote target |
+| 132 | active | P1 | open | medium | 2374342bd83e0e662a1ce8676c6d3f87 | Local remote selector listed nonexistent VPS instance |
+| 133 | active | P1 | open | medium | fd8affd7d173d7314887800477c4fce4 | Remote job-output read failed for healthy retained job |
+| 134 | active | P1 | open | medium | 2849f90e57e507f07cb218d168cc4058 | Remote instance error listed local registry |
+| 135 | active | P1 | open | medium | 128f35781c4be662f8df875e7683e68d | accepted remote resource scan can remain queued without position after prior retained scan completes |
+| 136 | active | P1 | open | medium | 7a349cf706b132bc63a1edbef1edcdda | Remote deep storage scan timed out before attribution |
+| 137 | active | P1 | open | medium | 9af5c990a7efde8bf2a61d1c8ee31cf7 | Remote storage attribution scan timed out with large unknown bucket |
+| 138 | active | P1 | open | medium | 2d168956422b2f6aeee4ef754bc63b95 | remote exec accepted id cannot be queried |
+| 139 | active | P1 | open | medium | b6e84616c1ed7e21a41136c604a00602 | Hermes host run cannot bootstrap from a private repository without remote GitHub auth |
+| 140 | active | P1 | open | medium | e2cffada572053c0b41500419c79dc40 | Hermes run requires a managed repo despite supporting remote operations |
+| 141 | active | P1 | open | medium | 43f98577513e43026ffdf03d1c6481e8 | Hermes health remains degraded although remote MCP is healthy |
+| 142 | active | P1 | open | medium | e3d8c553b3b24bafeaddde245294ddaf | Thorough remote resource inventory remains partial at 60 seconds |
+| 143 | active | P1 | open | medium | bc1f0f8974b9dd55e241f1f257572530 | reveal-login refused remote ensure records, leaving E2E runners with a placeholder login URL |
+| 144 | active | P1 | open | medium | 6f513cf08218e309dcdc650ae151c94e | Remote Sandbox guide rejects documented local flag |
+| 145 | active | P1 | open | medium | 56bf50f61cf5065710dc5acd608575fa | Remote host operation lacks a brokered exec path |
+| 146 | active | P1 | open | medium | 453aef2840ed33dcffe10cc9c87855b6 | Remote exec rejects standalone evaluator state under /tmp |
+| 147 | active | P1 | open | medium | 704a866370b6c283352e21862e7b7040 | Documented remote Sandbox path is not valid |
+| 148 | active | P1 | open | medium | 3727d6d5ba84090a5c1a5dbbe1e408ee | Doctor crashed before remote diagnostics during protocol-skew investigation |
+| 149 | active | P1 | open | medium | db90e71e7e51c4dcbad486e60c91a627 | sb test and sb apply refuse to work in a detached-HEAD worktree, which is the normal shape for PR review |
+| 150 | active | P1 | open | medium | a45de86b853fe15cc089f5799ebcc98b | preview create does not report the instance name or runtime dir it created, so follow-up work has to guess by glob |
+| 151 | active | P1 | open | medium | 871ee1a12b74738e7885fea98472d654 | job-output cannot retrieve the live metrics stream that job-status reports |
+| 152 | active | P1 | open | medium | 9db422b1be73c60e0e0f5f5f7834de81 | Focused E2E defaults WP-CLI to nonexistent /tmp/wp despite registered Sandbox instance |
+| 153 | active | P1 | open | medium | 9fd4afbcf6bd5efbf7698d9906f02169 | Secret runner reports redaction failure for a successful non-sensitive status probe |
+| 154 | active | P1 | open | medium | b89fe5e677f3b94ba9105e39bffaad27 | Job CLI matrix regression is not isolated from persistent workspace bindings |
+| 155 | active | P1 | open | medium | f535fa1357d42bf2a8dd30737af37fbe | job-status rejects intuitive --job-id flag |
+| 156 | active | P1 | open | medium | 20cc2f0a53ab4bc421f46735c1742cf1 | Sandbox stale WordPress instance cannot be reconciled when database service is missing |
+| 157 | active | P1 | open | medium | 895342edf9b7a8f5b65515a16aed15d7 | Generic Compose deployment rejects valid dotted project directory as WordPress slug |
+| 158 | active | P1 | open | medium | d46a9bb76aa1733ec0f933b278a83c57 | web CSS builder no longer finds modular page shell |
+| 159 | active | P1 | open | medium | ac760c7b02d4b81fe697c6cd15c6001b | Active broken plugin blocks wp plugin replacement recovery |
+| 160 | active | P1 | open | medium | a72307fa19c6d89ec6f8c1cdc901a8b4 | ensure returned empty output without creating review instance |
+| 161 | active | P1 | open | medium | c80f91e0fd2bdb79555d89cb0920c5cd | Exact-head xspeed activation fails when vendor autoload is absent |
+| 162 | active | P1 | open | medium | 7d88045f9c8e92c3fdeded2754a837bc | Applying a valid xspeed sandbox config failed on unresolved inherited plugin |
+| 163 | active | P1 | open | medium | 5fec1a2ad96785ac922e45d1078915a7 | Dev push deploy hook uses wrong Node version |
+| 164 | active | P1 | open | medium | fb21264967c998f7bc20368e961bcc3b | Sandbox CLI deploy fails when pyenv selects unavailable python3.13 |
+| 165 | active | P1 | open | medium | 2c76137a00c63a97e40ff2086dfe89fb | Post-merge Lenzora deploy hook ignores the repository Node version |
+| 166 | active | P1 | open | medium | 56b29b3604b6f4ae1fdee8bef3334daa | Post-merge dev deployment does not bootstrap the required Node version |
+| 167 | active | P1 | open | medium | a3050df7119b8750a6da00837951d014 | Hermes configured status hides absent dashboard |
+| 168 | active | P1 | open | medium | f81f8349985787c6825f0013e0866328 | Host logs discovery timed out after Docker test workload |
+| 169 | active | P1 | open | medium | 2a918e7c8aec57b786fcbf40bd9e0a64 | Post-merge Sandbox deploy hook ignores the project Node pin |
+| 170 | active | P1 | open | medium | d14342c79c4a55b077ab3d5a368e589d | sb ensure changes explicit instance name and omits requested JSON result |
+| 171 | active | P1 | open | medium | 9898984862bc034e50fda397d85afa3f | sb doctor detects a dead proxy port-forward but offers no repair; docker restart sandbox-proxy fixes it |
+| 172 | active | P1 | open | medium | 793c3d1b9b951af0f00424f63a91b554 | job-start help does not enumerate valid execution profiles |
+| 173 | active | P1 | open | medium | 6944e3417b63aecd7cc2dd3f687993c9 | Direct-host job preserved early assertion failure as terminal evidence |
+| 174 | active | P1 | open | medium | 39f83b4daec5c90af74a4125b1329c3e | Read-only jobs lookup cannot resolve isolated registered-project checkout |
+| 175 | active | P1 | open | medium | 718e64637a1a5462c92a11af6a092911 | Batched corrected-job evidence reads timed out at SSH control |
+| 176 | active | P1 | open | medium | a1de4edbe535da9e5ecf4ee4780569f1 | Direct-host job output read failed while job active |
+| 177 | active | P1 | open | medium | 621aeec140a2f92f93b5ab2ccaa11acb | Deploy rejects safe detached deployment snapshot |
+| 178 | active | P1 | open | medium | 499afa9e8fc6a10a625821e2bede72a0 | direct job-start accepted sh wrapper with bash-only pipefail |
+| 179 | active | P1 | open | medium | 4ae20bf73cf57308ece0a8c79a21ad41 | Runtime guide references missing project Sandbox launcher |
+| 180 | active | P1 | open | medium | 7032764f3afc12d1ac55d767c4f18210 | Fresh HSSB WordPress 7.1 E2E provisioning exhausted Docker network pools |
+| 181 | active | P1 | open | medium | e3c10123ab75ea297d49e7aa1d014794 | WordPress runtime cannot execute wp db query because mysql client is missing |
+| 182 | active | P1 | open | medium | 96819c8e948b59b8205afb53d5383041 | Hermes repo sync cannot refresh provisioned Sandbox runtime |
+| 183 | active | P1 | open | medium | 37760be8415b0a79aea9e5775d00a7ea | Hosting command group has no discoverable hosting skill |
+| 184 | active | P1 | open | medium | 34b7e8f69a6ded4368b37fddf8fcf8ed | Repeated sb wp startup exhausts Playwright setup timeout |
+| 185 | active | P1 | open | medium | 5b79bab6434c746598accf35e3c1c474 | Sandbox ensure rejects disposable PR review clone under /tmp |
+| 186 | active | P1 | open | medium | 03f51d2fce72cca73cc499b7d3d30e99 | Free PR checkout cannot be initialized for Sandbox without compose config |
+| 187 | active | P1 | open | medium | 941dacfc126a3e5087fc1783d21df829 | Repeated linked-worktree Node and dependency bootstrap toil |
+| 188 | active | P1 | open | medium | 34088c3da0522f16db1a000046518234 | Herd ability execution probe fatals and wp wrapper prompts noninteractively |
+| 189 | active | P1 | open | medium | eb496b17c1c33e47aaa7e74fde5ea4bf | Feedback JSON list crashes when since filter is used |
+| 190 | active | P1 | open | medium | feacbc91b1d5e2c6c3056ca78dc90eca | Ensure does not recover database after interrupted first provisioning |
+| 191 | active | P1 | open | low | 5ce268c6b6c7e9d8e5cc79312ddfd961 | Remote network-capacity monitor: no managed pool pressure |
+| 192 | active | P1 | open | low | 1e799cd8c24fc081924a8ed99b369fab | Remote network-capacity monitor: no managed pool pressure |
+| 193 | active | P1 | open | low | 1f4372da2337ec163743ffc8af70035c | Remote capacity monitor recovered after runtime refresh |
+| 194 | active | P1 | open | low | b94b737c8813c0fa613d4b4a8f969d26 | Remote network-capacity monitor: ownership incomplete |
+| 195 | active | P1 | open | low | 37643f63e567d44d4fa153062559b911 | Remote network monitor: ownership remains incomplete |
+| 196 | active | P1 | open | low | 756a8df6696e71385fa15134a9992308 | Remote network monitor recovered with incomplete ownership |
+| 197 | active | P1 | open | low | 80b4dea2b687f3ab4c2e3c807bddf34b | Read-only remote resource probe could not measure host capacity |
+| 198 | active | P1 | open | low | 66cca31e474b70b2260eaa41a6dcd317 | Remote resource scan partial despite low network pressure |
+| 199 | active | P1 | open | low | 7a03bd1d37303521466987c81337c254 | Remote network pool pressure classified low |
+| 200 | active | P1 | open | low | dd4f8d96d5e8794d97b21bdc0e68d07a | Remote resource preflight unavailable during feedback triage |
+| 201 | active | P1 | open | low | 3bab1363b29e8a2225e1e760fbdbace2 | Support-floor smoke assertion failed in WP-CLI runtime |
+| 202 | active | P1 | open | low | 2ad74188c8f1636c572542e4f1e5408b | Support-floor content equality assertion failed again |
+| 203 | active | P2 | open | medium | dbb7068f992c1aca082904ce3ef7fa68 | Allow a container to invoke an allowlisted command on the HOST |
+| 204 | active | P2 | open | medium | 5d79047c59d6194588cdab4eae846b00 | Disposable WordPress worktree instance omits reviewed plugin and cannot install project ZIP |
+| 205 | active | P2 | open | medium | 56551456d608b92220dcf52388cbb6f6 | sb wp plugin install cannot bridge an absolute host ZIP path |
+| 206 | active | P2 | open | medium | 711940db2d0c9bbce9ad5130444cc3f9 | Disposable plugin mapping activates before vendor dependencies are installed |
+| 207 | active | P2 | open | medium | fdd88ab7c3b78f3e1b0e694db6c50b0a | pyenv pin 3.12 missing on machine: every sb invocation in sandbox repo fails before argparse |
+| 208 | active | P2 | open | medium | 92966e707ba418e055820f9e3c71f1e4 | sb init did not install or upgrade the configured WordPress project |
+| 209 | active | P2 | open | medium | 5393e210a5f22a86af9b5ad6a409f896 | sb test --local --label does not create a missing isolated test instance |
+| 210 | active | P2 | open | medium | 4ea48c7a73fa466a22fc6a13c0ce9134 | PR review temp worktree rejected by WordPress instance resolver |
+| 211 | active | P2 | open | medium | 2cfab06ff5393a6e759df277fa818dca | secrets run 1800s cap blocks running a long-lived dev server under a brokered secret |
+| 212 | active | P2 | open | medium | 6ae07ae76205e45d8fd6782bee16b212 | Secret-run agent launch surfaced OpenRouter SDK maxPrice schema mismatch |
+| 213 | active | P2 | open | medium | 18c1ac3d3b7821087cc4d6a26bbf632a | Secret broker lacks OpenRouter API key validation profile |
+| 214 | active | P2 | open | medium | 133d878c1f52ca34065d514ee72c76d9 | Registered WordPress project lost its Sandbox instance |
+| 215 | active | P2 | open | medium | 20a2508436ae6be32d8da8ec065ebda6 | Fresh local Sandbox instance loses project association between commands |
+| 216 | active | P2 | open | medium | 6ef03d44b29cf10c87f56f6634e68ca3 | Full unittest discovery aborts: a test invokes the sb parser with the discovery argv |
+| 217 | active | P2 | open | medium | d89c5644b44dc5c7159d6164d62a815d | sb secrets has no delete/unset operation, so stale keys cannot be removed through sanctioned tooling |
+| 218 | active | P2 | open | medium | 7e6374beb19ef30884e78745a4a87281 | Known xSpeed instance name and label guidance conflict |
+| 219 | active | P2 | open | medium | 3f0bc71ac86f145ab9480f5972800a63 | Plugin Check exact ZIP workflow lacks a clear Sandbox path |
+| 220 | active | P2 | open | medium | b2ed6f764e1f61cdacb5b03f32f5e986 | wp eval namespaced cache toggle quoting remains brittle |
+| 221 | active | P2 | open | medium | eb0e3845185bfe348d35ac34a6a156bf | wp eval rejects valid namespaced PHP reflection command |
+| 222 | active | P2 | open | medium | cabb0469159a2357c994c84893fa8c44 | sb host validate requires an undocumented environment selector for multi-environment manifests |
+| 223 | active | P2 | open | medium | 89b94c60c3470010af34126a3f671dc1 | Plugin ZIP aborts on Hamcrest generator template |
+| 224 | active | P2 | open | medium | 171f639a9f4dcd7bea3f502dd6c00a49 | Disposable review worktrees under system temp are rejected |
+| 225 | active | P2 | open | medium | 82ec5d6e863604d66959a64490e07853 | Sandbox WordPress wp command rejects documented project-dir routing |
+| 226 | active | P2 | open | medium | 54ec837a1a5260180308720f43dd8763 | Sandbox rejects valid detached worktree because generated directory basename is not a plugin slug |
+| 227 | active | P2 | open | medium | 7f75fabc5156991f6c33f9bcb2a7caf4 | Disposable project init fails on inherited unresolved optional plugins |
+| 228 | active | P2 | open | medium | c8c82eb12b63fbc8bdde2afc04d909c4 | Deep storage scan completes only with partial inner attribution |
+| 229 | active | P2 | open | medium | 5b07febc49a9eca2944669bb86ca4fb2 | Sandbox isolated worktree setup rejects valid review paths and service targeting is unclear |
+| 230 | active | P2 | open | medium | e8ddb411eb6d706b2959e96ade8e86e8 | feedback list pagination emitted invalid JSON control characters |
+| 231 | active | P2 | open | medium | 028148a48ab7f607d8a32a6ea789fb92 | Hermes public repository clone returns clone_failed during normal checkout |
+| 232 | active | P2 | open | medium | cd9baf02fa2727215178513c323a2ca8 | Hermes repo sync reports missing managed repository for Sandbox |
+| 233 | active | P2 | open | medium | 39d1950882d21545dfa0599f44d9f7b7 | Hermes iteration-cap controller used config get unsupported by pinned Hermes v0.18.2 |
+| 234 | active | P2 | open | medium | 1ff68cf292a169877840db44823f90b0 | Sandbox launcher ignores bundled CLI virtualenv when pyenv 3.12 is missing |
+| 235 | active | P2 | open | medium | d47f53dccc7fce3cbf314211a0932219 | Hermes shared external skill scan omits design-fidelity-diff without a verdict |
+| 236 | active | P2 | open | medium | b1864a6bfe983b15f24a26f7c20a88b2 | Hermes skill registration needs an explicit discovery reload |
+| 237 | active | P2 | open | medium | ee7fa861f1ca6b76b87fc3bab53a84c0 | Hermes public-route adoption cannot resolve Access policies from list response |
+| 238 | active | P2 | open | medium | 7a2cdddbf791a51423e0a713e98997a5 | Hermes OpenRouter setup used unsupported config read command |
+| 239 | active | P2 | open | medium | 9680116c0afdaee8448f2e68421710b3 | Hermes OpenRouter setup command misses os import |
+| 240 | active | P2 | open | medium | d619a2a7c33c4e21073928e29eeef266 | Scoped WordPress core update failed after unpacking version 7.1 |
+| 241 | active | P2 | open | medium | 6687abd93e5d8ca4f8d5d6a56fb7c8fa | CI preflight blocks full Lenzora workflow on Sandbox act runner |
+| 242 | active | P2 | open | medium | 103ae36f12548a7680c414bff2043999 | Sandbox WordPress plugin path contradicts plugin list |
+| 243 | active | P2 | open | medium | 4e7e5f254889298791b77e8ef05d56d8 | Sandbox CLI discoverability gap: no subcommand |
+| 244 | active | P2 | open | medium | c7ea6da8687db97c2dbba94c24316e5a | Guide documents request-id for detached exec but CLI rejects it |
+| 245 | active | P2 | open | medium | 93824bd2ad4bcd66c6628edda9c498dd | doctor rejects standard local project routing flags |
+| 246 | active | P2 | open | medium | e0a9c65980b8f16b2febf7e74f27e649 | sb exec rejects documented request-id option |
+| 247 | active | P2 | open | medium | cd1f7a9858b8e6077c2a7ed8d57b4fff | Fresh Sandbox worktree guide fails when incomplete CLI virtualenv exists |
+| 248 | active | P2 | open | medium | 74d503ab3bef8d3392432e2232760a93 | Full Sandbox suite retains three baseline failures |
+| 249 | active | P2 | open | medium | 423e3e912f87cbf0024837d275a807dd | Sandbox logs does not provide bounded terminal snapshot |
+| 250 | active | P2 | open | medium | e341ae5ea348d7f62794117b309a8ee5 | Spec Kit precheck cannot target amended existing specs |
+| 251 | active | P2 | open | medium | 1034d4ca80006f016554337db1264aae | Fresh ZIP-only fixture contains destination plugin directory |
+| 252 | active | P2 | open | medium | 6496ba60bf80c6cff680d2e95384f23d | Sandbox E2E wrapper hides Playwright failure output after successful provisioning |
+| 253 | active | P2 | open | medium | e3dadfcd00c26989ad4590947f6d1b80 | WP media import does not map project file and pollutes porcelain capture |
+| 254 | active | P2 | open | medium | 6240dc67560ab8cd7ce2188a2c657ab0 | Plugin Check adapter rejects successful output |
+| 255 | active | P2 | open | medium | b32a5250c5a22045c95059da67bcb10c | E2E wrapper omits Playwright failure detail |
+| 256 | active | P2 | open | medium | 25c004af5c238bc706b84ac833594aab | Plugin Check wrapper rejects successful no-error output |
+| 257 | active | P2 | open | medium | bb1f932babd2e4e0c1afebe0621456ee | Restore confirmation flag is not exposed by the CLI parser |
+| 258 | active | P2 | open | medium | 5d9f1c65067dd7cf0079220a4ebc2060 | Host plan omits declared background services |
+| 259 | active | P2 | open | low | c73e13c16883f1ccc416df26f59fb08c | Remote service subcommand usage is not discoverable from remote --help |
+| 260 | active | P2 | open | low | d4a37b6f22edeee8563d7abd943714c4 | Host validate cannot validate every manifest environment in one call |
+| 261 | active | P2 | open | low | 7e6bf32d6bb2a0207fcd612f8d46503e | Remote status requires non-obvious instance selection from isolated worktree |
+| 262 | active | P2 | open | low | a5af1834c48ec3b70080840b061068e1 | Correction: deploy job ledger is local, not remote |
+| 263 | active | P2 | open | low | 74212a8043f83fa50446b94e2f76ccb7 | remote service migrate returned no CLI output despite successful apply |
+| 264 | active | P2 | open | low | f528a47206c7b9d0f1d36dd17ee7def9 | Hosted deployment status cannot resolve deploy-source project directory |
+| 265 | active | P2 | open | low | f200d37deea45ebc6375d5e519302b64 | Remote status command is not discoverable |
+| 266 | active | P2 | open | low | 8d5b6bce700d8ef592e8c4d18cb59248 | shell WP-CLI diagnostics need explicit root allowance |
+| 267 | active | P2 | open | low | 2f2699256f50fcc2520d245b0c2aa8a3 | sb e2e reached Playwright but could not resolve @playwright/test from the project |
+| 268 | active | P2 | open | low | bd617aa4a6c91dafef6ecca7700243ad | Host plan requires explicit remote after successful manifest validation |
+| 269 | active | P2 | open | low | 1440ad3df0c3d1d28c55ec5129a8298e | Sandbox secret inspection fails under the default pyenv selector even though Python 3.13.1 is installed |
+| 270 | active | P2 | open | low | 6bf36b944cf8846af3cfcc33279555d3 | WP plugin list rejected undocumented path field during remote inspection |
+| 271 | active | P2 | open | low | 7c93654b14d054d504caf2b40b2c426e | Evaluator local path glob was not resolved before remote submission |
+| 272 | active | P2 | open | low | 29f0128acae302ae957950feaada51fb | Global sb exec rejects project-dir although workspace accepts it |
+| 273 | active | P2 | open | low | 5bda94d762e7ecea4c82d3060d6b8b19 | Remote list rejects project-dir selector |
+| 274 | active | P2 | open | low | 27a3ebac6330510ef46400ea4a8fbbc9 | Agent runner syntax check used caller cwd instead of runner directory |
+| 275 | active | P2 | open | low | 7ea39dad34d9d23bd530ad7be14f6717 | Hosted log tailing is not discoverable and rejects the common --tail argument |
+| 276 | active | P2 | open | low | 3ce28a2c9f32e370ec93183f2d818d78 | Hermes doctor treats expected pre-install absence as failure |
+| 277 | active | P2 | open | low | ca6c46b208c40d2a16cefe0d7fe5c827 | Project-scoped status should explain missing instance context |
+| 278 | active | P2 | open | low | 301231455c3fca6af640704a630de8cb | Project-mounted WP-CLI paths and E2E cleanup need clearer reporting |
+| 279 | active | P2 | open | low | ac14f1c22e465cd6127e6846fb509fe4 | ensure recovery rejects the instance name returned by ensure create |
+| 280 | active | P2 | open | low | ed61d1e45f5aac0b41a762f3b7dabcc5 | Guide status command fails before first instance creation |
+| 281 | active | P2 | open | low | 64bcf5e5c6ece82d395a5a5a2ebc87f9 | Status cannot inspect unregistered project without an instance |
+| 282 | active | P2 | open | low | f372b16887dd99be160dab62859c2fd3 | Instance deletion preserved unreceipted legacy domain artifacts |
+| 283 | active | P2 | open | low | 135e0014fd2946ecda09abbde70fed8a | Instance deletion preserves unreceipted legacy domain artifacts |
+| 284 | active | P2 | open | low | c50b7e5f00cc9c57f51d66a93f8cf07a | test_modularity baseline runtime_kind_branches is stale (111 vs 115 at HEAD) |
+| 285 | active | P2 | open | low | 319295b97505c5105698076a71ca2431 | Local status requires a registered instance |
+| 286 | active | P2 | open | low | 48369c862e31b1ed4d9a33817f0e014e | Instance status subcommand is unavailable |
+| 287 | active | P2 | open | low | 4bbcf21ce7af47e77fad318f579a2692 | Theme status pass-through gives no guidance for invalid WP-CLI field form |
+| 288 | active | P2 | open | low | 0ca4656a7af7c37503dbe50b27d466a5 | Brokered secret command succeeded but inline tsx evaluation failed on top-level await |
+| 289 | active | P2 | open | low | 3fa2c05db19e2b541435e4c494eb9ceb | Focused unittest module name was missing |
+| 290 | active | P2 | open | low | b1ad1d168ae2a184d0638da7a58f95fd | Nested sb wp rejects project-dir placement during secrets run |
+| 291 | active | P2 | open | low | 3c575e3573915a8a9f12f3d8f3cd5147 | fresh ensure instance lacks Plugin Check despite project PHP validation workflow |
+| 292 | active | P2 | open | low | bd27d2cbbfae7a8b8dd5fdee79450087 | sb wp passthru test command surfaced missing explicit phpunit.xml |
+| 293 | active | P2 | open | low | fa6d5f85dfbf142e90381530730b250a | Sandbox wp cannot target an instance from detached review worktree cwd |
+| 294 | active | P2 | open | low | 81cbcc2283df364ee7d3b6090b2587a4 | WP-CLI help through sb fails because less is missing |
+| 295 | active | P2 | open | low | 6b22c6f6ced583e1b946a6d165598a0d | sb up does not support JSON output unlike status |
+| 296 | active | P2 | open | low | 758ed630bd86503a3ecc7600019f4213 | Temporary PR review worktree cannot resolve existing W3TC instance |
+| 297 | active | P2 | open | low | 1b6c9384b1bce1b4f7bf9e399dfbd571 | License status command rejects documented-style JSON flag |
+| 298 | active | P2 | open | low | bdbd66546d3f0c01289a2c3c34dfb191 | Plugin deactivation reports batch failure for one absent slug after deactivating others |
+| 299 | active | P2 | open | low | d02cc0ff45272ba13559ccab3ba05bcf | sb job-output rejects wait longer than its documented polling use |
+| 300 | active | P2 | open | low | 55f213b00c715e051ac5d91c73bcba6e | Secret-run timeout ceiling is undocumented at agent launch |
+| 301 | active | P2 | open | low | 72d7e41672b419a7ed688f56130e9f4f | secrets run rejects direct Node -e arguments |
+| 302 | active | P2 | open | low | 312999f52f6275df463d3178d1c8cd00 | Secret key inventory flag differs from documented invocation |
+| 303 | active | P2 | open | low | 4932ce6cb034428b9d058372f27b1384 | Focused Hermes test class is not discoverable |
+| 304 | active | P2 | open | low | 26f42e8614d8782fd3247ad1812543a3 | Post-merge sandbox deploy hook ignores repository Node pin |
+| 305 | active | P2 | open | low | d31d50a62fee3d648aa1a0943e5ed38e | Post-merge dev deploy hook ignores repository Node pin |
+| 306 | active | P2 | open | low | 234ae3c23f48e079e884c3f6a42fdd97 | Execution guard rejects temporary test cleanup |
+| 307 | active | P2 | open | low | 5d686f805c040875b70647936c3eb852 | Host status requires hidden environment selection |
+| 308 | active | P2 | open | low | c7148951984491f103e0d106d190b7d5 | Focused test file selection is not discoverable from sb test |
+| 309 | active | P2 | open | low | aff7c116c78be838405d39bdc6f8e502 | Focused Python test invocation used system Python 2.7 |
+| 310 | active | P2 | open | low | b2b1372ef928343fdf27bb60cc0e2793 | WordPress project status omits actionable local bootstrap hint |
+| 311 | active | P2 | open | low | fbdb7ee1c831849bdea6cfce516eec15 | Focused sb test surfaced test fixture constructor error |
+| 312 | active | P2 | open | low | 2affb4b3ad518bb79fca14bfacbc29f8 | Unset optional WP option lookup propagates nonzero status |
+| 313 | active | P2 | open | low | 8683c017651a8a817235498a8fdf0c5b | Spec implementation live-proof preflight lacks a registered instance |
+| 314 | active | P2 | open | low | 5d1cf19beed3520de67e717ccc85dfb9 | New job acceptance flush regression missed io import |
+| 315 | active | P2 | open | low | 8eee850065b3be5e0c9dfabb70a7babd | Ambient python3 invoked Sandbox CLI during focused unittest run |
+| 316 | active | P2 | open | low | 95c4db6a7c6715abf72ccdcff5e68a85 | Local instance JSON flags do not return JSON |
+| 317 | active | P2 | open | low | 32e67b5b5d127bed5e828e3cb7253f2d | Runtime guide advertises unavailable project-local sb path |
+| 318 | active | P2 | open | low | 4aa1e5e9204dea64cfd9b821953fa75c | Top-level sb destroy guidance is inconsistent with the actual instance lifecycle command |
+| 319 | active | P2 | open | low | 02f1514ddbb7e0510f30ec401834f045 | Focused Sandbox test correctly surfaced a project assertion failure |
+| 320 | active | P2 | open | low | 14563ae5e075bcbf90b628efa8cb0cf2 | Test bootstrap failures are interleaved with successful provisioning output |
+| 321 | active | P2 | open | low | 0ac8cb5dabd519d03ee0f27802bb51e3 | WordPress eval-file cannot resolve project-relative test path |
+| 322 | active | P2 | open | low | a62ad5240b0fcd7a7016144f5de814b0 | Status JSON failure is emitted as plain text |
+| 323 | active | P2 | open | low | 2b348f268c95d7335eda13a5166ba505 | Doctor audit result needs distinct diagnostic exit semantics |
+| 324 | active | P2 | open | low | 947f752eeffe6c3220adab1e06a30394 | General research skill lookup failed through sb skill show |
+| 325 | active | P2 | open | low | ab0866d29c12cd197a722f9563020bc0 | Sandbox compose logs option does not accept documented tail argument |
+| 326 | active | P2 | open | low | c444755c51a1eed1d5f23f6a7e47bcc2 | Host validation requires undocumented environment flag for multi-environment manifest |
+| 327 | active | P2 | open | low | 846518da5be863f7c75172fd85bcf451 | Exact ZIP Plugin Check requires archive extraction inside the WordPress container, but the container lacks unzip. |
+| 328 | active | P2 | open | low | c025a7bccd06656ce1cfbaf618442431 | wp option get requires a no-error probe for missing settings |
+| 329 | active | P2 | open | low | 0f197b2fc399d6e0b9fd028ec5bd5037 | wp eval diagnostics surface duplicate critical-error wrapper |
+| 330 | active | P2 | open | low | 4d8151f05e3746744ba612c919f44897 | sb e2e does not preflight the Chromium binary required by the project Playwright version |
+| 331 | active | P2 | open | low | dca83f79ebb8b80d018fd31d8674590e | sb wp eval parse errors are surfaced as a generic critical-site failure |
+| 332 | active | P2 | open | low | 3f916f56a4f8e7079f7ee628c6e4324e | sb wp passthrough rejects an extra wp token with a misleading missing-file error |
+| 333 | active | P2 | open | low | 5a59f5884d8cce77bae26f6cf010a194 | Post-processing resources JSON through Python quoting is fragile |
+| 334 | active | P2 | open | low | 9f7c0552f338a5666ad5a71cc38fd08e | sb exec does not share the WordPress plugin filesystem used by sb wp |
+| 335 | active | P2 | open | low | e093784cb284083b6768ee491beca80d | sb wp eval namespace escaping is easy to over-escape |
+| 336 | active | P2 | open | low | ec4154df6becebdcaec9855c505c6fcf | sb wp eval quoting is easy to over-escape |
+| 337 | active | P2 | open | low | 83017d4ae2ca0e5ad127abe1ea24c8ad | Sandbox WordPress image lacks pager required by wp help |
+| 338 | active | P2 | open | low | b4afad744a9cd27f70125804a973eae0 | Sandbox logs command lacks bounded tail option |
+| 339 | active | P2 | open | low | 91211eae7a0f4e0bc37340f3c8484fe2 | Review worktrees in system temp cannot be used by ensure |
+| 340 | active | P2 | open | low | 70c5b9380bada51469c5cee70cdbf693 | Disposable PR review worktrees under macOS private temp are rejected |
+| 341 | active | P2 | open | low | c5cc5e8182f990d7dde849eeae622d4f | Sandbox guide rejects isolated temp worktree outside configured roots |
+| 342 | active | P2 | open | low | 63779c5a45a19b85bdda6c45f443dff5 | sb wp option get reports missing optional setting as command failure |
+| 343 | active | P2 | open | low | 80ac2e2d134ca374c0fbd422adc651ea | Sandbox CLI is not discoverable from project repositories |
+| 344 | active | P2 | open | low | d60dc6fa62fb623a41ce0afa5dd75133 | sb up lacks JSON output despite CLI-first automation |
+| 345 | active | P2 | open | low | 2f5dd7379b043e0a99c76e1349c97241 | sandbox host logs line cap is undocumented in command context |
+| 346 | active | P2 | open | low | e7a26e0b06f1b3cadf72947933edaefe | Hermes repo sync requires undisclosed confirmation flag |
+| 347 | active | P2 | open | low | ea33c77d504c60a3a7cfb2ee546f7514 | Host logs environment selection is confusing and feedback flag names are undocumented |
+| 348 | active | P2 | open | low | 6649d141452c845129f3ebf59df8e373 | Lenzora edge verification lacks curl in agent shell |
+| 349 | active | P2 | open | low | 05936f990e374823e61c0ceb5f25e5c7 | skill show rejects documented project-dir placement |
+| 350 | active | P2 | open | low | 4d0ef1c0135bcbd0379b9a5ceb2c895d | OpenRouter key profile is unavailable |
+| 351 | active | P2 | open | low | b2eb916facc6ab2539553b5e2ed39823 | Feedback list limit range is absent from CLI skill |
+| 352 | active | P2 | open | low | 60bcd100c479e42b4b9276d59ce8908e | feedback list rejects requested inventory limit |
+| 353 | active | P2 | open | low | 6968a4b592fe4884e182e0f7dd9e5eda | WordPress command rejects documented local execution pattern |
+| 354 | active | P2 | open | low | df47dc48756e87cc10b77fbea8bfe8df | CLI lacks despite discoverability pattern |
+| 355 | active | P2 | open | low | 57736970a6862ed1eb5eb59bab8fa530 | skill show rejects documented project-dir routing |
+| 356 | active | P2 | open | low | 79acef9abd8dad40308d7db0456e28ee | Sandbox home output lacks a machine-readable cursor location |
+| 357 | active | P2 | open | low | 097bcd12421d1c81054aca3028237b3f | Resource timeout regression missed subprocess import |
+| 358 | active | P2 | open | low | a0022ceaf3a6594f4c621b2ab667dce1 | Feedback show rejects ledger ID prefixes |
+| 359 | active | P2 | open | low | 008af940588e7c65225abbbf5251588b | Sandbox WordPress image lacks unzip for exact archive manifest verification |
+| 360 | active | P2 | open | low | 8334692aacd13be9b091b339678a7cad | wp eval-file path is resolved only inside the WordPress container |
+| 361 | active | P2 | open | low | d895fbb72d741555fe90b3577af32efd | WP eval-file wrapper cannot forward script options after documented separators |
+| 362 | active | P2 | open | low | cf3fe2edc59788c8f9604a7cd71f3e3e | Sandbox npm wrapper does not document WP eval-file argument separators |
+| 363 | active | P2 | open | low | 895e206fdb40629cacc88b6b6b648d89 | Sandbox WP option and eval probes provide noisy failure output for absent options and namespace quoting |
+| 364 | active | P2 | open | low | d640f9c6f110d02c52b2bad359c2d67b | WP post-type field capability is not discoverable through Sandbox guide |
+| 365 | active | P2 | open | low | e6a26df9b4d957a591bdc6d072e60bbe | login-url attempted on Basic Auth only environment |
+| 366 | active | P2 | open | low | 7f0e27c15635d96a637b0d48e7a25381 | host login-url protection not visible in command help |
+| 367 | active | P2 | open | low | 7df52abe67e97a43759b449ea6a11c8b | mktemp project suffix produces a slug rejected by sb init |
+| 368 | active | P2 | open | low | 096fdaf53364cbcc86efd49ba25c4d98 | Temporary project under /tmp is refused after macOS canonicalizes it to /private/tmp |
+| 369 | active | P2 | open | low | b2791536ba51a9a1ee0d7f2bb471294e | Disposable plugin fixture under macOS /tmp rejected |
+| 370 | active | P2 | open | low | 35ed60860c8c1d2d034c8d5489d456d8 | feedback list rejects documented over-limit request |
+| 371 | active | P3 | open | low | aa6452605024ed41759ec4f3e8a8050b | Retained remote gate exposed invalid benchmark fixture tree IDs |
+| 372 | active | P3 | open | low | 65d5427835e56f60a2cd0637a40cc2e3 | T118 remote product gate failed on closed-list ordering mismatch |
+| 373 | active | P3 | open | low | ff8b94dc66c07e836837b46a0030abc8 | Keyless WPDeveloper pro activation misses xspeed-pro (keyword list) |
+| 374 | active | P3 | open | low | bcdb8d8f647df1652727abbcbf616ed4 | Plugin replacement can report success before detecting an unusable runtime archive |
+| 375 | active | P3 | open | low | ade1ef130bd7178813711b00c29d3150 | Focused HSSB icon-default PHPUnit run found stale golden and payload-shape expectations |
+| 376 | active | P3 | open | low | d79dcb78281523725565a2e3ad0eed6d | Full HSSB PHPUnit run found nine icon-default expectation mismatches |
+| 377 | active | P3 | open | low | 5dd57aaddca483c747f87f3f0a33f24b | Focused HSSB PHPUnit filter reported four expectation failures |
+| 378 | active | P3 | open | low | 3273804376c6c8d41b079a9fe6b3e15c | T118 lifecycle fixtures exposed cross-realm structuredClone incompatibility with Ajv array consts |
+| 379 | closure | P0 | resolved | critical | 71be94307c0b2dfee1ef2640898bf1a0 | sb host apply exits 0 after a failed deploy, and its rollback can fail silently when the disk is full |
+| 380 | closure | P0 | resolved | critical | 1f094d2f708e7c57cf128ac9635aa5af | Failed deploy leaves wrong remote instance registered |
+| 381 | closure | P0 | resolved | critical | 0b420c9bf187cdce7a9e8be03d44dfda | target inference sent every project's sb ensure to the VPS instead of booting locally |
+| 382 | closure | P0 | resolved | critical | 088652d49fdabbff77311353f251270b | Docker pool rollback restored configuration but left 20 previously running containers stopped |
+| 383 | closure | P0 | resolved | critical | 3ef73e91af2e0fcc11c1c111591e9784 | Apply recreates ownership failure after explicit repair |
+| 384 | closure | P0 | resolved | high | d176d75f2af85574e78aadbc5018fefa | Remote resource status timeout leaks traceback |
+| 385 | closure | P0 | resolved | high | cd84b75dcfc5da657b6b5a95d35e54fb | Remote Docker pool transaction exceeded client timeout and failure envelope exposed encoded command detail |
+| 386 | closure | P0 | resolved | high | 665bb8da6b1d86c8e1754e1c85e94dd0 | Fresh wordpress@1 child-image build fails at mbstring and init resolves the wrong project root |
+| 387 | closure | P0 | resolved | high | 6481185910b63348f5c38308439049ca | A pre-subcommand --label is silently clobbered for six subcommands, targeting the wrong instance |
+| 388 | closure | P0 | resolved | medium | 441022bfe8746ac26fa4b719fa0a7bb4 | Redacted sandbox_autologin URL is indistinguishable from a working one, and check_reachable's 10s budget false-negatives a ~190ms-RTT host |
+| 389 | closure | P0 | verified | critical | 19fe2251d017bb8bbbf0dd6b5d609d26 | Status JSON disclosed an autologin credential |
+| 390 | closure | P0 | verified | critical | a1fc66d41f603894e18bc4092a0a9aba | Deploy ignores instance and provisions wrong project |
+| 391 | closure | P0 | verified | high | e8ab77173bf1be69b65f7d1e65b42d49 | ensure JSON exposes credential-bearing login URL |
+| 392 | closure | P0 | not_applicable | low | 9fbb0f4b05ef8ee1c38fe7216aad1c48 | Full WP 7.1 suite exposed legacy API test state leakage |
+| 393 | closure | P0 | duplicate | high | 4ecf436c6dadfaf25efbdb04bddffa31 | Current xspeed-pr188 status remains unreachable with web plane unavailable |
 | 394 | closure | P1 | verified | high | 1a7dde8bc4c88c8f7f311bf11c5ab5f3 | Remote active job list can return a false empty page |
 | 395 | closure | P1 | verified | high | d1a8a9f50d980bc8b1be061ef20c52ae | Remote deploy push timeout reproduced |
 | 396 | closure | P1 | verified | high | 1ad96d2d24f9e1aa0bc401dde35eb2f1 | Remote deploy Git push timed out |
@@ -561,69 +561,72 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 539 | closure | P1 | not_applicable | medium | 8ad9e033916a505bc4d79ca1c5c5d6f9 | sb ensure aborts plugin provisioning on one unresolved declared plugin instead of continuing |
 | 540 | closure | P1 | not_applicable | medium | 35b8491b9227efb3a0ca93cce100764c | ensure --create fails on disabled mcp-adapter declaration |
 | 541 | closure | P1 | not_applicable | low | b9fd65663a30672c6463c0a28cc4f356 | Focused unittest selectors drift from current test class names |
-| 542 | closure | P2 | verified | medium | d49d9a42f092a6435dce53180716aa15 | Resources help advertises detach for plan but rejects it |
-| 543 | closure | P2 | verified | medium | 8c1873920423df6f56d97ff9dc09ae15 | remote service command omits required status subcommand in generic usage |
-| 544 | closure | P2 | resolved | medium | f13ce98a2b1cf9208cb70e9d32e0b127 | Scoped sb wp inspection hung after core reported installed |
-| 545 | closure | P2 | resolved | medium | e717790ccfb266def874bd5dab31b47e | Plugin Check targets project slug instead of installed plugin map key |
-| 546 | closure | P2 | resolved | medium | e90a91ce4ba43da1f614711f17bd3a9c | WordPress guide advertises unusable separator syntax |
-| 547 | closure | P2 | resolved | medium | 91a5804528ffcc223a97978c857291f0 | A WP instance cannot resolve its own published localhost:<port>, so any plugin loopback to home_url() fails |
-| 548 | closure | P2 | resolved | medium | 1a16d09ab8232fcfd19eb23eb5700b1d | Project directory did not resolve its known labeled local instance |
-| 549 | closure | P2 | resolved | medium | 6374e2268d9d8d1ce93db1bbe73e2a6a | sb init on a WP plugin repo scaffolds no mapping for the repo's own plugin |
-| 550 | closure | P2 | resolved | medium | 7586c2da39e8c6248488d9333ee5f3cb | visit URL refuses a known instance when invoked outside its registered project directory |
-| 551 | closure | P2 | resolved | medium | 618665f43d1c4373a78073ec365ae91e | visit rejects generic Compose project before browser route verification |
-| 552 | closure | P2 | resolved | medium | c335f32ed75eedc8446d074af5517a98 | secrets run injects only one key, blocking paired credentials (S3/R2 access key id + secret) |
-| 553 | closure | P2 | resolved | medium | 22d52bec13bcfae8bbcd8a84518baff9 | WordPress instance cannot loopback-request its own .tst host |
-| 554 | closure | P2 | resolved | medium | 00b1e17ef9e48163053e874f8cd3dbc5 | No secret-safe authenticated health verification for Basic Auth host |
-| 555 | closure | P2 | resolved | medium | cf5e49ed74423175e35d7c224dac473f | Known generic instance cannot resolve from its project directory |
-| 556 | closure | P2 | resolved | medium | ef4ec661e33eeabb4c96b1d53d21b06d | visit rebuilt a valid CLI venv and then failed on missing pip shim |
-| 557 | closure | P2 | resolved | medium | b690505252b3b715c48b6b10a4dbade4 | sb guide, the designated agent entry point, lists about 9 percent of the command surface |
-| 558 | closure | P2 | resolved | medium | ad190c71bb8c1f6148e348e0c01ce797 | The feedback log has no read path and no egress: details are write-only |
-| 559 | closure | P2 | resolved | medium | 81f43e6f645366f2593be67d9b05cdd4 | Redaction is keyword-only, so common bare provider tokens are stored verbatim |
-| 560 | closure | P2 | resolved | medium | 13bfb0ed2825f9cf1ef8dae179f5db66 | Domains documentation points to an unavailable doctor action |
-| 561 | closure | P2 | resolved | low | 12f3901f0d77fd0d9da1626145e79bec | sb wp rejects project-dir used by project-scoped automation |
-| 562 | closure | P2 | resolved | low | 9be86009dd1cfb404a39176e43184fae | WordPress subcommand rejects explicit local selector |
-| 563 | closure | P2 | resolved | low | 369b23c71360d455a664589c18a20b6b | Activation status and scan reject the documented-looking --json placement |
-| 564 | closure | P2 | resolved | low | 7400679a8bd181379d48834e88f01802 | activation status rejects harmless json selector |
-| 565 | closure | P2 | resolved | low | 6bc4c6d5e0a70e0a048030d694ad76f9 | Compact active-job parser failed on null data |
-| 566 | closure | P2 | resolved | low | 15d1625b2d1f52c15b595b39bc3120d9 | Project guide advertises unavailable ./sb wrapper |
-| 567 | closure | P2 | resolved | low | 2b080bf5b7fec8dc1199aa4bba812a78 | CLI and MCP disagree on project identity: same report, different record |
-| 568 | closure | P2 | resolved | low | f90c67127f746e37e7a0d58a40acd4e8 | feedback list reports a partial invalid_record_count as if it were complete |
-| 569 | closure | P2 | resolved | low | 525d979da7fc4f2652eab8475c0161f9 | activation status rejects JSON output flag after the subcommand |
-| 570 | closure | P2 | resolved | low | 12f503ddf72d709f4b22a0fee1cd435f | visit rejects JSON output flag after the URL |
-| 571 | closure | P2 | verified | high | 5d67860ce4e2c9352b70319b62634050 | Remote cleanup plan rejected by client fallback target identity |
-| 572 | closure | P2 | verified | medium | a92422d4fc120d162e8897a865f5b5ea | Cache cleanup one-click path requires an undocumented plan id |
-| 573 | closure | P2 | verified | medium | 9a383ec302d7b53bb45262336576ae1b | Sandbox CLI discoverability issue with instance-listing command |
-| 574 | closure | P2 | verified | medium | bd9b0f950c0dbe05e835a3a264fcc9e1 | Sandbox CLI discoverability issue with instance-listing command |
-| 575 | closure | P2 | verified | medium | b45408b05b1924038075ff3ee8701be7 | Remote workspace release/status rejects a unique label without exposing the required workspace ID |
-| 576 | closure | P2 | verified | medium | a98aa8a17e1120fbd7448bfad3bf9a98 | Remote workspace status rejects an indexed workspace ID with workspace_protocol_invalid |
-| 577 | closure | P2 | verified | low | 763fbc6ea330e48be19fad5a4f54eaac | job-output wait bound differs between local CLI and remote service |
-| 578 | closure | P2 | verified | low | 439e970b010909485adb7362aa4b23e1 | Remote revision status parser reports unknown for a proven unit |
-| 579 | closure | P2 | verified | low | 93bdc880370f90ad3e0dabe52ad9cd27 | sb ensure stops on mount drift but the guide omits sb apply as the required recovery |
-| 580 | closure | P2 | verified | low | 757a756d5592ce5319f3e155914f5369 | No supported instance list action |
-| 581 | closure | P2 | verified | low | 35217943eb0a5c9b0938738000d6d371 | Instance listing command is not discoverable |
-| 582 | closure | P2 | verified | low | e1d98c9872a1edd5482f8062cd5ff354 | Instance subcommand lacks read-only list action |
-| 583 | closure | P2 | verified | low | c892e6d411297f910f49cdc878fdc033 | Sandbox CLI lacks a standard version flag |
-| 584 | closure | P2 | verified | low | 54b3f69511df4eb5dcc81e71e9f77560 | Standard version flag is not supported |
-| 585 | closure | P2 | duplicate | medium | 94b2e9ea0203b9552b824a0edef3c6c6 | Guide-documented sb wp separator is forwarded literally |
-| 586 | closure | P2 | duplicate | medium | 4a9d18478e7296c2ffeeaaeb6d8f0101 | WordPress guide emits unusable wp separator syntax |
-| 587 | closure | P2 | duplicate | medium | 3f858af223a901e8cf2389eca038d180 | Generated guide wp separator is passed as WP command |
-| 588 | closure | P2 | duplicate | medium | 910bc8c9e0cd0009d15b6698e2f3b35f | secrets run does not propagate trusted child failure |
-| 589 | closure | P2 | duplicate | low | f846861e26a13d521ae3ff1f330ae6c0 | sandbox host status action is unavailable |
-| 590 | closure | P2 | duplicate | low | dca9e6e6abf8e9abf67fc886d105232e | sb wp rejects project-dir routing for manual fixture reset |
-| 591 | closure | P2 | not_applicable | medium | 715ecbd7b9d2509b3d45c226503120dc | Local init rejects optional disabled plugins |
-| 592 | closure | P2 | not_applicable | medium | 695cd378486da97b45ab284f44df040d | Doctor command rejects a valid instance when run from Sandbox root |
-| 593 | closure | P2 | not_applicable | low | 108318d9f208a78beffc95798261e92c | WordPress plugin state drift observed between sessions |
-| 594 | closure | P3 | duplicate | low | 39b75815fcaa3cfd4dad75bd9382ef3d | feedback review evidence limit is undocumented at invocation |
-| 595 | closure | P3 | verified | low | 3b6356fd0b3346d9bdf8e03818a3308f | Provide a non-mutating Sandbox CLI version command |
-| 596 | closure | P3 | verified | low | 90924a4344b7155f0cc7353a35e24d5f | job-output max-bytes rejects values above 262144 without exposing the limit in help |
-| 597 | closure | P3 | duplicate | low | 0c09b4d67b155094e957333f4b3b6927 | feedback review rejects evidence longer than its bounded limit |
-| 598 | closure | P3 | not_applicable | medium | 2eb242d04b4b9142fb5a94fb4b9587c8 | combined CLI test run can hang in sb instances subprocess |
-| 599 | closure | P3 | not_applicable | low | dbc830ae6994b48b97c58d44885601a6 | job-output rejects wait-seconds above its documented supervisor window |
-| 600 | closure | P3 | not_applicable | low | 70efc11f0057be8a815c8c81edc9dd48 | feedback export rejects max-bytes above its documented upper bound |
-| 601 | closure | P3 | not_applicable | low | 52e75cf8bdc07aaebf8adc9ea2cada5f | feedback review accepts oversized evidence argument before rejecting it |
-| 602 | closure | P3 | not_applicable | low | ede0e5e74cebecb1633a9041fd3d60a7 | Doctor does not run from the Sandbox repository root without a registered project |
-| 603 | closure | P3 | not_applicable | low | e35b5a7eb09066b2932b19fd908b81a9 | status from Sandbox checkout has no local instance context |
-| 604 | closure | P3 | not_applicable | low | 1dc1e1a6851fbddd186c29450fe06bc2 | feedback JSON piping can surface BrokenPipeError when downstream parser exits |
-| 605 | closure | P3 | not_applicable | low | ce1f7d87ad17d203062620621a8127bf | feedback list returns records that show cannot resolve by ID |
-| 606 | closure | P3 | not_applicable | low | d870ea64eadd9bc5cbb8efbcc51abef1 | operator verification used repository path as Sandbox home |
-| 607 | closure | P3 | verified | low | b2731f7a8b3b04ccfeb501fda2436663 | CLI command inventory test baseline is stale at 88 |
+| 542 | closure | P1 | verified | high | f7e83e9e0dc00d0c08591d45f7eca1f5 | Deploy cannot reconcile diverged managed remote branch |
+| 543 | closure | P2 | verified | medium | d49d9a42f092a6435dce53180716aa15 | Resources help advertises detach for plan but rejects it |
+| 544 | closure | P2 | verified | medium | 8c1873920423df6f56d97ff9dc09ae15 | remote service command omits required status subcommand in generic usage |
+| 545 | closure | P2 | resolved | medium | f13ce98a2b1cf9208cb70e9d32e0b127 | Scoped sb wp inspection hung after core reported installed |
+| 546 | closure | P2 | resolved | medium | e717790ccfb266def874bd5dab31b47e | Plugin Check targets project slug instead of installed plugin map key |
+| 547 | closure | P2 | resolved | medium | e90a91ce4ba43da1f614711f17bd3a9c | WordPress guide advertises unusable separator syntax |
+| 548 | closure | P2 | resolved | medium | 91a5804528ffcc223a97978c857291f0 | A WP instance cannot resolve its own published localhost:<port>, so any plugin loopback to home_url() fails |
+| 549 | closure | P2 | resolved | medium | 1a16d09ab8232fcfd19eb23eb5700b1d | Project directory did not resolve its known labeled local instance |
+| 550 | closure | P2 | resolved | medium | 6374e2268d9d8d1ce93db1bbe73e2a6a | sb init on a WP plugin repo scaffolds no mapping for the repo's own plugin |
+| 551 | closure | P2 | resolved | medium | 7586c2da39e8c6248488d9333ee5f3cb | visit URL refuses a known instance when invoked outside its registered project directory |
+| 552 | closure | P2 | resolved | medium | 618665f43d1c4373a78073ec365ae91e | visit rejects generic Compose project before browser route verification |
+| 553 | closure | P2 | resolved | medium | c335f32ed75eedc8446d074af5517a98 | secrets run injects only one key, blocking paired credentials (S3/R2 access key id + secret) |
+| 554 | closure | P2 | resolved | medium | 22d52bec13bcfae8bbcd8a84518baff9 | WordPress instance cannot loopback-request its own .tst host |
+| 555 | closure | P2 | resolved | medium | 00b1e17ef9e48163053e874f8cd3dbc5 | No secret-safe authenticated health verification for Basic Auth host |
+| 556 | closure | P2 | resolved | medium | cf5e49ed74423175e35d7c224dac473f | Known generic instance cannot resolve from its project directory |
+| 557 | closure | P2 | resolved | medium | ef4ec661e33eeabb4c96b1d53d21b06d | visit rebuilt a valid CLI venv and then failed on missing pip shim |
+| 558 | closure | P2 | resolved | medium | b690505252b3b715c48b6b10a4dbade4 | sb guide, the designated agent entry point, lists about 9 percent of the command surface |
+| 559 | closure | P2 | resolved | medium | ad190c71bb8c1f6148e348e0c01ce797 | The feedback log has no read path and no egress: details are write-only |
+| 560 | closure | P2 | resolved | medium | 81f43e6f645366f2593be67d9b05cdd4 | Redaction is keyword-only, so common bare provider tokens are stored verbatim |
+| 561 | closure | P2 | resolved | medium | 13bfb0ed2825f9cf1ef8dae179f5db66 | Domains documentation points to an unavailable doctor action |
+| 562 | closure | P2 | resolved | low | 12f3901f0d77fd0d9da1626145e79bec | sb wp rejects project-dir used by project-scoped automation |
+| 563 | closure | P2 | resolved | low | 9be86009dd1cfb404a39176e43184fae | WordPress subcommand rejects explicit local selector |
+| 564 | closure | P2 | resolved | low | 369b23c71360d455a664589c18a20b6b | Activation status and scan reject the documented-looking --json placement |
+| 565 | closure | P2 | resolved | low | 7400679a8bd181379d48834e88f01802 | activation status rejects harmless json selector |
+| 566 | closure | P2 | resolved | low | 6bc4c6d5e0a70e0a048030d694ad76f9 | Compact active-job parser failed on null data |
+| 567 | closure | P2 | resolved | low | 15d1625b2d1f52c15b595b39bc3120d9 | Project guide advertises unavailable ./sb wrapper |
+| 568 | closure | P2 | resolved | low | 2b080bf5b7fec8dc1199aa4bba812a78 | CLI and MCP disagree on project identity: same report, different record |
+| 569 | closure | P2 | resolved | low | f90c67127f746e37e7a0d58a40acd4e8 | feedback list reports a partial invalid_record_count as if it were complete |
+| 570 | closure | P2 | resolved | low | 525d979da7fc4f2652eab8475c0161f9 | activation status rejects JSON output flag after the subcommand |
+| 571 | closure | P2 | resolved | low | 12f503ddf72d709f4b22a0fee1cd435f | visit rejects JSON output flag after the URL |
+| 572 | closure | P2 | verified | high | 5d67860ce4e2c9352b70319b62634050 | Remote cleanup plan rejected by client fallback target identity |
+| 573 | closure | P2 | verified | medium | a92422d4fc120d162e8897a865f5b5ea | Cache cleanup one-click path requires an undocumented plan id |
+| 574 | closure | P2 | verified | medium | 9a383ec302d7b53bb45262336576ae1b | Sandbox CLI discoverability issue with instance-listing command |
+| 575 | closure | P2 | verified | medium | bd9b0f950c0dbe05e835a3a264fcc9e1 | Sandbox CLI discoverability issue with instance-listing command |
+| 576 | closure | P2 | verified | medium | b45408b05b1924038075ff3ee8701be7 | Remote workspace release/status rejects a unique label without exposing the required workspace ID |
+| 577 | closure | P2 | verified | medium | a98aa8a17e1120fbd7448bfad3bf9a98 | Remote workspace status rejects an indexed workspace ID with workspace_protocol_invalid |
+| 578 | closure | P2 | verified | low | 763fbc6ea330e48be19fad5a4f54eaac | job-output wait bound differs between local CLI and remote service |
+| 579 | closure | P2 | verified | low | 439e970b010909485adb7362aa4b23e1 | Remote revision status parser reports unknown for a proven unit |
+| 580 | closure | P2 | verified | low | 93bdc880370f90ad3e0dabe52ad9cd27 | sb ensure stops on mount drift but the guide omits sb apply as the required recovery |
+| 581 | closure | P2 | verified | low | 757a756d5592ce5319f3e155914f5369 | No supported instance list action |
+| 582 | closure | P2 | verified | low | 35217943eb0a5c9b0938738000d6d371 | Instance listing command is not discoverable |
+| 583 | closure | P2 | verified | low | e1d98c9872a1edd5482f8062cd5ff354 | Instance subcommand lacks read-only list action |
+| 584 | closure | P2 | verified | low | c892e6d411297f910f49cdc878fdc033 | Sandbox CLI lacks a standard version flag |
+| 585 | closure | P2 | verified | low | 54b3f69511df4eb5dcc81e71e9f77560 | Standard version flag is not supported |
+| 586 | closure | P2 | duplicate | medium | 94b2e9ea0203b9552b824a0edef3c6c6 | Guide-documented sb wp separator is forwarded literally |
+| 587 | closure | P2 | duplicate | medium | 4a9d18478e7296c2ffeeaaeb6d8f0101 | WordPress guide emits unusable wp separator syntax |
+| 588 | closure | P2 | duplicate | medium | 3f858af223a901e8cf2389eca038d180 | Generated guide wp separator is passed as WP command |
+| 589 | closure | P2 | duplicate | medium | 910bc8c9e0cd0009d15b6698e2f3b35f | secrets run does not propagate trusted child failure |
+| 590 | closure | P2 | duplicate | low | f846861e26a13d521ae3ff1f330ae6c0 | sandbox host status action is unavailable |
+| 591 | closure | P2 | duplicate | low | dca9e6e6abf8e9abf67fc886d105232e | sb wp rejects project-dir routing for manual fixture reset |
+| 592 | closure | P2 | not_applicable | medium | 715ecbd7b9d2509b3d45c226503120dc | Local init rejects optional disabled plugins |
+| 593 | closure | P2 | not_applicable | medium | 695cd378486da97b45ab284f44df040d | Doctor command rejects a valid instance when run from Sandbox root |
+| 594 | closure | P2 | not_applicable | low | 108318d9f208a78beffc95798261e92c | WordPress plugin state drift observed between sessions |
+| 595 | closure | P3 | duplicate | low | 39b75815fcaa3cfd4dad75bd9382ef3d | feedback review evidence limit is undocumented at invocation |
+| 596 | closure | P3 | verified | low | 3b6356fd0b3346d9bdf8e03818a3308f | Provide a non-mutating Sandbox CLI version command |
+| 597 | closure | P3 | verified | low | 90924a4344b7155f0cc7353a35e24d5f | job-output max-bytes rejects values above 262144 without exposing the limit in help |
+| 598 | closure | P3 | duplicate | low | 0c09b4d67b155094e957333f4b3b6927 | feedback review rejects evidence longer than its bounded limit |
+| 599 | closure | P3 | not_applicable | medium | 2eb242d04b4b9142fb5a94fb4b9587c8 | combined CLI test run can hang in sb instances subprocess |
+| 600 | closure | P3 | not_applicable | low | dbc830ae6994b48b97c58d44885601a6 | job-output rejects wait-seconds above its documented supervisor window |
+| 601 | closure | P3 | not_applicable | low | 70efc11f0057be8a815c8c81edc9dd48 | feedback export rejects max-bytes above its documented upper bound |
+| 602 | closure | P3 | not_applicable | low | 52e75cf8bdc07aaebf8adc9ea2cada5f | feedback review accepts oversized evidence argument before rejecting it |
+| 603 | closure | P3 | not_applicable | low | ede0e5e74cebecb1633a9041fd3d60a7 | Doctor does not run from the Sandbox repository root without a registered project |
+| 604 | closure | P3 | not_applicable | low | e35b5a7eb09066b2932b19fd908b81a9 | status from Sandbox checkout has no local instance context |
+| 605 | closure | P3 | not_applicable | low | 1dc1e1a6851fbddd186c29450fe06bc2 | feedback JSON piping can surface BrokenPipeError when downstream parser exits |
+| 606 | closure | P3 | not_applicable | low | ce1f7d87ad17d203062620621a8127bf | feedback list returns records that show cannot resolve by ID |
+| 607 | closure | P3 | not_applicable | low | d870ea64eadd9bc5cbb8efbcc51abef1 | operator verification used repository path as Sandbox home |
+| 608 | closure | P3 | verified | low | b2731f7a8b3b04ccfeb501fda2436663 | CLI command inventory test baseline is stale at 88 |
+| 609 | closure | P3 | not_applicable | low | 25b272b47812f782866f0b3dae1ad020 | Domain status without a registered project returns a context error |
+| 610 | closure | P3 | not_applicable | low | f4aeff5cb928fa724b78b9d20514292a | Resource cleanup apply action is not discoverable |

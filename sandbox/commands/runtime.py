@@ -21,7 +21,8 @@ _GUIDES = {
         ("init", "./sb init --type compose",
          "Write/validate a reviewable Compose descriptor and print the ensure next step."),
         ("ensure", "./sb ensure", "Create, start, or reconcile the declared project."),
-        ("status", "./sb status", "Inspect the declared runtime."),
+        ("status", "./sb status",
+         "Inspect the declared runtime after init/ensure; unregistered projects get a bootstrap hint."),
         ("logs", "./sb logs", "Read service logs."),
         ("exec", "./sb exec [--local|--remote <name>] --workspace <name> --timeout <seconds> "
          "--detach --request-id <stable-id> -- <argv...>",
@@ -35,7 +36,8 @@ _GUIDES = {
     "wordpress": (
         ("init", "./sb init", "Create a local WordPress project instance."),
         ("ensure", "./sb ensure", "Start or reconcile the local instance."),
-        ("status", "./sb status", "Inspect the declared runtime."),
+        ("status", "./sb status",
+         "Inspect the declared runtime after init/ensure; unregistered projects get a bootstrap hint."),
         ("wp", "./sb wp --timeout 60 -- <wp-cli args...>",
          "Run bounded synchronous WP-CLI; use --async for long work."),
         ("test", "./sb test [--local] --timeout <seconds>",

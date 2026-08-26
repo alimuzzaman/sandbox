@@ -749,7 +749,15 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
-             "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
+             "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Service actions:\n"
+            "  ./sb remote service status NAME [--json]\n"
+            "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
+            "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
+            "  ./sb remote service stop NAME --confirm [--json]"
+        ))
     remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "

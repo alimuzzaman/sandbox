@@ -80,6 +80,10 @@ Use only reviewed profile names. A result reports `pass`, `fail`, or
 `not_applicable` checks and `live_checked=false`. It does not prove that a
 provider accepts the credential.
 
+The reviewed `openrouter-api-key` profile checks the documented `sk-or-`
+public prefix plus the generic bounded shape rules. It is offline only and
+never contacts OpenRouter; `live_checked` stays `false`.
+
 ## 4. Request the fixed mask only when needed
 
 ```bash

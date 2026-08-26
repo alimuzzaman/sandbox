@@ -63,6 +63,17 @@ class TestSecretPolicy(unittest.TestCase):
         self.assertEqual(result["syntax"], "pass")
         self.assertNotIn("value", result)
 
+    def test_openrouter_api_key_profile_checks_public_prefix_without_live_use(self):
+        value = "sk-or-v1-" + ("0123456789abcdef" * 4)
+        result = validate("openrouter-api-key", "OPENROUTER_KEY", value)
+        self.assertEqual(result["syntax"], "pass")
+        self.assertEqual(result["checks"]["public_prefix"], "pass")
+        self.assertFalse(result["live_checked"])
+
+        rejected = validate("openrouter-api-key", "OPENROUTER_KEY", "sk_test_" + "a" * 40)
+        self.assertEqual(rejected["syntax"], "fail")
+        self.assertEqual(rejected["checks"]["public_prefix"], "fail")
+
     def test_keys_and_destinations_fail_closed(self):
         with self.assertRaises(SecretBrokerError):
             validate_key("BAD-KEY")

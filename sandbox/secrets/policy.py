@@ -19,6 +19,9 @@ _PUBLIC_PREFIXES = {
     "stripe-secret-v1": ("sk_test_", "sk_live_", "rk_test_", "rk_live_", "sk_org_"),
     "github-token-v1": ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
     "cloudflare-token-v1": ("cfut_",),
+    # OpenRouter's documented user API keys start with ``sk-or-``.  This is a
+    # shape check only; it never contacts OpenRouter or proves live validity.
+    "openrouter-api-key": ("sk-or-",),
 }
 _DANGEROUS_EXACT = frozenset({
     "NODE_OPTIONS", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "RUBYOPT",

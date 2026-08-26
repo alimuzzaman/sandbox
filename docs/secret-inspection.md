@@ -169,6 +169,13 @@ questions about documented public prefix class, length, character set, segment
 structure, parseability, or embedded expiry. It does not contact the provider or
 prove that the credential is active, authorized, or accepted.
 
+The built-in `openrouter-api-key` profile performs the same bounded shape
+checks plus the documented `sk-or-` public-prefix check. It is offline only:
+`live_checked` remains `false`, and it never sends the key to OpenRouter. See
+the [OpenRouter API-key documentation](https://openrouter.ai/docs/api/api-reference/api-keys/create-a-new-api-key)
+for the provider's current example and its warning that plaintext keys are
+shown only once.
+
 ### 4. Request the fixed mask only when identification requires it
 
 ```bash

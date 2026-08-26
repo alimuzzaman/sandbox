@@ -52,6 +52,18 @@ Drive, recovery, commit, or push action occurred.
   and complete `container`, `network`, `volume`, `runtime`, `registry`,
   `extraction`, and `report` cleanup planes. The per-review port lanes were
   required after the first overlap exposed a shared-default port race.
+- A live source/archive parity run used the same deterministic fixture and
+  caller project. Source and archive both exited 0 with 4 ERROR/2 WARNING
+  findings, and the four normalized ERROR identities matched exactly:
+  `entrypoint.php::plugin_header_missing_plugin_description`,
+  `entrypoint.php::plugin_header_no_license`,
+  `readme.txt::no_plugin_readme`, and
+  `side-effect-sentinel.php::missing_direct_file_access_protection`. The
+  archive result recorded SHA `34de3e374abf0aad08753f3a582be384c845ed7052f9b70dd0d0b2af686c5cfd`,
+  member manifest SHA `d83c045a2dd10a824a8e3a8aa12c465268d6931c8da87cb3b8f4e80a55f42588`,
+  review instance `plugin-check-r302bd32e2`, receipt `89297c55bd8b957088c6a24b`,
+  and complete cleanup. The source caller stack was removed by exact-name
+  postconditions after the comparison.
 - Independent postconditions found the caller baseline absent and untouched,
   the fixture side-effect sentinel absent, no review registry/runtime paths,
   and no matching Docker containers, networks, or volumes. The stale exact

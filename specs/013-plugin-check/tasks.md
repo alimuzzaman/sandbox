@@ -332,7 +332,8 @@ note; the source-tree Plugin Check path remains unchanged.
   concurrent live disposable runs all passed with exact archive/checker
   provenance, inactive-target proofs, retained reports, complete seven-plane
   cleanup receipts, and a direct source/archive `(file, rule)` identity
-  regression. The repository-wide regression is still a separate open gate: a
+  regression plus a live source/archive parity run with matching four ERROR
+  identities. The repository-wide regression is still a separate open gate: a
   bounded isolated run executed 3,371 tests (7 failures, 3 errors,
   18 skips) after omitting the unbounded `test_resource_remote` module; the
   failures are existing architecture/runtime-transport baseline drift, not an

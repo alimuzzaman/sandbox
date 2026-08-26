@@ -185,10 +185,9 @@ cleanup journal, per-plane absence receipt, retained artifacts, and pinned
 checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
 and failure evidence. The CLI integration and disposable acceptance are now
-complete. A focused regression proves source-tree and archive paths produce the
-same `(file, rule)` baseline identity. The exact-archive feedback records remain
-open until the full repository regression gate and a live source/archive parity
-run are clean.
+complete. Focused and live regressions prove source-tree and archive paths
+produce the same `(file, rule)` baseline identity. The exact-archive feedback
+records remain open only until the full repository regression gate is clean.
 
 ## 5. What changed porting from the reference implementation
 

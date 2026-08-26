@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shlex
 import time
 
 from sandbox.config.storage_monitor import StorageMonitorConfigError
@@ -127,6 +128,120 @@ def _monitor_invalid_mode(args) -> dict | None:
     return None
 
 
+def _schedule_target(remote: str | None) -> dict[str, str]:
+    """Return the safe, display-only target descriptor for a schedule plan."""
+    if remote:
+        return {"kind": "remote", "name": str(remote)}
+    return {"kind": "local", "name": "local"}
+
+
+def _schedule_envelope(
+    remote: str | None,
+    *,
+    ok: bool,
+    status: str,
+    data: dict | None = None,
+    error: Exception | None = None,
+) -> dict:
+    code = getattr(error, "code", None) if error is not None else None
+    message = str(error).replace("\r", " ").replace("\n", " ").strip() if error else ""
+    if error is not None and (not isinstance(code, str) or not code):
+        code = "schedule_failed"
+    return {
+        "schema_version": 1,
+        "ok": bool(ok),
+        "action": "schedule",
+        "status": status,
+        "target": _schedule_target(remote),
+        "data": data or {},
+        "error": None if error is None else {
+            "code": code,
+            "message": message[:240] or "schedule failed",
+            "retryable": bool(getattr(error, "retryable", False)),
+        },
+    }
+
+
+def _schedule_invalid_mode(args) -> dict | None:
+    """Reject non-schedule options before policy or scheduler resolution."""
+    from sandbox.resources.schedule import ScheduleError
+
+    invalid = (
+        ("--scope", getattr(args, "scope", None) is not None),
+        ("--tier", getattr(args, "tier", None) is not None),
+        ("--plan-id", getattr(args, "plan_id", None) is not None),
+        ("--thorough", bool(getattr(args, "thorough", False))),
+        ("--deep", bool(getattr(args, "deep", False))),
+        ("--fast", bool(getattr(args, "fast", False))),
+        ("--refresh", bool(getattr(args, "refresh", False))),
+        ("--cancelled", bool(getattr(args, "cancelled", False))),
+        ("--detach", bool(getattr(args, "detach", False))),
+        ("--request-id", bool(getattr(args, "request_id", None))),
+        ("--scheduled", bool(getattr(args, "scheduled", False))),
+        ("--dry-run", bool(getattr(args, "dry_run", False))),
+    )
+    for flag, present in invalid:
+        if present:
+            return _schedule_envelope(
+                getattr(args, "remote", None),
+                ok=False,
+                status="refused",
+                error=ScheduleError(
+                    f"{flag} is valid only for resources status, plan, cleanup, or monitor",
+                    "invalid_mode",
+                ),
+            )
+    if bool(getattr(args, "activate", False)) and bool(getattr(args, "deactivate", False)):
+        return _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--activate and --deactivate are mutually exclusive",
+                "invalid_mode",
+            ),
+        )
+    if bool(getattr(args, "confirm", False)) and not (
+        bool(getattr(args, "activate", False)) or bool(getattr(args, "deactivate", False))
+    ):
+        return _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--confirm requires --activate or --deactivate",
+                "invalid_mode",
+            ),
+        )
+    return None
+
+
+def _run_schedule(args) -> dict:
+    """Render or explicitly transition one local storage-monitor schedule."""
+    from sandbox.resources.schedule import (
+        activate,
+        build_schedule_plan,
+        deactivate,
+    )
+
+    invalid = _schedule_invalid_mode(args)
+    if invalid is not None:
+        return invalid
+    remote = getattr(args, "remote", None)
+    try:
+        # Policy resolution validates the named remote but never constructs a
+        # host-facing service.  A schedule therefore remains install-local.
+        policy = resolve_policy(remote)
+        plan = build_schedule_plan(policy, _schedule_target(remote))
+    except Exception as exc:
+        return _schedule_envelope(remote, ok=False, status="refused", error=exc)
+    if bool(getattr(args, "activate", False)):
+        return activate(plan, confirm=bool(getattr(args, "confirm", False)))
+    if bool(getattr(args, "deactivate", False)):
+        return deactivate(plan, confirm=bool(getattr(args, "confirm", False)))
+    return _schedule_envelope(remote, ok=True, status="planned", data=plan)
+
+
 def _run_monitor(args) -> dict:
     """Resolve monitor policy, then invoke the host-facing monitor service."""
     invalid = _monitor_invalid_mode(args)
@@ -167,7 +282,9 @@ def _run_monitor(args) -> dict:
 
 def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
-    parser.add_argument("action", choices=("status", "plan", "cleanup", "monitor"))
+    parser.add_argument(
+        "action", choices=("status", "plan", "cleanup", "monitor", "schedule")
+    )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
     parser.add_argument(
@@ -232,6 +349,16 @@ def configure_parser(parser) -> None:
         "--dry-run",
         action="store_true",
         help="observe capacity and retention candidates without deleting",
+    )
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="schedule only: install and enable the rendered monitor unit (requires --confirm)",
+    )
+    parser.add_argument(
+        "--deactivate",
+        action="store_true",
+        help="schedule only: disable and remove the rendered monitor unit (requires --confirm)",
     )
     parser.add_argument("--json", action="store_true")
 
@@ -401,10 +528,67 @@ def _emit_monitor(payload: dict, as_json: bool) -> None:
             )
 
 
+def _emit_schedule(payload: dict, as_json: bool) -> None:
+    """Render a schedule plan or lifecycle result without hiding paths."""
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    target = payload.get("target") or {}
+    name = target.get("name", "unresolved")
+    print(f"resources schedule: {payload.get('status', 'unknown')} ({name})")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        print(f"  {error.get('code', 'schedule_failed')}: {error.get('message', 'schedule failed')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return
+    if "enabled" in data:
+        print(f"  enabled: {str(bool(data.get('enabled'))).lower()}")
+    if data.get("platform"):
+        print(f"  platform: {data['platform']}")
+    if data.get("calendar"):
+        cadence = f"{data['calendar']}"
+        if data.get("randomized_delay"):
+            cadence += f" (randomized delay {data['randomized_delay']}"
+            if data.get("timeout"):
+                cadence += f", timeout {data['timeout']}"
+            cadence += ")"
+        print(f"  cadence: {cadence}")
+    command = data.get("command")
+    if isinstance(command, list):
+        print(f"  command: {shlex.join(str(item) for item in command)}")
+    paths = data.get("paths")
+    if isinstance(paths, dict):
+        for key, value in paths.items():
+            if isinstance(value, str):
+                label = "would write" if payload.get("status") == "planned" else key
+                print(f"  {label}: {value}")
+    for label, key in (("activate", "activate_command"), ("deactivate", "deactivate_command")):
+        value = data.get(key)
+        if isinstance(value, list):
+            print(f"  {label}: {shlex.join(str(item) for item in value)}")
+    for label, key in (("written", "paths_written"), ("removed", "paths_removed")):
+        values = data.get(key)
+        if isinstance(values, list):
+            for value in values:
+                print(f"  path {label}: {value}")
+    units = data.get("units")
+    if isinstance(units, dict) and payload.get("status") == "planned":
+        print("  units:")
+        for name, content in units.items():
+            print(f"    {name}:")
+            if isinstance(content, str):
+                for line in content.splitlines():
+                    print(f"      {line}")
+
+
 def _emit(payload: dict, as_json: bool) -> None:
     payload = redact(payload)
     if payload.get("action") == "monitor":
         _emit_monitor(payload, as_json)
+        return
+    if payload.get("action") == "schedule":
+        _emit_schedule(payload, as_json)
         return
     if as_json:
         print(json.dumps(payload, sort_keys=True))
@@ -889,6 +1073,25 @@ def cmd_resources(_cfg, args) -> None:
         )
         _emit(payload, bool(args.json))
         raise SystemExit(1)
+    if (getattr(args, "activate", False) or getattr(args, "deactivate", False)) and action != "schedule":
+        from sandbox.resources.schedule import ScheduleError
+        payload = _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--activate and --deactivate are valid only for resources schedule",
+                "invalid_mode",
+            ),
+        )
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
+    if action == "schedule":
+        payload = _run_schedule(args)
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
     if action == "monitor":
         payload = _run_monitor(args)
         _emit(payload, bool(args.json))

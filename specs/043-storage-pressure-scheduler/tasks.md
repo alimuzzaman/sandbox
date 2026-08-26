@@ -40,15 +40,17 @@ parallel.
 
 ## Phase 3 — Schedule rendering and activation (user story 2)
 
-- [ ] **T008** Create `sandbox/resources/schedule.py` with pure `build_schedule_plan(policy,
+- [X] **T008** Create `sandbox/resources/schedule.py` with pure `build_schedule_plan(policy,
   target, platform)` rendering systemd `.service` + `.timer` (with `flock -n`) or a launchd
   `.plist`, refusing any command other than the fixed monitor argv, and always reporting
-  `enabled: false`.
-- [ ] **T009** In the same module, add `activate(plan, confirm)` / `deactivate(plan,
+  `enabled: false`. DONE: both renderers are pure and install-free; launchd explicitly
+  reports its lack of native randomized delay.
+- [X] **T009** In the same module, add `activate(plan, confirm)` / `deactivate(plan,
   confirm)`: refuse without confirmation with code `protected_operation`; on confirmation
   write the unit(s) 0600/0644, run the bounded enable/disable command, and report every path
   written and the reverse command. Activation of an identical existing schedule returns
-  `unchanged`.
+  `unchanged`. DONE: lifecycle transitions validate and reconstruct the fixed plan, reject
+  unsafe paths/symlinks, use atomic writes, and never run without confirmation.
 
 ## Phase 4 — The scheduled run (user stories 3, 4)
 
@@ -63,12 +65,15 @@ parallel.
 
 ## Phase 5 — CLI surface (user stories 1, 2, 3, 4)
 
-- [ ] **T012** Add `monitor` and `schedule` to the `resources` action choices in
+- [X] **T012** Add `monitor` and `schedule` to the `resources` action choices in
   `sandbox/commands/resources.py` with `--scheduled`, `--dry-run`, `--activate`,
   `--deactivate`, and the existing `--confirm`/`--json`; reject invalid flag combinations.
-- [ ] **T013** Add `_emit_monitor()` and `_emit_schedule()` renderers carrying free bytes,
+  DONE: schedule flags are refused on other actions and contradictory/confirmation-less
+  schedule modes are rejected before policy or host resolution.
+- [X] **T013** Add `_emit_monitor()` and `_emit_schedule()` renderers carrying free bytes,
   total, free percentage, threshold crossed, and the next command on warning/critical, and
-  adding no warning line on `normal`. Exit 1 on `critical`/`unknown`/refusal.
+  adding no warning line on `normal`. Exit 1 on `critical`/`unknown`/refusal. DONE: monitor
+  and schedule renderers are wired; schedule plans include unit contents and reverse command.
 - [x] **T014** Add the read-only "Storage pressure" section to `sb doctor`
   (`sandbox/commands/lifecycle.py`), consuming `storage_doctor_checks()` in the same
   `check(label, ok, hint)` shape the remote-target section already uses.
@@ -86,9 +91,10 @@ parallel.
 - [x] **T017** [P] `tests/test_resource_reclaim_policy.py` — defaults; every validation
   rejection; layer precedence; classification at exactly `warn_ratio`, just above, exactly
   `critical_ratio`, `0` free, `unknown` capacity; the automatic gate on/off.
-- [ ] **T018** [P] `tests/test_storage_monitor_schedule.py` — plan renders with
+- [X] **T018** [P] `tests/test_storage_monitor_schedule.py` — plan renders with
   `enabled: false` and writes nothing; activation and deactivation refused without confirm;
-  fixed argv enforced; both platforms render; idempotent activation.
+  fixed argv enforced; both platforms render; idempotent activation. DONE: disposable HOME
+  tests cover both platforms, modes, fixed argv, atomic files, idempotency, and forged plans.
 - [x] **T019** [P] `tests/test_storage_monitor_runner.py` — default configuration deletes
   nothing at every level; auto path runs only `safe` and only when eligible; non-safe tier
   refused before any provider call; reap dry by default and real when opted in; record
@@ -98,17 +104,16 @@ parallel.
 
 ## Phase 8 — Docs and verification
 
-> Status note: source-complete work currently covers the policy/record/lock helpers,
-> runner T010/T011, the monitor-only CLI portions of T012/T013, doctor T014, and the
-> policy/MCP/runner tests. Schedule rendering/activation and the schedule portions of
-> T008/T009/T012/T013 remain pending. T022 remains open because the README and skill
-> documentation are not fully landed. No schedule command, activation, or live remote
-> evidence is claimed. Keep T008, T009, T012, T013, T018, T021, T022, and T023 unchecked.
+> Status note: policy/record/lock helpers, runner T010/T011, monitor and schedule CLI
+> surfaces, doctor T014, and the policy/MCP/runner/schedule tests are complete locally.
+> T023 remains open because no live remote verification is claimed and no schedule has
+> been activated.
 
-- [ ] **T021** Extend `docs/resource-monitoring.md` with the monitoring/scheduling section,
-  the config keys and defaults, the activation gate, and the doctor output.
-- [ ] **T022** Update `README.md`, `CLAUDE.md` (gotcha 23 subsection only), and
-  `skills/sandbox-cli/SKILL.md` with the two new actions and the off-by-default rule.
+- [X] **T021** Extend `docs/resource-monitoring.md` with the monitoring/scheduling section,
+  the config keys and defaults, the activation gate, and the doctor output. DONE: render-only
+  and confirmation-gated lifecycle behavior are documented; live evidence remains T023.
+- [X] **T022** Update `README.md`, `CLAUDE.md` (gotcha 23 subsection only), and
+  `skills/sandbox-cli/SKILL.md` with the two new actions and the off-by-default rule. DONE.
 - [ ] **T023** Verify read-only against the real `scaleway-sandbox`: `resources monitor
   --dry-run`, `resources schedule` (renders only), and an unconfirmed activation refusal.
   Record the evidence. No deletion; no timer activated.

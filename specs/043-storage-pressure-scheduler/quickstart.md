@@ -1,8 +1,7 @@
 # Quickstart: storage-pressure monitor and safe-tier reaper
 
-This quickstart covers the implemented monitor and policy paths only. Scheduling
-rendering and activation are future work in Spec 043 (T008/T009); there is no
-`resources schedule` command or activation workflow available in this checkout.
+This quickstart covers the monitor, policy, and schedule-plan paths. Scheduling
+is local to the controller; no timer is activated by the examples below.
 
 ## Prerequisites
 
@@ -31,13 +30,20 @@ Expected: one line per configured target plus `local`, each carrying the recorde
 numbers, and record age. No network is used. A target with no record is a failed check with
 the command that fixes it.
 
-## 3. Scheduling (pending; not runnable)
+## 3. Render a schedule (install-free)
 
-Do not run a scheduling or activation command from this quickstart. The planned
-`resources schedule` renderer, confirmation gate, and platform units are not yet
-implemented (T008/T009, with CLI/test gates T012/T018 still open), so there is no
-schedule file or activation evidence to inspect. The future design must remain
-disabled until those tasks and the live read-only verification gate (T023) are complete.
+Render the disabled plan for the controller. This writes no unit and does not
+contact the monitored target:
+
+```sh
+./sb resources schedule --remote scaleway-sandbox --json
+```
+
+The plan reports the exact `sb resources monitor --scheduled --json` argv, the
+systemd or launchd unit, install path, and reverse command. It always says
+`enabled: false`. Activation and removal are protected local operations and
+require `--activate --confirm` or `--deactivate --confirm`; do not run those
+commands until the target policy and the live read-only gate in T023 are reviewed.
 
 ## 4. Opt a target in (only when you mean it)
 
@@ -74,9 +80,9 @@ resource_cleanup_plan(tier="safe", scope="cache")               # refused: inval
 
 ```bash
 .cli-venv/bin/python -m unittest tests.test_resource_interfaces \
+                   tests.test_storage_monitor_schedule \
                    tests.test_storage_monitor_runner
 ```
 
-Use targeted module names. Schedule-specific tests are not available until T018 is
-implemented. A repo-wide `unittest discover` aborts on a pre-existing `sb` argparse error
+Use targeted module names. A repo-wide `unittest discover` aborts on a pre-existing `sb` argparse error
 unrelated to this feature (feedback `6ef03d44`).

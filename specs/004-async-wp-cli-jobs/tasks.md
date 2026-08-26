@@ -6,9 +6,12 @@ description: "Task list for Async / Background WP-CLI Jobs"
 
 **Input**: Design documents from `specs/004-async-wp-cli-jobs/`
 
-**Status**: Implemented + live-verified on Docker (templately-rebuild2). Implementation
-landed in `sandbox/commands/jobs.py` (core + CLI) and `mcp/wp-server/tools/wp.py` (MCP
-tools), not all in `tools/wp.py` as the original plan guessed.
+**Status**: Implemented with partial Docker live verification. The current
+Nginx shared and `wp db` fallback paths have disposable `<2s` evidence; LiteSpeed,
+older/stopped-service, and cold-daemon parity remain open under T021. The
+implementation landed in `sandbox/commands/jobs.py` (core + CLI) and
+`mcp/wp-server/tools/wp.py` (MCP tools), not all in `tools/wp.py` as the original
+plan guessed.
 
 ## Phase 1: Setup
 
@@ -57,7 +60,10 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 8: Polish
 
 - [x] T019 Safety: `job_id` validated against `^[a-f0-9]{16}$` before any filesystem/container access; `--async` is only an execution mode for `wp` (no widened surface).
-- [x] T020 Docs-with-code: add `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` + `./sb wp --async`/`job`/`jobs` to the CLAUDE.md MCP table + config reference. (Pending a docs pass.)  **DONE: CLAUDE.md MCP table now documents `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` + the `./sb wp --async`/`job`/`jobs` CLI equivalents (spec 004).**
+- [x] T020 Docs-with-code: add `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` +
+  `./sb wp --async`/`job`/`jobs` to the CLAUDE.md MCP table + config reference.
+  **DONE:** CLAUDE.md documents the MCP tools and their CLI equivalents (spec
+  004).
 
 ## Notes
 

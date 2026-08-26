@@ -70,3 +70,23 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 9: Convergence
 
 - [ ] T021 Reduce or otherwise redesign Docker async-job acceptance so it meets SC-001's under-2-second target; the recorded ~7-second `compose run -d` acceptance is a partial implementation of SC-001 (partial).
+
+  Bounded implementation tasks:
+
+  - [ ] T021a Measure the current Docker start path with a monotonic client-side
+    timer and retain the job acceptance receipt separately from command runtime.
+    Record cold-start and warm-instance samples; do not claim the target from a
+    single run.
+  - [ ] T021b Compare a warm worker/session launcher with a lightweight detached
+    launcher. Both must preserve the existing job directory, PID/status files,
+    argv quoting, cancellation behavior, and project mount boundary.
+  - [ ] T021c Define the acceptance envelope: non-empty job ID, durable ledger
+    row before acknowledgement, bounded start latency, and a truthful
+    `acceptance_unknown` result on disconnect or malformed output.
+  - [ ] T021d Add focused unit/fixture tests for cold and warm paths, duplicate
+    request IDs, cancellation, retained output, and cleanup. Keep the current
+    `compose run -d` implementation as a compatibility fallback until parity
+    is proven.
+  - [ ] T021e Run the same disposable Docker acceptance matrix used by T005,
+    T007, T010, and T013, then record measured `<2s` evidence or a precise
+    residual blocker. No remote or production mutation is part of T021.

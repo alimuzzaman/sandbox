@@ -1,10 +1,56 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-25. This is the reconciled handoff queue for Hermes. Repository
+Updated: 2026-08-26. This is the reconciled handoff queue for Hermes. Repository
 task ledgers and feedback are evidence, not execution authority: reproduce them
 first, preserve dirty work, and do not reset, destroy, clean up remote resources,
 deploy, release, delete recovery data, or expose secrets without fresh explicit
 authority.
+
+## Feedback remediation goal — live ledger 2026-08-26
+
+Goal: reduce the currently blocked feedback set by impact, recurrence, safety,
+and unblock value. Implement only local changes with a testable acceptance
+contract. Keep remote, credential, production, and evidence-limited records
+blocked until their required live proof is available.
+
+Current ledger snapshot (from `./sb feedback counts --json`): **619 total**,
+**98 blocked**, **102 verified**, **265 resolved**, **72 duplicate**, and
+**82 not applicable**. All 619 records are reviewed; no record is treated as
+implementation authority.
+
+Next tasks, in order:
+
+1. **P0 — restore remote evidence before remote fixes.** Re-check the supported
+   `scaleway-sandbox` inventory only when the controller is reachable; capture
+   installed revision, capacity/index completeness, and durable-job health. Keep
+   remote deployment, cleanup, and migration records blocked while reachability
+   is `timeout`.
+2. **P1 — close async WP-CLI acceptance design.** Decompose Spec 004 T021 into
+   a fast local acceptance row, a detached Docker start path, retained job
+   receipt, and a measured `<2s` gate. Compare a warm worker/session and a
+   lightweight launcher before changing the public contract; preserve the
+   current path as the compatibility fallback until parity tests pass.
+3. **P1 — define a bounded remote WP-CLI/preview contract.** Specify exact
+   instance selection, package staging, authorization, output limits, and
+   receipts for `sb wp --remote`/preview operations. Do not implement through
+   the operator-only SSH escape hatch; require a reachable remote acceptance
+   fixture first. Tracks feedback `33ae983d` and `ef047579`.
+4. **P1 — design startup batching.** Add a session/batch proposal for repeated
+   `sb wp` setup that preserves project mounts, instance ownership, cleanup,
+   timeout bounds, and per-command evidence. Benchmark the current one-command
+   workaround before selecting an API. Tracks `34b7e8f6`.
+5. **P2 — preserve checkout/selector safety.** Add isolated fixtures for
+   detached HEAD, `--project-dir`, and remote/list scope. Only add a selector
+   when its target-resolution contract and negative tests are explicit. Tracks
+   `db90e71e`, `5bda94d7`, and `092ae3ad`.
+6. **P2 — improve read-only guidance after contract review.** Document valid
+   WP-CLI fields and project-mounted paths, and make E2E final-result reporting
+   bounded and truthful only after a live or fixture reproduction. Tracks
+   `6bf36b94` and `30123145`.
+7. **P3 — resume runtime bug fixes with MCP proof.** For `feacbc91` and other
+   runtime bugs, reproduce through the real Sandbox MCP surface, snapshot before
+   DB mutation, apply the smallest fix, and rerun the identical call. Without
+   that surface, status remains `blocked`, not `fixed`.
 
 Sources reconciled in this pass:
 

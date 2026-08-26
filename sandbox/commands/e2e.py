@@ -23,12 +23,72 @@ _E2E_LABEL_PREFIX = "e2e-w"
 _PLAYWRIGHT_CONFIG_NAMES = ("playwright.config.ts", "playwright.config.js",
                            "playwright.config.mjs", "playwright.config.cjs")
 _PLAYWRIGHT_CONFIG_DIRS = (".", "tests", "test", "e2e", "tests/e2e")
+_PLAYWRIGHT_PREFLIGHT_TIMEOUT = 15
 
 # The descriptor filename + shape a real observed convention writes/reads
 # (Templately's scripts/lib/sandbox.js + tests/e2e/utils/wp-env-url.js): a
 # SINGLE shared file at the project root, read once when Playwright's config
 # module loads. Detected (not assumed) — see _detect_wp_env_port_convention.
 _WP_ENV_PORT_FILE = ".wp-env-port"
+
+
+def _playwright_browser_preflight(
+    root: Path, timeout: int = _PLAYWRIGHT_PREFLIGHT_TIMEOUT,
+) -> dict | None:
+    """Check the project's Playwright Chromium path without installing anything."""
+    script = (
+        "const names=['playwright','@playwright/test'];"
+        "for (const name of names) {"
+        " try { const mod=require(name); const browser=mod && mod.chromium;"
+        "  if (browser && typeof browser.executablePath === 'function') {"
+        "   process.stdout.write(browser.executablePath()); process.exit(0);"
+        "  }"
+        " } catch (_) {}"
+        "}"
+        "process.exit(2);"
+    )
+    try:
+        result = subprocess.run(
+            ["node", "-e", script], cwd=str(root), capture_output=True,
+            text=True, timeout=timeout, check=False,
+        )
+    except FileNotFoundError:
+        return {
+            "code": "playwright_node_missing",
+            "message": (
+                "Node.js is required for the Playwright browser preflight; "
+                "install Node or run sb e2e from the project's toolchain."
+            ),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "code": "playwright_preflight_timeout",
+            "message": (
+                f"Playwright browser preflight timed out after {timeout}s; "
+                "no WordPress worker was provisioned."
+            ),
+        }
+    if result.returncode != 0:
+        return {
+            "code": "playwright_dependency_missing",
+            "message": (
+                "The project's Playwright dependency could not be resolved; "
+                "install project dependencies before running sb e2e."
+            ),
+        }
+    output = (result.stdout or "").strip()
+    executable = Path(output.splitlines()[-1]) if output else None
+    if executable is None or not executable.is_file():
+        return {
+            "code": "playwright_browser_missing",
+            "message": (
+                "Chromium executable for the project's Playwright dependency is "
+                "missing; run `pnpm exec playwright install chromium` (or "
+                "`npx playwright install chromium`) before rerunning sb e2e. "
+                "No WordPress worker was provisioned."
+            ),
+        }
+    return None
 
 
 def _find_playwright_config(root: Path, explicit: str | None = None) -> Path | None:
@@ -250,6 +310,7 @@ def cmd_e2e(cfg, args) -> None:
         die(str(e))
     root = pconf["root"]
     root_path = Path(root)
+    as_json = bool(getattr(args, "json", False))
 
     config_path = _find_playwright_config(root_path,
                                           getattr(args, "playwright_config", None))
@@ -291,9 +352,15 @@ def cmd_e2e(cfg, args) -> None:
         else: print(accepted["parent_job_id"])
         return
 
+    preflight_error = _playwright_browser_preflight(root_path)
+    if preflight_error:
+        if as_json:
+            print(json.dumps({"ok": False, "error": preflight_error}, sort_keys=True))
+            raise SystemExit(1)
+        die(preflight_error["message"])
+
     workers = max(1, int(getattr(args, "workers", None) or 2))
     write_wp_env_port = _detect_wp_env_port_convention(config_path)
-    as_json = bool(getattr(args, "json", False))
 
     if getattr(args, "run_async", False):
         # Detached run (sandbox/core/_asyncjobs.py) — NOT the same model as

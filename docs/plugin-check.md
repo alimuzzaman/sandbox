@@ -1,7 +1,8 @@
 # Plugin Check — first-class WordPress.org compliance gate
 
-Author: drafted 2026-07-09 (design-fidelity-diff session). Status: implemented, unit-
-tested; live-verification pending (see §6). Spec: `specs/013-plugin-check/`.
+Author: drafted 2026-07-09 (design-fidelity-diff session). Status: source-tree and
+exact-archive CLI paths implemented and unit-tested; disposable live verification is
+pending (see §6). Spec: `specs/013-plugin-check/`.
 
 ## 1. What this is
 
@@ -44,7 +45,15 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
   "pluginCheck": {
     "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default: "<slug>.php"
-    "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
+    "baselineFile": "plugin-check-baseline.json", // optional, this is already the default
+    "archive": {                                  // required only with --archive
+      "source": "https://downloads.wordpress.org/plugin/plugin-check.2.0.0.zip",
+      "version": "2.0.0",
+      "sha256": "<64-hex-digest>",
+      "wordpressVersion": "6.8.2",
+      "phpVersion": "8.3",
+      "sandboxRevision": "<40-hex-git-sha>"
+    }
   }
 }
 ```
@@ -115,7 +124,9 @@ Both interfaces return the identical JSON shape:
 
 ## Exact-release archive mode (runtime-gated)
 
-The proposed archive command is still gated and has no CLI implementation:
+The exact-release archive CLI is implemented behind an explicit `--archive` flag;
+final disposable live acceptance is still required before the related feedback can
+be closed:
 
 ```bash
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
@@ -160,6 +171,12 @@ unless all cleanup planes are proven complete, atomically replace only the
 caller baseline, and retain sanitized result/report files below the owner-only
 Sandbox report directory (20 runs or 7 days, whichever is smaller).
 
+Archive mode requires the `pluginCheck.archive` block shown above. The checker URL
+must be HTTPS and end in `.zip`; its version and SHA-256 digest are pinned, as are
+the WordPress and PHP versions. `sandboxRevision` is a 40-hex Git SHA; if omitted,
+the current Sandbox checkout revision is used. Missing or malformed provenance fails
+before the ZIP is opened or any runtime state is created.
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,
@@ -168,9 +185,9 @@ cleanup journal, per-plane absence receipt, retained artifacts, and pinned
 checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
 and failure evidence. Do not treat the preflight layer as permission to add
-`--archive` or close the exact-archive feedback records; isolated runtime,
-cleanup/recovery, CLI integration, and disposable live acceptance are still
-required.
+`--archive` or close the exact-archive feedback records; the CLI integration is
+present, but isolated runtime, cleanup/recovery, and disposable live acceptance are
+still required.
 
 ## 5. What changed porting from the reference implementation
 

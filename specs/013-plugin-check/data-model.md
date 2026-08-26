@@ -16,6 +16,13 @@ resolved slug (see below), not a separately-configured value.
 | `excludeDirectories` | `list[str]` | Entries from `.distignore`, or `[]` when none exist | Directories excluded from the check, relative to the project root. A non-empty explicit list wins; otherwise the project's `.distignore` is read. Passed verbatim to `wp plugin check --exclude-directories=`. |
 | `versionFile` | `str \| None` | `None` | Path (relative to project root) to read a `Version:` header from for report metadata. `None` resolves at run time to `<slug>.php` at the project root (spec FR-004's stated default). |
 | `baselineFile` | `str` | `"plugin-check-baseline.json"` | Path (relative to project root) to the committed baseline file (spec FR-005). |
+| `archive` | `object | None` | `None` | Exact-release provenance used only with `--archive`: pinned checker HTTPS ZIP/version/SHA-256, WordPress version, PHP version, and optional 40-hex Sandbox revision. |
+
+`pluginCheck.archive` is required for archive mode. A malformed or incomplete block
+fails before ZIP preflight and before any runtime or caller-state write. The checker
+source may be inherited from the resolved `plugin-check` map entry, but its digest,
+runtime version pins, and (when supplied) Sandbox revision are never inferred from a
+floating dependency.
 
 **Which plugin is checked** (spec FR-002, amended twice — see spec.md and research.md for
 the full history): first select the one canonical `plugins_resolved` entry whose path

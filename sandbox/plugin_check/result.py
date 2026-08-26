@@ -32,7 +32,35 @@ PLANE_ORDER = (
 )
 _RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
-_KEY_RE = re.compile(r"^[^/\\\x00]+::[^/\\\x00]+$")
+_KEY_SEPARATOR = "::"
+
+
+def _validate_identity_key(value: object) -> bool:
+    """Validate a normalized ``file::rule`` baseline identity.
+
+    Plugin files commonly live below directories, so the file half must allow
+    safe relative path separators.  The older single-component regex rejected
+    every nested finding and made a valid archive run look like an artifact
+    failure.  Rule identifiers remain one opaque, non-path component.
+    """
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if value.count(_KEY_SEPARATOR) != 1:
+        return False
+    file_name, rule = value.split(_KEY_SEPARATOR, 1)
+    if not file_name or not rule or "\\" in file_name or "\\" in rule:
+        return False
+    if file_name.startswith("/") or _DRIVE_RE.match(file_name):
+        return False
+    parts = file_name.split("/")
+    if any(not part or part in {".", ".."} for part in parts):
+        return False
+    if len(file_name.encode("utf-8")) > 240 or len(parts) > 32:
+        return False
+    if "/" in rule or any(part in {".", ".."} for part in rule.split("/")):
+        return False
+    return True
 
 
 class ArchiveResultError(ValueError):
@@ -117,6 +145,38 @@ def archive_error_counts(findings: Sequence[Mapping[str, object]]) -> dict[str, 
     return counts
 
 
+def load_archive_baseline(
+    path: os.PathLike[str] | str,
+    *,
+    caller_project_root: os.PathLike[str] | str,
+) -> dict[str, int]:
+    """Read and validate the caller baseline before archive gating.
+
+    Source-tree mode historically treats a missing or malformed baseline as an
+    empty setup state.  Archive mode is a trust boundary: a malformed file
+    must produce a typed result instead of an uncaught ``.values()`` error or a
+    silently weakened gate.
+    """
+
+    baseline, _caller = _baseline_path(path, caller_project_root)
+    if not baseline.is_file():
+        return {}
+    try:
+        value = json.loads(baseline.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise ArchiveResultError("archive_baseline_invalid", "baseline JSON could not be read") from exc
+    if not isinstance(value, Mapping):
+        raise ArchiveResultError("archive_baseline_invalid", "baseline must be an object")
+    clean: dict[str, int] = {}
+    for key, count in value.items():
+        if not _validate_identity_key(key):
+            raise ArchiveResultError("archive_baseline_invalid", "baseline key is not a file/rule identity")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ArchiveResultError("archive_baseline_invalid", "baseline count must be a non-negative integer")
+        clean[key] = count
+    return clean
+
+
 def cleanup_receipt_complete(receipt: Mapping[str, object]) -> bool:
     """Return true only for a complete, seven-plane cleanup receipt."""
 
@@ -159,7 +219,7 @@ def update_caller_baseline_atomic(
         raise ArchiveResultError("archive_baseline_invalid", "baseline counts must be an object")
     clean: dict[str, int] = {}
     for key, value in counts.items():
-        if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
+        if not _validate_identity_key(key):
             raise ArchiveResultError("archive_baseline_invalid", "baseline key is not a file/rule identity")
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ArchiveResultError("archive_baseline_invalid", "baseline count must be a non-negative integer")
@@ -304,7 +364,7 @@ def _safe_result(result: Mapping[str, object]) -> dict[str, object]:
                 if not isinstance(item, Mapping):
                     continue
                 identity = item.get("key")
-                if not isinstance(identity, str) or not _KEY_RE.fullmatch(identity):
+                if not _validate_identity_key(identity):
                     raise ArchiveResultError("archive_artifact_invalid", "artifact violation key must be relative")
                 violations.append({
                     "key": identity,
@@ -405,6 +465,7 @@ __all__ = [
     "ArchiveArtifactError",
     "ArchiveResultError",
     "archive_error_counts",
+    "load_archive_baseline",
     "cleanup_receipt_complete",
     "normalize_archive_findings",
     "persist_archive_artifact",

@@ -20,16 +20,15 @@ project-specific inputs (plugin slug, exclude-directories, version-header file) 
 ## Exact-release archive extension (runtime-gated)
 
 The source-tree implementation above is complete for its existing contract.
-Exact archive checking is a separate, not-yet-authorized extension described in
+Exact archive checking is a separate extension described in
 `archive-mode-design.md`. The pure host preflight, deterministic fixture corpus,
-run-local target/config builder, owner-only journal/cleanup primitives, and
-finding/baseline/artifact helpers are now implemented as the first five gated
-tasks; the CLI remains
-disabled until the remaining tasks prove hostile-ZIP limits,
-single-descriptor extraction, run-local inherited-state isolation, inactive
-static-only target execution, pinned checker provenance, retained owner-only
-artifacts, and durable per-plane cleanup/recovery. The first extension is
-CLI-only; the current MCP tool remains source-tree-only until parity is tested.
+run-local target/config builder, owner-only journal/cleanup primitives, finding/
+baseline/artifact helpers, and CLI integration are implemented as the gated tasks;
+the remaining acceptance work must prove hostile-ZIP limits, single-descriptor
+extraction, run-local inherited-state isolation, inactive static-only target
+execution, pinned checker provenance, retained owner-only artifacts, and durable
+per-plane cleanup/recovery on a disposable live runtime. The extension is CLI-only;
+the current MCP tool remains source-tree-only until parity is tested.
 
 ## Technical Context
 

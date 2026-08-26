@@ -730,6 +730,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     pcheck.add_argument("--update", action="store_true",
         help="rewrite the baseline to match current findings exactly, "
              "instead of gating against it")
+    pcheck.add_argument("--archive", default=None, metavar="FILE",
+        help="check an exact-release ZIP in a fresh disposable runtime; "
+             "the archive target is never installed into the caller instance")
     pcheck.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
@@ -1254,7 +1257,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     # helper re-execs this exact command after staging the data; explicit
     # migration/home commands keep their own dry-run and relocation semantics.
     command_spec = COMMAND_SPECS.get(args.cmd)
-    predispatch_skip = bool(
+    # Exact archive mode owns its complete run-local lifecycle. Skip the
+    # compatibility writers below so merely invoking it cannot regenerate the
+    # caller's global Compose or environment files before host preflight.
+    archive_plugin_check = (
+        args.cmd == "plugin-check" and bool(getattr(args, "archive", None))
+    )
+    predispatch_skip = archive_plugin_check or bool(
         command_spec is not None
         and command_spec.predispatch_policy is not None
         and command_spec.predispatch_policy(args)

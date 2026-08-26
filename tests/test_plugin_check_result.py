@@ -15,6 +15,7 @@ from sandbox.plugin_check.result import (  # noqa: E402
     ArchiveResultError,
     archive_error_counts,
     cleanup_receipt_complete,
+    load_archive_baseline,
     normalize_archive_findings,
     persist_archive_artifact,
     prune_archive_artifacts,
@@ -56,6 +57,27 @@ class TestArchiveFindingIdentity(unittest.TestCase):
 
 
 class TestArchiveBaselineUpdate(unittest.TestCase):
+    def test_nested_baseline_keys_are_validated_and_loaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "caller"
+            caller.mkdir()
+            baseline = caller / "plugin-check-baseline.json"
+            baseline.write_text('{"includes/foo.php::rule": 2}\n')
+            self.assertEqual(
+                load_archive_baseline(baseline, caller_project_root=caller),
+                {"includes/foo.php::rule": 2},
+            )
+
+    def test_malformed_baseline_is_typed_instead_of_becoming_an_empty_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "caller"
+            caller.mkdir()
+            baseline = caller / "plugin-check-baseline.json"
+            baseline.write_text('["not-an-object"]\n')
+            with self.assertRaises(ArchiveResultError) as raised:
+                load_archive_baseline(baseline, caller_project_root=caller)
+            self.assertEqual(raised.exception.code, "archive_baseline_invalid")
+
     def test_unknown_cleanup_leaves_caller_baseline_byte_for_byte_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             caller = Path(directory) / "caller"

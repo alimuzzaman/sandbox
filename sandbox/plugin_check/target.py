@@ -48,6 +48,10 @@ class PluginCheckPin:
             raise ArchiveTargetError("archive_provenance_missing", "Plugin Check version is not a stable release identifier")
         if not _SHA256_RE.fullmatch(self.sha256):
             raise ArchiveTargetError("archive_provenance_missing", "Plugin Check source must include a SHA-256 digest")
+        # Keep the in-memory identity canonical as well as the serialized one;
+        # a caller must not be able to make the same release look different
+        # merely by changing hex-letter casing.
+        object.__setattr__(self, "sha256", self.sha256.lower())
 
     def as_dict(self) -> dict[str, str]:
         return {"source": self.source, "version": self.version, "sha256": self.sha256.lower()}
@@ -213,6 +217,12 @@ def _archive_review_descriptor(
     baseline_path: Path,
     artifact_dir: Path,
     review_instance: str,
+    extraction_root: Path,
+    sandbox_home: Path,
+    review_project_root: Path,
+    wordpress_version: str | None = None,
+    php_version: str | None = None,
+    sandbox_revision: str | None = None,
 ) -> dict:
     """Build the allowlisted descriptor; no global config is consulted."""
 
@@ -234,8 +244,8 @@ def _archive_review_descriptor(
         "mappings": {},
         "mappings_inactive": {},
         "server": "nginx",
-        "phpVersion": None,
-        "wpVersion": None,
+        "phpVersion": php_version,
+        "wpVersion": wordpress_version,
         "multisite": False,
         "config": {},
         "port": None,
@@ -250,14 +260,24 @@ def _archive_review_descriptor(
             "memberManifestSha256": preflight.member_manifest_sha256,
             "archiveSlug": preflight.archive_slug,
             "mainFile": preflight.main_file,
+            "memberCount": preflight.member_count,
             "callerBaseline": str(baseline_path),
             "artifactDir": str(artifact_dir),
             "reviewInstance": review_instance,
+            "extractionRoot": str(extraction_root),
+            "sandboxHome": str(sandbox_home),
+            "reviewProjectRoot": str(review_project_root),
             "runtime": {"kind": "compose", "scope": "local", "remote": False},
             "target": {"active": False, "readOnly": True},
             "pluginCheck": {
                 **plugin_check.as_dict(),
                 "active": True,
+            },
+            "provenance": {
+                "pluginCheck": plugin_check.as_dict(),
+                "wordpress": wordpress_version,
+                "php": php_version,
+                "sandbox": sandbox_revision,
             },
             "environmentAllowlist": ["SANDBOX_HOME", "SANDBOX_PROJECT_ROOTS"],
         },
@@ -272,6 +292,9 @@ def build_archive_review_target(
     sandbox_home: os.PathLike[str] | str,
     plugin_check: PluginCheckPin,
     baseline_path: os.PathLike[str] | str | None = None,
+    wordpress_version: str | None = None,
+    php_version: str | None = None,
+    sandbox_revision: str | None = None,
 ) -> ArchiveReviewTarget:
     """Prepare a run-local, local-Compose archive target.
 
@@ -314,13 +337,16 @@ def build_archive_review_target(
     _ensure_directory(run_root)
     _ensure_directory(artifact_dir)
     run_sandbox_home = run_root / "sandbox"
-    review_project_root = run_root / "project"
+    review_instance = f"plugin-check-{run_id}"
+    # Give the disposable project the same path-safe identity that the
+    # registry/Compose adapter will use.  A fixed ``project`` basename would
+    # make concurrent archive runs collide on the Docker project name.
+    review_project_root = run_root / review_instance
     extraction_root = run_root / "extracted"
     _ensure_owner_tree(run_sandbox_home)
     _ensure_owner_tree(review_project_root)
     _ensure_owner_tree(extraction_root)
 
-    review_instance = f"plugin-check-{run_id}"
     descriptor = _archive_review_descriptor(
         preflight,
         plugin_check=plugin_check,
@@ -328,6 +354,12 @@ def build_archive_review_target(
         baseline_path=baseline,
         artifact_dir=artifact_dir,
         review_instance=review_instance,
+        extraction_root=extraction_root,
+        sandbox_home=run_sandbox_home,
+        review_project_root=review_project_root,
+        wordpress_version=wordpress_version,
+        php_version=php_version,
+        sandbox_revision=sandbox_revision,
     )
     descriptor_path = review_project_root / "sandbox.config.json"
     _write_descriptor(descriptor_path, descriptor)

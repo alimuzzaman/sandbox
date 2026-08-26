@@ -285,11 +285,11 @@ gate before considering the feature done, per Constitution Principle IV.
 
 ---
 
-## Phase 9: Exact-release archive mode (design convergence; implementation gated)
+## Phase 9: Exact-release archive mode (implementation and acceptance)
 
-**Purpose**: Define and prove a hostile ZIP and disposable review lifecycle before
-adding an archive flag. These tasks supersede the earlier design-only archive note;
-the source-tree Plugin Check path remains unchanged while this phase is incomplete.
+**Purpose**: Define and prove a hostile ZIP and disposable review lifecycle around
+the explicit archive flag. These tasks supersede the earlier design-only archive
+note; the source-tree Plugin Check path remains unchanged.
 
 - [x] T034 Amend `archive-mode-design.md`, `contracts/cli-and-mcp.md`, and
   `data-model.md` with the internal target identity, exact ZIP limits and
@@ -316,9 +316,11 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
   `--update` atomically update only the caller baseline after complete cleanup,
   persist reports/results under retained Sandbox state, and harden HTML escaping
   for archive-controlled strings.
-- [ ] T040 Integrate the CLI archive flag with typed failures and deterministic
+- [x] T040 Integrate the CLI archive flag with typed failures and deterministic
   provenance; preserve source-tree behavior and leave MCP unchanged until a
-  separate parity task is approved.
+  separate parity task is approved. The implementation uses a fresh child process,
+  run-local configuration, cleanup-gated baseline replacement, and retained
+  owner-only artifacts; missing provenance fails before archive open.
 - [ ] T041 Run focused, full regression, concurrency, and fixed live acceptance
   checks proving exact SHA/provenance, target inactivity, source/archive finding
   identity, unchanged caller state, retained report, complete cleanup, and

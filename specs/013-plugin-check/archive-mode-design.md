@@ -1,8 +1,7 @@
 # Plugin Check exact-archive mode — bounded design
 
-Status: runtime-gated design. The host-only fixture/preflight layer is landed,
-but no CLI flag, lifecycle mutation, or shared image change is authorized by
-this note.
+Status: CLI integration landed; disposable live acceptance is still pending. No
+shared image change or MCP archive surface is authorized by this note.
 
 This design addresses the blocked exact-release feedback records
 `3f0bc71ac86f145ab9480f5972800a63` and
@@ -15,21 +14,18 @@ Archive mode remains disabled until the limits, isolation journal, fixture corpu
 and acceptance matrix below are implemented and reviewed.
 
 The deterministic fixture corpus, pure single-descriptor preflight, run-local
-target/config builder, and owner-only journal/cleanup primitives are now the
-first four gated tasks. They do not boot Sandbox or touch the registry; the
-builder writes only owner-controlled review state and a generated allowlisted
-descriptor, while cleanup callbacks are supplied by the future runtime adapter.
-They do not inspect secrets, inherit global config, or mutate a caller project.
-The finding/baseline/artifact helpers now also enforce relative finding identity,
-cleanup-gated atomic baseline replacement, retained owner-only reports, and
-archive-controlled HTML escaping. The remaining disposable-runtime integration
-and live acceptance gates are still open.
+target/config builder, owner-only journal/cleanup primitives, and finding/
+baseline/artifact helpers are landed. The CLI integration now wires those pieces
+through a fresh child process with typed failures, pinned provenance, and cleanup-
+gated baseline updates. It does not inspect secrets, inherit global config, or
+mutate a caller project during a normal check. Disposable live acceptance and
+recovery evidence remain open.
 
-Independent Sol High readiness review on 2026-08-26: **not ready for
-implementation**. The review identified missing target identity, inherited-state
-isolation, static-only execution proof, durable cleanup/recovery, exact ZIP
-limits, artifact ownership, report escaping, and pinned provenance. Phase 9 in
-`tasks.md` tracks the resulting convergence work.
+Independent Sol High readiness review on 2026-08-26: **implementation gates
+addressed; acceptance pending**. The review identified missing target identity,
+inherited-state isolation, static-only execution proof, durable cleanup/recovery,
+exact ZIP limits, artifact ownership, report escaping, and pinned provenance; Phase
+9 in `tasks.md` tracks the resulting convergence work and its remaining live gate.
 
 ## Proposed surface
 
@@ -150,7 +146,7 @@ the check itself passed.
 
 ## Result and integration scope
 
-The first archive implementation is CLI-only. The existing MCP
+The archive implementation is CLI-only. The existing MCP
 `run_plugin_check(project_dir, update=False)` contract remains source-tree-only;
 MCP archive support is deferred until an identical artifact, cleanup, and error
 contract can be tested. When implemented, archive results use these typed fields:

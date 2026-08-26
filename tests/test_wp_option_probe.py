@@ -50,6 +50,49 @@ class TestWpOptionProbe(unittest.TestCase):
         self.assertIn("only valid with `option get KEY`", error.getvalue())
         wpcli.assert_not_called()
 
+    def test_allow_missing_plugin_deactivate_reports_typed_partial_result(self):
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([
+                    {"name": "good", "status": "active"},
+                    {"name": "inactive", "status": "inactive"},
+                ]),
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout="Success: Plugin deactivated.\n", stderr=""),
+        ]
+        output = io.StringIO()
+        with patch.object(wp, "preflight_instance_capability", return_value=None), \
+             patch.object(wp, "wpcli", side_effect=results) as wpcli, \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            wp.cmd_wp({}, self._args([
+                "plugin", "deactivate", "good", "absent", "inactive", "--skip-plugins",
+            ]))
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["requested"], ["good", "absent", "inactive"])
+        self.assertEqual(payload["deactivated"], ["good"])
+        self.assertEqual(payload["absent"], ["absent"])
+        self.assertEqual(payload["already_inactive"], ["inactive"])
+        self.assertEqual(wpcli.call_args_list[1].args[0], [
+            "plugin", "deactivate", "good", "--skip-plugins",
+        ])
+
+    def test_allow_missing_plugin_deactivate_fails_closed_on_ambiguous_preflight(self):
+        error = io.StringIO()
+        with patch.object(wp, "preflight_instance_capability", return_value=None), \
+             patch.object(wp, "wpcli", return_value=SimpleNamespace(
+                 returncode=0, stdout="not-json", stderr="")) as wpcli, \
+             contextlib.redirect_stderr(error), \
+             self.assertRaises(SystemExit) as raised:
+            wp.cmd_wp({}, self._args(["plugin", "deactivate", "good", "absent"]))
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("no deactivation was attempted", error.getvalue())
+        wpcli.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

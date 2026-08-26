@@ -120,6 +120,109 @@ def _reports_missing_option(stdout: str, stderr: str) -> bool:
     )
 
 
+_PLUGIN_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _plugin_deactivate_request(argv: list[str]) -> tuple[list[str], int] | None:
+    """Parse the safe, positional part of ``plugin deactivate``.
+
+    The partial-result mode must know exactly which operands are plugin slugs;
+    reject option-before-slug and ``--all`` forms rather than guessing around
+    WP-CLI options that may consume a following value.
+    """
+    if len(argv) < 3 or argv[:2] != ["plugin", "deactivate"]:
+        return None
+    slugs: list[str] = []
+    index = 2
+    while index < len(argv) and not argv[index].startswith("-"):
+        slug = argv[index]
+        if not _PLUGIN_SLUG_RE.fullmatch(slug):
+            return None
+        slugs.append(slug)
+        index += 1
+    if not slugs:
+        return None
+    return slugs, index
+
+
+def _plugin_list_state(instance: str) -> dict[str, str] | None:
+    """Read installed plugin state for an explicit partial deactivation."""
+    try:
+        result = wpcli(
+            ["plugin", "list", "--fields=name,status", "--format=json",
+             "--skip-plugins"],
+            instance=instance, check=False, capture=True,
+        )
+    except Exception:
+        return None
+    if getattr(result, "returncode", None) not in (None, 0):
+        return None
+    output = getattr(result, "stdout", "") or ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    try:
+        rows = json.loads(output)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    states: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        name, status = row.get("name"), row.get("status")
+        if not isinstance(name, str) or not _PLUGIN_SLUG_RE.fullmatch(name):
+            return None
+        if not isinstance(status, str) or not status.strip():
+            return None
+        states[name] = status.strip().lower()
+    return states
+
+
+def _run_plugin_deactivate_allow_missing(argv: list[str], instance: str) -> None:
+    """Run an explicit, typed partial deactivation without masking failures."""
+    parsed = _plugin_deactivate_request(argv)
+    if parsed is None:
+        die("--allow-missing for plugin deactivate requires one or more plugin "
+            "slugs before WP-CLI options; --all is not supported")
+    requested, option_start = parsed
+    states = _plugin_list_state(instance)
+    if states is None:
+        die("could not verify the installed plugin list; no deactivation was "
+            "attempted")
+    missing = sorted({slug for slug in requested if slug not in states})
+    inactive = sorted({slug for slug in requested if states.get(slug) == "inactive"})
+    skipped = set(missing) | set(inactive)
+    attempted = []
+    for slug in requested:
+        if slug not in skipped and slug not in attempted:
+            attempted.append(slug)
+    warnings = False
+    if attempted:
+        command = [*argv[:2], *attempted, *argv[option_start:]]
+        try:
+            result = wpcli(command, instance=instance, check=False, capture=True)
+        except Exception:
+            result = None
+        if result is None or getattr(result, "returncode", None) not in (None, 0):
+            _print_stream(getattr(result, "stdout", None) if result else None)
+            _print_stream(getattr(result, "stderr", None) if result else None, stderr=True)
+            code = getattr(result, "returncode", 1) if result else 1
+            die(f"wp command failed with exit code {code}", code=code or 1)
+        warnings = bool((getattr(result, "stderr", "") or "").strip())
+    status = "partial" if missing else "complete"
+    print(json.dumps({
+        "ok": True,
+        "status": status,
+        "command": ["plugin", "deactivate"],
+        "requested": requested,
+        "deactivated": attempted,
+        "absent": missing,
+        "already_inactive": inactive,
+        "warnings": warnings,
+    }, sort_keys=True))
+
+
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
     if error is not None:
@@ -133,10 +236,18 @@ def cmd_wp(cfg, args) -> None:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
     pt = _disable_help_pager(pt)
-    if getattr(args, "allow_missing", False) and not _is_option_get_probe(pt):
-        die("--allow-missing is only valid with `option get KEY`; "
-            "no command was executed.")
+    allow_missing = bool(getattr(args, "allow_missing", False))
+    plugin_partial = _plugin_deactivate_request(pt)
+    if allow_missing and not (_is_option_get_probe(pt) or plugin_partial):
+        die("--allow-missing is only valid with `option get KEY` or an explicit "
+            "`plugin deactivate SLUG...` command; no command was executed.")
     _reject_ignored_post_list_search(pt)
+    if allow_missing and plugin_partial:
+        if getattr(args, "run_async", False):
+            die("--allow-missing plugin deactivation requires synchronous state "
+                "inspection; remove --async or use a normal WP-CLI command")
+        _run_plugin_deactivate_allow_missing(pt, args.resolved_instance)
+        return
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):
         if managed_native_instance_selected(args.resolved_instance) is not None:

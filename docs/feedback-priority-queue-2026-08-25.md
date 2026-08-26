@@ -69,8 +69,8 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 | 47 | active | P1 | blocked | medium | 8468c164cd1eb21746ab9fa3c2360000 | Remote workspace listing is blocked by runtime revision mismatch |
 | 48 | active | P1 | blocked | medium | fb3f67c8f3b583854058d53a5cc02a19 | Workspace remote revision check stays mismatched after successful service migration |
 | 49 | active | P1 | blocked | medium | 00bad5d45624a2451bc59bd62d816b7a | Disposable source instance cannot start when a declared Docker network has disappeared |
-| 50 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
-| 51 | active | P1 | open | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
+| 50 | active | P1 | blocked | high | 689840ec0c3890f568b130ddc0fd338e | lenzora.dev host deploy failing due remote disk pressure |
+| 51 | active | P1 | open | high | fb17bb5c05c60ef78ce1e33e7a25685b | hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply |
 | 52 | active | P1 | open | high | fee3a2f77e25dcba833e6242976a0b8a | Remote SSH banner exchange timed out during retained evidence recovery |
 | 53 | active | P1 | open | high | 319480dd089a1225a40ad8a602838165 | Learning host apply blocked by remote SSH timeout |
 | 54 | active | P1 | open | high | dde35952937cff4f87cd77549d568878 | Remote job output cannot resolve Sandbox home over SSH |

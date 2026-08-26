@@ -17,7 +17,7 @@ from sandbox.isolation.models import canonical_digest
 
 VERSION = 1
 SECTIONS = ("selections", "backends", "policies", "packages", "grants", "networks",
-            "recovery")
+            "credential_bindings", "recovery")
 
 
 def _empty(): return {"version": VERSION, **{name: {} for name in SECTIONS}}
@@ -88,8 +88,13 @@ class NativeRepository:
             if not self.path.exists() or value.get("version") != VERSION: self._write(value)
             return copy.deepcopy(value)
 
+    def readonly_snapshot(self):
+        """Read ownership state without creating or migrating the state file."""
+        with self._lock():
+            return copy.deepcopy(self._read())
+
     def put_owned(self, section, identity, record):
-        if section not in SECTIONS or section == "recovery":
+        if section not in SECTIONS or section in {"recovery", "credential_bindings"}:
             raise ValueError("native ownership section is invalid")
         value = dict(record)
         with self.transaction() as state:

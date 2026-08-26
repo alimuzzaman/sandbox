@@ -21,7 +21,12 @@ def cmd_activation(cfg, args) -> None:
         result = getattr(supervision, args.action)()
         print(json.dumps(result, sort_keys=True))
         return
-    import sandbox_core as sc
+    # Keep the activation command on the compatibility facade owner.  Direct
+    # imports of the legacy module make the command an untracked consumer and
+    # let architecture-boundary drift accumulate; `_core()` returns the same
+    # owner used by the other command modules without changing behavior.
+    from sandbox.core import _core
+    sc = _core()
     from sandbox.activation.catalog import ActivationCatalogError, build_catalog
     from sandbox.activation.http import ActivationHTTPApplication
     from sandbox.activation.server import serve

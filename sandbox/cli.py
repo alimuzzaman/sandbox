@@ -1466,9 +1466,12 @@ Per-project (each plugin carries its own sandbox.config.json):
                 "cd into a registered project, or run `sb init` / `sb ensure` "
                 "to create one."
             )
-            if _known:
-                hint += " Use `sb instances --json` for the global inventory, " \
-                        "or pass `--instance NAME` for a known instance."
+            # Keep the machine-readable recovery contract stable even when the
+            # registry is empty.  The global inventory and explicit selector
+            # are useful guidance in both cases; omitting them made the JSON
+            # shape depend on unrelated host state and broke clients/tests.
+            hint += " Use `sb instances --json` for the global inventory, " \
+                    "or pass `--instance NAME` for a known instance."
             _die_status_resolution(args, "instance_context_missing", message, hint)
     elif inner_local_observation and explicit and chosen not in instances:
         # A named selector remains an explicit selector even when the staged

@@ -85,8 +85,10 @@ not installed/active, or an unresolvable plugin slug).
 
 A first run with no baseline is a successful, non-gating setup state: `ok` is `true`,
 `new_count` is `0`, `baseline_exists` is `false`, and `message` tells the caller to run
-`--update`. By contrast, malformed or unrecognised Plugin Check output is rejected as an
-infrastructure failure; it is never treated as an empty finding set.
+`--update`. Plugin Check's exact documented `Success: Checks complete. No errors found.`
+summary is accepted as the zero-finding result, including when it follows structured
+warning findings. By contrast, other malformed or unrecognised output is rejected as
+an infrastructure failure; it is never treated as an empty finding set.
 
 MCP tool, mirroring `run_tests`'s calling convention:
 
@@ -110,6 +112,32 @@ Both interfaces return the identical JSON shape:
   "error": null
 }
 ```
+
+## Exact-release archive mode (design-only)
+
+The proposed archive command is currently gated and has no CLI implementation:
+
+```bash
+./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
+```
+
+`FILE` is a regular, non-symlink ZIP resolved from the caller project. It is
+validated and hashed on the host, extracted outside the checkout, and checked
+in a new local disposable Compose instance. The caller instance, database,
+registry, descriptor, checkout, and baseline are never reused or overwritten.
+The target plugin stays inactive and read-only; only the pinned Plugin Check
+dependency is active, and runtime hooks are not run.
+
+Archive mode has an explicit threat-model contract in
+`specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
+limits, Unicode/case-fold collision checks, traversal and special-file rejection,
+same-descriptor hashing/extraction, run-local `SANDBOX_HOME`, an owner-only
+cleanup journal, per-plane absence receipt, retained artifacts, and pinned
+checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
+MCP archive support is deferred until it can provide identical artifact, cleanup,
+and failure evidence. Do not treat this design note as permission to add
+`--archive` or close the exact-archive feedback records; fixture, focused tests,
+and disposable live acceptance are still required.
 
 ## 5. What changed porting from the reference implementation
 

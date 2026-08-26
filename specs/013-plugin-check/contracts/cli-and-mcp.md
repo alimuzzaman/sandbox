@@ -6,6 +6,20 @@
 ./sb plugin-check --project-dir DIR [--update] [--json]
 ```
 
+The exact-release archive extension is intentionally separate from the source-tree
+contract while its isolation work is in design. The proposed, CLI-only shape is:
+
+```text
+./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
+```
+
+`--archive` is mutually exclusive with source-tree execution. `FILE` resolves
+relative to the caller project, must be a regular non-symlink ZIP, and is never
+installed into the caller instance. Archive mode uses the typed result and
+cleanup/provenance contract in `archive-mode-design.md`; the current MCP tool
+does not accept an archive and remains source-tree-only until MCP parity is
+implemented and tested.
+
 | Flag | Meaning |
 |---|---|
 | `--project-dir DIR` | The plugin project to check (same convention as `./sb e2e`/`./sb ci`). |
@@ -46,6 +60,10 @@ infrastructure failure, never an empty successful finding set.
   "error": null                    // set (string) instead of the above on infra failure
 }
 ```
+
+Archive results add `input_mode`, `archive_sha256`, `archive_slug`, `main_file`,
+`checker_provenance`, and a cleanup receipt. A cleanup plane with unknown state
+forces `ok: false`; it is never reduced to a passing gate result.
 
 ## MCP tool: `run_plugin_check`
 

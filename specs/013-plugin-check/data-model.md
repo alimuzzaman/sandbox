@@ -109,3 +109,44 @@ PluginCheckConfig (1) ---- drives ----> one `wp plugin check` invocation
                    (gate pass/fail decision)               (always, regardless
                                                              of gate outcome)
 ```
+
+## Exact-archive extension (design-only)
+
+Archive mode does not change the source-tree entities above. It adds one
+ephemeral `ArchiveReviewTarget`, one owner-only `ArchiveReviewJournal`, and one
+persisted `ArchiveArtifact` per run. The public CLI carries the target identity;
+the MCP source-tree contract is unchanged until parity is implemented.
+
+### ArchiveReviewTarget
+
+| Field | Type | Notes |
+|---|---|---|
+| `caller_project_root` | `str` | Canonical caller checkout; never used as the extracted source. |
+| `archive_path` | `str` | Canonical regular, non-symlink input path. |
+| `archive_sha256` | `str` | SHA-256 from the same open descriptor used for extraction. |
+| `extraction_root` | `str` | Owner-only run directory outside the caller checkout. |
+| `archive_slug` | `str` | Exactly one validated top-level directory name. |
+| `main_file` | `str` | Exactly one root-level PHP file with a `Plugin Name:` header. |
+| `baseline_path` | `str` | Caller-owned baseline; only `--update` may replace it atomically. |
+| `artifact_dir` | `str` | Owner-only retained report/result directory under Sandbox state. |
+| `review_project_root` | `str` | Run-local descriptor root with no inherited config. |
+| `review_instance` | `str` | Unique disposable local Compose instance identity. |
+
+### ArchiveReviewJournal and cleanup receipt
+
+The journal is written mode `0600` before the first lifecycle side effect under
+`$SANDBOX_HOME/runtime/plugin-check/<run-id>/`. It records only the run ID,
+phase transitions, non-secret paths, hashes, and per-plane cleanup state. The
+cleanup receipt independently records `container`, `network`, `volume`,
+`runtime`, `registry`, `extraction`, and `report` as `absent`, `complete`, or
+`unknown`. Any `unknown` state keeps the journal/recovery metadata and forces
+the top-level result to `ok: false` with `archive_cleanup_unknown`.
+
+### ArchiveArtifact
+
+Reports and result JSON live below the owner-only artifact directory and are
+retained for at most 20 reports or 7 days. They contain the archive hash, slug,
+member count, receipt, and pinned checker/WordPress/PHP/Sandbox provenance, but
+never archive contents, credentials, or temporary absolute paths. Finding keys
+are relative to the extracted plugin root so source and archive baselines are
+comparable.

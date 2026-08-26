@@ -328,3 +328,36 @@ class TestDoctorJson(unittest.TestCase):
         self.assertEqual(payload["php_extensions"], report)
         self.assertTrue(any(row["section"] == "PHP extensions" and not row["ok"]
                             for row in payload["checks"]))
+
+    def test_doctor_report_only_returns_zero_for_completed_failed_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            inst_cfg = {"admin": {}, "wordpress_port": 8188}
+            with patch.object(lifecycle, "preflight_instance_capability", return_value=None), \
+                    patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
+                    patch.object(lifecycle, "_core", return_value=SimpleNamespace(
+                        registry_find_instance=lambda _name: None)), \
+                    patch.object(lifecycle, "compose", return_value=SimpleNamespace(
+                        returncode=0, stdout="", stderr="")), \
+                    patch.object(lifecycle, "wpcli", return_value=SimpleNamespace(
+                        returncode=1, stdout="", stderr="")), \
+                    patch.object(lifecycle, "php_extension_status", return_value=None), \
+                    patch.object(lifecycle, "_probe_mcp_server", return_value=(False, "missing")), \
+                    patch.object(lifecycle, "MCP_VENV", Path(directory) / "venv"), \
+                    patch.object(lifecycle, "focus_file", return_value=Path(directory) / "focus"), \
+                    patch.object(lifecycle, "plugins_dir", return_value=Path(directory) / "plugins"), \
+                    patch.object(lifecycle, "_project_declares_plugin_check", return_value=False), \
+                    patch.object(lifecycle, "_local_yaml", return_value={}), \
+                    patch.object(lifecycle, "SECRETS_ENV", Path(directory) / "env"), \
+                    patch("sandbox.core._domains.proxy_health_checks", return_value=[]), \
+                    patch("sandbox.core._remote.list_remotes", return_value={}), \
+                    patch.object(lifecycle, "_storage_pressure_doctor_checks", return_value=[]), \
+                    contextlib.redirect_stdout(output):
+                lifecycle.cmd_doctor(
+                    {"instances": {"fixture": {}}},
+                    SimpleNamespace(resolved_instance="fixture", json=True, report_only=True),
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["exit_code"], 1)

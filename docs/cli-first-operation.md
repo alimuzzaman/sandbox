@@ -143,6 +143,11 @@ The guide detects the runtime and emits only its useful commands.
 ./sb deploy --remote <name> --ensure --expose
 ```
 
+`./sb doctor --json --report-only` is an opt-in automation mode for a completed
+audit with failed checks: the JSON keeps `ok: false` and `exit_code: 1`, while the
+process exits 0 so callers can consume findings. Preflight or transport failures
+still exit non-zero. Without `--report-only`, doctor keeps its normal failure exit.
+
 `sb exec` accepts an explicit argv list and runs it in the configured public
 Compose service. It does not invent a shell, service, or package command.
 `status --stats` is an opt-in, bounded local Docker snapshot for the selected

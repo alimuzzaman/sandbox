@@ -1055,6 +1055,9 @@ def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
     json_mode = bool(getattr(args, "json", False))
+    report_only = bool(getattr(args, "report_only", False))
+    if report_only and not json_mode:
+        die("--report-only requires --json; no command was executed")
     error = preflight_instance_capability(cfg, inst, "wordpress.cli")
     if error is not None:
         if json_mode:
@@ -1314,7 +1317,7 @@ def cmd_doctor(cfg, args) -> None:
         if extension_data is not None:
             payload["php_extensions"] = extension_data
         print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))
-        if problems:
+        if problems and not report_only:
             raise SystemExit(1)
         return
     print()
@@ -1506,6 +1509,10 @@ def configure_parser(sub) -> None:
         ),
     )
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--report-only", action="store_true",
+        help="with --json, keep completed findings in the document but exit 0; preflight failures still fail",
+    )
     sub.add_parser("smoke", help="Self-test: boot a fresh instance, REST probe, tear down")
     sub.add_parser("update", help="git pull the project repo this instance tracks")
     op = sub.add_parser("open", help="Open admin / site / mailpit in browser")

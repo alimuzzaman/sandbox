@@ -67,6 +67,14 @@ def _reject_ignored_post_list_search(argv: list[str]) -> None:
                 "actions.")
 
 
+def _reject_redundant_wp_token(argv: list[str]) -> None:
+    """Explain the common ``sb wp -- wp ...`` double-wrapper typo."""
+    if argv and argv[0] == "wp":
+        die("do not repeat the `wp` executable after `sb wp`; pass the "
+            "WP-CLI command directly, for example: "
+            "`./sb wp -- --require=FILE eval-file SCRIPT.php`. "
+            "No command was executed.")
+
 
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
@@ -79,6 +87,7 @@ def cmd_wp(cfg, args) -> None:
         pt = pt[1:]
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
+    _reject_redundant_wp_token(pt)
     _reject_ignored_post_list_search(pt)
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):

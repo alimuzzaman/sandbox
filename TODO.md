@@ -25,12 +25,12 @@ Next tasks, in order:
    installed revision, capacity/index completeness, and durable-job health. Keep
    remote deployment, cleanup, and migration records blocked while reachability
    is `timeout`.
-2. **P1 — close async WP-CLI acceptance design.** Decompose Spec 004 T021 into
-   a fast local acceptance row, a detached Docker start path, retained job
-   receipt, and a measured `<2s` gate. The CLI and MCP boundaries now use
-   finite launch budgets and return `acceptance_unknown` when the envelope is
-   not proven; preserve the current `compose run -d` path as the compatibility
-   fallback until cold/warm, duplicate-request, and all-tier parity tests pass.
+2. **P1 — finish async WP-CLI acceptance evidence.** The CLI and MCP boundaries
+   now use finite launch budgets, retained acceptance receipts, and
+   `acceptance_unknown` when the envelope is not proven. A disposable Docker
+   run measured Nginx shared and `wp db` fallback launches below `<2s`; preserve
+   the current `compose run -d` path until duplicate-request, cold-daemon, and
+   all-tier parity evidence passes.
 3. **P1 — define a bounded remote WP-CLI/preview contract.** Specify exact
    instance selection, package staging, authorization, output limits, and
    receipts for `sb wp --remote`/preview operations. Do not implement through
@@ -124,8 +124,9 @@ Sources reconciled in this pass:
   built-in WP-CLI is present; DB/LiteSpeed/older or unavailable instances keep
   the `compose run -d` fallback. A private `acceptance_ms` receipt and finite
   launch deadline now separate acceptance from command output; CLI timeout is
-  reported as `acceptance_unknown`. Finish the measured cold/warm Docker
-  matrix, duplicate-request contract, and all-tier cancellation parity in
+  reported as `acceptance_unknown`. The 2026-08-26 disposable evidence records
+  Nginx shared and `wp db` fallback paths below `<2s`; duplicate-request,
+  cold-daemon, and LiteSpeed/older/stopped-service parity remain open in
   `specs/004-async-wp-cli-jobs/tasks.md:T021` before claiming SC-001.
 
 - [ ] **Workspace relocation/migration proof** — complete

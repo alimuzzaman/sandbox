@@ -44,3 +44,27 @@ behavior.
 
 - A forged `job_id` (not `^[a-f0-9]{16}$`) is rejected before any filesystem access.
 - `async` runs only `wp` — it does not accept commands the sync path wouldn't.
+
+## 7. Disposable Docker evidence — 2026-08-26
+
+This acceptance run used a temporary per-worktree `SANDBOX_HOME` and a disposable
+WordPress instance. It did not use or change the shared instance registry, existing
+instances, remote hosts, or production state.
+
+- First post-ensure Nginx `web-exec` launch: client acceptance **1,270.243 ms**;
+  private receipt **330.449 ms**; job `46f4262c1d3031b5`; exit `0`.
+- Three warm Nginx `web-exec` launches: client acceptance **1,323.606 ms**,
+  **1,194.099 ms**, and **1,209.229 ms**; private receipts **370.227 ms**,
+  **292.788 ms**, and **337.128 ms**; jobs `d7d29f3358ca49cc`,
+  `a323e9a59f9699ac`, and `b5c8b37cb09c006a`; all exit `0`.
+- Two `wp db` compatibility `run` launches: client acceptance **1,974.677 ms**
+  and **1,918.533 ms**; private receipts **1,051.358 ms** and **1,009.751 ms**;
+  jobs `ff0e2bbd2b9cb0d8` and `c9f04ca5853dcde7`; both exit `0`.
+- Polling re-read the retained `t021-warm` and database output. Job
+  `23b647678e8a0637` was cancelled and completed with exit `143`; its
+  pre-cancel marker remained and its post-cancel marker did not appear.
+
+All measured client acceptances were below two seconds. This proves the current
+Nginx shared and database-fallback paths only. LiteSpeed, older/stopped-service,
+cold-Docker-daemon, and duplicate-request semantics still need evidence before
+SC-001 or all-tier parity can be marked complete.

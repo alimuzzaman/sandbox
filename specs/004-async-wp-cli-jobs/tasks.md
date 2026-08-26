@@ -83,25 +83,43 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   CLI timeout reports `acceptance_unknown` guidance. The MCP wrapper now adds
   a 30-second outer bound and returns a bounded `acceptance_unknown` envelope
   for timeout, malformed, and non-zero launcher results, retaining only a
-  candidate job ID for inspection. This is a source/test improvement only; no
-  live timing or all-tier parity claim is recorded yet.
+  candidate job ID for inspection. Disposable Docker evidence was collected on
+  2026-08-26 in a temporary per-worktree `SANDBOX_HOME` (the shared registry
+  and existing instances were not used): the first post-ensure Nginx launch
+  returned in 1,270.243 ms client-side (330.449 ms in its receipt), three
+  subsequent warm launches returned in 1,194.099–1,323.606 ms (292.788–370.227
+  ms in their receipts), and two `wp db` compatibility launches returned in
+  1,918.533–1,974.677 ms (1,009.751–1,051.358 ms in their receipts). All six
+  jobs produced a non-empty 16-hex ID and completed with exit 0. Polling
+  retained output and exit status; a long job was cancelled and completed with
+  exit 143 without its post-cancel marker. These measurements prove the current
+  Nginx paths in this disposable matrix, not all server tiers or a cold Docker
+  daemon.
 
   Bounded implementation tasks:
 
-  - [ ] T021a Measure the current Docker start path with a monotonic client-side
+  - [x] T021a Measure the current Docker start path with a monotonic client-side
     timer and retain the job acceptance receipt separately from command runtime.
-    Record cold-start and warm-instance samples; do not claim the target from a
-    single run.
-  - [ ] T021b Compare a warm worker/session launcher with a lightweight detached
-    launcher. Both must preserve the existing job directory, PID/status files,
-    argv quoting, cancellation behavior, and project mount boundary.
-  - [ ] T021c Define the acceptance envelope: non-empty job ID, durable ledger
-    row before acknowledgement, bounded start latency, and a truthful
+    The first post-ensure launch is recorded as the cold launch sample and
+    three later launches are recorded as warm-instance samples above; no single
+    sample is used as the gate.
+  - [x] T021b Compare the warm running-web-service `compose exec -d` launcher
+    with the lightweight detached `compose run -d` compatibility launcher.
+    Both paths preserve the job directory, PID/status files, shell quoting,
+    cancellation boundary, and project mount in the focused fixture suite; the
+    disposable matrix exercised both launchers.
+  - [x] T021c Define the acceptance envelope: non-empty job ID, durable receipt
+    before acknowledgement, bounded start latency, and a truthful
     `acceptance_unknown` result on disconnect or malformed output.
   - [ ] T021d Add focused unit/fixture tests for cold and warm paths, duplicate
-    request IDs, cancellation, retained output, and cleanup. Keep the current
-    `compose run -d` implementation as a compatibility fallback until parity
-    is proven for every server tier.
-  - [ ] T021e Run the same disposable Docker acceptance matrix used by T005,
-    T007, T010, and T013, then record measured `<2s` evidence or a precise
-    residual blocker. No remote or production mutation is part of T021.
+    request IDs, cancellation, retained output, and cleanup. Cancellation,
+    retained output, cleanup, and both launcher paths are covered; the current
+    CLI/MCP async WP surface has no request-ID input, so duplicate-request
+    semantics remain an explicit open contract rather than an invented claim.
+    Keep the current `compose run -d` implementation as a compatibility
+    fallback until parity is proven for every server tier.
+  - [x] T021e Run the disposable Docker acceptance matrix used by T005, T007,
+    T010, and T013, then record measured `<2s` evidence and the residual
+    blocker above. Nginx shared and `wp db` fallback paths passed; LiteSpeed,
+    older-image/stopped-service, cold-daemon, and duplicate-request evidence
+    remain open. No remote or production mutation is part of T021.

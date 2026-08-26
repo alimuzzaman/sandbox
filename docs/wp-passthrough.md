@@ -32,3 +32,16 @@ same passthrough boundary instead:
 Sandbox does not rewrite PHP namespaces. A doubled separator is sent to PHP as
 written and can produce a parse error; that is an expression-quoting error, not
 a runtime or plugin failure.
+
+## Noninteractive WP-CLI help
+
+The managed WordPress image does not require a pager binary. For a passthrough
+`help` command, Sandbox adds WP-CLI's `--no-pager` switch unless the command
+already includes `--pager` or `--no-pager`:
+
+```sh
+./sb wp -- help w3-total-cache option set
+```
+
+This keeps help output bounded and usable in shells, jobs, and MCP calls without
+changing other WP-CLI commands.

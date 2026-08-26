@@ -75,6 +75,24 @@ def _reject_redundant_wp_token(argv: list[str]) -> None:
             "`./sb wp -- --require=FILE eval-file SCRIPT.php`. "
             "No command was executed.")
 
+
+def _disable_help_pager(argv: list[str]) -> list[str]:
+    """Keep WP-CLI help noninteractive inside the container boundary.
+
+    The managed WordPress image does not promise a pager binary. Add WP-CLI's
+    explicit no-pager switch only for the help command, and preserve an
+    operator's explicit pager choice when one was supplied.
+    """
+    if not argv or "--no-pager" in argv or "--pager" in argv:
+        return list(argv)
+    for index, token in enumerate(argv):
+        if token == "help":
+            return [*argv, "--no-pager"]
+        if not isinstance(token, str) or not token.startswith("-"):
+            break
+    return list(argv)
+
+
 def _is_option_get_probe(argv: list[str]) -> bool:
     """Return whether argv is the narrow optional-option probe contract."""
     return len(argv) >= 3 and argv[:2] == ["option", "get"]
@@ -101,6 +119,7 @@ def cmd_wp(cfg, args) -> None:
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
+    pt = _disable_help_pager(pt)
     if getattr(args, "allow_missing", False) and not _is_option_get_probe(pt):
         die("--allow-missing is only valid with `option get KEY`; "
             "no command was executed.")

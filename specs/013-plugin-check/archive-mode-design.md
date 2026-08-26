@@ -20,8 +20,10 @@ first four gated tasks. They do not boot Sandbox or touch the registry; the
 builder writes only owner-controlled review state and a generated allowlisted
 descriptor, while cleanup callbacks are supplied by the future runtime adapter.
 They do not inspect secrets, inherit global config, or mutate a caller project.
-The remaining disposable-runtime integration and live acceptance gates are
-still open.
+The finding/baseline/artifact helpers now also enforce relative finding identity,
+cleanup-gated atomic baseline replacement, retained owner-only reports, and
+archive-controlled HTML escaping. The remaining disposable-runtime integration
+and live acceptance gates are still open.
 
 Independent Sol High readiness review on 2026-08-26: **not ready for
 implementation**. The review identified missing target identity, inherited-state

@@ -312,7 +312,7 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
   per-plane absence checks, retained unknown-state receipt, and fault-injection
   tests for descriptor, journal, registry, boot, check, report, and every cleanup
   boundary.
-- [ ] T039 Normalize archive findings relative to the extracted root, make
+- [x] T039 Normalize archive findings relative to the extracted root, make
   `--update` atomically update only the caller baseline after complete cleanup,
   persist reports/results under retained Sandbox state, and harden HTML escaping
   for archive-controlled strings.

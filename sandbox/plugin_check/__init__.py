@@ -26,6 +26,16 @@ from .journal import (
     CleanupPlane,
     recover_archive_cleanup,
 )
+from .result import (
+    ArchiveArtifactError,
+    ArchiveResultError,
+    archive_error_counts,
+    cleanup_receipt_complete,
+    normalize_archive_findings,
+    persist_archive_artifact,
+    prune_archive_artifacts,
+    update_caller_baseline_atomic,
+)
 
 __all__ = [
     "ArchiveLimits",
@@ -48,4 +58,12 @@ __all__ = [
     "ArchiveReviewJournal",
     "CleanupPlane",
     "recover_archive_cleanup",
+    "ArchiveResultError",
+    "ArchiveArtifactError",
+    "archive_error_counts",
+    "cleanup_receipt_complete",
+    "normalize_archive_findings",
+    "persist_archive_artifact",
+    "prune_archive_artifacts",
+    "update_caller_baseline_atomic",
 ]

@@ -153,6 +153,13 @@ unproven plane is retained as `unknown` with `recovery_required: true`; retrying
 the same callbacks through `recover_archive_cleanup` is idempotent. These
 primitives still do not choose Docker/registry operations themselves.
 
+Finding/baseline/artifact helpers are implemented in
+`sandbox/plugin_check/result.py`. They normalize archive findings to the same
+relative `(file, rule)` identity as source checks, refuse a baseline update
+unless all cleanup planes are proven complete, atomically replace only the
+caller baseline, and retain sanitized result/report files below the owner-only
+Sandbox report directory (20 runs or 7 days, whichever is smaller).
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,

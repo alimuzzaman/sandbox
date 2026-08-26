@@ -349,7 +349,10 @@ def _archive_run_id() -> str:
     # Keep ``plugin-check-`` + this identity within Sandbox's 24-character
     # instance-name budget.  That makes the derived Compose/registry name
     # deterministic while retaining 40 bits of uniqueness for concurrent runs.
-    return uuid.uuid4().hex[:10]
+    # Journal run IDs must start with a letter; keep nine random hex
+    # characters after the prefix so the total still fits the instance-name
+    # budget.
+    return f"r{uuid.uuid4().hex[:9]}"
 
 
 def _archive_report_meta(result: Mapping[str, object], *, baseline_total: int,

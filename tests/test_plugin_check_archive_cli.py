@@ -38,6 +38,11 @@ _COMPLETE_PLANES = {
 
 
 class TestPluginCheckArchiveCli(unittest.TestCase):
+    def test_archive_run_id_is_valid_for_journal_and_instance_budget(self):
+        run_id = plugin_check._archive_run_id()
+        self.assertRegex(run_id, r"^[a-z][a-z0-9_-]{0,47}$")
+        self.assertLessEqual(len(f"plugin-check-{run_id}"), 24)
+
     def _setup(self, directory: str, *, baseline: str | None = None):
         root = Path(directory)
         caller = root / "caller"

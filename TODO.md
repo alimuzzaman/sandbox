@@ -14,7 +14,7 @@ contract. Keep remote, credential, production, and evidence-limited records
 blocked until their required live proof is available.
 
 Current ledger snapshot (from `./sb feedback counts --json`): **619 total**,
-**97 blocked**, **103 verified**, **265 resolved**, **72 duplicate**, and
+**96 blocked**, **104 verified**, **265 resolved**, **72 duplicate**, and
 **82 not applicable**. All 619 records are reviewed; no record is treated as
 implementation authority.
 
@@ -280,9 +280,10 @@ observations; these are deduplicated work items, not permission to mutate.
   failures, preserve source comments, support safe unset/delete, paired-key
   injection, bounded long-lived local development, OpenRouter validation, and
   direct child-argv passthrough without printing values. The sanctioned
-  single-key `unset` path is verified in commit `4bb9be4`; remaining items are
-  tracked here. IDs: `3c184f3c`, `910bc8c9`, `54c1c9ae`, `c335f32e`,
-  `2cfab06f`, `18c1ac3d`, `6ae07ae7`, `72d7e416`.
+  single-key `unset` path is verified in `4bb9be4`, and the offline
+  `openrouter-api-key` shape profile is verified in `a6d1cea`; remaining items
+  are tracked here. IDs: `3c184f3c`, `910bc8c9`, `54c1c9ae`, `c335f32e`,
+  `2cfab06f`, `6ae07ae7`, `72d7e416`.
 - [ ] **CLI contract/discoverability:** document/enforce feedback limits and
   prefix lookup, focused test selection/interpreter routing, status/instance
   listing, local-vs-remote selectors, `--request-id`, `--project-dir`, WP

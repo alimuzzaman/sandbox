@@ -1039,6 +1039,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     lic.add_argument("--from", dest="from_instance", default=None,
         help="for elementor-sync: the instance you connected Elementor Pro on "
              "(default: auto-detect the connected instance)")
+    lic.add_argument("--json", action="store_true",
+        help="emit a redacted JSON document (status only)")
 
     px = sub.add_parser("pxdiff",
         help="Pixel-diff two PNG screenshots (reference vs build) + locate the drift")

@@ -9,12 +9,18 @@ never echoes a key value (status shows presence + a masked hint only).
     sb license status                  # which keys are set (masked) + EL primary
     sb license clear [family]          # remove one family's key (or all)
 """
+import json
+
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 
 
 def cmd_license(cfg, args) -> None:
     action = getattr(args, "action", "status") or "status"
+    json_output = bool(getattr(args, "json", False))
+
+    if json_output and action != "status":
+        die("--json is only supported with `license status`; no license mutation was run.")
 
     if action == "set":
         family = getattr(args, "family", None)
@@ -46,6 +52,14 @@ def cmd_license(cfg, args) -> None:
 
     # default: status — presence + masked hint only, never the raw key.
     st = license_status()
+    if json_output:
+        print(json.dumps({
+            "ok": True,
+            "command": "license",
+            "action": "status",
+            "status": st,
+        }, sort_keys=True))
+        return
     ok("Pro license status (values masked — keys are secret):")
     info(f"  elementor   : {st['elementor']}")
     info("  wpdeveloper : keyless (pro plugins force-activated in-instance)")

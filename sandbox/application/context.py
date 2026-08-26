@@ -707,6 +707,11 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         verifier=verifier, bubblewrap=BubblewrapCompiler("/usr/bin/bwrap"),
         machine_exec=ManagedMachineExecutor(process=process, helper=helper),
     ))
+    credential_repository = overrides.pop("credential_repository", None)
+    credential_broker = overrides.pop("credential_broker", None)
+    credential_supervisor = overrides.pop("credential_supervisor", None)
+    credential_health = overrides.pop("credential_health", None)
+    credential_recovery = overrides.pop("credential_recovery", None)
     cleanup = overrides.pop("cleanup", None)
     if cleanup is None and native_repository is not None:
         cleanup = ManagedNativeCleanup(
@@ -723,6 +728,11 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         packages=packages,
         network=network, database=database, services=services, credentials=credentials,
         grants=grants,
+        credential_repository=credential_repository,
+        credential_broker=credential_broker,
+        credential_supervisor=credential_supervisor,
+        credential_health=credential_health,
+        credential_recovery=credential_recovery,
         verifier=verifier, launcher=launcher, plan_builder=plan_builder,
         provisioner=provisioner, cleanup=cleanup,
         **overrides,
@@ -982,6 +992,38 @@ def managed_native_credential_repository():
     if not path.is_file():
         return None
     return CredentialRepository(NativeRepository(path))
+
+
+def managed_native_credential_broker(
+    *, instance_id, credential_repository, resolver, proof, egress, upstream,
+    owner=None, max_concurrent=16, clock=None, drain_seconds=5.0,
+):
+    """Compose an explicit per-instance Credential Vault broker.
+
+    This factory has no default source reader, upstream, or proof.  Callers
+    must inject all three trust-boundary mechanisms, which keeps ordinary
+    managed-native composition inert while the live proof gate is incomplete.
+    Binding lookup is delegated to the credential repository and can be
+    owner-scoped; no registry/state JSON is read directly here.
+    """
+    from sandbox.isolation.credential_request_broker import CredentialRequestBroker
+
+    if credential_repository is None or not callable(getattr(credential_repository, "get", None)):
+        raise ValueError("managed credential broker repository is required")
+    if not callable(getattr(resolver, "issue", None)):
+        raise ValueError("managed credential broker resolver is required")
+    if not callable(proof) or not callable(egress) or upstream is None:
+        raise ValueError("managed credential broker gates are required")
+
+    def load(binding_id):
+        return credential_repository.get(binding_id, owner=owner) \
+            if owner is not None else credential_repository.get(binding_id)
+
+    return CredentialRequestBroker(
+        instance_id, resolver, load, proof=proof, egress=egress,
+        upstream=upstream, owner=owner, max_concurrent=max_concurrent,
+        clock=clock, drain_seconds=drain_seconds,
+    )
 
 
 def wordpress_runtime_service(cfg):

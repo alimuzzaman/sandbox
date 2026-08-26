@@ -29,9 +29,7 @@ class TestWpPassthroughContract(unittest.TestCase):
         wpcli.assert_not_called()
 
     def test_normal_passthrough_is_not_rejected(self):
-        with patch.object(wp, "_reject_redundant_wp_token") as reject:
-            wp._reject_redundant_wp_token(["option", "get", "missing_key"])
-        reject.assert_called_once_with(["option", "get", "missing_key"])
+        wp._reject_redundant_wp_token(["option", "get", "missing_key"])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sandbox.commands import plugin_check as source_plugin_check  # noqa: E402
 from sandbox.plugin_check.result import (  # noqa: E402
     PLANE_ORDER,
     ArchiveResultError,
@@ -37,6 +38,31 @@ def _complete_receipt():
 
 
 class TestArchiveFindingIdentity(unittest.TestCase):
+    def test_source_and_archive_finding_keys_are_identical(self):
+        """The two input paths must gate on one stable file/rule identity."""
+
+        plugin_root = Path("/tmp/review/extracted/demo-plugin")
+        source_output = (
+            f"FILE: {plugin_root}/includes/findings.php\n"
+            '[{"type":"ERROR","code":"rule","line":2,"column":1,"message":"m"}]\n'
+            f"FILE: {plugin_root}/includes/findings.php\n"
+            '[{"type":"WARNING","code":"warning_rule","line":3,"column":1,"message":"w"}]\n'
+        )
+        source_findings = source_plugin_check._parse_findings(source_output, root=plugin_root)
+        archive_findings = normalize_archive_findings(
+            [
+                {"file": str(plugin_root / "includes/findings.php"), "type": "ERROR", "code": "rule"},
+                {"file": str(plugin_root / "includes/findings.php"), "type": "WARNING", "code": "warning_rule"},
+            ],
+            plugin_root,
+        )
+
+        self.assertEqual(
+            source_plugin_check._count_by_key(source_findings),
+            archive_error_counts(archive_findings),
+        )
+        self.assertEqual(source_findings[0]["file"], archive_findings[0]["file"])
+
     def test_absolute_and_plugin_prefixed_paths_become_relative(self):
         root = Path("/tmp/review/extracted/demo-plugin")
         findings = normalize_archive_findings(

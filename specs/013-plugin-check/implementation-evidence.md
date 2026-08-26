@@ -35,9 +35,10 @@ Drive, recovery, commit, or push action occurred.
 
 ## Exact-release archive acceptance — 2026-08-26
 
-- Focused archive slice: 107 tests passed, including preflight, target
+- Focused archive slice: 108 tests passed, including preflight, target
   isolation, child-run ordering, result/artifact handling, CLI dispatch, and
-  the per-review port-lane regression. The journal/result/CLI recovery slice
+  the per-review port-lane and source/archive finding-key parity regressions.
+  The journal/result/CLI recovery slice
   was rerun separately: 28 tests passed.
 - Fixed live run used the deterministic `valid` fixture. The observed archive
   SHA was `34de3e374abf0aad08753f3a582be384c845ed7052f9b70dd0d0b2af686c5cfd`,

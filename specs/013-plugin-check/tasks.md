@@ -327,12 +327,13 @@ note; the source-tree Plugin Check path remains unchanged.
   idempotent recovery after an injected cleanup failure. Close feedback only
   after all evidence exists.
 
-  Archive-specific evidence is complete as of 2026-08-26: 107 focused tests,
+  Archive-specific evidence is complete as of 2026-08-26: 108 focused tests,
   28 journal/result/CLI recovery tests, one live disposable run, and two
   concurrent live disposable runs all passed with exact archive/checker
-  provenance, inactive-target proofs, retained reports, and complete seven-plane
-  cleanup receipts. The repository-wide regression is still a separate open
-  gate: a bounded isolated run executed 3,371 tests (7 failures, 3 errors,
+  provenance, inactive-target proofs, retained reports, complete seven-plane
+  cleanup receipts, and a direct source/archive `(file, rule)` identity
+  regression. The repository-wide regression is still a separate open gate: a
+  bounded isolated run executed 3,371 tests (7 failures, 3 errors,
   18 skips) after omitting the unbounded `test_resource_remote` module; the
   failures are existing architecture/runtime-transport baseline drift, not an
   archive acceptance pass. Keep T041 open until that baseline is reconciled and

@@ -27,6 +27,13 @@ from sandbox.services.redaction import redact_text
 _PROVISION_LOG_SCHEMA_VERSION = 1
 _PROVISION_LOG_EVENT_LIMIT = 32
 _PROVISION_LOG_DETAIL_LIMIT = 1_000
+_RUNTIME_SOURCE_STAGE_TIMEOUT = 300
+
+
+class RemoteRuntimeSourceTimeout(RuntimeError):
+    """The bounded runtime-source package or upload did not finish."""
+
+    code = "remote_runtime_source_timeout"
 
 
 def _provision_log_root(name: str) -> Path:
@@ -353,7 +360,10 @@ def _cmd_service(args, as_json: bool) -> None:
                 sr.stop_remote_mcp_server(entry)
                 payload = {"ok": True, "name": name, "status": "stopped", "data": {}, "error": None}
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        code = "remote_service_ownership_unknown" if str(exc) == "remote_service_ownership_unknown" else "remote_service_failed"
+        if isinstance(exc, RemoteRuntimeSourceTimeout):
+            code = RemoteRuntimeSourceTimeout.code
+        else:
+            code = "remote_service_ownership_unknown" if str(exc) == "remote_service_ownership_unknown" else "remote_service_failed"
         payload = {"ok": False, "name": name, "status": "degraded", "data": {},
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
@@ -511,20 +521,47 @@ def _upload_runtime_source(ssh_target: str) -> None:
     )
     skipped = sr.count_appledouble_files(ROOT, excluded_roots=excludes)
     sr.emit_appledouble_skip_diagnostic(skipped, context="runtime-source")
-    tar_res = subprocess.run(
-        tar_cmd, cwd=str(ROOT), capture_output=True, timeout=300, check=False,
-        # BSD tar synthesizes AppleDouble members for macOS metadata unless
-        # this environment switch is set. GNU tar ignores it.
-        env={**os.environ, "COPYFILE_DISABLE": "1"},
+    print(
+        "staging Sandbox runtime source archive "
+        f"(bounded {_RUNTIME_SOURCE_STAGE_TIMEOUT}s)...",
+        file=sys.stderr,
     )
+    try:
+        tar_res = subprocess.run(
+            tar_cmd, cwd=str(ROOT), capture_output=True,
+            timeout=_RUNTIME_SOURCE_STAGE_TIMEOUT, check=False,
+            # BSD tar synthesizes AppleDouble members for macOS metadata unless
+            # this environment switch is set. GNU tar ignores it.
+            env={**os.environ, "COPYFILE_DISABLE": "1"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteRuntimeSourceTimeout(
+            "runtime source packaging timed out after "
+            f"{_RUNTIME_SOURCE_STAGE_TIMEOUT}s; the remote was not contacted"
+        ) from exc
     if tar_res.returncode != 0:
         raise RuntimeError(
             f"could not package the local sandbox runtime: "
             f"{tar_res.stderr.decode(errors='replace').strip()[:500]}"
         )
-    ssh_res = sr.ssh_process(
-        ssh_target, remote_cmd, input_data=tar_res.stdout, timeout=300,
+    archive = tar_res.stdout or b""
+    print(
+        "runtime source archive ready "
+        f"({len(archive)} bytes); uploading to remote "
+        f"(bounded {_RUNTIME_SOURCE_STAGE_TIMEOUT}s)...",
+        file=sys.stderr,
     )
+    try:
+        ssh_res = sr.ssh_process(
+            ssh_target, remote_cmd, input_data=archive,
+            timeout=_RUNTIME_SOURCE_STAGE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteRuntimeSourceTimeout(
+            "runtime source upload timed out after "
+            f"{_RUNTIME_SOURCE_STAGE_TIMEOUT}s; remote completion is unknown; "
+            "inspect the remote before retrying"
+        ) from exc
     if ssh_res.returncode != 0:
         detail = (ssh_res.stderr or ssh_res.stdout or b"").decode(errors="replace")
         raise RuntimeError(f"could not upload sandbox runtime: {detail.strip()[:500]}")

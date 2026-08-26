@@ -1498,6 +1498,25 @@ class TestUploadRuntimeSource(unittest.TestCase):
             remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
         self.assertEqual(mock_run.call_count, 1)
 
+    @patch("subprocess.run")
+    def test_runtime_source_packaging_timeout_is_typed(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired("tar", 300)
+        with self.assertRaisesRegex(remote_cmd.RemoteRuntimeSourceTimeout,
+                                    "packaging timed out"):
+            remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch.object(sr, "ssh_process")
+    @patch("subprocess.run")
+    def test_runtime_source_upload_timeout_preserves_unknown_completion(
+            self, mock_run, ssh_process):
+        mock_run.return_value = _completed(returncode=0, stdout=b"tarball", stderr=b"")
+        ssh_process.side_effect = subprocess.TimeoutExpired("ssh", 300)
+        with self.assertRaisesRegex(remote_cmd.RemoteRuntimeSourceTimeout,
+                                    "completion is unknown"):
+            remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+        ssh_process.assert_called_once()
+
 
 class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
     def test_provision_result_omits_the_minted_token(self):
@@ -2367,6 +2386,28 @@ class TestRemoteServiceCommand(unittest.TestCase):
                     remote_cmd._cmd_service(args, as_json=True)
                 upload.assert_called_once_with("ubuntu@1.2.3.4")
                 self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
+
+    def test_service_migration_upload_timeout_has_typed_json_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="https", control_url="https://sandbox.example.test",
+                              mcp_port=9174, bearer_token="a" * 64)
+                args = types.SimpleNamespace(name="migrate", ssh_url="myvps", confirm=True)
+                timeout = remote_cmd.RemoteRuntimeSourceTimeout(
+                    "runtime source upload timed out after 300s; remote completion is unknown; inspect the remote before retrying"
+                )
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value={"legacy_pidfile": "absent"}), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  side_effect=timeout), \
+                     redirect_stdout(StringIO()) as output:
+                    remote_cmd._cmd_service(args, as_json=True)
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"],
+                                 "remote_runtime_source_timeout")
+                self.assertIn("completion is unknown", payload["error"]["message"])
 
     def test_down_without_confirmation_is_plan_only(self):
         args = MagicMock()

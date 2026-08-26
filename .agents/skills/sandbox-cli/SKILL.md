@@ -32,6 +32,39 @@ sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox --json
 sb workspace reap --remote scaleway-sandbox --dry-run --json
 ```
 
+For authenticated host health evidence through the remote Sandbox service, use:
+
+```sh
+sb remote service diagnostics scaleway-sandbox --json
+sb remote service diagnostics scaleway-sandbox --processes --json
+```
+
+The default service snapshot reports aggregate total, used, available, and
+percentage RAM, plus load and free disk.
+
+`--processes` opts into independently bounded, read-only service-side probes.
+It groups sanitized `comm` identities, exposes no command lines, arguments,
+environment, paths, or sudo data, and optionally includes non-sudo Docker stats.
+CPU is a `ps` lifetime average; RSS/shared pages, snapshot drift, and overlapping
+host/container rows prevent these values from being additive accounting totals.
+Grouping by `comm` is heuristic and grouped CPU can exceed 100% on multicore hosts.
+The response requires diagnostics schema 2 and `transport: control`; update an older
+installed remote through the supported Sandbox lifecycle first. The deprecated
+`--ssh` flag is rejected before remote lookup.
+
+Run `./sb web` to open the local host dashboard. Select a remote under **Remotes**
+to see hosted-instance totals/state, per-instance container attribution, apps,
+processes, containers, jobs, RAM/load/disk, and storage evidence. Quick refresh is
+cache-only; **Rebuild attribution** performs a bounded deep refresh through the
+authenticated service and keeps partial/unknown evidence visible.
+
+Direct SSH is an explicit operator escape hatch only; it is never an internal
+fallback or MCP operation:
+
+```sh
+sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
+```
+
 Status and planning are read-only. Treat unavailable or timed-out bytes as
 unknown. Ordinary cache plans never contain named persistent volumes or
 worktrees; those require the separate stale scope and complete positive
@@ -72,6 +105,31 @@ partial and cannot be combined with the outer capacity summary. Use
 `sb resources status --deep --cancelled --json` or MCP
 `resource_status(deep=true, cancelled=true)` only as non-mutating
 pre-cancellation test seams.
+
+For a deep scan that must continue after the terminal session closes, use the
+durable resource-scan helper. It executes the worker with the selected host's
+local adapter (a remote worker does not recursively SSH to the same host):
+
+```sh
+sb resources status --remote scaleway-sandbox --deep --refresh --budget 1800 \
+  --detach --request-id storage-refresh-20260823 --json
+sb job-status JOB_ID --remote scaleway-sandbox --json
+sb job-output JOB_ID --remote scaleway-sandbox --stream combined \
+  --wait-seconds 20 --json
+```
+
+The host-local worker honors the same directory-index mode as the direct
+remote adapter. `--refresh` reserves the budget for the indexed filesystem
+walk instead of repeating per-worktree `du` probes, then resolves managed
+worktree, runtime, and Docker-volume records with one bounded multi-path
+`du -s` pass; `--fast` reads the saved index only and reports `cache_missing`
+when no index exists.
+
+`--detach` returns only after the durable row is accepted. Retain the job ID,
+poll until a terminal lifecycle, and inspect the retained JSONL progress/result
+events. Reuse the identical request ID if submission output is lost; never
+launch a second request identity. A completed `partial` result is still
+incomplete attribution evidence, not permission to reclaim bytes.
 
 `sb resources monitor` is a cache-only pressure pass with a 900-second default
 budget. `--scheduled` labels the trigger and adds no authority. `--dry-run`
@@ -245,7 +303,7 @@ credentials:
 
 ```sh
 sb feedback submit --category bug --severity high --summary "Short finding" --details "Evidence and impact" --json
-sb feedback list --limit 20 --json
+sb feedback list --limit 20 --json   # bounded range: 1-100
 ```
 
 Use `sb feedback show REF --json` or `sb feedback detail REF --json` with an exact

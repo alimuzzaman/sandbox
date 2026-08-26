@@ -17,7 +17,29 @@ from sandbox.services.redaction import redact_structure, redact_text, require_sa
 
 
 class RemoteJobTransportError(RuntimeError):
-    pass
+    """Bounded, retryable failure from a remote job control operation."""
+
+    code = "remote_job_transport_error"
+    retryable = True
+
+    def to_payload(self, *, remote: str | None = None,
+                   operation: str | None = None) -> dict:
+        """Return a redacted envelope when a remote control call has no receipt."""
+        allowed_operations = {
+            "exec", "test", "job-output", "job-status", "job-list", "job-cancel",
+            "job-retry", "job-cleanup", "job-artifacts", "job-artifact-get",
+        }
+        operation = operation if operation in allowed_operations else "job"
+        return {
+            "ok": False,
+            "status": "unknown",
+            "code": self.code,
+            "error": _safe_remote_detail(str(self)) or "remote job transport failed",
+            "target": _admission_target({"kind": "remote", "remote": remote}),
+            "operation": operation,
+            "retryable": bool(self.retryable),
+            "acceptance": "unknown" if operation in {"exec", "test"} else None,
+        }
 
 
 _NETWORK_CAPACITY_CODES = frozenset({

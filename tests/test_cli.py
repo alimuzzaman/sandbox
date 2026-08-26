@@ -1217,6 +1217,45 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
         self.assertNotIn(secret, line)
         self.assertNotIn("Traceback", line)
 
+    def test_json_transport_error_is_one_bounded_receipt_unknown_envelope(self):
+        import sandbox.cli as cli
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli._dispatch_remote_transport_error(
+                    RemoteJobTransportError("remote job acceptance failed: no payload"),
+                    SimpleNamespace(json=True, remote="vps", cmd="exec"),
+                )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(errors.getvalue(), "")
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "remote_job_transport_error")
+        self.assertEqual(payload["status"], "unknown")
+        self.assertEqual(payload["acceptance"], "unknown")
+        self.assertEqual(payload["target"], {"kind": "remote", "remote": "vps"})
+        self.assertNotIn("Traceback", output.getvalue())
+
+    def test_human_transport_error_is_bounded_and_does_not_claim_a_job(self):
+        import sandbox.cli as cli
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli._dispatch_remote_transport_error(
+                    RemoteJobTransportError("remote output read failed"),
+                    SimpleNamespace(json=False, remote="vps", cmd="job-output"),
+                )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("remote output read failed", errors.getvalue())
+        self.assertIn("No remote job receipt was established", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+
     def test_json_flag_before_passthrough_delimiter_does_not_consume_child_json(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

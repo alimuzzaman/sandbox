@@ -21,7 +21,10 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
 from sandbox.commands.manifest import load_builtin_commands
-from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+from sandbox.transports.remote_jobs import (
+    RemoteJobAdmissionError,
+    RemoteJobTransportError,
+)
 
 
 
@@ -123,6 +126,23 @@ def _dispatch_remote_admission_error(exc: RemoteJobAdmissionError, args) -> None
         print(
             f"error: {payload['error']} ({payload['code']})."
             f"{suffix}",
+            file=sys.stderr,
+        )
+    raise SystemExit(1)
+
+
+def _dispatch_remote_transport_error(exc: RemoteJobTransportError, args) -> None:
+    """Render a bounded remote control failure instead of leaking a traceback."""
+    payload = exc.to_payload(
+        remote=getattr(args, "remote", None),
+        operation=getattr(args, "cmd", None),
+    )
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    else:
+        print(
+            f"error: {payload['error']} ({payload['code']}). "
+            "No remote job receipt was established; inspect remote state before retrying.",
             file=sys.stderr,
         )
     raise SystemExit(1)
@@ -1469,6 +1489,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         handler(cfg, args)
     except RemoteJobAdmissionError as exc:
         _dispatch_remote_admission_error(exc, args)
+    except RemoteJobTransportError as exc:
+        _dispatch_remote_transport_error(exc, args)
 
 
 

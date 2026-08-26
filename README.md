@@ -365,6 +365,7 @@ Inspect local or named-remote storage without booting an instance:
 # always-available: capacity plus the cached index, no disk walk
 ./sb resources status --remote scaleway-sandbox --fast
 ./sb resources monitor --remote scaleway-sandbox --scheduled --json
+./sb resources schedule --remote scaleway-sandbox --json   # render only
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -376,6 +377,13 @@ still allowing the local monitor record and review-plan metadata to be written.
 The monitor policy is resolved before any host-facing service is built, and
 warning/normal runs exit 0 while critical, unknown, refused, or failed runs
 exit 1. Automatic reclamation and real reaping are off by default.
+
+`resources schedule` renders a disabled systemd user service/timer on Linux or
+a launchd user plist on macOS. It installs nothing unless the operator passes
+`--activate --confirm`; `--deactivate --confirm` removes only that exact
+schedule. The unit always runs the fixed cache-only monitor command, and the
+rendered plan includes its paths and reverse command. No schedule is activated
+by default.
 
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker

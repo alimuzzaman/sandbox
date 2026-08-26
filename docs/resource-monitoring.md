@@ -30,6 +30,75 @@ monitor (`resources plan --tier safe` for a warning and the confirmation-gated
 safe cleanup command for a critical result). A policy or target refusal is
 local and occurs before any host probe or service construction.
 
+## Render or activate a schedule
+
+The schedule lives on the machine that runs `sb`; it does not install anything
+on the monitored remote. Render it first:
+
+```sh
+./sb resources schedule --json
+./sb resources schedule --remote scaleway-sandbox
+```
+
+The plan is always `enabled: false` and contains the exact command, unit
+contents, paths, and reverse commands. Linux renders a systemd user service and
+timer; macOS renders a launchd user plist. Both use the fixed command
+`sb resources monitor --scheduled --json` (plus `--remote NAME` for a named
+target). Systemd wraps the service with non-blocking `flock`; launchd reports
+that it has no native randomized-delay primitive.
+
+Installing or removing a timer is a protected local operation. It requires an
+explicit confirmation and is never part of a render-only plan:
+
+```sh
+./sb resources schedule --remote scaleway-sandbox --activate --confirm
+./sb resources schedule --remote scaleway-sandbox --deactivate --confirm
+```
+
+Activation is idempotent for an identical unit, writes owner-safe files only in
+the user scheduler directory, and runs a bounded init-system transition. Do
+not activate a schedule until its target policy and live read-only monitor
+evidence have been reviewed. Automatic reclamation and real reaping remain off
+unless their separate policy switches are explicitly enabled.
+
+### Policy defaults
+
+The machine-level `resources.monitor` block is resolved from built-in defaults,
+`sandbox.yml`, `$SANDBOX_HOME/sandbox.local.yml`, then the named remote's
+`storage_monitor` override. The deletion switches are deliberately separate:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `warn_ratio` | `0.15` | warning at or below 15% free |
+| `critical_ratio` | `0.05` | critical at or below 5% free |
+| `auto_enabled` | `false` | permits the safe tier only when eligible |
+| `auto_tier` | `safe` | the only accepted unattended tier |
+| `auto_ratio` | `null` | inherits `critical_ratio` |
+| `reap_enabled` | `false` | permits real retention reaping; otherwise dry-run |
+| `reap_ttl` | `null` | inherits the reaper's seven-day default |
+| `schedule_calendar` | `hourly` | init-system cadence |
+| `schedule_randomized_delay` | `5min` | systemd jitter; launchd reports no native jitter |
+| `schedule_timeout` | `30min` | bounded scheduled service runtime |
+| `record_max_age_seconds` | `21600` | six-hour freshness window for `doctor` |
+
+`auto_tier` is hard-limited to `safe`; thresholds must satisfy
+`0 < critical_ratio <= warn_ratio < 1`, and the flags must be real booleans.
+Invalid policy is refused before any host-facing service is built.
+
+## Storage pressure in `sb doctor`
+
+`sb doctor` reads one last-run monitor record per configured target plus the
+local machine. It performs no network probe. A missing or stale record is a
+failed check, not a healthy default, and includes the command needed to refresh
+it:
+
+```text
+Storage pressure:
+  ✓ local: normal — 411.2 GiB free of 926.4 GiB (44.4%), checked 12m ago
+  ✗ scaleway-sandbox: WARNING — 24.1 GiB free of 193.7 GiB (12.4%), threshold warn_ratio, checked 41m ago
+      → run `sb resources plan --tier safe --remote scaleway-sandbox` and review the candidates
+```
+
 ## Inspect storage
 
 Use fast status for capacity and cheap inventory:

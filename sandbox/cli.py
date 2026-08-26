@@ -439,6 +439,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                    help="explicitly select the local WordPress runtime")
     w.add_argument("--project-dir", default=None,
                    help="project directory whose registered instance should run wp-cli")
+    w.add_argument("--allow-missing", action="store_true",
+                   help="for `option get KEY`, return a JSON missing marker instead of failing when the option is absent")
     wp_options = w.add_mutually_exclusive_group()
     wp_options.add_argument("--async", dest="run_async", action="store_true",
                             help="run as a background job (spec 004) — prints a job id")

@@ -75,6 +75,19 @@ def _reject_redundant_wp_token(argv: list[str]) -> None:
             "`./sb wp -- --require=FILE eval-file SCRIPT.php`. "
             "No command was executed.")
 
+def _is_option_get_probe(argv: list[str]) -> bool:
+    """Return whether argv is the narrow optional-option probe contract."""
+    return len(argv) >= 3 and argv[:2] == ["option", "get"]
+
+
+def _reports_missing_option(stdout: str, stderr: str) -> bool:
+    """Recognize WP-CLI's missing-option diagnostic without hiding transport errors."""
+    text = f"{stdout}\n{stderr}".lower()
+    return bool(
+        re.search(r"could not get.{0,160}\boption\b", text)
+        or re.search(r"\boption\b.{0,160}(?:does not exist|not found)", text)
+    )
+
 
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
@@ -88,6 +101,9 @@ def cmd_wp(cfg, args) -> None:
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
+    if getattr(args, "allow_missing", False) and not _is_option_get_probe(pt):
+        die("--allow-missing is only valid with `option get KEY`; "
+            "no command was executed.")
     _reject_ignored_post_list_search(pt)
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):
@@ -122,11 +138,15 @@ def cmd_wp(cfg, args) -> None:
         )
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
+    returncode = int(getattr(result, "returncode", 0) or 0)
+    if (getattr(args, "allow_missing", False) and returncode
+            and _reports_missing_option(stdout, stderr)):
+        print('{"present":false,"value":null}')
+        return
     if stdout:
         print(stdout, end="")
     if stderr:
         print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
-    returncode = int(getattr(result, "returncode", 0) or 0)
     if returncode:
         die(f"wp command failed with exit code {returncode}", code=returncode)
 

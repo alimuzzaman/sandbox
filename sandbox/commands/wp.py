@@ -254,7 +254,14 @@ def cmd_wp(cfg, args) -> None:
             die("managed-native async wp requires an adapter-native durable "
                 "transport; host/legacy job fallback is disabled")
         from sandbox.commands.jobs import launch_job
-        jid = launch_job(args.resolved_instance, pt)
+        try:
+            jid = launch_job(args.resolved_instance, pt)
+        except subprocess.TimeoutExpired:
+            die(
+                "async wp job acceptance timed out; acceptance is unknown—"
+                "inspect `./sb jobs` before retrying",
+                code=124,
+            )
         print(jid)
         print(f"started background job {jid}", file=sys.stderr)
         print(f"  poll:   ./sb job {jid}", file=sys.stderr)

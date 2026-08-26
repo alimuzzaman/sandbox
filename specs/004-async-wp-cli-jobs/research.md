@@ -41,7 +41,8 @@ acceptance. It contains only the job ID, launcher kind, wall-clock acceptance
 time, and monotonic client-side `acceptance_ms`; it never stores command argv or
 output. Polling may surface the measured latency as diagnostic metadata, but a
 live cold/warm sample is still required before the SC-001 target is considered
-verified.
+verified. Probe and launcher calls share a finite 15-second acceptance budget;
+an expiry is an unknown acceptance, not a safe retry signal.
 
 ## Decision: incremental output via byte offset
 

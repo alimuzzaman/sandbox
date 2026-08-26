@@ -37,6 +37,9 @@
   or runtime work.
 - `./sb wp --async <args>` → prints the `job_id`; use this detached path for
   work that should outlive the synchronous wait bound.
+- Async Docker probe/launch is bounded to 15 seconds. A timeout is reported as
+  acceptance unknown; inspect `./sb jobs` before retrying because a detached
+  launch may have crossed the transport boundary.
 - `./sb job <id> [--follow] [--kill]` → show status + tail; `--follow` streams; `--kill` cancels.
 - `./sb jobs [--prune]` → list active/recent jobs; both normal listing and
   `--prune` sweep only old *terminal* artifact groups, never individual files

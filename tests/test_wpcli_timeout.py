@@ -128,6 +128,26 @@ class TestWpCliTimeout(unittest.TestCase):
         self.assertIn("wp command failed with exit code 124", err.getvalue())
         self.assertNotIn("completion is unknown", err.getvalue())
 
+    def test_cmd_wp_async_acceptance_timeout_is_explicitly_unknown(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture", passthrough=["option", "get", "siteurl"],
+            run_async=True,
+        )
+        err = StringIO()
+        expired = subprocess.TimeoutExpired(["docker", "compose"], 15)
+        with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(command, "managed_native_instance_selected", return_value=None), \
+                mock.patch("sandbox.commands.jobs.launch_job", side_effect=expired) as launch, \
+                redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                command.cmd_wp({}, args)
+        self.assertEqual(raised.exception.code, 124)
+        self.assertIn("async wp job acceptance timed out", err.getvalue())
+        self.assertIn("acceptance is unknown", err.getvalue())
+        launch.assert_called_once_with("fixture", ["option", "get", "siteurl"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

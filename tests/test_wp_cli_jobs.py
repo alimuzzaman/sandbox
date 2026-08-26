@@ -77,6 +77,8 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(receipt["job_id"], jid)
         self.assertEqual(receipt["launcher"], "web-exec")
         self.assertGreaterEqual(receipt["acceptance_ms"], 0)
+        self.assertGreater(compose.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(compose.call_args.kwargs["timeout"], jobs._JOB_ACCEPTANCE_TIMEOUT)
 
     def test_docker_launch_keeps_run_fallback_without_builtin_cli(self):
         with patch.object(jobs, "wp_dir", return_value=self.root), \

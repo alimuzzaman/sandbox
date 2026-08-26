@@ -16,6 +16,7 @@ from sandbox.registry import register
 _JOB_RE = re.compile(r"^[a-f0-9]{16}$")
 _JOB_MAX_AGE = 24 * 3600  # prune jobs older than 24h (spec FR-007)
 _JOB_ORPHAN_EXIT = 1
+_JOB_ACCEPTANCE_TIMEOUT = 15.0
 
 
 def _job_dir(instance: str, *, create: bool = True) -> Path:
@@ -110,6 +111,11 @@ def _write_acceptance_receipt(instance: str, jid: str, launcher: str,
     except OSError:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _remaining_acceptance_timeout(started: float) -> float:
+    """Return a positive Compose deadline shared by probe and launch."""
+    return max(0.1, _JOB_ACCEPTANCE_TIMEOUT - (time.monotonic() - started))
 
 
 def _known_job(paths: tuple[Path, Path, Path]) -> bool:
@@ -301,14 +307,15 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
         # even when the web container has the built-in phar.
         use_builtin = (
             bool(wp_args) and wp_args[0] != "db" and
-            _wp_has_builtin_cli(instance)
+            _wp_has_builtin_cli(instance, timeout=_remaining_acceptance_timeout(started))
         )
         if use_builtin:
             # `exec -d` is the lightweight detached launcher.  The web
             # container is the cancellation boundary for this path; the
             # wrapper's PID remains an internal observation handle.
             compose("exec", "-d", "-u", "www-data", "-T", "wp", "sh", "-c",
-                    wrapper, instance=instance)
+                    wrapper, instance=instance,
+                    timeout=_remaining_acceptance_timeout(started))
             _job_launcher_path(instance, jid).write_text("web-exec\n")
             launcher = "web-exec"
         else:
@@ -317,7 +324,8 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
             # the web service is unavailable.
             compose("run", "-d", "--name", _job_name(instance, jid),
                     "--entrypoint", "sh", "wpcli", "-c", wrapper,
-                    instance=instance)
+                    instance=instance,
+                    timeout=_remaining_acceptance_timeout(started))
             _job_launcher_path(instance, jid).write_text("run\n")
             launcher = "run"
         _write_acceptance_receipt(instance, jid, launcher, started)

@@ -398,6 +398,7 @@ def _cleanup_planes(
     sandbox_home: Path,
     extraction_root: Path,
     artifact_dir: Path,
+    registry_remove=None,
 ) -> dict[str, object]:
     compose_path = core.compose_file(instance)
 
@@ -451,15 +452,9 @@ def _cleanup_planes(
 
     def remove_registry() -> None:
         try:
-            remover = getattr(core, "registry_remove", None)
-            if not callable(remover):
-                # The split core package currently exposes the read/put
-                # facades but not the legacy remove facade.  Resolve the
-                # supported public compatibility API only as a fallback; do
-                # not parse registry JSON in the archive runner.
-                import sandbox_core as legacy_core
-                remover = legacy_core.registry_remove
-            remover(str(review_root), label="default")
+            remover = registry_remove or getattr(core, "registry_remove", None)
+            if callable(remover):
+                remover(str(review_root), label="default")
         except Exception:
             # A boot failure can leave no registry record.  Verification below
             # is authoritative and keeps this callback idempotent.
@@ -537,7 +532,6 @@ def run_archive_child(
         # sandbox.yml defaults or local state.
         import sandbox.core as core
         import sandbox.core._instances as instances_module
-        import sandbox_core as legacy_core
         from sandbox.commands.plugin_check import (
             _parse_findings,
             _read_version_header,
@@ -552,8 +546,11 @@ def run_archive_child(
             plugin_slug=plugin_slug,
         )
         # ``ensure_instance`` reaches this compatibility loader through its
-        # lazy ``_core()`` import.  Replace it only in this fresh child, so no
-        # caller process or global config is modified.
+        # lazy ``_core()`` import.  Resolve the existing compatibility owner
+        # through `_instances`; do not add another direct legacy consumer here.
+        legacy_core = instances_module._core()
+        # Replace it only in this fresh child, so no caller process or global
+        # config is modified.
         original_project_loader = legacy_core.load_project_config
         original_legacy_runtime_loader = getattr(legacy_core, "load_config", None)
         original_runtime_loader = instances_module.load_config
@@ -694,6 +691,7 @@ def run_archive_child(
             sandbox_home=sandbox_home,
             extraction_root=extraction_root,
             artifact_dir=artifact_dir,
+            registry_remove=getattr(legacy_core, "registry_remove", None),
         )
     except BaseException:
         cleanup = {

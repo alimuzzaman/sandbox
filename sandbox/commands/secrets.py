@@ -14,7 +14,7 @@ from sandbox.secrets.context import build_secret_service
 from sandbox.secrets.models import MAX_VALUE_BYTES
 
 
-ACTIONS = ("source-info", "inspect", "validate", "run", "set", "organize", "reveal", "migrate-zshrc")
+ACTIONS = ("source-info", "inspect", "validate", "run", "set", "unset", "organize", "reveal", "migrate-zshrc")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -75,6 +75,15 @@ def configure_parser(parser) -> None:
     setting.add_argument("--profile")
     setting.add_argument("--json", action="store_true")
     setting.add_argument("--project-dir", default=".")
+
+    unsetting = actions.add_parser(
+        "unset", help="remove one existing dotenv assignment without displaying its value",
+    )
+    unsetting.add_argument("--source", required=True)
+    unsetting.add_argument("key")
+    unsetting.add_argument("--if-revision")
+    unsetting.add_argument("--json", action="store_true")
+    unsetting.add_argument("--project-dir", default=".")
 
     organize = actions.add_parser(
         "organize", help="group one dotenv source into documented sections without reading values",
@@ -267,6 +276,11 @@ def cmd_secrets(cfg, args) -> None:
                 value = _stdin_secret() if args.stdin else _tty_secret(f"New value for {args.key}: ")
                 payload = service.set(args.source, args.key, value,
                                       input_channel="stdin" if args.stdin else "tty", **kwargs)
+            _emit(payload, args.json)
+        elif args.action == "unset":
+            payload = service.unset(
+                args.source, args.key, expected_revision=args.if_revision,
+            )
             _emit(payload, args.json)
         elif args.action == "organize":
             _emit(service.organize(args.source, apply=args.apply,

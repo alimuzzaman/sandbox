@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from .audit import SecretAudit
 from .formats import SecretFormatError, parse_secret_document, validate_selector
 from .models import MAX_SELECTED_KEYS, SecretBrokerError, UseProfile, success
-from .parser import SecretParseError, parse_document
+from .parser import SecretParseError, parse_document, remove_assignment
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
 from .runner import run_with_secret, run_with_secrets
 from .sources import SourceRegistry
@@ -295,6 +295,31 @@ class SecretService:
                            validation=checked, correlation_id=correlation)
         return self._operate("set", source, (key,), surface, perform,
                              profile=validation_profile, input_channel=input_channel)
+
+    def unset(self, source: str, key: str, *, expected_revision=None,
+              surface="cli") -> dict:
+        """Remove one existing dotenv assignment through the local broker."""
+        self._validate_source_key(source, key)
+        if surface != "cli":
+            raise SecretBrokerError("update_denied", "secret updates require the local CLI")
+
+        def perform(correlation):
+            if self.registry.policy(source).format != "dotenv":
+                raise SecretBrokerError(
+                    "update_unsupported", "secret updates are not supported for this format",
+                )
+            safe, document = self._document(source)
+            if key not in document.entries:
+                raise SecretBrokerError("key_missing", "secret key does not exist")
+            updated = remove_assignment(document, key)
+            revision = rewrite_source(
+                safe, updated, revision_key=load_revision_key(self.revision_key_path),
+                expected_revision=expected_revision,
+            )
+            return success("unset", source=source, key=key, action="removed",
+                           revision=revision, correlation_id=correlation)
+
+        return self._operate("unset", source, (key,), surface, perform)
 
     def organize(self, source: str, *, apply: bool = False, expected_revision=None,
                  surface: str = "cli") -> dict:

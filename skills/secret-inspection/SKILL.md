@@ -187,6 +187,26 @@ Never use a plaintext flag, `KEY=value`, an ordinary environment variable, an
 arbitrary input file, or a shell command string. Confirm only non-secret status,
 validation state, and the opaque revision. Do not inspect the file afterward.
 
+## 6a. Remove one key without reading the source
+
+```bash
+./sb secrets unset --source SOURCE_ALIAS SECRET_KEY --if-revision OPAQUE_REVISION \
+  --project-dir PROJECT_DIR
+```
+
+Use this for stale dotenv assignments. It is local-CLI-only, requires the key
+to exist, preserves unrelated raw records and comments, and uses the same
+owner-only lock, signature check, atomic replacement, and opaque revision as
+`set`. The revision guard is optional but recommended after inspection. It has
+no plaintext value, wildcard, batch, or `--yes` input, and refuses structured,
+binary, and other non-dotenv sources. A missing key is a bounded refusal, not a
+successful no-op. Verify only the returned action/revision or rerun `inspect`;
+never open the source to confirm removal.
+
+For a value-free rename, use `set --from-ref SOURCE_ALIAS:OLD_KEY
+--create-only` for the new key, then inspect and run `unset` on the old key
+with `--if-revision`. The operations remain separate and each is audited.
+
 ## 6b. Group a dotenv source without reading it
 
 ```bash

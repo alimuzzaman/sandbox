@@ -65,7 +65,7 @@ Supported registered formats are:
 
 | Format | Typical documented sources | Inspection behavior |
 |---|---|---|
-| `dotenv` | `.env*`, Sandbox personal assignments | Names, scalar metadata, eligible fixed mask, validation, bounded use, targeted update |
+| `dotenv` | `.env*`, Sandbox personal assignments | Names, scalar metadata, eligible fixed mask, validation, bounded use, targeted update/unset |
 | `json` | GCP credentials, Docker config, Terraform credentials, Composer auth | RFC 6901-style leaf selectors; no mask, exact length, or update |
 | `ini` | AWS credentials, `.pypirc`, OCI config | `/section/key` selectors; no interpolation |
 | `properties` | `.npmrc`-style flat configuration | Escaped `/key` selectors; continuations rejected |
@@ -302,6 +302,29 @@ Never use a plaintext command argument, `KEY=value`, a parent environment
 variable, an arbitrary input file, a shell command string, or an ordinary MCP
 field for the candidate. Do not verify by opening the source afterward; use
 metadata, validation, or a bounded trusted child.
+
+### 6a. Remove one assignment without reading the source
+
+```bash
+./sb secrets unset --source SOURCE_ALIAS SECRET_KEY \
+  --if-revision OPAQUE_REVISION --project-dir PROJECT_DIR
+```
+
+`unset` is local-CLI-only and supports registered dotenv sources. It requires
+the key to exist, removes only that assignment, preserves unrelated raw
+records/comments/newlines, and uses the same owner-only lock, signature check,
+atomic replacement, and opaque revision as `set`. The revision guard is
+optional but recommended after inspection; a stale revision refuses the write.
+The result contains only source/key identifiers, the `removed` action, audit
+correlation, and a new opaque revision. It never accepts a plaintext value,
+wildcard, batch, or `--yes`, and it refuses structured or binary sources. A
+missing key is a bounded refusal, not a successful no-op.
+
+To rename a dotenv key without exposing its value, first use `set
+--from-ref SOURCE_ALIAS:OLD_KEY --create-only` for the new key, then inspect
+the returned revision and run `unset` for the old key with `--if-revision`.
+The two writes are intentionally separate so each has its own audit event and
+revision guard.
 
 ### 6b. Group one dotenv source into documented sections
 

@@ -421,6 +421,32 @@ class TestSecretBrokerService(unittest.TestCase):
             stat.S_IMODE((self.root / ".env.fixture.sb-secrets.lock").stat().st_mode), 0o600,
         )
 
+    def test_unset_removes_only_the_requested_assignment_and_returns_revision(self):
+        before = self.source.read_bytes()
+        metadata_result = self.service.inspect("fixture", keys=["API_TOKEN"], mode="metadata")
+        result = self.service.unset(
+            "fixture", "API_TOKEN", expected_revision=metadata_result["revision"],
+        )
+        after = self.source.read_bytes()
+        self.assertEqual(result["action"], "removed")
+        self.assertNotIn(b"API_TOKEN=", after)
+        self.assertIn(b"# preserved\nPUBLIC_NAME=visible-label\n", after)
+        self.assertNotEqual(after, before)
+        self.assertNotIn("Fixture1234567890", repr(result))
+        self.assertTrue(result["revision"].startswith("r1_"))
+
+    def test_unset_is_revision_checked_local_dotenv_only_and_strict_on_missing_keys(self):
+        metadata_result = self.service.inspect("fixture", keys=["API_TOKEN"], mode="metadata")
+        self.source.write_bytes(self.source.read_bytes() + b"OTHER=fixture\n")
+        with self.assertRaisesRegex(SecretBrokerError, "revision"):
+            self.service.unset(
+                "fixture", "API_TOKEN", expected_revision=metadata_result["revision"],
+            )
+        with self.assertRaisesRegex(SecretBrokerError, "does not exist"):
+            self.service.unset("fixture", "MISSING")
+        with self.assertRaisesRegex(SecretBrokerError, "local CLI"):
+            self.service.unset("fixture", "API_TOKEN", surface="mcp")
+
     def test_reference_generation_profile_validation_and_atomic_failure(self):
         other = self.root / ".env.other"
         other.write_text("COPY_FROM=SyntheticReference123456789AbCd\n")

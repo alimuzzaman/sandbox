@@ -343,6 +343,15 @@ def replace_assignment(
     return b"".join(replacement if record is target else record.raw for record in document.records)
 
 
+def remove_assignment(document: ParsedDocument, key: str) -> bytes:
+    """Remove one assignment while preserving every unrelated raw record."""
+    _validate_key(key)
+    target = document.entries.get(key)
+    if target is None:
+        _refuse("missing_key")
+    return b"".join(record.raw for record in document.records if record is not target)
+
+
 __all__ = [
     "AssignmentRecord",
     "BlankRecord",
@@ -356,4 +365,5 @@ __all__ = [
     "parse_document",
     "render_assignment",
     "replace_assignment",
+    "remove_assignment",
 ]

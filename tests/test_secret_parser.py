@@ -5,6 +5,7 @@ from sandbox.secrets.parser import (
     SecretParseError,
     parse_document,
     render_assignment,
+    remove_assignment,
     replace_assignment,
 )
 
@@ -156,6 +157,20 @@ class SecretParserTests(unittest.TestCase):
         document = parse_document(b"OTHER=value\n")
         with self.assertRaises(SecretParseError) as raised:
             replace_assignment(document, "TOKEN", "replacement")
+        self.assertEqual(raised.exception.code, "missing_key")
+
+    def test_remove_preserves_unrelated_records_and_supports_mixed_newlines(self):
+        source = b"# keep\r\nREMOVE=fixture\nOTHER='unchanged'"
+        document = parse_document(source)
+        self.assertEqual(
+            remove_assignment(document, "REMOVE"),
+            b"# keep\r\nOTHER='unchanged'",
+        )
+
+    def test_remove_requires_an_existing_valid_key(self):
+        document = parse_document(b"OTHER=value\n")
+        with self.assertRaises(SecretParseError) as raised:
+            remove_assignment(document, "MISSING")
         self.assertEqual(raised.exception.code, "missing_key")
 
 

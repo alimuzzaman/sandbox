@@ -45,6 +45,36 @@ class SecretCommandTests(unittest.TestCase):
             ("source-info", "fixture", False, False, "."),
         )
 
+    def test_unset_parser_has_no_value_input_and_supports_revision_guard(self):
+        args = self.parser().parse_args([
+            "unset", "--source", "fixture", "API_TOKEN", "--if-revision", "r1_fixture",
+        ])
+        self.assertEqual(
+            (args.action, args.source, args.key, args.if_revision, args.project_dir),
+            ("unset", "fixture", "API_TOKEN", "r1_fixture", "."),
+        )
+        self.assertNotIn("--value", self.parser().format_help())
+
+    def test_unset_dispatches_without_receiving_a_secret_value(self):
+        args = SimpleNamespace(
+            action="unset", source="fixture", key="API_TOKEN", if_revision="r1_fixture",
+            project_dir=".", json=True,
+        )
+        calls = []
+        service = SimpleNamespace(unset=lambda *call_args, **call_kwargs: calls.append(
+            (call_args, call_kwargs)
+        ) or {
+            "ok": True, "operation": "unset", "source": call_args[0],
+            "key": call_args[1], "action": "removed", "revision": "r1_new",
+        })
+        with patch.object(command, "_service", return_value=service), \
+             patch.object(command, "_emit") as emit:
+            command.cmd_secrets({}, args)
+        self.assertEqual(calls, [(("fixture", "API_TOKEN"), {
+            "expected_revision": "r1_fixture",
+        })])
+        emit.assert_called_once()
+
     def test_parser_has_no_plaintext_value_or_reveal_json_flags(self):
         help_text = self.parser().format_help()
         self.assertNotIn("--value", help_text)

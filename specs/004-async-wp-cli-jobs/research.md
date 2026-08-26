@@ -36,6 +36,13 @@
 - `job_<id>.log` (combined stdout+stderr, appended live) + `job_<id>.status` (exists ⇒ done; contents = exit code; `143` if killed) + `job_<id>.pid`.
 - **Rationale**: lock-free, host-readable directly from the bind-mount, survives across calls; presence/absence is the running→completed signal. Matches the proven Novamira pattern.
 
+The launcher also atomically writes a private `job_<id>.receipt` after detached
+acceptance. It contains only the job ID, launcher kind, wall-clock acceptance
+time, and monotonic client-side `acceptance_ms`; it never stores command argv or
+output. Polling may surface the measured latency as diagnostic metadata, but a
+live cold/warm sample is still required before the SC-001 target is considered
+verified.
+
 ## Decision: incremental output via byte offset
 
 - `wp_cli_job(offset, limit)` fseeks to `offset`, reads `limit` bytes, reports `bytes_read` + `truncated`; `limit=-1` = whole file.

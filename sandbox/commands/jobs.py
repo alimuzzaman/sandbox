@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import math
 import os
 import re
 import secrets
@@ -54,12 +55,61 @@ def _job_launcher_path(instance: str, jid: str) -> Path:
     return _job_dir(instance, create=False) / f"job_{jid}.launcher"
 
 
+def _job_receipt_path(instance: str, jid: str) -> Path:
+    """Return the private acceptance receipt path for a job."""
+    return _job_dir(instance, create=False) / f"job_{jid}.receipt"
+
+
 def _job_launcher_mode(instance: str, jid: str) -> str | None:
     try:
         mode = _job_launcher_path(instance, jid).read_text(errors="replace").strip()
     except OSError:
         return None
     return mode or None
+
+
+def _read_acceptance_receipt(instance: str, jid: str) -> dict | None:
+    """Read a validated, value-free acceptance receipt when present."""
+    try:
+        receipt = json.loads(_job_receipt_path(instance, jid).read_text())
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict) or receipt.get("job_id") != jid \
+            or receipt.get("status") != "accepted":
+        return None
+    launcher = receipt.get("launcher")
+    elapsed = receipt.get("acceptance_ms")
+    try:
+        elapsed_value = float(elapsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if launcher not in {"herd", "web-exec", "run"} \
+            or isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) \
+            or not math.isfinite(elapsed_value) or elapsed < 0:
+        return None
+    return {"launcher": launcher, "acceptance_ms": elapsed_value}
+
+
+def _write_acceptance_receipt(instance: str, jid: str, launcher: str,
+                              started: float) -> None:
+    """Atomically retain launcher acceptance timing without command argv/output."""
+    if launcher not in {"herd", "web-exec", "run"}:
+        raise ValueError("invalid async job launcher")
+    target = _job_receipt_path(instance, jid)
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
+    payload = {
+        "job_id": jid,
+        "status": "accepted",
+        "launcher": launcher,
+        "acceptance_ms": round(max(0.0, (time.monotonic() - started) * 1000), 3),
+        "accepted_at": time.time(),
+    }
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+        os.replace(temporary, target)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _known_job(paths: tuple[Path, Path, Path]) -> bool:
@@ -205,6 +255,7 @@ def _reconcile_job(instance: str, jid: str, paths: tuple[Path, Path, Path] | Non
 def launch_job(instance: str, wp_args: list[str]) -> str:
     """Start `wp <wp_args>` detached; return a 16-hex job id. State lands in
     runtime/wp-<instance>/.sb-jobs/job_<id>.{pid,log,status}."""
+    started = time.monotonic()
     jid = secrets.token_hex(8)
     _job_dir(instance)  # ensure exists
     quoted = " ".join(shlex.quote(a) for a in wp_args)
@@ -224,6 +275,7 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
         # here too so an immediate poll/cancel has a process handle instead of
         # racing the shell's first instruction.
         _job_paths(instance, jid)[2].write_text(str(process.pid))
+        _write_acceptance_receipt(instance, jid, "herd", started)
     else:
         # Apache and Nginx web services mount the shipped wp-cli phar at
         # /usr/local/bin/wp.  Reuse that already-running container so async
@@ -258,6 +310,7 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
             compose("exec", "-d", "-u", "www-data", "-T", "wp", "sh", "-c",
                     wrapper, instance=instance)
             _job_launcher_path(instance, jid).write_text("web-exec\n")
+            launcher = "web-exec"
         else:
             # wpcli is a run-style service; entrypoint is `wp`, override to sh
             # (gotcha #6). This compatibility path starts dependencies when
@@ -266,6 +319,8 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
                     "--entrypoint", "sh", "wpcli", "-c", wrapper,
                     instance=instance)
             _job_launcher_path(instance, jid).write_text("run\n")
+            launcher = "run"
+        _write_acceptance_receipt(instance, jid, launcher, started)
         # The launcher has accepted the detached shell by this point. The
         # empty log is the durable running marker until the wrapper writes its
         # PID and first output.
@@ -284,6 +339,9 @@ def job_status(instance: str, jid: str, offset: int = 0, limit: int = 1_048_576)
     if state == "not_found":
         return {"job_id": jid, "status": "not_found"}
     out = {"job_id": jid, "status": state, "stdout": "", "bytes_read": 0, "truncated": False}
+    receipt = _read_acceptance_receipt(instance, jid)
+    if receipt is not None:
+        out.update(receipt)
     if st.exists():
         c = st.read_text().strip()
         if c:
@@ -376,7 +434,8 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
             # because its first output is older than the retention window.
             if _reconcile_job(instance, jid, paths) != "completed":
                 continue
-            artifacts = (*paths, _job_launcher_path(instance, jid))
+            artifacts = (*paths, _job_launcher_path(instance, jid),
+                         _job_receipt_path(instance, jid))
             newest = max(path.stat().st_mtime for path in artifacts if path.exists())
             if now - newest > max_age:
                 for path in artifacts:

@@ -77,9 +77,10 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   service via `compose exec -d` when the built-in WP-CLI binary is present.
   Shared-container polling/cancellation is covered by an internal launcher
   marker and wrapper TERM trap; `wp db …`, LiteSpeed, older images, and
-  unavailable web services retain the `compose run -d` fallback. This is a
-  source/test improvement only; no live timing or all-tier parity claim is
-  recorded yet.
+  unavailable web services retain the `compose run -d` fallback. Acceptance
+  now writes a private timing receipt (`acceptance_ms`) separate from command
+  output. This is a source/test improvement only; no live timing or all-tier
+  parity claim is recorded yet.
 
   Bounded implementation tasks:
 

@@ -7,6 +7,7 @@ handles: Docker/Herd live proof remains the explicitly blocked T018 work.
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -72,6 +73,10 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertIn("/var/www/vhosts/localhost/html/.sb-jobs", wrapper)
         self.assertIn("wp option get siteurl", wrapper)
         self.assertTrue(self._paths(jid)[0].exists())
+        receipt = json.loads((self.job_dir / f"job_{jid}.receipt").read_text())
+        self.assertEqual(receipt["job_id"], jid)
+        self.assertEqual(receipt["launcher"], "web-exec")
+        self.assertGreaterEqual(receipt["acceptance_ms"], 0)
 
     def test_docker_launch_keeps_run_fallback_without_builtin_cli(self):
         with patch.object(jobs, "wp_dir", return_value=self.root), \
@@ -88,6 +93,7 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(args[4:8], ("--entrypoint", "sh", "wpcli", "-c"))
         self.assertIn("/var/www/vhosts/localhost/html/.sb-jobs", args[8])
         self.assertTrue(self._paths(jid)[0].exists())
+        self.assertEqual(json.loads((self.job_dir / f"job_{jid}.receipt").read_text())["launcher"], "run")
 
     def test_docker_db_job_keeps_mysql_client_fallback(self):
         with patch.object(jobs, "wp_dir", return_value=self.root), \
@@ -122,6 +128,10 @@ class TestWpCliJobs(unittest.TestCase):
         self.job_dir.mkdir(parents=True, exist_ok=True)
         (self.job_dir / f"job_{jid}.launcher").write_text("web-exec\n")
         result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        (self.job_dir / f"job_{jid}.receipt").write_text(json.dumps({
+            "job_id": jid, "status": "accepted", "launcher": "web-exec",
+            "acceptance_ms": 12.5,
+        }))
         with patch.object(jobs, "wp_dir", return_value=self.root), \
                 patch.object(jobs, "_is_herd_instance", return_value=False), \
                 patch.object(jobs, "compose", return_value=result) as compose, \
@@ -129,6 +139,8 @@ class TestWpCliJobs(unittest.TestCase):
             state = jobs.job_status(self.instance, jid)
 
         self.assertEqual(state["status"], "running")
+        self.assertEqual(state["acceptance_ms"], 12.5)
+        self.assertEqual(state["launcher"], "web-exec")
         self.assertEqual(compose.call_args.args[:6],
                          ("exec", "-T", "wp", "sh", "-c", "kill -0 4242"))
 
@@ -141,6 +153,18 @@ class TestWpCliJobs(unittest.TestCase):
         with patch.object(jobs, "wp_dir", return_value=self.root), \
                 patch.object(jobs, "compose", return_value=result):
             self.assertIsNone(jobs._docker_exec_job_running(self.instance, jid, pid))
+
+    def test_malformed_acceptance_receipt_is_ignored(self):
+        jid = "a" * 16
+        self._paths(jid)[0].touch()
+        (self.job_dir / f"job_{jid}.receipt").write_text(json.dumps({
+            "job_id": jid, "status": "accepted", "launcher": "web-exec",
+            "acceptance_ms": 10 ** 1000,
+        }))
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_job_running", return_value=None):
+            self.assertIsNone(jobs._read_acceptance_receipt(self.instance, jid))
 
     def test_kill_shared_container_job_signals_wrapper_and_verifies_exit(self):
         jid = "d" * 16
@@ -241,11 +265,16 @@ class TestWpCliJobs(unittest.TestCase):
         running_paths = self._paths(running)
         terminal_launcher = self.job_dir / f"job_{terminal}.launcher"
         terminal_launcher.write_text("web-exec\n")
+        terminal_receipt = self.job_dir / f"job_{terminal}.receipt"
+        terminal_receipt.write_text(json.dumps({
+            "job_id": terminal, "status": "accepted", "launcher": "web-exec",
+            "acceptance_ms": 4.0,
+        }))
         for path in terminal_paths:
             path.write_text("0" if path.suffix == ".status" else "old")
         running_paths[0].write_text("still running")
         old = time.time() - jobs._JOB_MAX_AGE - 1
-        for path in (*terminal_paths, terminal_launcher, running_paths[0]):
+        for path in (*terminal_paths, terminal_launcher, terminal_receipt, running_paths[0]):
             os.utime(path, (old, old))
 
         with patch.object(jobs, "wp_dir", return_value=self.root), \
@@ -256,6 +285,7 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertFalse(any(path.exists() for path in terminal_paths))
         self.assertFalse(terminal_launcher.exists())
+        self.assertFalse(terminal_receipt.exists())
         self.assertTrue(running_paths[0].exists())
 
     def test_ordinary_list_runs_the_terminal_group_retention_sweep(self):

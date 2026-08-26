@@ -15,6 +15,8 @@
 
 ### `wp_cli_job(job_id, offset=0, limit=1048576, *, project_dir)`
 - Validates `job_id`; returns `{ ok, job_id, status, exit_code?, stdout, bytes_read, truncated }`.
+- New jobs may also expose value-free acceptance metadata (`launcher` and
+  measured `acceptance_ms`); command argv and output remain separate artifacts.
 - `status ∈ {running, completed, not_found}`; `limit=-1` ⇒ whole log.
 
 ### `wp_cli_job_kill(job_id, *, project_dir)`

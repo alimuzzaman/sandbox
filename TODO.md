@@ -279,9 +279,10 @@ observations; these are deduplicated work items, not permission to mutate.
 - [ ] **Secret broker correctness and ergonomics:** surface trusted-child exit
   failures, preserve source comments, support safe unset/delete, paired-key
   injection, bounded long-lived local development, OpenRouter validation, and
-  direct child-argv passthrough without printing values. IDs: `3c184f3c`,
-  `910bc8c9`, `54c1c9ae`, `d89c5644`, `c335f32e`, `2cfab06f`, `18c1ac3d`,
-  `6ae07ae7`, `72d7e416`.
+  direct child-argv passthrough without printing values. The sanctioned
+  single-key `unset` path is verified in commit `4bb9be4`; remaining items are
+  tracked here. IDs: `3c184f3c`, `910bc8c9`, `54c1c9ae`, `c335f32e`,
+  `2cfab06f`, `18c1ac3d`, `6ae07ae7`, `72d7e416`.
 - [ ] **CLI contract/discoverability:** document/enforce feedback limits and
   prefix lookup, focused test selection/interpreter routing, status/instance
   listing, local-vs-remote selectors, `--request-id`, `--project-dir`, WP

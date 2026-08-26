@@ -51,6 +51,33 @@ def _target_is_remote(target) -> bool:
     return getattr(target, "kind", None) == "remote"
 
 
+def _remote_ensure_reachability(remote_name: str, remote: dict) -> dict | None:
+    """Refuse remote ensure before deploy when one bounded liveness probe fails."""
+    from sandbox.core import _remote
+
+    try:
+        probe = _remote.check_reachable_diagnostic(remote)
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+        probe = {"reachable": False, "state": "probe_unavailable", "latency_ms": None}
+    if probe.get("reachable") is True:
+        return None
+    state = probe.get("state")
+    if not isinstance(state, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", state):
+        state = "unreachable"
+    return {
+        "ok": False,
+        "error": {
+            "code": "remote_unreachable",
+            "message": (
+                f"remote {remote_name!r} is unreachable ({state}); "
+                "restore SSH reachability or retry with --local"
+            ),
+        },
+        "reachability": {"state": state, "latency_ms": probe.get("latency_ms")},
+        "target": {"remote": remote_name},
+    }
+
+
 
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
@@ -551,6 +578,9 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         return None
     remote = target.remote or _remote.get_remote(target.remote_name)
     if action == "ensure":
+        refusal = _remote_ensure_reachability(target.remote_name, remote)
+        if refusal is not None:
+            return refusal
         deployed = _remote.deploy_exact_working_tree(
             remote, target.project_root, remote_name=target.remote_name,
         )

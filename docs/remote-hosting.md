@@ -277,6 +277,11 @@ DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)
 defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
 public URL path unless they explicitly opt out.
 
+Remote `ensure` runs one bounded, non-multiplexed SSH liveness probe before source
+deployment. If the probe fails, it returns `remote_unreachable` with the safe state
+and `--local` recovery hint; no Git push, workspace staging, or remote instance
+mutation starts.
+
 When `--ensure` or `--expose` is requested, deploy first records the selected remote's
 read-only instance inventory. If remote `ensure` fails before returning a usable instance,
 Sandbox compares the post-failure inventory with that baseline and removes only one

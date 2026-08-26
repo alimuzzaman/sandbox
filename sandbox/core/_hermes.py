@@ -2522,12 +2522,45 @@ def doctor(remote_name: str) -> dict:
     checks = dict(line.split("=", 1) for line in (res.stdout or "").splitlines() if "=" in line)
     required = ["git", "docker", "python3", "systemctl", "flock", "setsid", "hermes", "sandbox_sb", "sandbox_mcp_config", "sandbox_mcp_contract", "sandbox_mcp", "sandbox_profile"]
     healthy = res.returncode == 0 and all(checks.get(key) == "1" for key in required)
-    return result(healthy, "doctor", remote_name, status="healthy" if healthy else "degraded",
-                  data={"checks": checks, "mcp_configured": checks.get("sandbox_mcp_config") == "1",
-                        "mcp_contract_complete": checks.get("sandbox_mcp_contract") == "1",
-                        "mcp_catalog_complete": checks.get("sandbox_mcp") == "1",
-                        "direct_sb": checks.get("sandbox_sb") == "1"},
-                  error=None if healthy else HermesError("remote Hermes prerequisites are incomplete", "doctor_failed", True))
+    data = {
+        "checks": checks,
+        "mcp_configured": checks.get("sandbox_mcp_config") == "1",
+        "mcp_contract_complete": checks.get("sandbox_mcp_contract") == "1",
+        "mcp_catalog_complete": checks.get("sandbox_mcp") == "1",
+        "direct_sb": checks.get("sandbox_sb") == "1",
+        "ready": healthy,
+    }
+    if healthy:
+        return result(True, "doctor", remote_name, status="healthy", data=data)
+
+    # A doctor probe is also used before installation.  Keep that expected
+    # absence distinct from a broken installation so setup scripts can branch
+    # without parsing a generic doctor_failed error.  Only report the
+    # install-needed state when the remote probe completed and its host
+    # prerequisites are present; missing host tools remain a real degradation.
+    host_prerequisites = ["git", "docker", "python3", "systemctl", "flock", "setsid"]
+    if (res.returncode == 0
+            and all(checks.get(key) == "1" for key in host_prerequisites)
+            and checks.get("hermes") != "1"):
+        data.update({"readiness": "install_needed", "install_needed": True})
+        return result(True, "doctor", remote_name, status="install_needed", data=data)
+
+    # Hermes is present, but its Sandbox integration has not been configured
+    # yet.  This is the normal post-install/pre-setup state and is safe for a
+    # caller to resolve with the explicit setup command.  A failed MCP probe or
+    # invalid contract is still degraded below; it must not be mistaken for a
+    # setup-needed state.
+    if (res.returncode == 0
+            and checks.get("hermes") == "1"
+            and checks.get("sandbox_sb") == "1"
+            and (checks.get("sandbox_mcp_config") != "1"
+                 or checks.get("sandbox_profile") != "1")):
+        data.update({"readiness": "setup_needed", "setup_needed": True})
+        return result(True, "doctor", remote_name, status="setup_needed", data=data)
+
+    data["readiness"] = "degraded"
+    return result(False, "doctor", remote_name, status="degraded", data=data,
+                  error=HermesError("remote Hermes prerequisites are incomplete", "doctor_failed", True))
 
 
 def _worktree_snapshot(entry: dict, paths: dict) -> list[dict]:

@@ -14,6 +14,15 @@ effective `sandbox` policy (resolved home, enabled resource/prompt utilities,
 sequential calls, and no filters) using remote-only boolean checks; neither
 check prints the remote configuration or provider credentials.
 
+The doctor result has typed readiness states. `status=install_needed` with
+`data.readiness=install_needed` means the remote probe completed and host
+prerequisites are present, but Hermes is not installed yet; a setup flow can
+branch to `sb hermes install`. `status=setup_needed` means Hermes is installed
+but its Sandbox integration/profile is not configured; branch to
+`sb hermes setup`. Broken prerequisites, an invalid MCP contract, a failed MCP
+probe, and SSH/transport errors remain failures. `data.ready` is the strict
+readiness bit and stays false for both expected pre-install states.
+
 ## Private state repository
 
 Hermes can keep a rebuildable, sanitized harness snapshot in a private GitHub

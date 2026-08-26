@@ -2555,6 +2555,44 @@ class TestRemoteCommands(unittest.TestCase):
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
+    def test_doctor_reports_install_needed_when_host_is_ready_but_hermes_is_absent(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout=("git=1\ndocker=1\npython3=1\nsystemctl=1\nflock=1\nsetsid=1\n"
+                               "hermes=0\nsandbox_sb=1\nsandbox_mcp_config=0\n"
+                               "sandbox_mcp_contract=0\nsandbox_mcp=0\nsandbox_profile=0\n"
+                               "free_kb=1\nmem_kb=1\n")),
+        ]
+        out = hermes.doctor("test")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "install_needed")
+        self.assertEqual(out["data"]["readiness"], "install_needed")
+        self.assertTrue(out["data"]["install_needed"])
+        self.assertFalse(out["data"]["ready"])
+        self.assertIsNone(out["error"])
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_doctor_reports_setup_needed_after_install_before_setup(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout=("git=1\ndocker=1\npython3=1\nsystemctl=1\nflock=1\nsetsid=1\n"
+                               "hermes=1\nsandbox_sb=1\nsandbox_mcp_config=0\n"
+                               "sandbox_mcp_contract=0\nsandbox_mcp=0\nsandbox_profile=0\n"
+                               "free_kb=1\nmem_kb=1\n")),
+        ]
+        out = hermes.doctor("test")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "setup_needed")
+        self.assertEqual(out["data"]["readiness"], "setup_needed")
+        self.assertTrue(out["data"]["setup_needed"])
+        self.assertFalse(out["data"]["ready"])
+        self.assertIsNone(out["error"])
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
     def test_doctor_refuses_an_incomplete_mcp_catalog(self, get_remote, ssh_run):
         get_remote.return_value = self.entry
         ssh_run.side_effect = [

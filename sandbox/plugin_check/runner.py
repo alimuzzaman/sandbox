@@ -192,6 +192,41 @@ def _safe_runtime_config(sandbox_home: Path) -> dict[str, object]:
     }
 
 
+def _isolated_runtime_loader(base: Mapping[str, object], sandbox_home: Path):
+    """Load only the run-local defaults plus its generated local state.
+
+    Provisioning writes ports, mounts, and generated credentials to
+    ``sandbox.local.yml``.  Returning only ``base`` after that write makes the
+    next Compose render forget the archive mount.  Merge this one owner-only
+    file and nothing else; the normal machine config and user-global catalog
+    are never consulted.
+    """
+
+    def merge(left: Mapping[str, object], right: Mapping[str, object]) -> dict[str, object]:
+        output = dict(left)
+        for key, value in right.items():
+            if isinstance(value, Mapping) and isinstance(output.get(key), Mapping):
+                output[key] = merge(output[key], value)
+            else:
+                output[key] = value
+        return output
+
+    def load() -> dict[str, object]:
+        local_path = sandbox_home / "sandbox.local.yml"
+        local: Mapping[str, object] = {}
+        if local_path.is_file() and not local_path.is_symlink():
+            try:
+                import yaml
+                value = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+                if isinstance(value, Mapping):
+                    local = value
+            except (OSError, UnicodeError, ValueError, TypeError):
+                local = {}
+        return merge(base, local)
+
+    return load
+
+
 def _isolated_project_config(
     descriptor: Mapping[str, object],
     *,
@@ -481,6 +516,7 @@ def run_archive_child(
     instances_module = None
     original_project_loader = None
     original_runtime_loader = None
+    original_legacy_runtime_loader = None
 
     try:
         # All legacy runtime imports happen after the parent supplied the
@@ -507,9 +543,13 @@ def run_archive_child(
         # lazy ``_core()`` import.  Replace it only in this fresh child, so no
         # caller process or global config is modified.
         original_project_loader = legacy_core.load_project_config
+        original_legacy_runtime_loader = getattr(legacy_core, "load_config", None)
         original_runtime_loader = instances_module.load_config
         legacy_core.load_project_config = lambda _project_dir, label=None: dict(isolated_pconf)
-        instances_module.load_config = lambda: safe_cfg
+        isolated_loader = _isolated_runtime_loader(safe_cfg, sandbox_home)
+        if original_legacy_runtime_loader is not None:
+            legacy_core.load_config = isolated_loader
+        instances_module.load_config = isolated_loader
         result["action"] = "check"
 
         def boot() -> object:
@@ -669,6 +709,8 @@ def run_archive_child(
         legacy_core.load_project_config = original_project_loader
     if instances_module is not None and original_runtime_loader is not None:
         instances_module.load_config = original_runtime_loader
+    if legacy_core is not None and original_legacy_runtime_loader is not None:
+        legacy_core.load_config = original_legacy_runtime_loader
     return result
 
 

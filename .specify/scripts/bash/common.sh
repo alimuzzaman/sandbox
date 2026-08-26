@@ -168,8 +168,13 @@ get_feature_paths() {
         feature_dir="$SPECIFY_FEATURE_DIRECTORY"
         # Normalize relative paths to absolute under repo root
         [[ "$feature_dir" != /* ]] && feature_dir="$repo_root/$feature_dir"
-        # Persist to feature.json so future sessions without the env var still work
-        _persist_feature_json "$repo_root" "$SPECIFY_FEATURE_DIRECTORY"
+        # Normal feature creation persists the explicit override so future
+        # sessions inherit it. Read-only callers (for example a prerequisite
+        # probe selecting an older existing spec) can opt out without changing
+        # the owner-controlled feature pointer.
+        if [[ "${SPECIFY_FEATURE_DIRECTORY_NO_PERSIST:-0}" != "1" ]]; then
+            _persist_feature_json "$repo_root" "$SPECIFY_FEATURE_DIRECTORY"
+        fi
     elif [[ -f "$repo_root/.specify/feature.json" ]]; then
         local _fd
         _fd=$(read_feature_json_feature_directory "$repo_root")

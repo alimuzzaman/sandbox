@@ -12,6 +12,8 @@
 #   --require-tasks     Require tasks.md to exist (for implementation phase)
 #   --include-tasks     Include tasks.md in AVAILABLE_DOCS list
 #   --paths-only        Only output path variables (no validation)
+#   --feature-dir DIR   Read-only feature directory selector; does not update
+#                       .specify/feature.json
 #   --help, -h          Show help message
 #
 # OUTPUTS:
@@ -26,20 +28,33 @@ JSON_MODE=false
 REQUIRE_TASKS=false
 INCLUDE_TASKS=false
 PATHS_ONLY=false
+FEATURE_DIR_OVERRIDE=""
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --json)
             JSON_MODE=true
+            shift
             ;;
         --require-tasks)
             REQUIRE_TASKS=true
+            shift
             ;;
         --include-tasks)
             INCLUDE_TASKS=true
+            shift
             ;;
         --paths-only)
             PATHS_ONLY=true
+            shift
+            ;;
+        --feature-dir)
+            if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "ERROR: --feature-dir requires a feature directory path" >&2
+                exit 1
+            fi
+            FEATURE_DIR_OVERRIDE="$2"
+            shift 2
             ;;
         --help|-h)
             cat << 'EOF'
@@ -52,6 +67,8 @@ OPTIONS:
   --require-tasks     Require tasks.md to exist (for implementation phase)
   --include-tasks     Include tasks.md in AVAILABLE_DOCS list
   --paths-only        Only output path variables (no prerequisite validation)
+  --feature-dir DIR   Read-only feature directory selector; does not update
+                      .specify/feature.json
   --help, -h          Show this help message
 
 EXAMPLES:
@@ -63,12 +80,15 @@ EXAMPLES:
   
   # Get feature paths only (no validation)
   ./check-prerequisites.sh --paths-only
+
+  # Inspect an existing feature without changing the active feature pointer
+  ./check-prerequisites.sh --feature-dir specs/009-runtime-user-dir --json
   
 EOF
             exit 0
             ;;
         *)
-            echo "ERROR: Unknown option '$arg'. Use --help for usage information." >&2
+            echo "ERROR: Unknown option '$1'. Use --help for usage information." >&2
             exit 1
             ;;
     esac
@@ -77,6 +97,35 @@ done
 # Source common functions
 SCRIPT_DIR="$(CDPATH="" cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
+
+# An explicit selector is intentionally read-only. Validate it against the
+# selected Spec Kit project before handing it to common.sh, then disable the
+# normal environment-override persistence path for this invocation.
+if [[ -n "$FEATURE_DIR_OVERRIDE" ]]; then
+    _selector_repo_root=$(get_repo_root) || {
+        echo "ERROR: Failed to resolve the Spec Kit project root" >&2
+        exit 1
+    }
+    if [[ "$FEATURE_DIR_OVERRIDE" = /* ]]; then
+        _selector_candidate="$FEATURE_DIR_OVERRIDE"
+    else
+        _selector_candidate="$_selector_repo_root/$FEATURE_DIR_OVERRIDE"
+    fi
+    if ! _selector_candidate=$(CDPATH="" cd -- "$_selector_candidate" 2>/dev/null && pwd); then
+        echo "ERROR: --feature-dir does not point to an existing directory: $FEATURE_DIR_OVERRIDE" >&2
+        exit 1
+    fi
+    case "$_selector_candidate" in
+        "$_selector_repo_root"/*) ;;
+        *)
+            echo "ERROR: --feature-dir must stay inside the Spec Kit project: $_selector_repo_root" >&2
+            exit 1
+            ;;
+    esac
+    export SPECIFY_FEATURE_DIRECTORY="$_selector_candidate"
+    export SPECIFY_FEATURE_DIRECTORY_NO_PERSIST=1
+    unset _selector_repo_root _selector_candidate
+fi
 
 # Get feature paths
 _paths_output=$(get_feature_paths) || { echo "ERROR: Failed to resolve feature paths" >&2; exit 1; }

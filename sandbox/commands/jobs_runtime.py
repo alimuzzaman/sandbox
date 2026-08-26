@@ -33,6 +33,25 @@ def _emit_json_line(payload: dict) -> None:
     print(encoded, flush=True)
 
 
+def _remote_job_transport_failure(exc, args, operation: str) -> None:
+    """Render one bounded remote-job error instead of a traceback.
+
+    Remote control responses are untrusted.  Keep the transport's redacted
+    envelope at the CLI edge, especially when a controller returned malformed
+    JSON or a truncated page alongside retained job data.
+    """
+    payload = exc.to_payload(
+        remote=getattr(args, "remote", None), operation=operation,
+    )
+    if bool(getattr(args, "json", False)):
+        _emit_json_line(payload)
+        raise SystemExit(1)
+    _die(
+        f"{payload['error']} ({payload['code']}). "
+        "No remote job receipt was established; inspect remote state before retrying."
+    )
+
+
 def _local_job_not_found(job_id: str) -> dict:
     """Return a stable, path-free recovery receipt for local observation."""
     return {
@@ -438,17 +457,20 @@ def cmd_job_output(_cfg, args) -> None:
     effective_wait_seconds = max(wait_seconds, 1) if getattr(args, "follow", False) else wait_seconds
     if args.remote:
         from sandbox.core import _remote
-        from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path)
         cursor = args.cursor
         while True:
-            result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
-                offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
-                lines=getattr(args, "lines", None), since=getattr(args, "since", None),
-                max_bytes=max_bytes,
-                wait_seconds=effective_wait_seconds,
-                encoding=args.encoding, profile=getattr(args, "profile", "full"))
+            try:
+                result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
+                    offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
+                    lines=getattr(args, "lines", None), since=getattr(args, "since", None),
+                    max_bytes=max_bytes,
+                    wait_seconds=effective_wait_seconds,
+                    encoding=args.encoding, profile=getattr(args, "profile", "full"))
+            except RemoteJobTransportError as exc:
+                _remote_job_transport_failure(exc, args, "job-output")
             if args.json: print(json.dumps(result, sort_keys=True))
             elif result.get("data"): print(result["data"], end="")
             if not args.follow: return
@@ -512,7 +534,7 @@ def cmd_job_list(_cfg, args) -> None:
             _die("workspace_identity_unavailable: canonical target resolver is unavailable")
     if remote_name:
         from sandbox.core import _remote
-        from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
         list_options = {
             "limit": limit, "project_identity": project_identity,
             "workspace": workspace, "active_only": active_only,
@@ -523,9 +545,12 @@ def cmd_job_list(_cfg, args) -> None:
             list_options["kind"] = category
         if cursor_job_id:
             list_options["cursor_job_id"] = cursor_job_id
-        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(
-                remote_name, **list_options)
+        try:
+            result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+                remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(
+                    remote_name, **list_options)
+        except RemoteJobTransportError as exc:
+            _remote_job_transport_failure(exc, args, "job-list")
     else:
         query = {"limit": limit}
         if project_identity:
@@ -564,12 +589,14 @@ def cmd_job_cancel(_cfg, args) -> None:
     try:
         if args.remote:
             from sandbox.core import _remote
-            from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
             result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
                 remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).cancel(args.remote, args.job_id, force=args.force)
         else:
             result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
     except RuntimeError as exc:
+        if args.remote and isinstance(exc, RemoteJobTransportError):
+            _remote_job_transport_failure(exc, args, "job-cancel")
         _die(str(exc))
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cancelling")
 

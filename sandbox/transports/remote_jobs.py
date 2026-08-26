@@ -255,6 +255,14 @@ def _last_json(text: str) -> dict | None:
 
 
 def _error_detail(payload: dict | None, result: object) -> str:
+    """Return a bounded controller diagnostic without echoing retained output.
+
+    A failed control command can still put a valid-looking job page on stdout
+    before the transport notices truncation or a non-zero exit.  Treat stdout
+    as data, not an error channel: surfacing its tail can disclose retained
+    job logs and makes a malformed page look like a usable diagnostic.  The
+    controller's stderr remains a bounded diagnostic after redaction.
+    """
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):
@@ -263,12 +271,11 @@ def _error_detail(payload: dict | None, result: object) -> str:
                 return _safe_remote_detail(message)
         elif isinstance(error, str) and error.strip():
             return _safe_remote_detail(error)
-    for field in ("stderr", "stdout"):
-        detail = getattr(result, field, "")
-        if isinstance(detail, str) and detail.strip():
-            safe = _safe_remote_detail(detail)
-            if safe:
-                return safe
+    detail = getattr(result, "stderr", "")
+    if isinstance(detail, str) and detail.strip():
+        safe = _safe_remote_detail(detail)
+        if safe:
+            return safe
     return f"remote exit code {getattr(result, 'returncode', 1)}"
 
 

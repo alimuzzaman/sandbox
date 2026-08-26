@@ -51,7 +51,9 @@ If a remote control call cannot return a valid acceptance or retained-output
 receipt, the CLI emits one redacted `remote_job_transport_error` envelope (or a
 bounded human error) and exits non-zero. The envelope marks acceptance as
 `unknown` for submission operations; it never invents a job ID or implies that a
-retry is safe. Inspect remote job state before replaying the request.
+retry is safe. A malformed or truncated control response is never echoed from
+stdout as an error detail, so retained job pages cannot become traceback text.
+Inspect remote job state before replaying the request.
 
 Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test

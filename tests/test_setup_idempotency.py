@@ -35,14 +35,12 @@ class TestSetupIdempotency(unittest.TestCase):
         inst = {"server": "nginx", "wordpress_port": 8188,
                 "db_port": 3318, "mailpit_port": 8125}
         with patch.object(lifecycle, "resolve_instances", return_value={"demo": inst}), \
-             patch.object(lifecycle, "compose") as compose, \
+             patch.object(lifecycle, "_compose_up") as compose_up, \
              patch.object(lifecycle, "_web_services", return_value=("wp", "nginx")), \
              patch.object(lifecycle, "site_url", return_value="http://localhost:8188"), \
              patch.object(lifecycle, "wp_dir", return_value=types.SimpleNamespace(exists=lambda: False)):
             lifecycle.cmd_up(cfg, args)
-        compose.assert_called_once_with(
-            "up", "-d", "--remove-orphans", "wp", "nginx", instance="demo"
-        )
+        compose_up.assert_called_once_with("demo", ("wp", "nginx"))
 
     def test_up_never_mutates_unreceipted_legacy_proxy_state(self):
         cfg = {"instances": {"demo": {"server": "nginx"}}}

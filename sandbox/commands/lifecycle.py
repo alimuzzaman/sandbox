@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,54 @@ def _remote_ensure_reachability(remote_name: str, remote: dict) -> dict | None:
     }
 
 
+def _compose_up(instance: str, services: tuple[str, ...] | list[str]) -> object:
+    """Start one managed stack and classify stale-network failures.
+
+    Compose normally streams its own diagnostics, but a missing network can
+    leave an old container attached to a network ID that no longer exists.
+    Capture this bounded startup result so callers get a stable recovery code
+    instead of a raw Docker message.  No cleanup or container mutation is
+    attempted here.
+    """
+    result = compose(
+        "up", "-d", "--remove-orphans", *services,
+        instance=instance, check=False, capture=True,
+    )
+    returncode = getattr(result, "returncode", 0)
+    if isinstance(returncode, bool) or not isinstance(returncode, int):
+        returncode = 0
+    if returncode == 0:
+        for stream, to_stderr in (
+            (getattr(result, "stdout", ""), False),
+            (getattr(result, "stderr", ""), True),
+        ):
+            if isinstance(stream, str) and stream:
+                print(stream, end="" if stream.endswith("\n") else "\n",
+                      file=sys.stderr if to_stderr else sys.stdout)
+        return result
+
+    output = "\n".join(
+        value for value in (
+            getattr(result, "stdout", ""), getattr(result, "stderr", ""),
+        ) if isinstance(value, str) and value
+    )
+    if re.search(r"\bnetwork\b[^\n]{0,240}\bnot found\b", output,
+                 flags=re.IGNORECASE):
+        quoted = shlex.quote(str(instance))
+        die(
+            "stale_container_network: the managed Docker network for "
+            f"instance {instance!r} is missing; no containers or volumes were "
+            "removed. Recover this instance with: "
+            f"./sb down --instance {quoted} && ./sb up --instance {quoted}",
+            code=returncode,
+        )
+
+    detail = " ".join(output.split())[:500]
+    suffix = f": {detail}" if detail else ""
+    die(f"docker compose up failed with exit code {returncode}{suffix}",
+        code=returncode)
+
+
 
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
@@ -103,9 +152,7 @@ def cmd_up(cfg: dict, args) -> None:
     # removes stale sidecars left behind after switching web-server modes
     # (for example an old nginx service), so repeated setup cannot accumulate
     # orphan containers.
-    compose("up", "-d", "--remove-orphans",
-            *_web_services(inst_cfg.get("server", "nginx")),
-            instance=inst)
+    _compose_up(inst, _web_services(inst_cfg.get("server", "nginx")))
     if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
         # Verify the image that just started before any project/WP wiring is
         # allowed to run.  The probe is standalone PHP and does not touch the

@@ -2124,7 +2124,9 @@ json.load(open(path))
             "current_pools_configured": False, "current_pool_count": 0,
             "current_pools_digest": "sha256:" + "a" * 64,
             "desired_pools": list(sr.REMOTE_DOCKER_ADDRESS_POOLS),
-            "subnet_capacity": 4608, "restart_required": True,
+            "subnet_capacity": 4608, "subnet_capacity_total": 4608,
+            "subnet_capacity_allocated": 0, "subnet_capacity_status": "complete",
+            "restart_required": True,
             "route_overlap_count": 0, "apply_safe": True,
         }))
         result = sr.remote_docker_pool(

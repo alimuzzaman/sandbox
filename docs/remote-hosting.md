@@ -76,6 +76,15 @@ outcome. The safe error omits the generated transaction command (including its
 encoded program); inspect the remote receipt and running-container state before
 considering any replay.
 
+The Docker-pool plan reports measured capacity for the desired address pools:
+`subnet_capacity_total`, `subnet_capacity_allocated`, and
+`subnet_capacity` (usable). The measurement inspects user-defined network IPAM
+with full IDs. If network inventory, IPAM, or allocation accounting is incomplete,
+`subnet_capacity_status` is `partial` or `unavailable` and usable capacity is
+`null`; the plan never substitutes the historical fixed pool total or a raw
+network count. Treat that result as an evidence gap and keep the operation
+fail-closed until a fresh complete probe is available.
+
 At the transport boundary, a blocked admission is normalized to one bounded
 error envelope. It always reports `ok: false`, `status: blocked`, one of the
 stable capacity codes (`docker_network_capacity_unavailable`,

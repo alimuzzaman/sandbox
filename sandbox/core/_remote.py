@@ -2792,6 +2792,85 @@ def unsafe_route_count(networks):
         unsafe += 1
     return unsafe
 
+def capacity_snapshot(networks):
+    """Measure desired-pool IPAM usage without treating counts as capacity."""
+    ids_result = run(["docker", "network", "ls", "--no-trunc", "-q"],
+                     timeout=30, check=False)
+    if ids_result.returncode != 0:
+        return {{"status": "unavailable", "total_subnets": None,
+                "allocated_subnets": None, "usable_subnets": None}}
+    network_ids = [value.strip() for value in ids_result.stdout.splitlines()
+                   if value.strip()]
+    if len(network_ids) > 10000 or len(set(network_ids)) != len(network_ids):
+        return {{"status": "partial", "total_subnets": None,
+                "allocated_subnets": None, "usable_subnets": None}}
+    rows = []
+    if network_ids:
+        inspected = run(["docker", "network", "inspect", *network_ids],
+                        timeout=60, check=False)
+        if inspected.returncode != 0:
+            return {{"status": "unavailable", "total_subnets": None,
+                    "allocated_subnets": None, "usable_subnets": None}}
+        try:
+            rows = json.loads(inspected.stdout or "[]")
+        except (TypeError, ValueError):
+            return {{"status": "partial", "total_subnets": None,
+                    "allocated_subnets": None, "usable_subnets": None}}
+        observed = [row.get("Id") if isinstance(row, dict) else None
+                    for row in rows] if isinstance(rows, list) else []
+        if (not isinstance(rows, list) or len(rows) != len(network_ids)
+                or any(not isinstance(value, str) or not value for value in observed)
+                or len(set(observed)) != len(observed)
+                or set(observed) != set(network_ids)):
+            return {{"status": "partial", "total_subnets": None,
+                    "allocated_subnets": None, "usable_subnets": None}}
+    allocations = set()
+    unknown = False
+    collision = False
+    pool_specs = [(network, item["size"])
+                  for network, item in zip(networks, DESIRED)]
+
+    def units_for(subnet, pool, size):
+        if not subnet.subnet_of(pool):
+            return ()
+        unit_size = 1 << (32 - size)
+        first = (int(subnet.network_address) - int(pool.network_address)) // unit_size
+        count = 1 << max(size - subnet.prefixlen, 0)
+        return range(first, first + count)
+
+    for row in rows:
+        if not isinstance(row, dict) or row.get("Name") in {{"bridge", "host", "none"}}:
+            continue
+        ipam = row.get("IPAM") if isinstance(row.get("IPAM"), dict) else {{}}
+        configs = ipam.get("Config") if isinstance(ipam.get("Config"), list) else None
+        if not configs:
+            unknown = True
+            continue
+        for config in configs:
+            if not isinstance(config, dict) or not config.get("Subnet"):
+                unknown = True
+                continue
+            try:
+                subnet = ipaddress.ip_network(config.get("Subnet"), strict=False)
+            except (TypeError, ValueError):
+                unknown = True
+                continue
+            if subnet.version != 4:
+                continue
+            for index, (pool, size) in enumerate(pool_specs):
+                for unit in units_for(subnet, pool, size):
+                    key = (index, unit)
+                    if key in allocations:
+                        collision = True
+                    allocations.add(key)
+    if unknown or collision:
+        return {{"status": "partial", "total_subnets": None,
+                "allocated_subnets": None, "usable_subnets": None}}
+    total = sum(1 << (size - pool.prefixlen) for pool, size in pool_specs)
+    allocated = len(allocations)
+    return {{"status": "complete", "total_subnets": total,
+            "allocated_subnets": allocated, "usable_subnets": total - allocated}}
+
 LOCK.parent.mkdir(parents=True, exist_ok=True)
 lock_stream = LOCK.open("a+")
 try:
@@ -2924,6 +3003,7 @@ except Exception:
     raise SystemExit(2)
 current_pools = current.get("default-address-pools")
 current_pools_json = json.dumps(current_pools, sort_keys=True, separators=(",", ":"))
+capacity = capacity_snapshot(networks)
 base = {{
     "ok": True, "status": "planned" if not APPLY else "unchanged",
     "current_pools_configured": "default-address-pools" in current,
@@ -2932,7 +3012,11 @@ base = {{
     "desired_pools": DESIRED,
     "network_count": network_count, "running_container_count": len(before),
     "restart_policy_none_count": sum(value == "no" for value in restart_policies),
-    "subnet_capacity": 4608, "requires_confirm": not APPLY,
+    "subnet_capacity": capacity["usable_subnets"],
+    "subnet_capacity_total": capacity["total_subnets"],
+    "subnet_capacity_allocated": capacity["allocated_subnets"],
+    "subnet_capacity_status": capacity["status"],
+    "requires_confirm": not APPLY,
     "restart_required": current_pools != DESIRED,
     "route_overlap_count": route_overlap_count,
     "apply_safe": route_overlap_count == 0,
@@ -3084,7 +3168,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "ok", "status", "code", "message", "current_pools_configured",
         "current_pool_count", "current_pools_digest", "desired_pools",
         "network_count", "running_container_count", "restart_policy_none_count",
-        "subnet_capacity", "requires_confirm", "restart_required",
+        "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
+        "subnet_capacity_status", "requires_confirm", "restart_required",
         "restart_performed", "containers_restored", "containers_missing",
         "backup_created", "config_digest", "rollback_attempted",
         "rollback_succeeded", "route_overlap_count", "apply_safe",
@@ -3120,21 +3205,24 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "ok", "status", "current_pools_configured", "current_pool_count",
             "current_pools_digest", "desired_pools", "network_count",
             "running_container_count", "restart_policy_none_count",
-            "subnet_capacity", "requires_confirm", "restart_required",
+            "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
+            "subnet_capacity_status", "requires_confirm", "restart_required",
             "route_overlap_count", "apply_safe",
         },
         "unchanged": {
             "ok", "status", "current_pools_configured", "current_pool_count",
             "current_pools_digest", "desired_pools", "network_count",
             "running_container_count", "restart_policy_none_count",
-            "subnet_capacity", "requires_confirm", "restart_required",
+            "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
+            "subnet_capacity_status", "requires_confirm", "restart_required",
             "route_overlap_count", "apply_safe",
         },
         "complete": {
             "ok", "status", "current_pools_configured", "current_pool_count",
             "current_pools_digest", "desired_pools", "network_count",
             "running_container_count", "restart_policy_none_count",
-            "subnet_capacity", "requires_confirm", "restart_required",
+            "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
+            "subnet_capacity_status", "requires_confirm", "restart_required",
             "route_overlap_count", "apply_safe", "restart_performed",
             "containers_restored", "containers_missing", "backup_created",
             "config_digest",
@@ -3199,7 +3287,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
     if "desired_pools" in payload and payload["desired_pools"] != list(REMOTE_DOCKER_ADDRESS_POOLS):
         raise RuntimeError("remote Docker pool operation returned unexpected desired pools")
     for field in ("network_count", "running_container_count", "restart_policy_none_count",
-                  "subnet_capacity", "current_pool_count", "containers_restored",
+                  "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
+                  "current_pool_count", "containers_restored",
                   "containers_missing", "route_overlap_count",
                   "recovery_candidate_count", "recovery_window_seconds",
                   "recovery_expected_count", "recovery_evidence_count",
@@ -3207,6 +3296,19 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         value = payload.get(field)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise RuntimeError("remote Docker pool operation returned invalid counts")
+    capacity_status = payload.get("subnet_capacity_status")
+    if capacity_status is not None and capacity_status not in {"complete", "partial", "unavailable"}:
+        raise RuntimeError("remote Docker pool operation returned invalid capacity status")
+    if capacity_status == "complete":
+        if not all(isinstance(payload.get(field), int) and not isinstance(payload.get(field), bool)
+                   and payload.get(field) >= 0 for field in (
+                       "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated")):
+            raise RuntimeError("remote Docker pool operation returned incomplete capacity evidence")
+        if payload["subnet_capacity"] != (
+                payload["subnet_capacity_total"] - payload["subnet_capacity_allocated"]):
+            raise RuntimeError("remote Docker pool operation returned inconsistent capacity evidence")
+    elif capacity_status in {"partial", "unavailable"} and payload.get("subnet_capacity") is not None:
+        raise RuntimeError("remote Docker pool operation returned unsafe partial capacity")
     if payload.get("recovery_window_seconds", 0) > 1200:
         raise RuntimeError("remote Docker pool recovery window is unbounded")
     if payload["ok"] and payload.get("recovery_evidence_count") is not None and (

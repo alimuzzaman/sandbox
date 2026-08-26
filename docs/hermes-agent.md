@@ -23,6 +23,16 @@ but its Sandbox integration/profile is not configured; branch to
 probe, and SSH/transport errors remain failures. `data.ready` is the strict
 readiness bit and stays false for both expected pre-install states.
 
+`sb hermes status --json` also reports the optional UI boundary without reading
+credentials or changing the remote. `data.dashboard.readiness` is
+`not_configured` or `configured`, while `data.public_access.readiness` is
+`not_configured`, `ssh_only`, or `configured` and `data.public_access.mode` is
+`ssh-only` or `public`. These are persisted-configuration observations, so
+`observed` remains `false`; use `sb hermes dashboard doctor` or
+`dashboard exposure-status` for live loopback/public checks. A configured
+Hermes lifecycle therefore must not be read as proof that a dashboard or public
+endpoint is usable.
+
 ## Private state repository
 
 Hermes can keep a rebuildable, sanitized harness snapshot in a private GitHub

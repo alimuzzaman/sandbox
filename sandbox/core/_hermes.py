@@ -1729,6 +1729,38 @@ def status(remote_name: str) -> dict:
     lifecycle = "running" if running else "configured" if state.get("profile") else "installed"
     data["lifecycle"] = lifecycle
     data["running_sessions"] = running
+
+    # Hermes installation/profile lifecycle is independent from the optional
+    # dashboard and its public exposure.  Keep status read-only and
+    # credential-free: these fields describe the persisted readiness boundary,
+    # not a live dashboard or Cloudflare health probe.
+    dashboard = state.get("dashboard") if isinstance(state.get("dashboard"), dict) else {}
+    dashboard_configured = bool(
+        dashboard.get("installed") is True
+        or dashboard.get("unit")
+        or dashboard.get("port")
+    )
+    data["dashboard"] = {
+        "configured": dashboard_configured,
+        "readiness": "configured" if dashboard_configured else "not_configured",
+        "observed": False,
+    }
+
+    exposure = state.get("public_exposure") if isinstance(state.get("public_exposure"), dict) else {}
+    candidate_mode = exposure.get("mode")
+    mode = candidate_mode if isinstance(candidate_mode, str) and candidate_mode in {"public", "ssh-only"} else "ssh-only"
+    if mode == "public":
+        exposure_readiness = "configured"
+    elif dashboard_configured:
+        exposure_readiness = "ssh_only"
+    else:
+        exposure_readiness = "not_configured"
+    data["public_access"] = {
+        "configured": mode == "public",
+        "mode": mode,
+        "readiness": exposure_readiness,
+        "observed": False,
+    }
     return result(True, "status", remote_name, status=lifecycle, data=data)
 
 

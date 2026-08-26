@@ -1788,6 +1788,38 @@ class TestRemoteCommands(unittest.TestCase):
         out = hermes.status("test")
         self.assertEqual(out["status"], "configured")
         self.assertEqual(out["data"]["running_sessions"], 0)
+        self.assertEqual(out["data"]["dashboard"]["readiness"], "not_configured")
+        self.assertEqual(out["data"]["public_access"]["readiness"], "not_configured")
+
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_status_exposes_optional_dashboard_and_public_access_readiness(
+            self, get_remote, ssh_run, read_state):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout="hermes 0.18.2\n"),
+        ]
+        read_state.return_value = {
+            "schema_version": 1, "repositories": {}, "gates": {}, "sessions": {},
+            "profile": {"sandbox_home": "/home/ubuntu/sandbox"},
+            "dashboard": {"installed": True, "unit": "hermes-dashboard.service", "port": 9119},
+            "public_exposure": {
+                "mode": "public", "fqdn": "hermes.asb.bd",
+                "basic_auth": {"enabled": True},
+            },
+        }
+
+        out = hermes.status("test")
+
+        self.assertTrue(out["data"]["dashboard"]["configured"])
+        self.assertEqual(out["data"]["dashboard"]["readiness"], "configured")
+        self.assertFalse(out["data"]["dashboard"]["observed"])
+        self.assertTrue(out["data"]["public_access"]["configured"])
+        self.assertEqual(out["data"]["public_access"]["mode"], "public")
+        self.assertEqual(out["data"]["public_access"]["readiness"], "configured")
+        self.assertFalse(out["data"]["public_access"]["observed"])
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")

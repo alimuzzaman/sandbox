@@ -80,8 +80,11 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   unavailable web services retain the `compose run -d` fallback. Acceptance
   now writes a private timing receipt (`acceptance_ms`) separate from command
   output, and the probe/launcher share a finite 15-second acceptance deadline;
-  CLI timeout reports `acceptance_unknown` guidance. This is a source/test
-  improvement only; no live timing or all-tier parity claim is recorded yet.
+  CLI timeout reports `acceptance_unknown` guidance. The MCP wrapper now adds
+  a 30-second outer bound and returns a bounded `acceptance_unknown` envelope
+  for timeout, malformed, and non-zero launcher results, retaining only a
+  candidate job ID for inspection. This is a source/test improvement only; no
+  live timing or all-tier parity claim is recorded yet.
 
   Bounded implementation tasks:
 

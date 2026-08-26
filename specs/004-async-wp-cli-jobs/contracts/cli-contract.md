@@ -9,6 +9,11 @@
 - Launches the same authorised WP-CLI command detached and returns
   `{ ok, job_id, status:"running" }`; it never waits for the WP command's
   completion. The CLI equivalent is `./sb wp --async <args>`.
+- The MCP acceptance call has a 30-second outer bound around the CLI's
+  15-second Docker probe/launch budget. A timeout, malformed envelope, or
+  non-zero launcher result returns `{ok:false, code:"acceptance_unknown",
+  status:"unknown"}`; a candidate `job_id` is only an inspection handle.
+  Inspect `wp_cli_job` or `./sb jobs` before retrying.
 - No PID is returned to callers. The per-job `.pid` artifact is an internal
   cancellation handle; on Herd it is written immediately from the spawned
   wrapper PID to avoid an immediate-poll/cancel race.

@@ -1,6 +1,7 @@
 import sys
 import hashlib
 import importlib.util
+import subprocess
 import types
 import unittest
 from pathlib import Path
@@ -37,6 +38,7 @@ def _load_wp_tool():
     with patch.dict(sys.modules, {"app": app, "httpx": httpx, "mcp": mcp,
                                   "mcp.server": server, "mcp.server.fastmcp": fastmcp}):
         spec.loader.exec_module(module)
+    module.SANDBOX_ROOT = app.SANDBOX_ROOT
     return module
 
 
@@ -365,6 +367,56 @@ class JobMcpTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": False, "error": "invalid job id"})
         instance.assert_not_called()
+
+    def test_wp_cli_async_success_requires_complete_job_acceptance(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = lambda *_args: None
+        wp._managed_execution_unavailable = lambda *_args, **_kwargs: None
+        wp._project_instance = lambda *_args: ("fixture", None)
+        result = SimpleNamespace(
+            returncode=0, stdout="a" * 16 + "\n",
+            stderr="started background job " + "a" * 16 + "\n",
+        )
+        with patch.object(wp.subprocess, "run", return_value=result) as run:
+            accepted = wp.wp_cli_async("option get siteurl", project_dir="/project")
+
+        self.assertEqual(accepted, {"ok": True, "job_id": "a" * 16,
+                                    "status": "running"})
+        self.assertEqual(run.call_args.kwargs["timeout"],
+                         wp._WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT)
+
+    def test_wp_cli_async_timeout_is_unknown_and_keeps_candidate_for_inspection(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = lambda *_args: None
+        wp._managed_execution_unavailable = lambda *_args, **_kwargs: None
+        wp._project_instance = lambda *_args: ("fixture", None)
+        jid = "b" * 16
+        expired = subprocess.TimeoutExpired(
+            "sb", wp._WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT,
+            output=(jid + "\n").encode(), stderr=b"launcher still closing\n",
+        )
+        with patch.object(wp.subprocess, "run", side_effect=expired):
+            result = wp.wp_cli_async("option get siteurl", project_dir="/project")
+
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["code"], "acceptance_unknown")
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["job_id"], jid)
+        self.assertIn("inspect", result["error"])
+
+    def test_wp_cli_async_malformed_or_nonzero_output_is_unknown(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = lambda *_args: None
+        wp._managed_execution_unavailable = lambda *_args, **_kwargs: None
+        wp._project_instance = lambda *_args: ("fixture", None)
+        result = SimpleNamespace(returncode=2, stdout="diagnostic\n", stderr="bad\n")
+        with patch.object(wp.subprocess, "run", return_value=result):
+            payload = wp.wp_cli_async("option get siteurl", project_dir="/project")
+
+        self.assertEqual(payload["ok"], False)
+        self.assertEqual(payload["code"], "acceptance_unknown")
+        self.assertEqual(payload["status"], "unknown")
+        self.assertIn("diagnostic", payload["output"])
 
     def test_remote_instance_exec_uses_durable_runtime_exec_job(self):
         from tools import jobs, runtime

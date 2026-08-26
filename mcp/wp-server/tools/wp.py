@@ -15,6 +15,14 @@ _compose = _herd_host_env = _host_run = _is_herd = None
 _project_instance = _require_project_capability = _resolve_instance = None
 _safe_json = _wp_root = _wpcli = _core = None
 
+# The CLI's Docker probe/launch budget is 15 seconds. Keep a slightly larger
+# MCP-side envelope so interpreter startup and pipe teardown do not turn a
+# bounded CLI refusal into an unbounded tool call. A timeout never proves that
+# a detached launch did not cross the transport boundary.
+_WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT = 30.0
+_WP_CLI_JOB_ID_RE = _re.compile(r"(?m)^\s*([a-f0-9]{16})\s*$")
+_WP_CLI_STARTED_RE = _re.compile(r"started background job\s+([a-f0-9]{16})")
+
 
 def register(server, dependencies: ToolDependencies) -> None:
     """Bind WordPress tools to explicit composition-root dependencies."""
@@ -303,11 +311,55 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     }
 
 
+def _async_text(value) -> str:
+    """Normalize subprocess partial output without exposing a bytes repr."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _async_job_id_from_output(stdout: str, stderr: str = "") -> str | None:
+    """Extract only the CLI's exact job-id forms from bounded output."""
+    for pattern, value in ((_WP_CLI_JOB_ID_RE, stdout),
+                           (_WP_CLI_STARTED_RE, stderr),
+                           (_WP_CLI_STARTED_RE, stdout)):
+        match = pattern.search(value or "")
+        if match:
+            return match.group(1)
+    return None
+
+
+def _async_acceptance_unknown(reason: str, *, stdout: str = "",
+                              stderr: str = "") -> dict:
+    """Return a bounded, retry-safe envelope when acceptance is unproven.
+
+    A candidate job id is retained only as an inspection handle. It is never
+    reported as accepted until the CLI emitted its complete success envelope.
+    """
+    payload = {
+        "ok": False,
+        "code": "acceptance_unknown",
+        "status": "unknown",
+        "error": reason,
+    }
+    candidate = _async_job_id_from_output(stdout, stderr)
+    if candidate:
+        payload["job_id"] = candidate
+    diagnostic = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
+    if diagnostic:
+        payload["output"] = diagnostic[-2000:]
+    return payload
+
+
 def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
     (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
-    with wp_cli_job_kill.
+    with wp_cli_job_kill. The acceptance call is bounded; a timeout, malformed
+    envelope, or non-zero launcher result returns ``code=acceptance_unknown``
+    and must be inspected before any retry.
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
@@ -322,12 +374,37 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
         return err
     cmd = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "wp", "--async",
            *shlex.split(command)]
-    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
-    m = _re.search(r"started background job ([a-f0-9]{16})", res.stdout or "")
-    if not m:
-        return {"ok": False, "error": "failed to start job",
-                "output": ((res.stdout or "") + (res.stderr or ""))[-2000:]}
-    return {"ok": True, "job_id": m.group(1), "status": "running"}
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(SANDBOX_ROOT),
+            timeout=_WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _async_text(getattr(exc, "stdout", None)
+                             or getattr(exc, "output", None))
+        stderr = _async_text(getattr(exc, "stderr", None))
+        return _async_acceptance_unknown(
+            "wp_cli_async launch timed out after "
+            f"{_WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT:g}s; acceptance is unknown—"
+            "inspect wp_cli_job or ./sb jobs before retrying",
+            stdout=stdout, stderr=stderr,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _async_acceptance_unknown(
+            "wp_cli_async launch transport failed; acceptance is unknown—"
+            "inspect ./sb jobs before retrying",
+        )
+
+    stdout = _async_text(getattr(res, "stdout", None))
+    stderr = _async_text(getattr(res, "stderr", None))
+    jid = _async_job_id_from_output(stdout, stderr)
+    if getattr(res, "returncode", 1) == 0 and jid:
+        return {"ok": True, "job_id": jid, "status": "running"}
+    return _async_acceptance_unknown(
+        "wp_cli_async launch returned no valid acceptance; acceptance is "
+        "unknown—inspect ./sb jobs before retrying",
+        stdout=stdout, stderr=stderr,
+    )
 
 
 def _wp_cli_job_helpers():

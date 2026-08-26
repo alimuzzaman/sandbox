@@ -134,7 +134,7 @@ def _docker_exec_job_running(instance: str, jid: str, pid_file: Path) -> bool | 
               (getattr(result, "stderr", "") or "")).lower()
     if any(marker in detail for marker in (
             "cannot connect", "error response from daemon", "timed out",
-            "timeout", "connection refused")):
+            "timeout", "connection refused", "docker: command not found")):
         return None
     return False
 
@@ -159,8 +159,13 @@ def _kill_docker_exec_job(instance: str, jid: str, pid_file: Path) -> bool | Non
         return True
     detail = ((getattr(result, "stdout", "") or "") +
               (getattr(result, "stderr", "") or "")).lower()
-    if "no such process" in detail or "not found" in detail:
+    if any(marker in detail for marker in
+           ("no such process", "no such container", "is not running")):
         return False
+    if any(marker in detail for marker in (
+            "cannot connect", "error response from daemon", "timed out",
+            "timeout", "connection refused", "docker: command not found")):
+        return None
     return None
 
 

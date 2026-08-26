@@ -132,6 +132,16 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(compose.call_args.args[:6],
                          ("exec", "-T", "wp", "sh", "-c", "kill -0 4242"))
 
+    def test_shared_container_transport_failure_stays_unknown(self):
+        jid = "e" * 16
+        _, _, pid = self._paths(jid)
+        pid.write_text("4242")
+        result = SimpleNamespace(returncode=1, stdout="",
+                                  stderr="Cannot connect to the Docker daemon")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "compose", return_value=result):
+            self.assertIsNone(jobs._docker_exec_job_running(self.instance, jid, pid))
+
     def test_kill_shared_container_job_signals_wrapper_and_verifies_exit(self):
         jid = "d" * 16
         log, status, pid = self._paths(jid)

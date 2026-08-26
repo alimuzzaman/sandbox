@@ -45,3 +45,7 @@ already includes `--pager` or `--no-pager`:
 
 This keeps help output bounded and usable in shells, jobs, and MCP calls without
 changing other WP-CLI commands.
+
+For `eval` parse errors, Sandbox preserves the PHP parse diagnostic and removes
+only the duplicate generic WordPress critical-site wrapper. Runtime/plugin
+fatals and non-`eval` commands keep their original diagnostics.

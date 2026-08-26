@@ -93,6 +93,19 @@ def _disable_help_pager(argv: list[str]) -> list[str]:
     return list(argv)
 
 
+def _clean_eval_parse_diagnostic(argv: list[str], stdout: str, stderr: str) -> tuple[str, str]:
+    """Remove only WP's duplicate generic wrapper around an eval parse error."""
+    if not argv or argv[0] != "eval":
+        return stdout, stderr
+    combined = f"{stdout}\n{stderr}"
+    if not re.search(r"\b(?:php\s+)?parse\s+error\b", combined, flags=re.IGNORECASE):
+        return stdout, stderr
+    wrapper = re.compile(
+        r"(?im)^[ \t]*(?:error:\s*)?there has been a critical error on this website\.?[ \t]*(?:\r?\n|$)"
+    )
+    return wrapper.sub("", stdout), wrapper.sub("", stderr)
+
+
 def _is_option_get_probe(argv: list[str]) -> bool:
     """Return whether argv is the narrow optional-option probe contract."""
     return len(argv) >= 3 and argv[:2] == ["option", "get"]
@@ -158,6 +171,7 @@ def cmd_wp(cfg, args) -> None:
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
     returncode = int(getattr(result, "returncode", 0) or 0)
+    stdout, stderr = _clean_eval_parse_diagnostic(pt, stdout, stderr)
     if (getattr(args, "allow_missing", False) and returncode
             and _reports_missing_option(stdout, stderr)):
         print('{"present":false,"value":null}')

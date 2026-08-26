@@ -6,6 +6,7 @@ handles: Docker/Herd live proof remains the explicitly blocked T018 work.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -96,6 +97,69 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertIn("/var/www/vhosts/localhost/html/.sb-jobs", args[8])
         self.assertTrue(self._paths(jid)[0].exists())
         self.assertEqual(json.loads((self.job_dir / f"job_{jid}.receipt").read_text())["launcher"], "run")
+
+    def test_request_id_replay_returns_existing_job_without_second_launch(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", return_value=True), \
+                patch.object(jobs.secrets, "token_hex", side_effect=["a" * 16, "b" * 8, "c" * 8, "d" * 8]), \
+                patch.object(jobs, "compose") as compose:
+            first = jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                                    request_id="wp-request-1")
+            replay = jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                                     request_id="wp-request-1")
+
+        self.assertEqual(first, "a" * 16)
+        self.assertEqual(replay, first)
+        compose.assert_called_once()
+        request_digest = hashlib.sha256(b"wp-request-1").hexdigest()
+        record = json.loads(
+            (self.root / ".sb-jobs" / f"request_{request_digest}.json").read_text()
+        )
+        self.assertEqual(record["job_id"], first)
+        self.assertNotIn("wp-request-1", json.dumps(record))
+        self.assertNotIn("option", json.dumps(record))
+
+    def test_request_id_conflict_refuses_different_command_without_launch(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_wp_has_builtin_cli", return_value=True), \
+                patch.object(jobs.secrets, "token_hex", side_effect=["d" * 16, "e" * 8, "f" * 8, "g" * 8]), \
+                patch.object(jobs, "compose") as compose:
+            jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                            request_id="wp-request-2")
+            with self.assertRaises(jobs.RequestIdConflict):
+                jobs.launch_job(self.instance, ["option", "get", "home"],
+                                request_id="wp-request-2")
+
+        compose.assert_called_once()
+
+    def test_invalid_request_id_is_rejected_before_job_state_access(self):
+        with patch.object(jobs, "_job_dir") as job_dir:
+            with self.assertRaisesRegex(ValueError, "request id is invalid"):
+                jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                                request_id="../unsafe")
+        job_dir.assert_not_called()
+
+    def test_unknown_request_acceptance_replays_reserved_job_without_relaunch(self):
+        timeout = subprocess.TimeoutExpired(["docker", "compose"], 15)
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs.secrets, "token_hex", side_effect=["1" * 16, "2" * 8, "3" * 8]), \
+                patch.object(jobs, "_launch_job", side_effect=timeout) as launch:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                                request_id="wp-request-unknown")
+            replay = jobs.launch_job(self.instance, ["option", "get", "siteurl"],
+                                     request_id="wp-request-unknown")
+
+        self.assertEqual(replay, "1" * 16)
+        launch.assert_called_once()
+        request_digest = hashlib.sha256(
+            b"wp-request-unknown"
+        ).hexdigest()
+        request_path = self.root / ".sb-jobs" / f"request_{request_digest}.json"
+        record = json.loads(request_path.read_text())
+        self.assertEqual(record["status"], "unknown")
 
     def test_docker_db_job_keeps_mysql_client_fallback(self):
         with patch.object(jobs, "wp_dir", return_value=self.root), \
@@ -289,6 +353,28 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertFalse(terminal_launcher.exists())
         self.assertFalse(terminal_receipt.exists())
         self.assertTrue(running_paths[0].exists())
+
+    def test_prune_removes_request_record_with_old_terminal_group(self):
+        jid = "2" * 16
+        log, status, pid = self._paths(jid)
+        log.write_text("done")
+        status.write_text("0")
+        pid.write_text("100")
+        request = self.job_dir / "request_fixture.json"
+        request.write_text(json.dumps({
+            "version": 1, "job_id": jid, "command_digest": "a" * 64,
+            "status": "accepted",
+        }))
+        old = time.time() - jobs._JOB_MAX_AGE - 1
+        for path in (log, status, pid, request):
+            os.utime(path, (old, old))
+
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_job_running", return_value=False):
+            self.assertEqual(jobs.prune_jobs(self.instance), 1)
+
+        self.assertFalse(request.exists())
 
     def test_ordinary_list_runs_the_terminal_group_retention_sweep(self):
         jid = "1" * 16

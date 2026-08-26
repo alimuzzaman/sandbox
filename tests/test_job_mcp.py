@@ -385,6 +385,33 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"],
                          wp._WP_CLI_ASYNC_ACCEPTANCE_TIMEOUT)
 
+    def test_wp_cli_async_forwards_request_id_to_replay_safe_cli(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = lambda *_args: None
+        wp._managed_execution_unavailable = lambda *_args, **_kwargs: None
+        wp._project_instance = lambda *_args: ("fixture", None)
+        result = SimpleNamespace(returncode=0, stdout="a" * 16 + "\n", stderr="")
+        with patch.object(wp.subprocess, "run", return_value=result) as run:
+            accepted = wp.wp_cli_async(
+                "option get siteurl", project_dir="/project",
+                request_id="wp-request-mcp-1",
+            )
+
+        self.assertEqual(accepted, {"ok": True, "job_id": "a" * 16,
+                                    "status": "running"})
+        command = run.call_args.args[0]
+        self.assertIn("--request-id", command)
+        self.assertEqual(command[command.index("--request-id") + 1],
+                         "wp-request-mcp-1")
+
+    def test_wp_cli_async_rejects_invalid_request_id_before_target_resolution(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = Mock(side_effect=AssertionError("must not resolve"))
+        result = wp.wp_cli_async(
+            "option get siteurl", project_dir="/project", request_id="../unsafe",
+        )
+        self.assertEqual(result["code"], "invalid_request_id")
+
     def test_wp_cli_async_timeout_is_unknown_and_keeps_candidate_for_inspection(self):
         wp = _load_wp_tool()
         wp._require_project_capability = lambda *_args: None
@@ -417,6 +444,27 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(payload["code"], "acceptance_unknown")
         self.assertEqual(payload["status"], "unknown")
         self.assertIn("diagnostic", payload["output"])
+
+    def test_wp_cli_async_request_id_conflict_is_typed_not_unknown(self):
+        wp = _load_wp_tool()
+        wp._require_project_capability = lambda *_args: None
+        wp._managed_execution_unavailable = lambda *_args, **_kwargs: None
+        wp._project_instance = lambda *_args: ("fixture", None)
+        result = SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="error: request id was already used for a different WP-CLI command\n",
+        )
+        with patch.object(wp.subprocess, "run", return_value=result):
+            payload = wp.wp_cli_async(
+                "option get home", project_dir="/project",
+                request_id="wp-request-mcp-1",
+            )
+
+        self.assertEqual(payload, {
+            "ok": False,
+            "code": "request_id_conflict",
+            "error": "request id was already used for a different WP-CLI command",
+        })
 
     def test_remote_instance_exec_uses_durable_runtime_exec_job(self):
         from tools import jobs, runtime

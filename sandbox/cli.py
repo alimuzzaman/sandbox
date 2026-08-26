@@ -446,6 +446,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                             help="run as a background job (spec 004) — prints a job id")
     wp_options.add_argument("--timeout", type=_wp_timeout, default=60,
                             help="synchronous wait bound in seconds (default: 60; 1-3600)")
+    w.add_argument("--request-id",
+                   help="stable replay identity for --async (1-64 letters, digits, '.', '_' or '-')")
     w.add_argument("passthrough", nargs=argparse.REMAINDER)
 
     s = sub.add_parser("seed", help="Import a WXR from runtime/seeds/")

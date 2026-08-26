@@ -111,15 +111,18 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   - [x] T021c Define the acceptance envelope: non-empty job ID, durable receipt
     before acknowledgement, bounded start latency, and a truthful
     `acceptance_unknown` result on disconnect or malformed output.
-  - [ ] T021d Add focused unit/fixture tests for cold and warm paths, duplicate
-    request IDs, cancellation, retained output, and cleanup. Cancellation,
-    retained output, cleanup, and both launcher paths are covered; the current
-    CLI/MCP async WP surface has no request-ID input, so duplicate-request
-    semantics remain an explicit open contract rather than an invented claim.
+  - [x] T021d Add focused unit/fixture tests for cold and warm paths, duplicate
+    request IDs, cancellation, retained output, and cleanup. The CLI and MCP
+    async WP surfaces now accept a stable request ID. Same-instance/argv
+    replays return the reserved job ID without a second launch; a different
+    argv fails closed; an acceptance/transport exception reserves an
+    `unknown` inspection handle. Focused fixtures cover both launcher paths,
+    cancellation, retained output, request-record redaction, and cleanup.
     Keep the current `compose run -d` implementation as a compatibility
     fallback until parity is proven for every server tier.
   - [x] T021e Run the disposable Docker acceptance matrix used by T005, T007,
     T010, and T013, then record measured `<2s` evidence and the residual
     blocker above. Nginx shared and `wp db` fallback paths passed; LiteSpeed,
-    older-image/stopped-service, cold-daemon, and duplicate-request evidence
-    remain open. No remote or production mutation is part of T021.
+    older-image/stopped-service, and cold-daemon evidence remain open.
+    Duplicate-request behavior is fixture verified, not live-tier parity
+    evidence. No remote or production mutation is part of T021.

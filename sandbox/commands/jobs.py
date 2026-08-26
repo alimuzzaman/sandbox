@@ -1,4 +1,6 @@
 from __future__ import annotations
+import contextlib
+import hashlib
 import json
 import math
 import os
@@ -17,6 +19,11 @@ _JOB_RE = re.compile(r"^[a-f0-9]{16}$")
 _JOB_MAX_AGE = 24 * 3600  # prune jobs older than 24h (spec FR-007)
 _JOB_ORPHAN_EXIT = 1
 _JOB_ACCEPTANCE_TIMEOUT = 15.0
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+class RequestIdConflict(ValueError):
+    """A request identity was already used for a different WP-CLI command."""
 
 
 def _job_dir(instance: str, *, create: bool = True) -> Path:
@@ -59,6 +66,115 @@ def _job_launcher_path(instance: str, jid: str) -> Path:
 def _job_receipt_path(instance: str, jid: str) -> Path:
     """Return the private acceptance receipt path for a job."""
     return _job_dir(instance, create=False) / f"job_{jid}.receipt"
+
+
+def validate_request_id(value: object) -> str:
+    """Validate the replay identity before touching instance or job state."""
+    if not isinstance(value, str) or not _REQUEST_ID_RE.fullmatch(value):
+        raise ValueError(
+            "request id is invalid (use 1-64 letters, digits, '.', '_' or '-')"
+        )
+    return value
+
+
+def _request_record_path(instance: str, request_id: str) -> Path:
+    """Return a private, path-safe record keyed by a request-id digest."""
+    digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+    return _job_dir(instance, create=False) / f"request_{digest}.json"
+
+
+@contextlib.contextmanager
+def _request_lock(instance: str):
+    """Serialize request reservation across CLI/MCP processes on one instance."""
+    job_dir = _job_dir(instance)
+    lock_path = job_dir / ".request.lock"
+    with lock_path.open("a+") as handle:
+        try:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            # Sandbox targets macOS/Linux. On a platform without advisory file
+            # locks, the atomic record replace still preserves a readable
+            # record; callers fail closed on an ambiguous/malformed record.
+            pass
+        try:
+            yield
+        finally:
+            try:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+
+
+def _request_digest(wp_args: list[str]) -> str:
+    payload = json.dumps(list(wp_args), ensure_ascii=False,
+                         separators=(",", ":"), sort_keys=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_request_record(instance: str, request_id: str,
+                         command_digest: str) -> str | None:
+    path = _request_record_path(instance, request_id)
+    if not path.exists():
+        return None
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RequestIdConflict(
+            "request id record is unreadable; inspect the existing job before retrying"
+        ) from exc
+    job_id = record.get("job_id") if isinstance(record, dict) else None
+    if not isinstance(job_id, str) or not _valid_job_id(job_id):
+        raise RequestIdConflict(
+            "request id record has no valid job id; inspect the existing job before retrying"
+        )
+    if record.get("version") != 1 or record.get("status") not in {
+            "pending", "accepted", "unknown"}:
+        raise RequestIdConflict(
+            "request id record has an unsupported state; inspect the existing job before retrying"
+        )
+    if record.get("command_digest") != command_digest:
+        raise RequestIdConflict(
+            "request id was already used for a different WP-CLI command"
+        )
+    return job_id
+
+
+def _write_request_record(instance: str, request_id: str, job_id: str,
+                          command_digest: str, status: str) -> None:
+    if status not in {"pending", "accepted", "unknown"}:
+        raise ValueError("invalid request record status")
+    target = _request_record_path(instance, request_id)
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
+    payload = {
+        "version": 1,
+        "job_id": job_id,
+        "command_digest": command_digest,
+        "status": status,
+    }
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+        os.replace(temporary, target)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _request_records_for_job(instance: str, jid: str) -> list[Path]:
+    """Find request records for one job without trusting their filenames."""
+    directory = _job_dir(instance, create=False)
+    if not directory.is_dir():
+        return []
+    matches = []
+    for path in directory.glob("request_*.json"):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict) and record.get("job_id") == jid:
+            matches.append(path)
+    return matches
 
 
 def _job_launcher_mode(instance: str, jid: str) -> str | None:
@@ -258,11 +374,9 @@ def _reconcile_job(instance: str, jid: str, paths: tuple[Path, Path, Path] | Non
     return "running"
 
 
-def launch_job(instance: str, wp_args: list[str]) -> str:
-    """Start `wp <wp_args>` detached; return a 16-hex job id. State lands in
-    runtime/wp-<instance>/.sb-jobs/job_<id>.{pid,log,status}."""
-    started = time.monotonic()
-    jid = secrets.token_hex(8)
+def _launch_job(instance: str, wp_args: list[str], jid: str,
+                started: float) -> str:
+    """Launch one already-reserved job identity."""
     _job_dir(instance)  # ensure exists
     quoted = " ".join(shlex.quote(a) for a in wp_args)
     if _is_herd_instance(instance):
@@ -334,6 +448,41 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
         # PID and first output.
         _job_paths(instance, jid)[0].touch(exist_ok=True)
     return jid
+
+
+def launch_job(instance: str, wp_args: list[str], *,
+               request_id: str | None = None) -> str:
+    """Start `wp <wp_args>` detached; return a 16-hex job id.
+
+    An optional request ID makes an uncertain caller replay-safe: the same
+    instance/request/command returns the original job ID without launching a
+    second process, while reusing the ID for different argv fails closed. The
+    request record stores only a command digest and job ID, never the command
+    text or output.
+    """
+    started = time.monotonic()
+    if request_id is None:
+        return _launch_job(instance, wp_args, secrets.token_hex(8), started)
+    request_id = validate_request_id(request_id)
+    command_digest = _request_digest(wp_args)
+    with _request_lock(instance):
+        existing = _read_request_record(instance, request_id, command_digest)
+        if existing is not None:
+            return existing
+        jid = secrets.token_hex(8)
+        _write_request_record(instance, request_id, jid, command_digest, "pending")
+        try:
+            result = _launch_job(instance, wp_args, jid, started)
+        except BaseException:
+            # Preserve the reserved ID after an acceptance/transport failure so
+            # a replay inspects the same outcome instead of starting a duplicate.
+            try:
+                _write_request_record(instance, request_id, jid, command_digest, "unknown")
+            except OSError:
+                pass
+            raise
+        _write_request_record(instance, request_id, jid, command_digest, "accepted")
+        return result
 
 
 def job_status(instance: str, jid: str, offset: int = 0, limit: int = 1_048_576) -> dict:
@@ -447,6 +596,8 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
             newest = max(path.stat().st_mtime for path in artifacts if path.exists())
             if now - newest > max_age:
                 for path in artifacts:
+                    path.unlink(missing_ok=True)
+                for path in _request_records_for_job(instance, jid):
                     path.unlink(missing_ok=True)
                 n += 1
         except OSError:

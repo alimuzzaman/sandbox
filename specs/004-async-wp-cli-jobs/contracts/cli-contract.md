@@ -5,15 +5,25 @@
 ### `wp_cli(command, timeout=60, *, project_dir)`
 - Unchanged synchronous WP-CLI call.
 
-### `wp_cli_async(command, *, project_dir)`
+### `wp_cli_async(command, *, project_dir, request_id=None)`
 - Launches the same authorised WP-CLI command detached and returns
   `{ ok, job_id, status:"running" }`; it never waits for the WP command's
   completion. The CLI equivalent is `./sb wp --async <args>`.
+- When `request_id` is supplied, it must be 1–64 characters from
+  `[A-Za-z0-9_.-]` and start with a letter or digit. Repeating the same
+  request for the same instance and argv returns the original `job_id`
+  without launching a second process. Reusing the ID for different argv
+  fails closed with `RequestIdConflict`; an invalid ID is rejected before
+  capability or instance resolution.
 - The MCP acceptance call has a 30-second outer bound around the CLI's
   15-second Docker probe/launch budget. A timeout, malformed envelope, or
   non-zero launcher result returns `{ok:false, code:"acceptance_unknown",
   status:"unknown"}`; a candidate `job_id` is only an inspection handle.
-  Inspect `wp_cli_job` or `./sb jobs` before retrying.
+  Inspect `wp_cli_job` or `./sb jobs` before retrying. A request that reached
+  the launcher but whose result is unknown remains reserved, so replaying the
+  same request returns the same inspection handle instead of launching a
+  duplicate. A deterministic replay conflict returns
+  `{ok:false, code:"request_id_conflict"}` instead of `acceptance_unknown`.
 - No PID is returned to callers. The per-job `.pid` artifact is an internal
   cancellation handle; on Herd it is written immediately from the spawned
   wrapper PID to avoid an immediate-poll/cancel race.
@@ -40,8 +50,10 @@
   default and an integer bound from 1 through 3600. `--timeout` and `--async`
   are mutually exclusive and rejected by argparse before instance resolution
   or runtime work.
-- `./sb wp --async <args>` → prints the `job_id`; use this detached path for
-  work that should outlive the synchronous wait bound.
+- `./sb wp --async [--request-id ID] <args>` → prints the `job_id`; use this
+  detached path for work that should outlive the synchronous wait bound. A
+  stable `--request-id` makes a caller retry-safe; it is only valid with
+  `--async`.
 - Async Docker probe/launch is bounded to 15 seconds. A timeout is reported as
   acceptance unknown; inspect `./sb jobs` before retrying because a detached
   launch may have crossed the transport boundary.
@@ -61,6 +73,12 @@ terminated; Sandbox does not retry automatically after a timeout. Synchronous
 WP output remains raw and has no JSON wrapper.
 
 All take the standard instance resolution (cwd project → registry; `--instance`/`$SANDBOX_INSTANCE`); MCP tools require the mandatory `project_dir` and `ensure_instance` first. New MCP tools ⇒ Claude Code restart (gotcha #4).
+
+Request IDs are scoped to the resolved instance. The private record stores the
+request's SHA-256 digest, the command-argv digest, the reserved job ID, and a
+`pending`/`accepted`/`unknown` status. It never stores the request text, argv,
+or command output. Do not generate a second request identity after
+`acceptance_unknown`; inspect the original job first.
 
 ## Launch wrappers (sh)
 

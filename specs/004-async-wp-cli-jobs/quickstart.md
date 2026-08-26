@@ -21,6 +21,19 @@ the param is `background`, not the reserved word `async`.)
 - Poll with advancing `offset`; confirm only new bytes return (`bytes_read`, `truncated`).
 - After it finishes → `status:"completed"`, `exit_code:0`, full log re-readable.
 
+## 2a. Replay an uncertain acceptance safely
+
+Use a stable identity when the caller may need to retry the acceptance call:
+
+```
+./sb wp --async --request-id wp-request-1 -- option get siteurl
+```
+
+An identical second call returns the same `job_id` and launches no second
+process. Reusing `wp-request-1` for different WP-CLI args fails closed. If the
+first call reports `acceptance_unknown`, inspect that job with `./sb job` before
+retrying; do not invent a new request ID to bypass the uncertainty.
+
 ## 3. Cancel
 
 ```
@@ -65,6 +78,7 @@ instances, remote hosts, or production state.
   pre-cancel marker remained and its post-cancel marker did not appear.
 
 All measured client acceptances were below two seconds. This proves the current
-Nginx shared and database-fallback paths only. LiteSpeed, older/stopped-service,
-cold-Docker-daemon, and duplicate-request semantics still need evidence before
+Nginx shared and database-fallback paths only. Replay-safe duplicate-request
+behavior is covered by the focused fixture suite; LiteSpeed,
+older/stopped-service, and cold-Docker-daemon paths still need evidence before
 SC-001 or all-tier parity can be marked complete.

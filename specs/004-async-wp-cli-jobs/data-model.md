@@ -1,7 +1,9 @@
 # Data Model: Async / Background WP-CLI Jobs
 
 No database. A Job is three public files plus internal launcher/acceptance
-metadata under `runtime/wp-<instance>/.sb-jobs/`.
+metadata under `runtime/wp-<instance>/.sb-jobs/`. A request identity adds one
+private digest-keyed record so an uncertain caller can replay the same launch
+without creating a duplicate.
 
 ## Job
 
@@ -10,6 +12,28 @@ metadata under `runtime/wp-<instance>/.sb-jobs/`.
 | job_id | minted at start | 16 hex chars; validated `^[a-f0-9]{16}$` before any path use |
 | args | caller | the `wp` args (shell-quoted per token at launch) |
 | instance | registry | the resolved target instance |
+
+## Request identity
+
+`--request-id` / MCP `request_id` is optional. It is scoped to the resolved
+instance and accepts 1–64 ASCII letters, digits, `.`, `_`, or `-`, beginning
+with a letter or digit. The request ID is never used as a filename. Its
+SHA-256 digest names `request_<digest>.json`; a per-instance `.request.lock`
+serializes reservation and replay.
+
+| Field | Meaning |
+|-------|---------|
+| version | record schema version (`1`) |
+| job_id | reserved 16-hex job identity |
+| command_digest | SHA-256 of canonical WP-CLI argv JSON |
+| status | `pending`, `accepted`, or `unknown` |
+
+The record contains no request text, command argv, credentials, or output. A
+same-instance replay with the same command digest returns the recorded job ID;
+a different digest fails closed with `RequestIdConflict`. A launch/transport
+exception changes `pending` to `unknown`, and the same replay still returns
+that inspection handle. Callers must inspect the job before retrying with a
+new request identity.
 
 ## Artifacts + state machine
 
@@ -26,11 +50,12 @@ Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
 (no files / pruned). A **cancelled** job is just `completed` with `exit_code:143` —
 not a distinct query status (analysis F2); "cancelled" is the human interpretation.
 
-Transitions: start → running; process exit → completed; `kill` → targeted
+Transitions: reservation (`pending`) → accepted/unknown; start → running;
+process exit → completed; `kill` → targeted
 wrapper signal for shared-container Docker, container removal for the fallback,
 or SIGTERM to the Herd process **group** → completed(`143`). Age-prune removes
-terminal jobs' files, including the internal launcher marker and acceptance
-receipt.
+terminal jobs' files, including the internal launcher marker, acceptance
+receipt, and any request record bound to that job.
 
 ## Query result (`wp_cli_job`)
 

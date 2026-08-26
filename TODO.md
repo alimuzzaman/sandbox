@@ -29,8 +29,11 @@ Next tasks, in order:
    now use finite launch budgets, retained acceptance receipts, and
    `acceptance_unknown` when the envelope is not proven. A disposable Docker
    run measured Nginx shared and `wp db` fallback launches below `<2s`; preserve
-   the current `compose run -d` path until duplicate-request, cold-daemon, and
-   all-tier parity evidence passes.
+   the current `compose run -d` path until cold-daemon and all-tier parity
+   evidence passes. Stable `--request-id`/`request_id` replay is now implemented
+   and fixture-tested; it returns the same job for identical argv, refuses a
+   conflicting replay, and reserves an `unknown` inspection handle after an
+   acceptance failure.
 3. **P1 — define a bounded remote WP-CLI/preview contract.** Specify exact
    instance selection, package staging, authorization, output limits, and
    receipts for `sb wp --remote`/preview operations. Do not implement through
@@ -125,9 +128,11 @@ Sources reconciled in this pass:
   the `compose run -d` fallback. A private `acceptance_ms` receipt and finite
   launch deadline now separate acceptance from command output; CLI timeout is
   reported as `acceptance_unknown`. The 2026-08-26 disposable evidence records
-  Nginx shared and `wp db` fallback paths below `<2s`; duplicate-request,
-  cold-daemon, and LiteSpeed/older/stopped-service parity remain open in
-  `specs/004-async-wp-cli-jobs/tasks.md:T021` before claiming SC-001.
+  Nginx shared and `wp db` fallback paths below `<2s`; cold-daemon and
+  LiteSpeed/older/stopped-service parity remain open in
+  `specs/004-async-wp-cli-jobs/tasks.md:T021` before claiming SC-001. The
+  duplicate-request contract is implemented and fixture-tested, but is not
+  live-tier parity evidence.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and

@@ -331,6 +331,18 @@ def _async_job_id_from_output(stdout: str, stderr: str = "") -> str | None:
     return None
 
 
+def _async_request_id_conflict(stderr: str) -> dict | None:
+    """Map the CLI's deterministic replay refusal to a typed MCP error."""
+    for line in stderr.splitlines():
+        if line.startswith("error: request id "):
+            return {
+                "ok": False,
+                "code": "request_id_conflict",
+                "error": line.removeprefix("error: ").strip(),
+            }
+    return None
+
+
 def _async_acceptance_unknown(reason: str, *, stdout: str = "",
                               stderr: str = "") -> dict:
     """Return a bounded, retry-safe envelope when acceptance is unproven.
@@ -353,16 +365,24 @@ def _async_acceptance_unknown(reason: str, *, stdout: str = "",
     return payload
 
 
-def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
+def wp_cli_async(command: str, *, project_dir: str, label: str | None = None,
+                 request_id: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
     (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
     with wp_cli_job_kill. The acceptance call is bounded; a timeout, malformed
     envelope, or non-zero launcher result returns ``code=acceptance_unknown``
-    and must be inspected before any retry.
+    and must be inspected before any retry. A conflicting ``request_id`` is a
+    deterministic ``request_id_conflict`` error instead.
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    if request_id is not None:
+        try:
+            from sandbox.commands.jobs import validate_request_id
+            validate_request_id(request_id)
+        except ValueError as exc:
+            return {"ok": False, "code": "invalid_request_id", "error": str(exc)}
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error
@@ -372,8 +392,10 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
-    cmd = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "wp", "--async",
-           *shlex.split(command)]
+    cmd = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "wp", "--async"]
+    if request_id is not None:
+        cmd += ["--request-id", request_id]
+    cmd += shlex.split(command)
     try:
         res = subprocess.run(
             cmd, capture_output=True, text=True, cwd=str(SANDBOX_ROOT),
@@ -400,6 +422,10 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
     jid = _async_job_id_from_output(stdout, stderr)
     if getattr(res, "returncode", 1) == 0 and jid:
         return {"ok": True, "job_id": jid, "status": "running"}
+    if request_id is not None:
+        conflict = _async_request_id_conflict(stderr)
+        if conflict is not None:
+            return conflict
     return _async_acceptance_unknown(
         "wp_cli_async launch returned no valid acceptance; acceptance is "
         "unknown—inspect ./sb jobs before retrying",

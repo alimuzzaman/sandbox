@@ -248,6 +248,9 @@ def cmd_wp(cfg, args) -> None:
                 "inspection; remove --async or use a normal WP-CLI command")
         _run_plugin_deactivate_allow_missing(pt, args.resolved_instance)
         return
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and not getattr(args, "run_async", False):
+        die("--request-id requires --async")
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):
         if managed_native_instance_selected(args.resolved_instance) is not None:
@@ -255,13 +258,20 @@ def cmd_wp(cfg, args) -> None:
                 "transport; host/legacy job fallback is disabled")
         from sandbox.commands.jobs import launch_job
         try:
-            jid = launch_job(args.resolved_instance, pt)
+            if request_id is None:
+                # Preserve the established call shape for callers that do not
+                # opt into replay-safe acceptance.
+                jid = launch_job(args.resolved_instance, pt)
+            else:
+                jid = launch_job(args.resolved_instance, pt, request_id=request_id)
         except subprocess.TimeoutExpired:
             die(
                 "async wp job acceptance timed out; acceptance is unknown—"
                 "inspect `./sb jobs` before retrying",
                 code=124,
             )
+        except ValueError as exc:
+            die(str(exc))
         print(jid)
         print(f"started background job {jid}", file=sys.stderr)
         print(f"  poll:   ./sb job {jid}", file=sys.stderr)

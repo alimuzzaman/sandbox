@@ -968,6 +968,45 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("does not support --search", err.getvalue())
         launch_job.assert_not_called()
 
+    def test_wp_async_forwards_request_id_to_job_launcher(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture",
+            passthrough=["option", "get", "siteurl"],
+            run_async=True,
+            request_id="wp-request-cli-1",
+        )
+        with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                mock.patch("sandbox.commands.jobs.launch_job", return_value="a" * 16) as launch_job, \
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            command.cmd_wp({}, args)
+
+        launch_job.assert_called_once_with(
+            "fixture", ["option", "get", "siteurl"],
+            request_id="wp-request-cli-1",
+        )
+
+    def test_wp_request_id_is_rejected_for_synchronous_execution(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture",
+            passthrough=["option", "get", "siteurl"],
+            run_async=False,
+            request_id="wp-request-cli-2",
+        )
+        err = StringIO()
+        with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(command, "wpcli") as wpcli, \
+                redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                command.cmd_wp({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("requires --async", err.getvalue())
+        wpcli.assert_not_called()
+
     def test_wp_other_commands_preserve_search_passthrough(self):
         import sandbox.commands.wp as command
 
@@ -990,6 +1029,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("argument --timeout: not allowed with argument --async", r.stderr)
         self.assertNotIn("no sandbox instance", r.stderr + r.stdout)
+
+    def test_wp_help_exposes_replay_safe_request_id_for_async_jobs(self):
+        r = run_sb("wp", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--request-id", r.stdout)
+        self.assertIn("--async", r.stdout)
 
     def test_wp_accepts_explicit_local_selector(self):
         r = run_sb("wp", "--local", "--help")

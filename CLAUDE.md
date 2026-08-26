@@ -95,7 +95,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `run_e2e` | Playwright with N workers, EACH on its own fresh instance (multi-instance-per-root) — see `docs/ci-e2e-runner-spec.md` §2. |
 | `ci_plan` / `ci_run` | Interpret + (optionally) run a bounded subset of a project's GitHub Actions workflow locally, matrix cells fanned out to concurrent instances; deploy/publish steps skipped by default (`allow_deploy=true` to opt in) — see `docs/ci-e2e-runner-spec.md` §3. |
 | `wp_cli` | Any `wp` command. |
-| `wp_cli_async` / `wp_cli_job` / `wp_cli_job_kill` | Detached long-running wp commands. |
+| `wp_cli_async` / `wp_cli_job` / `wp_cli_job_kill` | Detached long-running wp commands; `wp_cli_async` accepts an optional stable `request_id` for replay-safe acceptance. |
 | `wp_exec` | Shell in container (composer, npm, php). |
 | `wp_eval_live` | PHP in live WP runtime (full env). |
 | `wp_rest` | WordPress REST API. |

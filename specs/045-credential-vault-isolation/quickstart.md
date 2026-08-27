@@ -53,6 +53,34 @@ consumer uses `ExplicitCredentialConsumer`; lifecycle uses
 6. Revoke, restart, and clean up; verify no future request is admitted until
    fresh recovery proof completes.
 
+## Standalone service planning boundary
+
+The pre-implementation service and transport invariants are recorded in
+[`contracts/credential-broker-service-v1.md`](./contracts/credential-broker-service-v1.md).
+T032 is complete as a planning artifact only. It defines one unprivileged broker
+per managed-native instance, a dedicated instance-bound guest transport, a
+separate trusted one-use lease boundary, fixed secret-free helper verbs,
+broker-first cleanup, and explicit refusal/evidence rules. It does not select an
+unreviewed credential-transfer mechanism, start a service, or enable the feature.
+
+The remaining local preparatory chain is still open:
+
+1. T033: independently review and select the concrete trusted lease mechanism,
+   clarifying the FR-008/SC-002 control-channel boundary if required.
+2. T034: add failing-first standalone service/transport contract tests.
+3. T035: implement the reviewed unprivileged standalone broker executable.
+4. T036: add secret-free fixed helper supervision, cleanup observation/order,
+   and inert application wiring with local tests.
+5. T037: add the proof-gated public `./sb` acceptance seam and offline harness
+   coverage using only opaque references and non-secret request metadata.
+
+These tasks are preparation, not live proof. T022 remains blocked until the
+local seams and authorized Ubuntu helper/service lifecycle proof pass. T029
+remains blocked on T003, T022, T037, and the authorized live feature matrix.
+T031 remains blocked until the exact clean source, contracts, live results, and
+cleanup evidence receive an independent final review. Support remains
+`implemented_unproven` with `adoptable=false` and no evidence ID.
+
 ## Acceptance matrix
 
 The implementation quickstart must exercise at least:
@@ -100,7 +128,8 @@ isolation, managed-native, and CLI suites. The final acceptance report must
 include commands, host/runtime identity, evidence ID, elapsed bounds, and cleanup
 result. It must not substitute local Compose tests for managed-native proof.
 
-The standalone credential-broker service/root-helper lifecycle (T022), the
-authorized live extension (T029), and the independent release review (T031)
-remain explicitly open. No support tier or evidence ID may be promoted from
-this local result.
+T032 records the standalone credential-broker service/transport planning
+contract. T033-T037 remain open preparatory work. The helper/service lifecycle
+(T022), authorized live extension (T029), and independent release review (T031)
+remain blocked. No support tier or evidence ID may be promoted from this local
+result.

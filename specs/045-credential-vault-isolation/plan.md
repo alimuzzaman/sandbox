@@ -91,7 +91,8 @@ specs/045-credential-vault-isolation/
 ├── contracts/
 │   ├── broker-request-v1.md
 │   ├── capability-report-v1.md
-│   └── credential-binding-v1.md
+│   ├── credential-binding-v1.md
+│   └── credential-broker-service-v1.md  # pre-implementation service/transport gate
 ├── plan.md
 └── tasks.md
 ```
@@ -112,9 +113,11 @@ sandbox/
 ├── runtimes/managed/adapter.py             # managed-native lifecycle and capability refusal
 └── commands/                               # CLI/report registration through manifests
 tools/native-helper/native-helper.py        # fixed helper verbs; never receives credential bytes
+tools/native-helper/native-credential-broker.py # planned unprivileged standalone broker
 tests/
 ├── test_credential_binding*.py              # model, CAS, expiry, revoke, persistence
 ├── test_credential_broker*.py               # request contract, bounds, TLS/error behavior
+├── test_credential_broker_service_contract.py # planned standalone service/transport contract
 ├── test_credential_lifecycle*.py            # restart/recovery/cleanup state machine
 ├── test_capability_report*.py               # proven/unproven/drift/refusal semantics
 ├── test_isolation_*.py                      # regression for existing isolation seams
@@ -126,7 +129,10 @@ tests/
 application context and managed adapter, and keep the native helper limited to
 fixed privileged operations. The explicit HTTP broker is a separate component
 from the existing opaque CONNECT broker so callers cannot confuse transport
-reachability with credential authorization.
+reachability with credential authorization. The standalone service and
+instance-bound transport remain governed by
+`contracts/credential-broker-service-v1.md`; its trusted lease mechanism must
+pass an independent design review before service implementation.
 
 ## Delivery phases
 
@@ -151,6 +157,31 @@ not authorize a weaker fallback.
    between declared support and effective evidence.
 4. Decide and measure request/response/concurrency/deadline limits before any
    consumer is enabled.
+
+### Phase 1A — Prepare the standalone service and acceptance seams
+
+This is the append-only T032-T037 preparation chain added after the original
+task IDs were established:
+
+1. T032 records the standalone service, instance-bound guest transport, trusted
+   lease, fixed helper, lifecycle, cleanup, and refusal invariants in
+   `contracts/credential-broker-service-v1.md`. This planning artifact is
+   complete, but it is not service implementation or proof.
+2. T033 independently selects the concrete trusted one-use lease mechanism and
+   resolves the FR-008/SC-002 control-channel wording through specification
+   clarification if needed.
+3. T034 adds failing-first local service/transport contracts; T035 implements
+   the reviewed unprivileged executable; T036 adds secret-free helper
+   supervision, broker-first cleanup, and inert composition wiring.
+4. T037 adds a proof-gated public `./sb` acceptance seam and offline harness
+   coverage using only opaque references and non-secret metadata.
+
+The dependency order is `T032 -> T033 -> T034 -> T035 -> T036`, followed by
+T022 authorized helper/service lifecycle proof; T036 also precedes T037.
+T003, T022, and T037 jointly precede T029, and T003/T022/T029 precede T031.
+Local preparation keeps `implemented_unproven`, `adoptable=false`, and the null
+evidence ID. It cannot substitute for Ubuntu 24.04 live evidence or independent
+final review.
 
 ### Phase 2 — Implement the explicit application-layer broker
 

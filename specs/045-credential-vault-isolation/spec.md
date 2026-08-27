@@ -8,6 +8,20 @@
 
 **Input**: Product requirements draft from `prd.md`, informed by the reviewed OpenSandbox Credential Vault and isolation documentation.
 
+## Clarifications
+
+### Session 2026-08-27
+
+- Q: Does the prohibition on credential bytes in control/process-control
+  channels include the trusted one-use control-plane-to-broker lease channel
+  already required by the data model? → A: No. The prohibition covers every
+  guest-visible, root-helper, supervisor, durable, status, audit, and retained
+  channel. One ephemeral, authenticated, one-use lease channel wholly inside
+  the trusted control-plane-to-broker boundary may carry credential material
+  transiently. That channel must be unreachable and unobservable from the
+  workload and sibling instances, must not involve the root helper or service
+  supervisor, and must fail closed without replay or durable recovery.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Bind an approved credential to one outbound operation (Priority: P1)
@@ -34,7 +48,7 @@ As a Sandbox workload author, I want to call an approved service through a docum
 
 **Acceptance Scenarios**:
 
-1. **Given** an active binding and a reviewed client contract, **When** the workload sends a valid request, **Then** the trusted boundary applies the credential and no real credential bytes are present in guest environment, argv, declared mounts, guest files, snapshots, policy records, audit records, control channels, or retained output.
+1. **Given** an active binding and a reviewed client contract, **When** the workload sends a valid request, **Then** the trusted boundary applies the credential and no real credential bytes are present in guest environment, argv, declared mounts, guest files, snapshots, policy records, audit records, guest-visible/helper/supervisor control channels, or retained output.
 2. **Given** a malformed request, unsupported authentication form, oversized request or response, invalid certificate, unsupported redirect, or upstream timeout, **When** the workload submits it, **Then** the broker returns a bounded error code without disclosing credential material.
 3. **Given** an approved upstream that returns data containing an authorization value or a transformed representation of it, **When** the response is returned, **Then** the system treats the upstream as an authorized but untrusted recipient, applies best-effort redaction where possible, and does not claim that response filtering proves confinement.
 
@@ -74,6 +88,9 @@ As a security reviewer, I want status and lifecycle reports to distinguish decla
 - Unsupported methods, content types, protocol versions, duplicate security-sensitive headers, and hop-by-hop headers are rejected or normalized according to the documented request contract.
 - Request and response limits, connection deadlines, cancellation, and concurrent-use limits return stable bounded errors rather than partial credential output.
 - A failed audit outcome after an effect has occurred is reported as indeterminate; the system does not automatically replay a credential-bearing request.
+- A stale, duplicated, malformed, wrong-process, wrong-instance, wrong-binding,
+  expired, or unacknowledged trusted lease is consumed or refused terminally;
+  the credential-bearing transfer and upstream request are never retried.
 - Native credential bytes may remain in an owner-only host store for this release; this residual at-rest risk is not represented as process-memory-only vault protection.
 - Compose, Herd, macOS, Kubernetes, ordinary remote workspaces, and unqualified durable jobs refuse this capability rather than silently falling back to a weaker runtime.
 
@@ -88,7 +105,7 @@ As a security reviewer, I want status and lifecycle reports to distinguish decla
 - **FR-005**: The system MUST apply only the registered authentication profile explicitly allowed by the binding; the first release MUST support the fixed `authorization_bearer` and `x_api_key` profiles and MUST reject guest-supplied or unsupported header forms.
 - **FR-006**: The system MUST provide a documented explicit application-layer request contract for the first consumer; arbitrary transparent `curl`, Git, package-manager, and SDK interception is not required.
 - **FR-007**: The system MUST validate destination identity, certificate validity, request scope, redirect behavior, request/response bounds, and deadlines before or during upstream use according to the contract.
-- **FR-008**: The system MUST keep the real credential out of workload environment, argv, guest-readable files, snapshots, policy and registry records, audit records, control channels, and retained output.
+- **FR-008**: The system MUST keep the real credential out of workload environment, argv, guest-readable files, snapshots, policy and registry records, audit records, guest-visible/root-helper/supervisor/durable control channels, status, and retained output. One ephemeral, authenticated, one-use control-plane-to-broker lease channel wholly inside the trusted boundary MAY carry credential material transiently; it MUST be unreachable from the workload and sibling instances, MUST NOT involve the root helper or service supervisor, and MUST fail closed without replay or durable recovery.
 - **FR-009**: The system MUST treat approved upstream services as credential recipients but untrusted response sources; response redaction MUST be defense in depth and MUST NOT be presented as proof of universal confinement.
 - **FR-010**: The system MUST record only opaque references, policy and binding digests, lifecycle state, actor, operation, decision, expiry, and stable reason codes in durable state and bounded audit output.
 - **FR-011**: The system MUST refuse new use immediately after expiry or revocation and MUST close active broker sessions within a documented bounded deadline.
@@ -122,7 +139,7 @@ lower limits but may not raise them through the guest contract.
 ### Measurable Outcomes
 
 - **SC-001**: On the supported acceptance host, 100% of matching requests in the documented test matrix either complete with a bounded response or return a bounded upstream error, and 100% of wrong-destination, wrong-method, wrong-path, expired, revoked, redirect, unknown-reference, and ambiguous-binding cases are denied before credential use.
-- **SC-002**: Hostile probes find zero real credential bytes in the guest environment, argv, declared mounts, guest files, snapshots, policy/registry/audit records, process-control channels, or retained output for every accepted test run.
+- **SC-002**: For every accepted test run, hostile probes find zero real credential bytes in the guest environment, argv, declared mounts, guest files, snapshots, policy/registry/audit/status records, guest-visible/root-helper/supervisor/durable process-control channels, or retained output. The only permitted transient carrier is the authenticated one-use lease channel inside the trusted control-plane-to-broker boundary, and probes MUST verify that the guest, sibling instances, helper, and supervisor cannot discover, read, connect to, inherit, or replay it.
 - **SC-003**: Revocation prevents every new request after the revocation decision and closes every active broker session within the documented deadline in 100% of acceptance runs.
 - **SC-004**: Every restart recovery begins in `credential_pending`, and 100% of recovery attempts with stale or mismatched policy, broker, egress, source, or isolation proof remain blocked.
 - **SC-005**: Capability reports identify the evidence identity and distinguish proven, unproven, blocked, and drifted states in 100% of preflight and status cases; no unproven host can enable the feature.

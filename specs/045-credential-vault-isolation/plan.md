@@ -131,8 +131,8 @@ fixed privileged operations. The explicit HTTP broker is a separate component
 from the existing opaque CONNECT broker so callers cannot confuse transport
 reachability with credential authorization. The standalone service and
 instance-bound transport remain governed by
-`contracts/credential-broker-service-v1.md`; its trusted lease mechanism must
-pass an independent design review before service implementation.
+`contracts/credential-broker-service-v1.md`; T033 accepted its sealed anonymous
+descriptor/peer-authenticated seqpacket design for T034 contract tests only.
 
 ## Delivery phases
 
@@ -167,9 +167,10 @@ task IDs were established:
    lease, fixed helper, lifecycle, cleanup, and refusal invariants in
    `contracts/credential-broker-service-v1.md`. This planning artifact is
    complete, but it is not service implementation or proof.
-2. T033 independently selects the concrete trusted one-use lease mechanism and
-   resolves the FR-008/SC-002 control-channel wording through specification
-   clarification if needed.
+2. T033 is complete: the spec clarifies the trusted-only lease exception and
+   the contract selects one sealed anonymous `memfd` transferred once with
+   `SCM_RIGHTS` over a broker-owned abstract `AF_UNIX` `SOCK_SEQPACKET` socket,
+   with kernel peer checks and exact broker-process verification before send.
 3. T034 adds failing-first local service/transport contracts; T035 implements
    the reviewed unprivileged executable; T036 adds secret-free helper
    supervision, broker-first cleanup, and inert composition wiring.

@@ -114,6 +114,13 @@ def guest_request(**overrides):
     return value
 
 
+def activate_coordinator(coordinator, controller, *, connection="lifecycle-controller"):
+    return coordinator.handle_controller({
+        "type": "ACTIVATE", "machine_id": MACHINE,
+        "broker_epoch": EPOCH, "sequence": 1,
+    }, observed_peer=controller, connection_identity=connection)
+
+
 def peer_identity(**overrides):
     value = {
         "pid": 4123,
@@ -1473,6 +1480,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         with mock.patch.object(broker, "_require_linux_guest_listener"), \
                 mock.patch.object(broker.socket, "SO_BINDTODEVICE", 25, create=True):
             self.assertTrue(endpoint.start()["ok"])
+            self.assertTrue(activate_coordinator(coordinator, controller)["admission_open"])
             self.assertTrue(endpoint.open_admission()["ok"])
             pending = endpoint.receive_once()
         self.assertTrue(pending["ok"])
@@ -1489,8 +1497,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             request_digest=claimed["request_digest"],
         )
         outcome = coordinator.accept_descriptor(
-            frame, 77, descriptor_observation(), dispatcher_peer=peer_identity(),
-            claim_owner="controller-connection-1",
+            frame, 77, descriptor_observation(), dispatcher_peer=controller,
         )
         self.assertEqual(outcome, {"ok": True, "lease_id": LEASE, "outcome": "completed"})
         self.assertEqual(len(material_seen), 1)
@@ -1503,16 +1510,14 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertNotIn("operation_id", terminal)
         self.assertNotIn("lease_id", terminal)
         replay = coordinator.accept_descriptor(
-            frame, 78, descriptor_observation(), dispatcher_peer=peer_identity(),
-            claim_owner="controller-connection-1",
+            frame, 78, descriptor_observation(), dispatcher_peer=controller,
         )
         self.assertEqual(replay, {"ok": False, "lease_id": LEASE, "outcome": "refused"})
         self.assertEqual(material_seen.__len__(), 1)
         self.assertEqual(closed, [77, 78])
         denied = coordinator.accept_descriptor(
             lease_frame(lease_id="lease-denied-0123456789abcdef"), 79,
-            descriptor_observation(), dispatcher_peer=peer_identity(uid=502),
-            claim_owner="controller-connection-1",
+            descriptor_observation(), dispatcher_peer={**controller, "uid": 502},
         )
         self.assertEqual(denied, {
             "ok": False, "lease_id": "lease-denied-0123456789abcdef",
@@ -1533,7 +1538,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             service_identity(), controller=controller, adapter=adapter,
             clock=lambda: 1_900_000_000, enabled=True,
         )
-        self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+        self.assertTrue(activate_coordinator(coordinator, controller)["admission_open"])
         self.assert_refusal(coordinator.retain_guest(
             FakeGuestConnection(b""), guest_observation(peer_address="10.203.0.6"),
             guest_request(),
@@ -1581,7 +1586,9 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                     descriptor_closer=lambda descriptor: closed.append(descriptor),
                     clock=lambda: 1_900_000_000, enabled=True,
                 )
-                self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+                self.assertTrue(activate_coordinator(
+                    coordinator, controller, connection=f"lifecycle-case-{index}",
+                )["admission_open"])
                 guest = FakeGuestConnection(b"")
                 observed = guest_observation(connection_identity=f"connection-case-{index}")
                 self.assertTrue(coordinator.retain_guest(
@@ -1599,7 +1606,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                 )
                 outcome = coordinator.accept_descriptor(
                     frame, 90 + index, observation,
-                    dispatcher_peer=peer_identity(), claim_owner=owner,
+                    dispatcher_peer=controller,
                 )
                 self.assertEqual(outcome["outcome"], expected_outcome)
                 self.assertEqual(closed, [90 + index])
@@ -1623,7 +1630,9 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                 ), descriptor_closer=lambda descriptor: closed.append(descriptor),
                 clock=lambda: 1_900_000_000, enabled=True,
             )
-            self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+            self.assertTrue(activate_coordinator(
+                coordinator, controller, connection=f"lifecycle-failure-{index}",
+            )["admission_open"])
             guest = FakeGuestConnection(b"")
             connection = f"connection-failure-{index}"
             owner = f"controller-failure-{index}"
@@ -1650,12 +1659,11 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertEqual(coordinator.registry.count, 0)
 
         cases = (
-            ("wrong-owner", {}, peer_identity(), "different-controller"),
-            ("stale-epoch", {"broker_epoch": NEXT_EPOCH}, peer_identity(), None),
-            ("stale-policy", {"policy_digest": "0" * 64}, peer_identity(), None),
-            ("wrong-request-digest", {"request_digest": "0" * 64}, peer_identity(), None),
-            ("failed-binding", {"binding_id": "binding-other-0123456789"}, peer_identity(), None),
-            ("dispatcher-mismatch", {}, peer_identity(uid=502), None),
+            ("stale-epoch", {"broker_epoch": NEXT_EPOCH}, controller, None),
+            ("stale-policy", {"policy_digest": "0" * 64}, controller, None),
+            ("wrong-request-digest", {"request_digest": "0" * 64}, controller, None),
+            ("failed-binding", {"binding_id": "binding-other-0123456789"}, controller, None),
+            ("dispatcher-mismatch", {}, {**controller, "uid": 502}, None),
         )
         for index, (name, overrides, peer, owner_override) in enumerate(cases):
             with self.subTest(name=name):
@@ -1669,7 +1677,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                 frame = lease_frame(**frame_values)
                 ack = coordinator.accept_descriptor(
                     frame, 100 + index, descriptor_observation(),
-                    dispatcher_peer=peer, claim_owner=owner_override or owner,
+                    dispatcher_peer=peer,
                 )
                 self.assertEqual(ack["lease_id"], frame["lease_id"])
                 self.assertIn(ack["outcome"], {"refused", "indeterminate"})
@@ -1678,7 +1686,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                 self.assertEqual(coordinator.registry.count, 0)
                 replay = coordinator.accept_descriptor(
                     frame, 200 + index, descriptor_observation(),
-                    dispatcher_peer=peer_identity(), claim_owner=owner,
+                    dispatcher_peer=controller,
                 )
                 self.assertEqual(replay, {
                     "ok": False, "lease_id": frame["lease_id"], "outcome": "refused",
@@ -1705,7 +1713,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             descriptor_closer=lambda _fd: None, clock=lambda: now[0],
             replay_limit=1, enabled=True,
         )
-        self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+        self.assertTrue(activate_coordinator(coordinator, controller)["admission_open"])
 
         def operation(index, sequence, lease_id, expires_at):
             guest = FakeGuestConnection(b"")
@@ -1725,7 +1733,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             )
             return guest, coordinator.accept_descriptor(
                 frame, 300 + index, descriptor_observation(),
-                dispatcher_peer=peer_identity(), claim_owner=owner,
+                dispatcher_peer=controller,
             )
 
         _guest, first = operation(1, 1, "lease-capacity-one-012345", now[0] + 10)

@@ -55,6 +55,19 @@ consumer uses `ExplicitCredentialConsumer`; lifecycle uses
 
 ## Standalone service planning boundary
 
+The production authority design is now the strict, non-downgradable
+[`contracts/credential-broker-controller-authority-v2.md`](./contracts/credential-broker-controller-authority-v2.md).
+It requires one persistent controller per managed-native machine as the sole
+binding, source-resolution, proof, egress, authorization, lease-dispatch, and
+durable-audit authority. The unprivileged broker separately authenticates the
+controller's kernel process identity and verifies the exact operation-bound
+authorization and v2 lease before use. Its exact mutual HELLO/ACK,
+ACTIVATE/QUIESCE acknowledgement, control, and semantic PRE/POST/ACK audit
+schemas now have one pure shared v2 codec and replay-state implementation, but
+no controller or broker runtime service is wired in this local increment. v1 is
+retained only as T032-T035 history and cannot be
+negotiated, translated, or used as a fallback.
+
 The pre-implementation service and transport invariants are recorded in
 [`contracts/credential-broker-service-v1.md`](./contracts/credential-broker-service-v1.md).
 T032 is complete as a planning artifact only. T033 is also complete as a local
@@ -67,28 +80,93 @@ separate trusted one-use lease boundary, fixed secret-free helper verbs,
 broker-first cleanup, and explicit refusal/evidence rules. This does not start a
 service or enable the feature.
 
-The local preparatory chain now has a verified test increment, but is not
-complete:
+The local preparatory chain now has a verified v1 test increment, but is not
+complete and must converge on v2 before any production completion claim:
 
 1. T034 is complete locally: 16 fake/local standalone service and transport
    contract tests pass. They do not open real sockets or prove Linux isolation.
-2. T035 remains open: guarded transport/descriptor seams and a local fake-driven
-   coordinator retain one guest through authenticated claim state, one-use
-   descriptor rendezvous, the existing typed request broker, terminal SBRS
-   delivery, and bounded cleanup. Production controller AF_UNIX/SOCK_SEQPACKET
-   listening/event-loop code, recvmsg/SCM_RIGHTS integration, kernel peer
-   observation, cross-process config/entrypoint, guest disconnect/deadline
-   processing, and lifecycle/audit observation remain incomplete. Authorized
-   host proof remains a separate T022/T029/T031 gate.
+2. T035 remains open: local fake-driven seams now cover retained guests,
+   authenticated ACTIVATE/QUIESCE and persistent claim ownership,
+   one-use descriptor rendezvous, typed execution, terminal SBRS,
+   coordinator-owned one-use prepared-attempt tokens, terminal canonical-prefix
+   handling for truncated/trailing lease frames, accepted-socket timeouts,
+   canonical per-machine root/group-owned config loading, injected controller/
+   SCM_RIGHTS endpoints, bounded selector handling, and audit certainty. An
+   integrated installed cross-process
+   executable using real kernel-owned controller/lease/guest listeners, config
+   ownership lifecycle, a continuous disconnect/deadline loop, and observed
+   lifecycle/audit cleanup remain incomplete. Authorized host proof remains a
+   separate T022/T029/T031 gate.
 3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
    coverage using only opaque references and non-secret request metadata.
+5. T038 is complete after independent Sol High acceptance of the revised exact
+   local contract and mutation/schema-table tests. This is not the T031 human
+   release/evidence review. T039 is complete locally with focused tests that
+   pin the reviewed registry digest, canonical JSON and digest
+   vectors, both fixed binary layouts, mutation refusals, temporal bounds, and
+   replay/authorization state, monotonic clock/mandatory-cap enforcement, and
+   bounded mismatch tombstones without I/O or runtime wiring. The registry
+   retains at most 16 total active/tombstoned identities for the full epoch
+   pair and never prunes an operation ID at expiry. After 16 distinct IDs the
+   epoch fails closed for capacity. Exactly one registry is pinned to the
+   machine, epoch pair, authenticated connection owner, and connection; it is
+   never reset, replaced, or reconstructed while that pair lives. Only a
+   genuinely changed authenticated epoch pair may construct a new registry and
+   accept more work. T040 must enforce that lifecycle. This is an intentional 16-total-operation throughput
+   bound, not a concurrency-only claim.
+   T040 has an inert persistent controller service and
+   isolated broker v2 listener/connection. It proves injected mutual process
+   authentication, handshake/sequence/epoch/terminal lifecycle, and exactly one
+   pinned T039 registry per authenticated connection without enabling a runtime,
+   and has independent Sol High local acceptance.
+   T041 now provides the isolated operation authorization and exact v2 lease
+   admission seam. The controller waits for `AUTHORIZED_V2` before resolution,
+   sends one exact 732-byte lease with one sealed memfd, then wipes and closes
+   its local material. The broker keeps a private 16-total-operation epoch
+   registry, projects no guest header values or body, consumes authorization
+   before descriptor inspection, and stops at `lease_bound`. It has independent
+   Sol High local acceptance. T042 has independent Sol High local acceptance:
+   locally: the inert controller audit authority durably commits secret-free
+   semantic PRE/POST records before acknowledgement, recovers unclosed PRE records
+   as indeterminate/possible before activation, and refuses conflicting replay.
+   The broker-side local seam executes one typed injected effect only after PRE,
+   permits one bounded transport retry, commits POST before the exact 444-byte
+   same-socket lease acknowledgement, and never retries after effect entry.
+   Immutable secret-free config plans and injected lifecycle tests pin
+   controller-first/broker-second start, exact ACTIVATE/QUIESCE acknowledgement,
+   broker-first/controller-second stop, and ownership-safe cleanup observation.
+   These modules have no public upstream, application, default, or runtime
+   composition. The accepted T043 implementation uses one connected authenticated
+   session graph rather than the rejected stitched fixture, and its connected
+   hostile matrix plus fresh broad local matrix pass. T043 is locally complete
+   and independently accepted by Sol High. Historical v1 endpoint/coordinator classes remain fake/local-only.
+   Guest composition additionally requires a frozen one-use capability minted
+   by the exact authenticated broker session and bound to its private nonce,
+   purpose, machine, epochs, config, and object identity. The production v1
+   broker factory and consumer are fixed refusals; their historical behavior is
+   test-only. Managed/public composition accepts only the exact v2 protocol and
+   verbs; the executable accepts only the canonical derived v2 broker config;
+   there is no runtime-reachable v1 handle/invoke fallback. This is local
+   injected evidence only. Completed T043 is a satisfied predecessor; the live
+   T022/T029/T031 gates remain blocked on their other stated requirements.
+
+   Threat-model note: the controller and application Python processes are
+   trusted. Same-process reflection, monkeypatching, closure inspection,
+   low-level object construction/mutation, or module-global mutation is process
+   compromise and is not claimed to be prevented by Python bridge types. Those
+   types and one-use receipts prevent ordinary public-API misuse. The untrusted
+   guest never receives or serializes a bridge and cannot execute Python in the
+   trusted processes; it can send only the exact guest wire document over the
+   kernel-authenticated cross-process socket. That document has no import,
+   callback, Python-object, controller-path, validator, clock, session, or
+   legacy-handler selector.
 
 These tasks are preparation, not live proof. T022 remains blocked until the
-local seams and authorized Ubuntu helper/service lifecycle proof pass. T029
-remains blocked on T003, T022, T037, and the authorized live feature matrix.
-T031 remains blocked until the exact clean source, contracts, live results, and
+local seams, T043 v2 convergence, and authorized Ubuntu helper/service lifecycle
+proof pass. T029 remains blocked on T003, T022, T037, T043, and the authorized
+live feature matrix. T031 remains blocked until T043, the exact clean source, contracts, live results, and
 cleanup evidence receive an independent final review. Support remains
 `implemented_unproven` with `adoptable=false` and no evidence ID.
 
@@ -107,6 +185,7 @@ The implementation quickstart must exercise at least:
 | Broker/instance restart | `credential_pending`, then ready only after fresh proof |
 | Missing or drifted native proof | Capability reports blocked/unproven; no workload entry |
 | Hostile guest inspection | Zero credential bytes on enumerated exposure surfaces |
+| Upstream reflection/transformation | Broker never deliberately emits authorization; bounded reviewed redaction runs, but arbitrary transformed-response confinement remains unproven |
 
 ## Foundational and broker local evidence
 
@@ -139,15 +218,19 @@ isolation, managed-native, and CLI suites. The final acceptance report must
 include commands, host/runtime identity, evidence ID, elapsed bounds, and cleanup
 result. It must not substitute local Compose tests for managed-native proof.
 
-T032 records the standalone credential-broker service/transport planning
-contract, T033 records the accepted local security design, and T034 records
+T032 records the historical v1 standalone credential-broker service/transport
+planning contract, T033 records the accepted local security design, and T034 records
 the passing fake/local contract suite. T035 has a fake-driven retained-guest,
 claim, descriptor, typed-broker, and terminal-result coordinator, but remains
 open for production controller and SCM_RIGHTS endpoints, the cross-process
 service entrypoint, guest disconnect/deadline processing, and lifecycle/audit
 observation. Authorized host
 evidence remains under T022/T029/T031; T036-T037 remain open preparatory
-work. The helper/service lifecycle
+work, T039 is complete locally, T040 and T041 have independent local acceptance,
+T042 has independent local acceptance. The connected T043 implementation, opaque
+bridge provenance, exhaustive v2 config-loader coverage, and fresh full matrix
+are locally complete and independently accepted by Sol High. The helper/service
+lifecycle
 (T022), authorized live extension (T029), and independent release review (T031)
 remain blocked. No support tier or evidence ID may be promoted from this local
 result.

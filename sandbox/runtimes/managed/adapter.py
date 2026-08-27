@@ -706,19 +706,23 @@ class ManagedNativeAdapter:
                 "label": request.label}
 
     def credential_request(self, value, *, transport_identity=None):
-        """Use an explicitly composed broker; ordinary adapter operations do not.
+        """Submit only through an explicitly composed v2 controller session.
 
-        The method is intentionally not registered as a generic runtime
-        capability. A caller must compose a broker and pass the verified local
-        transport identity explicitly; absent wiring is a bounded refusal.
+        The historical local broker ``handle`` seam is deliberately not a
+        fallback.  A caller cannot obtain authority by injecting an object with
+        a similarly named method: the composed object must identify the exact
+        non-downgradable v2 protocol and expose only its guest-submission verb.
         """
         broker = self.credential_broker
-        if broker is None or not callable(getattr(broker, "handle", None)):
+        from sandbox.runtimes.managed.services import CredentialV2GuestBridge
+        if type(broker) is not CredentialV2GuestBridge:
             return {"ok": False, "error": {"code": "credential_broker_unavailable",
                                              "message": "credential broker is unavailable",
                                              "retryable": False}}
         try:
-            return broker.handle(value, transport_identity=transport_identity)
+            return broker.submit_guest_v2(
+                value, connection_identity=transport_identity,
+            )
         except Exception:
             return {"ok": False, "error": {"code": "credential_broker_failed",
                                              "message": "credential broker request failed",
@@ -1112,13 +1116,16 @@ class ManagedNativeAdapter:
                 validate_credential_acceptance_service_result,
             )
             service = self.credential_acceptance
+            from sandbox.runtimes.managed.credential_acceptance import (
+                CredentialAcceptanceControllerV2,
+            )
             raw = request.arguments.get("request")
             if not self.proof_candidate:
                 result = public_credential_acceptance_result({
                     "action": raw.get("action", "request") if isinstance(raw, dict) else "request",
                     "reason": {"code": "managed_runtime_unproven"},
                 })
-            elif service is None or not callable(getattr(service, "invoke", None)):
+            elif type(service) is not CredentialAcceptanceControllerV2:
                 result = public_credential_acceptance_result({
                     "action": raw.get("action", "request") if isinstance(raw, dict) else "request",
                     "reason": {"code": "credential_acceptance_unavailable"},
@@ -1126,7 +1133,7 @@ class ManagedNativeAdapter:
                 result["proof_candidate"] = True
             else:
                 try:
-                    result = service.invoke(
+                    result = service.invoke_v2(
                         raw,
                         proof_candidate_authority=self._proof_candidate_authority,
                     )

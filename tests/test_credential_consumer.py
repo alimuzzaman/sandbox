@@ -3,20 +3,19 @@
 import unittest
 
 from tests.test_credential_broker_contract import INSTANCE, OWNER, FakeResolver, FakeUpstream, _binding
+from tests.credential_consumer_v1_fake import LocalV1CredentialConsumer
 
 
 class TestCredentialConsumer(unittest.TestCase):
     def consumer(self):
         from sandbox.isolation.credential_request_broker import CredentialRequestBroker
-        from sandbox.runtimes.managed.credential_consumer import ExplicitCredentialConsumer
-
         binding = _binding()
         broker = CredentialRequestBroker(
             INSTANCE, FakeResolver(), lambda _id: binding,
             proof=lambda _binding: True, egress=lambda _binding: True,
             upstream=FakeUpstream(), owner=OWNER,
         )
-        return ExplicitCredentialConsumer(broker, instance_id=INSTANCE), binding
+        return LocalV1CredentialConsumer(broker, instance_id=INSTANCE), binding
 
     def test_consumer_constructs_exact_scope_and_returns_only_broker_envelope(self):
         consumer, binding = self.consumer()
@@ -38,15 +37,18 @@ class TestCredentialConsumer(unittest.TestCase):
 
     def test_consumer_requires_a_complete_managed_instance_identity(self):
         from sandbox.isolation.credential_request_broker import CredentialRequestBroker
-        from sandbox.runtimes.managed.credential_consumer import ExplicitCredentialConsumer
-
         broker = CredentialRequestBroker(
             INSTANCE, FakeResolver(), lambda _id: _binding(),
             proof=lambda _binding: True, egress=lambda _binding: True,
             upstream=FakeUpstream(), owner=OWNER,
         )
         with self.assertRaises(ValueError):
-            ExplicitCredentialConsumer(broker, instance_id="sb-")
+            LocalV1CredentialConsumer(broker, instance_id="sb-")
+
+    def test_production_v1_consumer_is_fixed_closed(self):
+        from sandbox.runtimes.managed.credential_consumer import ExplicitCredentialConsumer
+        with self.assertRaisesRegex(ValueError, "credential_consumer_v1_disabled"):
+            ExplicitCredentialConsumer(object(), instance_id=INSTANCE)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,60 @@ _REASONS = frozenset({
     "credential_broker_status_mismatch", "credential_binding_unhealthy",
     "credential_egress_refused", "credential_acceptance_indeterminate",
 })
+CONTROLLER_PROTOCOL_V2 = "credential-broker-controller-v2"
+_ACCEPTANCE_ISSUER = object()
+
+
+class CredentialAcceptanceControllerV2:
+    """Thin public projector over the sole injected controller authority.
+
+    This class contains no binding, proof, egress, source, resolver, or audit
+    decision.  Those decisions stay behind ``controller_action``.  The public
+    surface can pass only the exact parsed opaque/non-secret request and can
+    return only the existing bounded projector envelope.
+    """
+
+    protocol = CONTROLLER_PROTOCOL_V2
+
+    def __init__(self, issuer, controller_authority):
+        if issuer is not _ACCEPTANCE_ISSUER:
+            raise ValueError("credential v2 controller authority is required")
+        self._controller_authority = controller_authority
+
+    def invoke_v2(self, raw, *, proof_candidate_authority=None):
+        try:
+            request = parse_credential_acceptance(raw)
+        except ValueError:
+            return _refusal("request", "credential_acceptance_invalid")
+        from sandbox.runtimes.managed.adapter import _is_proof_candidate_authority
+        proof = _is_proof_candidate_authority(proof_candidate_authority)
+        if not proof:
+            return _refusal(request["action"], "managed_runtime_unproven")
+        # T037 has no accepted mapping from this public bind/request/revoke
+        # envelope into the connected controller operation state machine yet.
+        # Retaining the authenticated authority proves provenance, not permission.
+        return _refusal(request["action"], "credential_acceptance_unavailable", proof=True)
+
+
+def build_credential_acceptance_controller_v2(receipt, controller_authority):
+    from sandbox.isolation.credential_controller_authority_v2 import (
+        ControllerOperationAuthorityV2,
+    )
+    from sandbox.isolation.credential_controller_service_v2 import (
+        AuthenticatedCompositionReceiptV2,
+    )
+    if (type(receipt) is not AuthenticatedCompositionReceiptV2
+            or type(controller_authority) is not ControllerOperationAuthorityV2):
+        raise ValueError("credential v2 controller receipt is required")
+    try:
+        receipt.consume_for_controller(
+            controller_authority, purpose="public_acceptance",
+        )
+    except Exception:
+        raise ValueError("credential v2 controller receipt is invalid") from None
+    return CredentialAcceptanceControllerV2(
+        _ACCEPTANCE_ISSUER, controller_authority,
+    )
 
 
 def _version(value):

@@ -13,6 +13,13 @@ from collections.abc import Mapping
 from sandbox.isolation.models import canonical_digest
 from sandbox.isolation.bubblewrap import USERNS_FILTER_FD, userns_filtered_argv
 from sandbox.isolation.seccomp import compile_userns_filter
+from sandbox.isolation.credential_controller_lifecycle_v2 import (
+    DerivedServiceConfigV2,
+    derived_config_document,
+)
+from sandbox.isolation.credential_controller_service_v2 import (
+    BoundGuestSubmitCapabilityV2,
+)
 
 
 PERSISTENT_WRITABLE_TARGETS = frozenset({
@@ -25,6 +32,104 @@ CREDENTIAL_BROKER_STATUS_FIELDS = frozenset({
     "process_start_identity", "service_uid", "unit_identity", "cgroup_identity",
 })
 CREDENTIAL_BROKER_SERVICE_UID = 991
+CREDENTIAL_CONTROLLER_SERVICE_UID_V2 = 992
+CREDENTIAL_BROKER_SERVICE_UID_V2 = 993
+CONTROLLER_PROTOCOL_V2 = "credential-broker-controller-v2"
+_GUEST_BRIDGE_ISSUER = object()
+
+
+class CredentialV2GuestBridge(tuple):
+    """Exact managed adapter bridge to one authenticated v2 broker session.
+
+    It deliberately exposes no legacy ``handle`` method and owns no authority
+    decision.  Canonical guest validation and time are fixed dependencies of
+    the composed bridge, never values supplied by a public caller.  This is an
+    ordinary trusted-process API boundary.  Python reflection or monkeypatching
+    in this process is process compromise, not a property this wrapper claims
+    to prevent; untrusted guests receive only the socket protocol, never this
+    object.
+    """
+
+    protocol = CONTROLLER_PROTOCOL_V2
+    __slots__ = ()
+
+    def __new__(cls, issuer, capability):
+        if (issuer is not _GUEST_BRIDGE_ISSUER
+                or type(capability) is not BoundGuestSubmitCapabilityV2):
+            raise ValueError("credential v2 guest bridge is invalid")
+        return tuple.__new__(cls, (capability,))
+
+    def __setattr__(self, name, value):
+        del name, value
+        raise AttributeError("credential v2 guest bridge is immutable")
+
+    def __delattr__(self, name):
+        del name
+        raise AttributeError("credential v2 guest bridge is immutable")
+
+    def __repr__(self):
+        return "CredentialV2GuestBridge(protocol='credential-broker-controller-v2')"
+
+    def __getitem__(self, key):
+        del key
+        raise TypeError("credential v2 guest bridge cells are private")
+
+    def __iter__(self):
+        raise TypeError("credential v2 guest bridge cells are private")
+
+    def __len__(self):
+        return 0
+
+    def __add__(self, value):
+        del value
+        raise TypeError("credential v2 guest bridge cells are private")
+
+    def __mul__(self, value):
+        del value
+        raise TypeError("credential v2 guest bridge cells are private")
+
+    __rmul__ = __mul__
+
+    def __copy__(self):
+        raise TypeError("credential v2 guest bridge cannot be copied")
+
+    def __deepcopy__(self, memo):
+        del memo
+        raise TypeError("credential v2 guest bridge cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("credential v2 guest bridge cannot be serialized")
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError("credential v2 guest bridge cannot be serialized")
+
+    def submit_guest_v2(self, request, *, connection_identity):
+        try:
+            capability = tuple.__getitem__(self, 0)
+            if type(capability) is not BoundGuestSubmitCapabilityV2:
+                raise ValueError
+        except Exception:
+            raise RuntimeError("credential v2 guest bridge is unavailable") from None
+        return capability(request, connection_identity=connection_identity)
+
+
+def build_credential_v2_guest_bridge(receipt, connection, *,
+                                     canonical_guest_validator, now_ms):
+    from sandbox.isolation.credential_controller_service_v2 import (
+        AuthenticatedBrokerCompositionReceiptV2,
+    )
+    if type(receipt) is not AuthenticatedBrokerCompositionReceiptV2:
+        raise ValueError("credential v2 composition receipt is required")
+    try:
+        receipt.require_exact_broker(connection)
+        capability = connection.bind_guest_submit_capability_v2(
+            receipt, canonical_guest_validator=canonical_guest_validator,
+            now_ms=now_ms,
+        )
+    except Exception:
+        raise ValueError("credential v2 composition receipt is invalid") from None
+    return CredentialV2GuestBridge(_GUEST_BRIDGE_ISSUER, capability)
 
 
 def credential_broker_unit_identity(machine_id):
@@ -33,6 +138,52 @@ def credential_broker_unit_identity(machine_id):
 
 def credential_broker_cgroup_identity(machine_id):
     return f"/sandbox.slice/credential-broker/{machine_id}"
+
+
+def compile_credential_service_plans_v2(*, machine_id, service_gid,
+                                        controller_executable_digest,
+                                        broker_executable_digest,
+                                        controller_config_identity,
+                                        broker_config_identity,
+                                        policy_digest, egress_digest,
+                                        broker_digest, proof_digest,
+                                        effective_isolation_digest,
+                                        evidence_id, controller_config_digest,
+                                        broker_config_digest,
+                                        controller_endpoint_identity,
+                                        lease_endpoint_identity,
+                                        guest_endpoint_identity):
+    """Derive only immutable secret-free v2 controller/broker config plans."""
+
+    common = {
+        "machine_id": machine_id, "service_gid": service_gid,
+        "policy_digest": policy_digest, "egress_digest": egress_digest,
+        "broker_digest": broker_digest, "proof_digest": proof_digest,
+        "effective_isolation_digest": effective_isolation_digest,
+        "evidence_id": evidence_id,
+        "controller_endpoint_identity": controller_endpoint_identity,
+        "lease_endpoint_identity": lease_endpoint_identity,
+        "guest_endpoint_identity": guest_endpoint_identity,
+    }
+    controller = DerivedServiceConfigV2.derive(derived_config_document(
+        component="controller", unit_identity=f"sandbox-credential-controller-v2@{machine_id}.service",
+        service_uid=CREDENTIAL_CONTROLLER_SERVICE_UID_V2,
+        executable_digest=controller_executable_digest,
+        config_identity=controller_config_identity,
+        peer_executable_digest=broker_executable_digest,
+        peer_config_digest=broker_config_digest,
+        own_config_digest=controller_config_digest, **common,
+    ))
+    broker = DerivedServiceConfigV2.derive(derived_config_document(
+        component="broker", unit_identity=f"sandbox-credential-broker-v2@{machine_id}.service",
+        service_uid=CREDENTIAL_BROKER_SERVICE_UID_V2,
+        executable_digest=broker_executable_digest,
+        config_identity=broker_config_identity,
+        peer_executable_digest=controller_executable_digest,
+        peer_config_digest=controller_config_digest,
+        own_config_digest=broker_config_digest, **common,
+    ))
+    return {"controller": controller, "broker": broker}
 
 
 def _persistent_payload(command, writable_targets):

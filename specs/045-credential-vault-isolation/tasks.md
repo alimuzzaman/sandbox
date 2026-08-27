@@ -19,14 +19,22 @@ T003-T007 (foundational; T003 is a hard predecessor gate)
  US2 T015-T018
    |
  US3 T019-T023
-        |
-T028-T031 (polish, evidence, review)
+
+T032 -> T033 -> T034 -> T035 -> T036
+                                  |  \
+                                  |   -> T037
+                                  v
+                                T022
+
+T003 + T022 + T037 -> T029 -> T031
 ```
 
 US1 depends on the foundational contracts and proof gate. US2 depends on the
 explicit broker from US1. US3 depends on US1 and the durable binding state. US4
 may develop its report model in parallel with US1 but must gate enablement and
-release. The final acceptance tasks depend on all four stories.
+release. Existing task IDs remain stable, so the later-added T032-T037 IDs are
+append-only even though they are predecessors of T022/T029. The final acceptance
+tasks depend on all four stories and the preparatory service/transport work.
 
 ## Phase 1: Setup
 
@@ -91,7 +99,7 @@ session closure, `credential_pending` recovery, and no replay after audit error.
 - [x] T019 [P] [US3] Add lifecycle state-machine tests for create, pending, ready, revoke, expiry, blocked, restart, and recovery transitions in `tests/test_credential_lifecycle.py`. **DONE:** repository CAS tests cover pending/ready/revoking/revoked/expired/blocked and closed-state removal; recovery tests cover restart and stale proof.
 - [x] T020 [US3] Implement monotonic expiry/revoke admission closure and bounded active-session draining in `sandbox/isolation/credential_request_broker.py` and `sandbox/isolation/credential_supervisor.py`. **DONE:** broker checks expiry at admission, closes binding/global admission before drain, enforces active-session ceilings, and supervisor reports bounded drain outcomes.
 - [x] T021 [US3] Implement restart reconciliation that enters `credential_pending`, recreates a fresh lease, and re-verifies policy/egress/broker/effective-isolation digests in `sandbox/runtimes/managed/credential_recovery.py`. **DONE:** recovery invalidates old leases, persists pending before gates, requires matching digests/proof/egress/report, and only then CAS-promotes a fresh ready version.
-- [ ] T022 [US3] Add fixed-verb service supervision and cleanup observation for the unprivileged credential broker without passing credential bytes to the root helper in `tools/native-helper/native-helper.py` and `sandbox/runtimes/managed/services.py` (BLOCKED: the standalone credential-broker service executable and authorized root-helper lifecycle proof are not present; local supervisor intentionally remains an in-process contract)
+- [ ] T022 [US3] Add fixed-verb service supervision and cleanup observation for the unprivileged credential broker without passing credential bytes to the root helper in `tools/native-helper/native-helper.py` and `sandbox/runtimes/managed/services.py` (BLOCKED: requires T032-T036 plus authorized Ubuntu root-helper/service lifecycle proof; local supervisor intentionally remains an in-process contract and no local seam may be promoted as T022 completion)
 - [x] T023 [US3] Add audit-safe lifecycle records and indeterminate-outcome handling that never retries a credential-bearing request after an append failure in `sandbox/isolation/credential_audit.py` and `tests/test_credential_audit.py`. **DONE:** append-only validated records reject sensitive fields; pre-effect append failure blocks; post-effect append failure returns indeterminate/no-replay.
 
 ## Phase 6: User Story 4 — Verify capability, proof, and lifecycle state (P2)
@@ -113,10 +121,23 @@ credential use.
 **Goal**: Verify regression behavior, evidence quality, documentation, and the
 release decision without staging unrelated user work.
 
-- [x] T028 [P] Run the focused resolver, binding, broker, lifecycle, report, secret, and isolation unittest suites and record commands/results in `specs/045-credential-vault-isolation/quickstart.md`. **DONE:** 59 Credential Vault contract/lifecycle/no-leak/broker tests pass locally; existing isolation/secret/managed-native regression commands also pass. Full discovery remains limited by pre-existing environment-dependent tests.
-- [ ] T029 Extend the authorized live native acceptance harness with exact binding, hostile no-leak, revoke, restart, exhaustion, cleanup, and timing checks in `tests/live_native_acceptance.py` (BLOCKED: requires T003 and an authorized Ubuntu 24.04 host)
+- [x] T028 [P] Run the focused resolver, binding, broker, lifecycle, report, secret, and isolation unittest suites and record commands/results in `specs/045-credential-vault-isolation/quickstart.md`. **DONE:** 62 Credential Vault contract/lifecycle/no-leak/broker tests pass locally; existing isolation/secret/managed-native regression commands also pass. Full discovery remains limited by pre-existing environment-dependent tests.
+- [ ] T029 Extend the authorized live native acceptance harness with exact binding, hostile no-leak, revoke, restart, exhaustion, cleanup, and timing checks in `tests/live_native_acceptance.py` (BLOCKED: requires T003, T022, T037, and an authorized Ubuntu 24.04 host; offline harness tests are preparation only)
 - [x] T030 Update the managed-native capability, isolation, and operator documentation with the explicit refusal boundaries and at-rest residual risk in `docs/native-runtime-isolation.md`, `docs/sandbox-config-reference.md`, and `docs/credential-vault.md`. **DONE:** status command, unsupported runtimes, exact request boundary, residual at-rest risk, and proof-gated refusal rules are documented.
-- [ ] T031 Complete an independent security/source/evidence review of the implementation against `specs/045-credential-vault-isolation/contracts/`, update the evidence ID and support tier only if every predecessor and feature gate passes, and record the decision in `specs/045-credential-vault-isolation/quickstart.md` (BLOCKED: predecessor/live feature evidence and independent implementation review are still outstanding; support remains `implemented_unproven`/`adoptable=false`)
+- [ ] T031 Complete an independent security/source/evidence review of the implementation against `specs/045-credential-vault-isolation/contracts/`, update the evidence ID and support tier only if every predecessor and feature gate passes, and record the decision in `specs/045-credential-vault-isolation/quickstart.md` (BLOCKED: requires T003, T022, T029, a clean exact source revision, live feature evidence, and independent implementation review; support remains `implemented_unproven`/`adoptable=false`)
+
+## Phase 8: Preparatory work to unblock T022 and T029
+
+**Goal**: Prepare the standalone service, instance-bound transport, cleanup, and
+public acceptance seams locally without enabling credential use or claiming live
+proof. These IDs are append-only to preserve references to T022/T029/T031.
+
+- [x] T032 [US3] Define the pre-implementation standalone service, instance-bound guest transport, trusted one-use lease channel, fixed helper verbs, and cleanup invariants in `specs/045-credential-vault-isolation/contracts/credential-broker-service-v1.md`. **DONE:** the contract records required boundaries and explicit refusals; it does not select an unreviewed lease mechanism, enable a runtime path, or change evidence/support state.
+- [ ] T033 [US3] Complete an independent security design review that selects one concrete trusted one-use lease mechanism, reconciles the FR-008/SC-002 control-channel wording through `specs/045-credential-vault-isolation/spec.md` clarification if required, and records accepted peer authentication, descriptor/socket ownership, replay refusal, and no-secret surfaces in `specs/045-credential-vault-isolation/contracts/credential-broker-service-v1.md` (LOCAL ONLY: must finish before service implementation; does not satisfy T031)
+- [ ] T034 [US3] Add failing-first standalone service and transport contract tests, including cross-instance denial, transport-capability rotation, lease one-use, bounded status, and argv/environment/unit/config/output no-leak checks, in `tests/test_credential_broker_service_contract.py` (LOCAL ONLY: no helper or runtime mutation)
+- [ ] T035 [US3] Implement the reviewed unprivileged standalone broker executable and its instance-bound request/trusted-lease endpoints in `tools/native-helper/native-credential-broker.py`, then satisfy `tests/test_credential_broker_service_contract.py` without adding a default or adoptable runtime path (LOCAL ONLY: code presence is not T022 proof)
+- [ ] T036 [US3] Add secret-free digest-bound broker plans, fixed helper lifecycle verbs, broker-first cleanup observation/order, and inert dependency wiring in `sandbox/runtimes/managed/services.py`, `tools/native-helper/native-helper.py`, `sandbox/runtimes/managed/adapter.py`, and `sandbox/application/context.py`, with local coverage in `tests/test_managed_services.py`, `tests/test_native_cleanup_observation.py`, and `tests/test_credential_wiring.py` (LOCAL ONLY: keep T022 blocked until authorized host proof)
+- [ ] T037 [US1] Add a proof-gated public `./sb` acceptance surface that accepts only opaque source references and exact non-secret binding/request/revoke metadata in `sandbox/commands/native.py`, then add offline public-command and harness coverage in `tests/test_native_cli.py` and `tests/test_live_native_acceptance_harness.py` (LOCAL ONLY: keep T029 blocked until the authorized live matrix runs)
 
 ## Phase 9: Authorized-proof harness preparation
 
@@ -158,6 +179,25 @@ T024 (report model) -> T025 (CLI/manifest) -> T026 (health hooks)
 T027 (report tests) can proceed alongside T025 after T024 is stable.
 ```
 
+### To unblock the standalone service and live acceptance
+
+```text
+T032 (service/transport invariants; complete)
+  -> T033 (independent lease-channel design review)
+  -> T034 (failing-first local service/transport contracts)
+  -> T035 (standalone unprivileged service)
+  -> T036 (fixed helper supervision, cleanup, inert wiring)
+       +-> T022 (authorized helper/service lifecycle proof)
+       +-> T037 (proof-gated public acceptance seam)
+
+T003 + T022 + T037 -> T029 (authorized live feature matrix)
+T003 + T022 + T029 -> T031 (independent final evidence/support review)
+```
+
+T034 and any unrelated non-service local regression preparation may run in
+parallel only after T033 accepts the concrete lease mechanism. No item in this
+chain changes `implemented_unproven`, `adoptable=false`, or the null evidence ID.
+
 ## Implementation strategy
 
 1. **MVP gate**: Complete T003–T014 and prove one exact request with no guest
@@ -167,10 +207,14 @@ T027 (report tests) can proceed alongside T025 after T024 is stable.
    revoke, expiry, restart, and cleanup behavior are independently observable.
 3. **Operator increment**: Complete T024–T027 so capability/proof status cannot
    overclaim readiness and lifecycle hooks fail closed.
-4. **Release gate**: Complete T028–T031 with authorized live evidence and an
+4. **Release gate**: Complete T028-T031 with authorized live evidence and an
    independent review. Transparent MITM, unsupported runtimes, multi-tenancy,
    HA, snapshots, and at-rest encryption remain deferred rather than silently
    entering the MVP.
+5. **Blocked-service increment**: Complete T032-T037 as local preparation, then
+   return to T022 for authorized helper/service proof and T029 for the live
+   feature matrix. Local preparation never changes the support tier or evidence
+   identity.
 
 ## Format validation
 

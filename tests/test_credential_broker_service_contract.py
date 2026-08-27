@@ -2010,6 +2010,107 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
         self.assert_refusal(registry.guest_disconnected(CONNECTION), "operation_cancelled")
         self.assert_refusal(registry.guest_result(CONNECTION), "operation_not_pending")
 
+    # --- kernel-derived guest observation ----------------------------------
+
+    ROUTES = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "ve-sb0123456789\t0000CB0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\n"
+        "eth0\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000\n"
+    )
+
+    def _observer(self, *, routes=None, interface="ve-sb0123456789",
+                  device_error=None):
+        def device_reader(_connection):
+            if device_error is not None:
+                raise device_error
+            return interface
+
+        return self.broker.LinuxGuestConnectionObserver(
+            service_identity(),
+            route_reader=lambda: self.ROUTES if routes is None else routes,
+            device_reader=device_reader,
+            id_factory=lambda: CONNECTION,
+        )
+
+    def test_the_observer_derives_verified_state_from_the_kernel(self):
+        observation = self._observer()(FakeGuestConnection(b""))
+        self.assertTrue(self.broker.validate_guest_transport(
+            service_identity(), observation,
+        )["ok"])
+        self.assertTrue(observation["peer_verified"])
+        self.assertFalse(observation["forwarded"])
+        self.assertFalse(observation["loopback"])
+        self.assertEqual(observation["interface"], "ve-sb0123456789")
+        self.assertEqual(observation["peer_address"], "10.203.0.2")
+
+    def test_a_peer_that_is_not_on_link_is_reported_as_forwarded(self):
+        gateway_only = (
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+            "ve-sb0123456789\t0000CB0A\t0100A8C0\t0003\t0\t0\t0\t00FFFFFF\n"
+        )
+        for routes in ("", gateway_only, "Iface\tDestination\n"):
+            with self.subTest(routes=routes[:24]):
+                observation = self._observer(routes=routes)(FakeGuestConnection(b""))
+                self.assertTrue(observation["forwarded"])
+                self.assertFalse(observation["peer_verified"])
+                self.assert_refusal(self.broker.validate_guest_transport(
+                    service_identity(), observation,
+                ), "transport_denied")
+
+    def test_a_route_on_another_device_never_verifies_this_one(self):
+        other = (
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+            "eth0\t0000CB0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\n"
+        )
+        observation = self._observer(routes=other)(FakeGuestConnection(b""))
+        self.assertTrue(observation["forwarded"])
+        self.assertFalse(observation["peer_verified"])
+
+    def test_an_unreadable_bound_device_is_a_closed_observation(self):
+        observation = self._observer(device_error=OSError("no device"))(
+            FakeGuestConnection(b""),
+        )
+        self.assertFalse(observation["peer_verified"])
+        self.assertTrue(observation["forwarded"])
+        self.assertTrue(observation["loopback"])
+        self.assert_refusal(self.broker.validate_guest_transport(
+            service_identity(), observation,
+        ), "transport_denied")
+
+    def test_a_foreign_bound_device_is_never_verified(self):
+        observation = self._observer(interface="eth0")(FakeGuestConnection(b""))
+        self.assertFalse(observation["peer_verified"])
+        self.assert_refusal(self.broker.validate_guest_transport(
+            service_identity(), observation,
+        ), "transport_denied")
+
+    def test_a_loopback_connection_is_never_verified(self):
+        connection = FakeGuestConnection(b"", local=("127.0.0.1", 18443),
+                                         peer=("127.0.0.1", 43100))
+        observation = self._observer()(connection)
+        self.assertTrue(observation["loopback"])
+        self.assertFalse(observation["peer_verified"])
+
+    def test_every_observation_carries_a_fresh_non_secret_identity(self):
+        observer = self.broker.LinuxGuestConnectionObserver(
+            service_identity(), route_reader=lambda: self.ROUTES,
+            device_reader=lambda _connection: "ve-sb0123456789",
+        )
+        first = observer(FakeGuestConnection(b""))
+        second = observer(FakeGuestConnection(b""))
+        self.assertNotEqual(first["connection_identity"],
+                            second["connection_identity"])
+        for value in (first, second):
+            self.assertTrue(self.broker._identity(value["connection_identity"]))
+            self.assertNotIn(FORBIDDEN_MARKER, repr(value))
+            self.assertNotIn("authorization", repr(value).lower())
+
+    def test_a_rotated_epoch_invalidates_an_older_observation(self):
+        observation = self._observer()(FakeGuestConnection(b""))
+        self.assert_refusal(self.broker.validate_guest_transport(
+            service_identity(broker_epoch=NEXT_EPOCH), observation,
+        ), "transport_denied")
+
     # --- coordinator lifecycle ---------------------------------------------
 
     def _coordinator(self, **overrides):

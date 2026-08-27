@@ -1547,6 +1547,154 @@ def _readily_observable_trailing(connection) -> bool:
         return False
 
 
+def _route_table(text: Any) -> tuple[dict[str, int], ...]:
+    """Parse `/proc/net/route` into on-link comparable integers.
+
+    The kernel prints destination, gateway, and mask as 32-bit values in host
+    byte order, so addresses are compared in the same order rather than being
+    byte-swapped into dotted form.
+    """
+    if not isinstance(text, str) or len(text) > 1024 * 1024:
+        return ()
+    entries = []
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        try:
+            entries.append({
+                "interface": parts[0],
+                "destination": int(parts[1], 16),
+                "gateway": int(parts[2], 16),
+                "mask": int(parts[7], 16),
+            })
+        except ValueError:
+            continue
+        if len(entries) >= 4096:
+            break
+    return tuple(entries)
+
+
+def _on_link(address: str, interface: str, routes: Any) -> bool:
+    """True only when the kernel routes this address directly on this device."""
+    try:
+        value = int.from_bytes(ipaddress.IPv4Address(address).packed, "little")
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+    for entry in routes or ():
+        if entry.get("interface") != interface or entry.get("gateway") != 0:
+            continue
+        mask = entry.get("mask")
+        destination = entry.get("destination")
+        if not isinstance(mask, int) or not isinstance(destination, int):
+            continue
+        if value & mask == destination & mask:
+            return True
+    return False
+
+
+class LinuxGuestConnectionObserver:
+    """Derive one guest connection's kernel state, failing closed on doubt.
+
+    Every field comes from the kernel, not from the caller: the bound device is
+    read back from the accepted socket, the addresses come from the socket
+    names, and reachability is decided by an on-link route on that exact
+    device. Anything unreadable, off-device, routed through a gateway, or on
+    loopback is reported as unverified, which the transport validator refuses.
+
+    The broker identity fields are included so a stale observer cannot pass a
+    rotated epoch. They are non-secret identities, never credential material.
+    """
+
+    def __init__(
+        self,
+        service: Any,
+        *,
+        route_reader=None,
+        device_reader=None,
+        id_factory=None,
+    ) -> None:
+        if not _validate_service_identity(service):
+            raise ValueError("guest connection observer configuration is invalid")
+        for value, label in ((route_reader, "route reader"),
+                             (device_reader, "device reader"),
+                             (id_factory, "identity factory")):
+            if value is not None and not callable(value):
+                raise ValueError(f"guest connection observer {label} is invalid")
+        self.service = dict(service)
+        self._route_reader = route_reader or self._read_proc_routes
+        self._device_reader = device_reader or self._read_bound_device
+        self._id_factory = id_factory or (lambda: f"guest-{uuid.uuid4().hex}")
+
+    @staticmethod
+    def _read_proc_routes() -> str:
+        with open("/proc/net/route", "r", encoding="ascii", errors="strict") as handle:
+            return handle.read(1024 * 1024)
+
+    @staticmethod
+    def _read_bound_device(connection) -> str:
+        raw = connection.getsockopt(
+            socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 64,
+        )
+        if isinstance(raw, int):
+            raise OSError("bound device is unreadable")
+        return raw.rstrip(b"\0").decode("ascii", errors="strict")
+
+    def _denied(self) -> dict[str, Any]:
+        """A syntactically valid observation that can only be refused."""
+        return {
+            "machine_id": self.service["machine_id"],
+            "broker_epoch": self.service["broker_epoch"],
+            "interface": self.service["guest_interface"],
+            "local_address": self.service["host_address"],
+            "local_port": self.service["guest_port"],
+            "peer_address": self.service["guest_address"],
+            "forwarded": True,
+            "loopback": True,
+            "connection_identity": self._id_factory(),
+            "peer_verified": False,
+        }
+
+    def __call__(self, connection) -> dict[str, Any]:
+        try:
+            interface = self._device_reader(connection)
+            local = connection.getsockname()
+            peer = connection.getpeername()
+            local_address, local_port = str(local[0]), int(local[1])
+            peer_address = str(peer[0])
+            routes = _route_table(self._route_reader())
+        except (OSError, UnicodeDecodeError, IndexError, TypeError, ValueError):
+            return self._denied()
+        if not _identity(interface) or not _address(local_address) \
+                or not _address(peer_address) \
+                or not _integer(local_port, minimum=1, maximum=65535):
+            return self._denied()
+        try:
+            loopback = bool(ipaddress.ip_address(local_address).is_loopback
+                            or ipaddress.ip_address(peer_address).is_loopback)
+        except ValueError:
+            return self._denied()
+        # A peer that is not directly on this device could have arrived through
+        # forwarding, another interface, or another namespace. That is never
+        # provable here, so it is reported as forwarded.
+        forwarded = not _on_link(peer_address, interface, routes)
+        return {
+            "machine_id": self.service["machine_id"],
+            "broker_epoch": self.service["broker_epoch"],
+            "interface": interface,
+            "local_address": local_address,
+            "local_port": local_port,
+            "peer_address": peer_address,
+            "forwarded": forwarded,
+            "loopback": loopback,
+            "connection_identity": self._id_factory(),
+            "peer_verified": bool(
+                not forwarded and not loopback
+                and interface == self.service["guest_interface"]
+            ),
+        }
+
+
 class LinuxGuestEndpoint:
     """Opt-in private-veth admission probe, not an integrated guest endpoint.
 
@@ -3413,7 +3561,7 @@ def build_coordinator(config: Any, *, adapter) -> BrokerCoordinator:
         service, control_plane_uid=value["control_plane_uid"],
         controller_identity=value["controller"], adapter=adapter,
         identity_observer=lambda: dict(service),
-        connection_observer=lambda _connection: bounded_error("transport_denied"),
+        connection_observer=LinuxGuestConnectionObserver(service),
         enabled=value["enabled"],
     )
 

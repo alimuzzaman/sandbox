@@ -281,6 +281,35 @@ After a broker or machine restart, durable bindings enter
 `credential_pending`; no old epoch, lease, descriptor, socket connection, or
 process identity can reopen admission.
 
+## Coordinator implementation status
+
+The broker now owns a runnable coordinator: `BrokerCoordinator` composes the
+private-veth guest endpoint, the broker-owned abstract controller endpoint, the
+descriptor endpoint, and the pending-operation registry, and drives them with
+bounded workers. One guest connection is retained from submission through
+authenticated claim, descriptor rendezvous, and typed execution until exactly
+one terminal SBRS result is written.
+
+Credential application crosses `CredentialOperationAdapter` only. Its target
+must be a `CredentialRequestBroker` whose resolver is the descriptor-backed
+`DescriptorLeaseResolver` and whose upstream is `VerifiedHttpsUpstream`, so
+every existing proof, egress, concurrency, normalization, and redaction gate
+still applies. The resolver has no source reader, no path resolver, and no
+plaintext-return operation; the only material it can surrender is the buffer
+the trusted lease channel just delivered, exactly once.
+
+Two boundaries are deliberately outside this executable and keep the standalone
+`--serve` path a refusal:
+
+1. the kernel-derived guest connection observer, which must prove the exact
+   veth, tuple, epoch, and peer state; and
+2. the credential adapter, whose binding loader, proof, and egress gates belong
+   to the trusted control plane, not to this executable's argv or config.
+
+A trusted control-plane process that supplies both can run the coordinator
+cross-process. The executable alone starts nothing, opens no admission, and
+returns a bounded refusal.
+
 ## Local verification boundary
 
 Local unit and contract tests may prove validation, fixed argv, serialization,

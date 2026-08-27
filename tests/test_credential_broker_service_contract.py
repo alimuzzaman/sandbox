@@ -9,10 +9,14 @@ read real credential material.  They are not Ubuntu isolation proof.
 from __future__ import annotations
 
 from array import array
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
+import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1270,14 +1274,23 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             lease_frame(operation_id=OPERATION, request_digest=digest),
             owner="controller-one", now=1_900_000_002,
         )["ok"])
+        # A response header outside the reviewed allowlist is refused rather
+        # than copied to the guest: it is dropped, and the terminal result is
+        # still delivered. The encoder remains the fail-closed backstop for
+        # anything that could ever bypass this filter.
         malformed = BrokerResponse(
             status=200, headers={"authorization": "not-reviewed"}, body=b"ok",
             correlation_id=guest_request()["correlation_id"],
         )
-        self.assert_refusal(
-            invalid.complete(OPERATION, digest, malformed),
-            "operation_indeterminate",
-        )
+        delivered = invalid.complete(OPERATION, digest, malformed)
+        self.assertTrue(delivered["ok"])
+        self.assertEqual(delivered["headers"], {})
+        self.assertNotIn("not-reviewed", repr(delivered))
+        with self.assertRaises(ValueError):
+            broker.encode_guest_terminal_result({
+                "ok": True, "status": 200, "headers": {"authorization": "x"},
+                "body": b"ok", "correlation_id": guest_request()["correlation_id"],
+            })
 
         correlation = broker.PendingOperationRegistry(
             service_identity(), id_factory=lambda: OPERATION,
@@ -1440,6 +1453,758 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             broker.helper_argv(
                 "/fixed/native-helper", "credential-broker-start", tainted_identity,
             )
+
+
+# --- T035 coordinator contracts ---------------------------------------------
+#
+# These exercise the runnable coordinator's pure and fake-socket seams. They
+# prove ordering, authentication, one-use consumption, typed execution, and
+# terminal delivery locally. They open no real socket, create no real
+# descriptor, and are not Ubuntu isolation, systemd, or live credential proof.
+
+
+def credential_binding(**overrides):
+    from sandbox.isolation.credential_binding import CredentialBinding
+
+    value = {
+        "binding_id": BINDING, "instance_id": MACHINE,
+        "source_reference": "fixture/API_TOKEN", "policy_digest": POLICY_DIGEST,
+        "egress_digest": EGRESS_DIGEST, "broker_digest": BROKER_DIGEST,
+        "scheme": "https", "host": "api.example.test", "port": 443,
+        "method": "POST", "path": "/v1/items", "auth_form": "bearer",
+        "expires_at": "2999-01-01T00:00:00Z", "owner": "project:fixture",
+        "version": 7, "state": "ready",
+    }
+    value.update(overrides)
+    return CredentialBinding(**value)
+
+
+class FakeTransport:
+    def __init__(self, *, status=200, body=b'{"ok":true}', headers=None, error=None):
+        self.calls = []
+        self.status = status
+        self.body = body
+        self.headers = headers if headers is not None else {
+            "content-type": "application/json", "set-cookie": "session=leak",
+        }
+        self.error = error
+
+    def request(self, method, path, headers, body, timeout):
+        self.calls.append((method, path, dict(headers), body, timeout))
+        if self.error is not None:
+            raise self.error
+        return {"status": self.status, "headers": dict(self.headers), "body": self.body}
+
+    def close(self):
+        pass
+
+
+def descriptor_broker(broker, *, transport=None, proof=True, egress=True,
+                      binding=None):
+    """Compose the descriptor-backed request broker with injected fakes."""
+    from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+    transport = transport or FakeTransport()
+    item = binding if binding is not None else credential_binding()
+    upstream = VerifiedHttpsUpstream(
+        resolver=lambda _host: ("93.184.216.34",),
+        connector=lambda *_args: transport,
+    )
+    request_broker = broker.descriptor_backed_request_broker(
+        machine_id=MACHINE, binding_loader=lambda _identity: item,
+        proof=lambda _binding: proof, egress=lambda _binding: egress,
+        upstream=upstream, owner="project:fixture",
+    )
+    return request_broker, transport, item
+
+
+class FakeControllerConnection:
+    """A seqpacket peer that yields fixed packets and records replies."""
+
+    def __init__(self, broker, packets, *, uid=501, pid=9001):
+        self.broker = broker
+        self.packets = list(packets)
+        self.uid = uid
+        self.pid = pid
+        self.sent = []
+        self.closed = False
+
+    def settimeout(self, _timeout):
+        pass
+
+    def getsockopt(self, _level, _kind, _size):
+        return self.broker._PEER_CREDENTIALS.pack(self.pid, self.uid, 20)
+
+    def recv(self, _size):
+        return self.packets.pop(0) if self.packets else b""
+
+    def sendall(self, payload):
+        self.sent.append(payload)
+
+    def close(self):
+        self.closed = True
+
+
+class TestCredentialBrokerCoordinator(unittest.TestCase):
+    def assert_refusal(self, value, code):
+        self.assertFalse(value["ok"])
+        self.assertEqual(value["code"], code)
+
+    def setUp(self):
+        self.broker = module()
+        # Local runs are unprivileged and often not Linux. Patching only the
+        # platform gates keeps the production guard intact while the fake
+        # socket seams exercise ordering and authentication.
+        for name in ("_require_linux_transport", "_require_linux_guest_listener"):
+            patcher = mock.patch.object(self.broker, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in (("SO_BINDTODEVICE", 25), ("SO_PEERCRED", 17)):
+            option = mock.patch.object(self.broker.socket, name, value, create=True)
+            option.start()
+            self.addCleanup(option.stop)
+
+    # --- descriptor-backed resolver and typed execution ---------------------
+
+    def test_descriptor_resolver_is_one_use_and_has_no_plaintext_return(self):
+        resolver = self.broker.DescriptorLeaseResolver()
+        binding = credential_binding()
+        with self.assertRaises(RuntimeError):
+            resolver.issue(binding)
+        with self.assertRaises(RuntimeError):
+            resolver.resolve("fixture/API_TOKEN")
+        resolver.bind(BINDING, 7, bytearray(b"synthetic-material"))
+        lease = resolver.issue(binding)
+        seen = []
+        self.assertEqual(lease.consume(lambda value: seen.append(bytes(value)) or "done"),
+                         "done")
+        self.assertEqual(seen, [b"synthetic-material"])
+        with self.assertRaises(RuntimeError):
+            lease.consume(lambda _value: None)
+        with self.assertRaises(RuntimeError):
+            resolver.issue(binding)
+
+    def test_descriptor_resolver_refuses_a_mismatched_binding(self):
+        resolver = self.broker.DescriptorLeaseResolver()
+        resolver.bind(BINDING, 7, bytearray(b"synthetic-material"))
+        with self.assertRaises(RuntimeError):
+            resolver.issue(credential_binding(version=8))
+
+    def test_adapter_requires_a_descriptor_backed_broker_and_verified_upstream(self):
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        upstream = VerifiedHttpsUpstream(
+            resolver=lambda _host: ("93.184.216.34",),
+            connector=lambda *_args: FakeTransport(),
+        )
+        with self.assertRaises(ValueError):
+            self.broker.CredentialOperationAdapter(upstream)
+        with self.assertRaises(ValueError):
+            self.broker.CredentialOperationAdapter(object())
+        with self.assertRaises(ValueError):
+            self.broker.CredentialOperationAdapter(
+                self.broker.CredentialRequestBrokerFactoryProbe
+                if hasattr(self.broker, "CredentialRequestBrokerFactoryProbe") else object(),
+            )
+        request_broker, _transport, _binding = descriptor_broker(self.broker)
+        adapter = self.broker.CredentialOperationAdapter(request_broker)
+        self.assertIsNotNone(adapter)
+
+    def test_adapter_executes_typed_upstream_through_the_broker_gates(self):
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+
+        request_broker, transport, _binding = descriptor_broker(self.broker)
+        adapter = self.broker.CredentialOperationAdapter(request_broker)
+        request = self.broker._canonical_guest_request(
+            guest_request(host="api.example.test", path="/v1/items", method="POST"),
+        )
+        result = adapter.execute(request, bytearray(b"synthetic-material"),
+                                 machine_id=MACHINE)
+        self.assertIsInstance(result, BrokerResponse)
+        self.assertEqual(result.status, 200)
+        # The upstream saw the applied credential; the guest-visible result
+        # never carries it and the disallowed response header is dropped.
+        self.assertIn("authorization", {key.lower() for key in transport.calls[0][2]})
+        public = self.broker._guest_public_result(result)
+        self.assertNotIn("set-cookie", public["headers"])
+        self.assertNotIn("synthetic-material", repr(public))
+
+    def test_adapter_refuses_before_lease_use_and_is_indeterminate_after(self):
+        request_broker, _transport, _binding = descriptor_broker(
+            self.broker, proof=False,
+        )
+        adapter = self.broker.CredentialOperationAdapter(request_broker)
+        request = self.broker._canonical_guest_request(guest_request(
+            host="api.example.test", path="/v1/items", method="POST",
+        ))
+        refused = adapter.execute(request, bytearray(b"x" * 8), machine_id=MACHINE)
+        self.assertEqual(refused["outcome"], "refused")
+        self.assertIn(refused["code"], self.broker.GUEST_ERROR_CODES)
+
+        broken = FakeTransport(error=OSError("synthetic upstream failure"))
+        request_broker, _transport, _binding = descriptor_broker(
+            self.broker, transport=broken,
+        )
+        adapter = self.broker.CredentialOperationAdapter(request_broker)
+        after = adapter.execute(request, bytearray(b"x" * 8), machine_id=MACHINE)
+        self.assertEqual(after["outcome"], "indeterminate")
+        self.assertNotIn("synthetic upstream failure", repr(after))
+
+    def test_adapter_refuses_a_transport_identity_that_is_not_this_instance(self):
+        request_broker, _transport, _binding = descriptor_broker(self.broker)
+        adapter = self.broker.CredentialOperationAdapter(request_broker)
+        request = self.broker._canonical_guest_request(guest_request())
+        result = adapter.execute(request, bytearray(b"x" * 8), machine_id=SIBLING)
+        self.assertEqual(result["outcome"], "refused")
+        self.assertEqual(result["code"], "transport_denied")
+
+    # --- registry retention -------------------------------------------------
+
+    def _registry(self):
+        return self.broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+
+    def test_registry_waits_for_a_terminal_result_and_reclaims_the_record(self):
+        registry = self._registry()
+        submitted = registry.submit(guest_request(), guest_observation(), now=1_000)
+        self.assertTrue(submitted["ok"])
+
+        def terminalize():
+            claimed = registry.claim_next("controller-1", now=1_000)
+            self.assertEqual(claimed["type"], "CLAIMED")
+            registry.refuse(claimed["operation_id"], claimed["request_digest"],
+                            owner="controller-1", code="binding_unknown")
+
+        worker = threading.Thread(target=terminalize)
+        worker.start()
+        result = registry.await_result(CONNECTION, timeout_seconds=5.0)
+        worker.join()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "binding_unknown")
+        self.assertEqual(result["correlation_id"], guest_request()["correlation_id"])
+        # The private record is reclaimed with the guest's connection.
+        self.assert_refusal(registry.guest_result(CONNECTION), "operation_not_pending")
+
+    def test_registry_wait_times_out_without_inventing_a_result(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        result = registry.await_result(CONNECTION, timeout_seconds=0.05)
+        self.assert_refusal(result, "lease_expired")
+
+    # --- controller endpoint ------------------------------------------------
+
+    def _controller_channel(self, registry=None):
+        registry = registry or self._registry()
+        channel = self.broker.ControllerClaimChannel(
+            service_identity(), registry, {
+                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+            clock=lambda: 1_000,
+        )
+        return registry, channel
+
+    def _controller_endpoint(self, packets, *, registry=None, uid=501, pid=9001,
+                             observer=None):
+        registry, channel = self._controller_channel(registry)
+        connection = FakeControllerConnection(self.broker, packets, uid=uid, pid=pid)
+        listener = FakeListener([connection])
+        endpoint = self.broker.LinuxControllerEndpoint(
+            service_identity(), channel=channel,
+            identity_observer=observer or (lambda _connection: {
+                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            }),
+            enabled=True, socket_factory=lambda *_args: listener,
+            clock=lambda: 1_000,
+        )
+        return registry, channel, endpoint, connection, listener
+
+    def test_controller_endpoint_is_closed_by_default(self):
+        _registry, channel = self._controller_channel()
+        endpoint = self.broker.LinuxControllerEndpoint(
+            service_identity(), channel=channel,
+            identity_observer=lambda _connection: {},
+        )
+        self.assert_refusal(endpoint.start(), "controller_channel_closed")
+        self.assertFalse(endpoint.admission_open)
+
+    def test_controller_endpoint_authenticates_the_peer_before_parsing(self):
+        registry, _channel, endpoint, connection, _listener = self._controller_endpoint(
+            [b"not-a-frame"], uid=777,
+        )
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        self.assertTrue(endpoint.start()["ok"])
+        self.assert_refusal(endpoint.accept_once(), "controller_denied")
+        self.assertEqual(connection.sent, [])
+
+    def test_controller_endpoint_refuses_an_observer_kernel_mismatch(self):
+        _registry, _channel, endpoint, _connection, _listener = self._controller_endpoint(
+            [b""], observer=lambda _connection: {
+                "uid": 501, "pid": 4242, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+        )
+        self.assertTrue(endpoint.start()["ok"])
+        self.assert_refusal(endpoint.accept_once(), "controller_denied")
+
+    def test_controller_claim_and_refuse_round_trip_over_the_endpoint(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        claim = self.broker.encode_controller_message({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 1,
+        })
+        registry, _channel, endpoint, connection, _listener = self._controller_endpoint(
+            [claim], registry=registry,
+        )
+        self.assertTrue(endpoint.start()["ok"])
+        self.assertTrue(endpoint.accept_once()["ok"])
+        handled = endpoint.handle_next()
+        self.assertTrue(handled["ok"])
+        reply = self.broker.parse_controller_message(connection.sent[0])
+        self.assertEqual(reply["type"], "CLAIMED")
+        self.assertEqual(reply["operation_id"], OPERATION)
+        self.assertNotIn("headers", reply)
+        self.assertNotIn("body", reply)
+
+    def test_controller_endpoint_enforces_monotonic_sequence(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        replay = self.broker.encode_controller_message({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 2,
+        })
+        registry, _channel, endpoint, _connection, _listener = self._controller_endpoint(
+            [replay], registry=registry,
+        )
+        endpoint.start()
+        endpoint.accept_once()
+        self.assert_refusal(endpoint.handle_next(), "controller_message_invalid")
+
+    def test_controller_endpoint_refuses_a_stale_epoch(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        stale = self.broker.encode_controller_message({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE, "broker_epoch": NEXT_EPOCH,
+            "sequence": 1,
+        })
+        registry, _channel, endpoint, _connection, _listener = self._controller_endpoint(
+            [stale], registry=registry,
+        )
+        endpoint.start()
+        endpoint.accept_once()
+        self.assert_refusal(endpoint.handle_next(), "controller_message_invalid")
+
+    def test_controller_disconnect_terminalizes_owned_operations(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        claim = self.broker.encode_controller_message({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 1,
+        })
+        registry, _channel, endpoint, _connection, _listener = self._controller_endpoint(
+            [claim], registry=registry,
+        )
+        endpoint.start()
+        endpoint.accept_once()
+        endpoint.handle_next()
+        self.assertEqual(endpoint.disconnect(), (OPERATION,))
+        self.assert_refusal(registry.guest_result(CONNECTION), "operation_cancelled")
+        self.assertIsNone(endpoint.owner)
+
+    # --- descriptor rendezvous ---------------------------------------------
+
+    def _operation_endpoint(self, *, registry, frame, owner="controller-1",
+                            adapter=None, uid=501, descriptor=77,
+                            reader=None):
+        packet = self.broker.encode_lease_frame(frame)
+        connection = FakeConnection(self.broker, packet, uid=uid, descriptor=descriptor)
+        listener = FakeListener([connection])
+        endpoint = self.broker.LinuxOperationLeaseEndpoint(
+            service_identity(), control_plane_uid=501, registry=registry,
+            adapter=adapter or self.broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
+            owner_provider=lambda: owner,
+            identity_observer=lambda: service_identity(),
+            descriptor_reader=reader or (
+                lambda _descriptor, size: bytearray(b"m" * size)
+            ),
+            descriptor_observer=lambda _descriptor: descriptor_observation(),
+            enabled=True, socket_factory=lambda *_args: listener,
+            clock=lambda: 1_000,
+        )
+        return endpoint, connection
+
+    def _claimed(self, registry, owner="controller-1"):
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        claimed = registry.claim_next(owner, now=1_000)
+        self.assertEqual(claimed["type"], "CLAIMED")
+        return claimed
+
+    def test_operation_lease_endpoint_is_closed_by_default(self):
+        registry = self._registry()
+        endpoint = self.broker.LinuxOperationLeaseEndpoint(
+            service_identity(), control_plane_uid=501, registry=registry,
+            adapter=self.broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
+            owner_provider=lambda: None,
+            identity_observer=lambda: service_identity(),
+        )
+        self.assert_refusal(endpoint.start(), "lease_channel_closed")
+        self.assert_refusal(endpoint.receive_once(), "lease_channel_closed")
+
+    def test_descriptor_rendezvous_requires_the_exact_claimed_operation(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest="0" * 64)
+        endpoint, connection = self._operation_endpoint(registry=registry, frame=frame)
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assert_refusal(endpoint.receive_once(), "request_digest_mismatch")
+        self.assertTrue(connection.closed)
+
+    def test_descriptor_rendezvous_requires_the_claim_owner(self):
+        registry = self._registry()
+        claimed = self._claimed(registry, owner="controller-1")
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        endpoint, _connection = self._operation_endpoint(
+            registry=registry, frame=frame, owner="controller-other",
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assert_refusal(endpoint.receive_once(), "operation_not_pending")
+
+    def test_descriptor_transfer_is_one_use_and_never_replayed(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        packet = self.broker.encode_lease_frame(frame)
+        first = FakeConnection(self.broker, packet, uid=501, descriptor=77)
+        second = FakeConnection(self.broker, packet, uid=501, descriptor=78)
+        listener = FakeListener([first, second])
+        endpoint = self.broker.LinuxOperationLeaseEndpoint(
+            service_identity(), control_plane_uid=501, registry=registry,
+            adapter=self.broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
+            owner_provider=lambda: "controller-1",
+            identity_observer=lambda: service_identity(),
+            descriptor_reader=lambda _descriptor, size: bytearray(b"m" * size),
+            descriptor_observer=lambda _descriptor: descriptor_observation(),
+            enabled=True, socket_factory=lambda *_args: listener,
+            clock=lambda: 1_000,
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assertTrue(endpoint.receive_once()["ok"])
+        self.assert_refusal(endpoint.receive_once(), "lease_replayed")
+
+    def test_descriptor_endpoint_denies_a_foreign_dispatcher_uid(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        endpoint, connection = self._operation_endpoint(
+            registry=registry, frame=frame, uid=999,
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assert_refusal(endpoint.receive_once(), "dispatcher_denied")
+        self.assertFalse(connection.recvmsg_called)
+
+    def test_typed_execution_delivers_the_terminal_result_to_the_guest_record(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        request_broker, transport, _binding = descriptor_broker(self.broker)
+        endpoint, _connection = self._operation_endpoint(
+            registry=registry, frame=frame,
+            adapter=self.broker.CredentialOperationAdapter(request_broker),
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assertTrue(endpoint.receive_once()["ok"])
+        result = registry.guest_result(CONNECTION)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(set(result["headers"]), {"content-type"})
+        self.assertNotIn("m" * 8, repr(result))
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_a_cancelled_operation_is_never_executed_after_revocation(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        registry.revoke(BINDING)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        calls = []
+        endpoint, _connection = self._operation_endpoint(
+            registry=registry, frame=frame,
+            adapter=self.broker.OfflineTestOperationAdapter(
+                lambda request, material: calls.append(1) or {"outcome": "completed"},
+                offline_test=True,
+            ),
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assertFalse(endpoint.receive_once()["ok"])
+        self.assertEqual(calls, [])
+
+    # --- retained guest connection -----------------------------------------
+
+    def _guest_endpoint(self, registry, connections, *, coordinator=None):
+        listener = FakeGuestListener(connections)
+        return self.broker.LinuxGuestEndpoint(
+            service_identity(), registry=registry,
+            connection_observer=lambda _connection: guest_observation(),
+            operation_runner=coordinator,
+            enabled=True, socket_factory=lambda *_args: listener,
+            clock=lambda: 1_000,
+        )
+
+    def test_guest_connection_is_retained_until_one_terminal_result(self):
+        registry = self._registry()
+        packet = self.broker.encode_guest_request(guest_request())
+        connection = FakeGuestConnection(packet)
+        endpoint = self._guest_endpoint(registry, [connection])
+        endpoint.start(); endpoint.open_admission()
+
+        def terminalize():
+            for _attempt in range(200):
+                claimed = registry.claim_next("controller-1", now=1_000)
+                if claimed["type"] == "CLAIMED":
+                    registry.refuse(claimed["operation_id"], claimed["request_digest"],
+                                    owner="controller-1", code="binding_not_ready")
+                    return
+                time.sleep(0.005)
+
+        worker = threading.Thread(target=terminalize)
+        worker.start()
+        result = endpoint.serve_once(timeout_seconds=5.0)
+        worker.join()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "binding_not_ready")
+        self.assertEqual(len(connection.sent), 1)
+        delivered = self.broker.parse_guest_terminal_result(connection.sent[0])
+        self.assertEqual(delivered["code"], "binding_not_ready")
+        self.assertTrue(connection.closed)
+
+    def test_a_delivered_result_never_carries_internal_identifiers(self):
+        registry = self._registry()
+        packet = self.broker.encode_guest_request(guest_request())
+        connection = FakeGuestConnection(packet)
+        endpoint = self._guest_endpoint(registry, [connection])
+        endpoint.start(); endpoint.open_admission()
+        worker = threading.Thread(target=lambda: registry.expire(9_999_999_999))
+        worker.start(); worker.join()
+        endpoint.serve_once(timeout_seconds=1.0)
+        surface = repr(connection.sent)
+        for forbidden in (OPERATION, LEASE, REQUEST_DIGEST, "descriptor", "memfd"):
+            self.assertNotIn(forbidden, surface)
+
+    def test_a_guest_disconnect_reclaims_the_private_record(self):
+        registry = self._registry()
+        registry.submit(guest_request(), guest_observation(), now=1_000)
+        self.assert_refusal(registry.guest_disconnected(CONNECTION), "operation_cancelled")
+        self.assert_refusal(registry.guest_result(CONNECTION), "operation_not_pending")
+
+    # --- coordinator lifecycle ---------------------------------------------
+
+    def _coordinator(self, **overrides):
+        values = {
+            "service": service_identity(),
+            "control_plane_uid": 501,
+            "controller_identity": {
+                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+            "adapter": self.broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
+            "identity_observer": lambda: service_identity(),
+            "connection_observer": lambda _connection: guest_observation(),
+            "clock": lambda: 1_000,
+        }
+        values.update(overrides)
+        service = values.pop("service")
+        return self.broker.BrokerCoordinator(service, **values)
+
+    def test_coordinator_is_closed_by_default(self):
+        coordinator = self._coordinator()
+        self.assertFalse(coordinator.admission_open)
+        self.assertEqual(coordinator.status()["state"], "credential_pending")
+        self.assertFalse(coordinator.status()["admission_open"])
+        self.assert_refusal(coordinator.start(), "broker_service_disabled")
+
+    def test_coordinator_lifecycle_closes_admission_before_drain_and_stop(self):
+        order = []
+
+        class Endpoint:
+            def __init__(self, name):
+                self.name = name
+
+            def start(self):
+                order.append(f"start:{self.name}")
+                return {"ok": True, "code": "started", "admission_open": False}
+
+            def open_admission(self, *_args):
+                order.append(f"open:{self.name}")
+                return {"ok": True, "code": "open"}
+
+            def close_admission(self):
+                order.append(f"close:{self.name}")
+
+            def drain(self, _timeout=5.0):
+                order.append(f"drain:{self.name}")
+                return True
+
+            def close(self):
+                order.append(f"stop:{self.name}")
+                return {"ok": True, "code": "closed", "admission_open": False}
+
+        coordinator = self._coordinator(enabled=True)
+        coordinator._endpoints = (Endpoint("lease"), Endpoint("controller"),
+                                  Endpoint("guest"))
+        coordinator.stop()
+        self.assertEqual(order.index("close:guest"), 0)
+        self.assertLess(max(index for index, value in enumerate(order)
+                            if value.startswith("close:")),
+                        min(index for index, value in enumerate(order)
+                            if value.startswith("drain:")))
+        self.assertLess(max(index for index, value in enumerate(order)
+                            if value.startswith("drain:")),
+                        min(index for index, value in enumerate(order)
+                            if value.startswith("stop:")))
+
+    def test_coordinator_lifecycle_identity_exposes_the_contract_fields(self):
+        coordinator = self._coordinator()
+        identity = coordinator.lifecycle_identity()
+        self.assertEqual(set(identity), {
+            "ok", "machine_id", "broker_epoch", "pid", "process_start_identity",
+            "service_uid", "unit_identity", "cgroup_identity", "executable_digest",
+            "config_digest", "policy_digest", "egress_digest", "broker_digest",
+            "state", "admission_open", "active_operations",
+        })
+        self.assertEqual(identity["state"], "credential_pending")
+        self.assertFalse(identity["admission_open"])
+        self.assertEqual(identity["active_operations"], 0)
+        surface = repr(identity)
+        for forbidden in ("source_reference", "lease", "descriptor", "operation_id",
+                          "request_digest", "authorization", FORBIDDEN_MARKER):
+            self.assertNotIn(forbidden, surface)
+
+    def test_coordinator_revoke_and_expiry_close_admission_fail_closed(self):
+        coordinator = self._coordinator(enabled=True)
+        coordinator.registry.submit(guest_request(), guest_observation(), now=1_000)
+        self.assertEqual(len(coordinator.revoke(BINDING)), 1)
+        self.assertFalse(coordinator.admission_open)
+        self.assert_refusal(coordinator.registry.guest_result(CONNECTION),
+                            "operation_cancelled")
+
+    def test_the_serving_loop_is_disabled_until_explicitly_enabled(self):
+        coordinator = self._coordinator()
+        self.assert_refusal(coordinator.run(stop_event=threading.Event()),
+                            "broker_service_disabled")
+
+    def test_the_serving_loop_starts_and_stops_every_worker(self):
+        coordinator = self._coordinator(enabled=True)
+        stop = threading.Event()
+        stop.set()
+        before = threading.active_count()
+        result = coordinator.run(stop_event=stop, guest_workers=1)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["admission_open"])
+        self.assertLessEqual(threading.active_count(), before)
+
+    def test_the_serving_loop_refuses_invalid_worker_bounds(self):
+        coordinator = self._coordinator(enabled=True)
+        for workers, poll in ((0, 0.05), (99, 0.05), (1, 0), (1, 5)):
+            with self.subTest(workers=workers, poll=poll):
+                self.assert_refusal(
+                    coordinator.run(stop_event=threading.Event(),
+                                    guest_workers=workers, poll_seconds=poll),
+                    "broker_service_config_invalid",
+                )
+
+    def test_a_stopped_coordinator_does_not_run_again(self):
+        coordinator = self._coordinator(enabled=True)
+        coordinator.stop()
+        self.assert_refusal(coordinator.run(stop_event=threading.Event()),
+                            "broker_service_unavailable")
+
+    # --- runnable configuration --------------------------------------------
+
+    def test_service_config_is_strict_and_refuses_any_extra_field(self):
+        document = {
+            "enabled": False, "control_plane_uid": 501,
+            "service": service_identity(),
+            "controller": {
+                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+        }
+        loaded = self.broker.parse_service_config(json.dumps(document))
+        self.assertFalse(loaded["enabled"])
+        self.assertEqual(loaded["service"]["machine_id"], MACHINE)
+        for mutation in (
+            {"credential_value": FORBIDDEN_MARKER},
+            {"source_reference": "fixture/API_TOKEN"},
+            {"authorization": "Bearer x"},
+        ):
+            with self.subTest(mutation=tuple(mutation)):
+                with self.assertRaises(ValueError):
+                    self.broker.parse_service_config(json.dumps({**document, **mutation}))
+        with self.assertRaises(ValueError):
+            self.broker.parse_service_config(json.dumps(
+                {**document, "service": service_identity(machine_id="not-a-machine")},
+            ))
+
+    def test_the_executable_is_closed_by_default_on_every_invocation(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = self.broker.main([])
+        self.assertNotEqual(code, 0)
+        document = json.loads(stream.getvalue())
+        self.assertFalse(document["ok"])
+        self.assertIn(document["code"], self.broker._SAFE_SUMMARIES)
+
+    def test_serving_requires_an_explicitly_enabled_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "broker.json"
+            path.write_text(json.dumps({
+                "enabled": False, "control_plane_uid": 501,
+                "service": service_identity(),
+                "controller": {
+                    "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                    "executable_digest": EXECUTABLE_DIGEST,
+                },
+            }))
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = self.broker.main(["--serve", "--config", str(path)])
+            self.assertNotEqual(code, 0)
+            document = json.loads(stream.getvalue())
+            self.assertFalse(document["ok"])
+            self.assertEqual(document["code"], "broker_service_disabled")
+
+    def test_no_runtime_composition_selects_the_coordinator(self):
+        surface = BROKER.read_text()
+        self.assertNotIn("sandbox.application.context", surface)
+        self.assertNotIn("sandbox.runtimes", surface)
+        production = (ROOT / "sandbox").rglob("*.py")
+        for path in production:
+            body = path.read_text()
+            self.assertNotIn("native-credential-broker", body)
+            self.assertNotIn("BrokerCoordinator", body)
+
+    def test_support_state_is_not_promoted_by_this_module(self):
+        document = self.broker.live_transport_status()
+        self.assertFalse(document["ok"])
+        # Off Ubuntu this is a platform refusal; on Linux it is still unproven.
+        self.assertIn(document["code"], {"live_transport_unproven",
+                                         "live_transport_platform_unsupported"})
 
 
 if __name__ == "__main__":

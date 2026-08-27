@@ -74,6 +74,7 @@ class ManagedRuntimeDependencies:
     grants: Any | None = None
     credential_repository: Any | None = None
     credential_broker: Any | None = None
+    credential_broker_service: Any | None = None
     credential_supervisor: Any | None = None
     credential_health: Any | None = None
     credential_recovery: Any | None = None
@@ -89,10 +90,16 @@ class ManagedNativeCleanup:
     permission to make an educated guess.
     """
 
-    ORDER = ("services", "database", "machine", "network", "mount", "image", "policy")
+    # The credential broker comes first: its admission must be closed and its
+    # service gone before any network, machine, or policy object it depends on
+    # is removed.  The step is skipped entirely when neither a broker component
+    # nor a broker cleanup entry is composed, which is the default.
+    ORDER = ("credential_broker", "services", "database", "machine", "network",
+             "mount", "image", "policy")
 
     def __init__(self, *, repository, services, database, network, machine, image,
-                 policy, observe):
+                 policy, observe, credential_broker=None):
+        self.credential_broker = credential_broker
         self.repository = repository
         self.services = services
         self.database = database
@@ -150,6 +157,23 @@ class ManagedNativeCleanup:
         for name in (*self.ORDER, "state"):
             self._clear_resource_recovery(machine_id, owner, name)
 
+    def _effective_order(self, entries):
+        """Include the broker step only when this run actually has one."""
+        if self.credential_broker is None and not isinstance(
+                entries.get("credential_broker"), dict):
+            return tuple(name for name in self.ORDER if name != "credential_broker")
+        return self.ORDER
+
+    def _observe_credential_broker(self, plan):
+        """Observe the broker through its own fixed status verb.
+
+        The root helper has no cleanup-observation verb for the broker, so an
+        absent or unwired supervisor is an unavailable observation -- never
+        absence.
+        """
+        observe = getattr(self.credential_broker, "observe", None)
+        return observe(plan) if callable(observe) else None
+
     @staticmethod
     def _outcome(value):
         if isinstance(value, dict):
@@ -197,7 +221,9 @@ class ManagedNativeCleanup:
                     "cleanup": {"complete": True, "removed": (), "residual": ()},
                     "reason": {"code": "cleanup_complete"}}
 
+        order = self._effective_order(entries)
         components = {
+            "credential_broker": (self.credential_broker, "stop"),
             "services": (self.services, "stop"), "database": (self.database, "remove"),
             "network": (self.network, "remove"), "machine": (self.machine, "stop"),
             "mount": (self.image, "unmount"), "image": (self.image, "remove"),
@@ -210,21 +236,23 @@ class ManagedNativeCleanup:
             and self._same_owner(progress.get("owner"), owner)
             and progress.get("identity") == machine_id
         ) else ()
-        if any(name not in self.ORDER for name in prior_removed): prior_removed = ()
+        if any(name not in order for name in prior_removed): prior_removed = ()
         # Later, exact removals can prove earlier runtime objects absent after a
         # lost response. This lets retry advance to the true residual without
         # treating observer unavailability as proof. Policy removal is strongest:
         # the helper refuses it while any managed runtime resource remains.
         proven_removed = set(prior_removed)
         if "policy" in proven_removed:
-            proven_removed.update(self.ORDER)
+            # The broker is a host-side service the policy removal never
+            # inspects, so policy removal proves everything except that.
+            proven_removed.update(name for name in order if name != "credential_broker")
         if "image" in proven_removed:
             proven_removed.update(("services", "database", "mount", "image"))
         if "machine" in proven_removed:
             proven_removed.update(("services", "machine"))
-        prior_removed = tuple(name for name in self.ORDER if name in proven_removed)
+        prior_removed = tuple(name for name in order if name in proven_removed)
         removed, residual, mutated = [], [], False
-        for name in self.ORDER:
+        for name in order:
             # Progress exists so a lost response cannot strand cleanup behind an
             # unreachable observer. It is not authority over the host, so a
             # resource it calls removed is still observed first: if the observer
@@ -245,7 +273,9 @@ class ManagedNativeCleanup:
             expected = entry["expected"]
             expected_digest = canonical_digest(expected)
             try:
-                observed = self.observe(name, entry["plan"])
+                observed = (self._observe_credential_broker(entry["plan"])
+                            if name == "credential_broker"
+                            else self.observe(name, entry["plan"]))
             except (OSError, RuntimeError, TypeError, ValueError):
                 observed = None
             if not isinstance(observed, dict):
@@ -666,7 +696,8 @@ class ManagedNativeAdapter:
     def __init__(self, *, preflight, repository, dependencies=None, launcher=None,
                  evidence_id=None, proof_candidate_authority=None,
                  credential_broker=None, credential_supervisor=None,
-                 credential_health=None, credential_recovery=None):
+                 credential_health=None, credential_recovery=None,
+                 credential_broker_service=None):
         self.preflight = preflight
         self.repository = repository
         self.dependencies = dependencies
@@ -683,6 +714,9 @@ class ManagedNativeAdapter:
                                   else getattr(dependencies, "credential_health", None))
         self.credential_recovery = (credential_recovery if credential_recovery is not None
                                     else getattr(dependencies, "credential_recovery", None))
+        self.credential_broker_service = (
+            credential_broker_service if credential_broker_service is not None
+            else getattr(dependencies, "credential_broker_service", None))
         self.proof_candidate = _is_proof_candidate_authority(
             proof_candidate_authority,
         )
@@ -710,6 +744,36 @@ class ManagedNativeAdapter:
             return {"ok": False, "error": {"code": "credential_broker_failed",
                                              "message": "credential broker request failed",
                                              "retryable": False}}
+
+    def credential_broker_lifecycle(self, action, plan):
+        """Run one fixed broker-service verb through an explicitly wired supervisor.
+
+        `start` never opens credential admission: the supervisor reports a
+        closed broker in every outcome, and this method refuses to relay any
+        result that claims otherwise.  Absent wiring is a bounded refusal, not
+        a fallback.
+        """
+        if action not in {"start", "status", "stop"}:
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "admission_open": False,
+                    "reason": {"code": "credential_broker_action_unsupported"}}
+        supervisor = self.credential_broker_service
+        verb = getattr(supervisor, action, None)
+        if supervisor is None or not callable(verb):
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "admission_open": False,
+                    "reason": {"code": "credential_broker_service_unavailable"}}
+        try:
+            result = verb(plan)
+        except Exception:
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "admission_open": False,
+                    "reason": {"code": "credential_broker_service_failed"}}
+        if not isinstance(result, dict) or result.get("admission_open", False) is not False:
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "admission_open": False,
+                    "reason": {"code": "credential_broker_service_invalid"}}
+        return result
 
     def credential_recover(self, binding_id, **digests):
         """Run an explicitly wired restart recovery service, if present."""

@@ -51,5 +51,77 @@ class TestCredentialWiring(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "credential_broker_unavailable")
 
 
+    def test_broker_service_supervisor_is_absent_from_default_composition(self):
+        """Spec 045 T036: composing managed-native starts no broker."""
+        from sandbox.application.context import managed_native_dependencies
+
+        class Registry:
+            def sandbox_base(self):
+                return Path(tempfile.gettempdir())
+
+            def load_project_config(self, *_args, **_kwargs):
+                return {}
+
+        dependencies = managed_native_dependencies(
+            {}, registry=Registry(), allowed_roots=(Path(tempfile.gettempdir()),),
+            isolation=SimpleNamespace(), packages=SimpleNamespace(),
+        )
+        self.assertIsNone(dependencies.credential_broker_service)
+        self.assertIsNone(dependencies.credential_broker)
+        self.assertIsNone(dependencies.credential_repository)
+
+    def test_adapter_broker_lifecycle_is_a_bounded_refusal_without_wiring(self):
+        from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+        from sandbox.runtimes.managed.repository import NativeRepository
+
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ManagedNativeAdapter(
+                preflight=SimpleNamespace(),
+                repository=NativeRepository(Path(directory) / "state.json"),
+            )
+            self.assertIsNone(adapter.credential_broker_service)
+            for action in ("start", "status", "stop", "activate"):
+                result = adapter.credential_broker_lifecycle(action, {})
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["mutated"])
+                self.assertFalse(result["admission_open"])
+
+    def test_a_supervisor_claiming_open_admission_is_refused_not_relayed(self):
+        from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+        from sandbox.runtimes.managed.repository import NativeRepository
+
+        supervisor = SimpleNamespace(
+            start=lambda _plan: {"ok": True, "state": "ready", "mutated": True,
+                                 "admission_open": True},
+            status=lambda _plan: {"ok": True, "state": "absent", "mutated": False,
+                                  "admission_open": False},
+            stop=lambda _plan: (_ for _ in ()).throw(RuntimeError("helper failed")),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ManagedNativeAdapter(
+                preflight=SimpleNamespace(),
+                repository=NativeRepository(Path(directory) / "state.json"),
+                credential_broker_service=supervisor,
+            )
+            refused = adapter.credential_broker_lifecycle("start", {})
+            self.assertEqual(refused["reason"]["code"], "credential_broker_service_invalid")
+            self.assertFalse(refused["admission_open"])
+            self.assertTrue(adapter.credential_broker_lifecycle("status", {})["ok"])
+            failed = adapter.credential_broker_lifecycle("stop", {})
+            self.assertEqual(failed["reason"]["code"], "credential_broker_service_failed")
+
+    def test_the_explicit_broker_service_factory_only_builds_a_supervisor(self):
+        from sandbox.application.context import managed_native_credential_broker_service
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+
+        calls = []
+        supervisor = managed_native_credential_broker_service(
+            process=SimpleNamespace(run=lambda *args, **kwargs: calls.append(args)),
+            helper="/fixed/native-helper",
+        )
+        self.assertIsInstance(supervisor, CredentialBrokerSupervisor)
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

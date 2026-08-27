@@ -50,6 +50,73 @@ existing managed-native isolation evidence. Compose, Herd, Valet, generic host
 jobs, Kubernetes, multi-tenant control planes, HA stores, snapshots, and
 transparent interception are unsupported and must remain explicit refusals.
 
+## Broker service lifecycle
+
+The credential broker runs as its own unprivileged, per-instance service. The
+root helper's entire protocol for it is three fixed verbs, each carrying only
+the machine identity and the policy, egress, and broker digests:
+
+```text
+credential-broker-start  machine_id policy_digest egress_digest broker_digest
+credential-broker-status machine_id policy_digest egress_digest broker_digest
+credential-broker-stop   machine_id policy_digest egress_digest broker_digest
+```
+
+There is no endpoint, descriptor, path, unit, user, or service-property
+argument, and no credential byte reaches the helper's argv, environment, unit
+text, protocol, stdout, or stderr. Each verb emits exactly one bounded
+document containing the identity, the observed state, the unit name, and
+`admission_open: false`. The control-plane supervisor refuses any helper
+output that is oversized, malformed, foreign, or claims open admission.
+
+`credential-broker-start` is deliberately terminal in this release. It proves
+policy and egress ownership, then refuses because the reviewed broker
+executable and its helper-owned service record do not exist on any host yet.
+Activating a unit for a service with no authorized Ubuntu lifecycle proof
+would be inventing support, so start reports `blocked` and changes nothing.
+
+`credential-broker-stop` closes admission and stops only the exact unit whose
+description matches the requested identity. An absent unit is a successful,
+idempotent no-op; a drifted or foreign unit is evidence and is never stopped;
+an unanswered read is `unavailable`, never absence.
+
+Cleanup runs the broker first: `credential_broker` is the leading step of the
+managed-native cleanup order, ahead of services, machine, network, image, and
+policy removal. The step is skipped entirely unless a broker supervisor or a
+broker cleanup entry is explicitly composed, which is not the default. The
+broker observes itself through its own status verb, so an unwired or silent
+supervisor produces a retained recovery item rather than a false absence.
+
+Composition stays inert: `managed_native_dependencies` leaves
+`credential_broker_service` absent, and `managed_native_credential_broker_service`
+must be called deliberately. Constructing it starts nothing.
+
+## Acceptance seam
+
+The public acceptance surface exists so the authorized live matrix can drive
+the feature through `./sb` without any plaintext path:
+
+```sh
+./sb native credential-bind --json \
+  --source-ref <alias>/<key> --binding-id <id> --instance-id <machine-id> \
+  --host api.example.com --path /v1/ping --method GET \
+  --auth-form authorization_bearer --expires-at 2030-01-01T00:00:00Z
+./sb native credential-request --json --binding-id <id> --binding-version 1 \
+  --method GET --path /v1/ping
+./sb native credential-revoke  --json --binding-id <id> --binding-version 1
+```
+
+Every value above is non-secret. The command has no option, prompt, file, or
+environment path that accepts a credential value, and the opaque source
+reference is reduced to a digest in the emitted document rather than echoed.
+Metadata that is missing, ambiguous, or not exact is refused with
+`credential_metadata_invalid` and the rejected value is never echoed back.
+
+All three actions are proof-gated and currently refuse with
+`credential_acceptance_unproven`: the capability remains
+`implemented_unproven`, `adoptable: false`, with a null evidence ID. They
+mutate nothing, and no local result promotes the support tier.
+
 ## Development evidence
 
 The foundational contracts are covered by the focused unit suites documented in

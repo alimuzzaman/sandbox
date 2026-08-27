@@ -9,7 +9,16 @@ from sandbox.registry import CommandSpec, register_specs
 
 
 ACTIONS = ("support", "preflight", "baseline", "install-plan", "install", "status", "cleanup",
-           "credential-status")
+           "credential-status", "credential-bind", "credential-request",
+           "credential-revoke")
+
+# The public acceptance seam (spec 045, T037).  These actions accept only an
+# opaque source reference and exact non-secret binding/request/revoke metadata.
+# There is deliberately no option, prompt, file, or environment path that can
+# carry a plaintext credential, and every action is refused while the live
+# proof gate is open.
+CREDENTIAL_ACCEPTANCE_ACTIONS = ("credential-bind", "credential-request",
+                                 "credential-revoke")
 
 
 def configure_parser(parser):
@@ -19,6 +28,18 @@ def configure_parser(parser):
     parser.add_argument("--label", default="default")
     parser.add_argument("--web-server", choices=("nginx", "apache"), default="nginx")
     parser.add_argument("--json", action="store_true")
+    # Credential acceptance metadata.  Every value below is non-secret: an
+    # opaque approved source reference, identities, and the exact request
+    # scope.  No credential value is ever accepted here.
+    parser.add_argument("--source-ref")
+    parser.add_argument("--binding-id")
+    parser.add_argument("--binding-version", type=int)
+    parser.add_argument("--instance-id", dest="instance_id")
+    parser.add_argument("--host")
+    parser.add_argument("--path")
+    parser.add_argument("--method")
+    parser.add_argument("--auth-form")
+    parser.add_argument("--expires-at")
 
 
 def _emit(value, as_json):
@@ -65,17 +86,121 @@ def support():
             "runtimes": [dict(value) for value in RUNTIME_DECLARATIONS], "mutated": False}
 
 
+def _capability_declaration():
+    from sandbox.isolation.manifest import MANAGED_ISOLATION_CAPABILITIES
+
+    return next(item for item in MANAGED_ISOLATION_CAPABILITIES
+                if item["capability_id"] == "outbound_credential_mediation")
+
+
+def _credential_metadata(action, args):
+    """Canonicalize only exact, non-secret acceptance metadata.
+
+    A rejected value is never echoed back: the caller gets a stable reason
+    code.  The opaque source reference is reduced to a digest so that even an
+    approved reference identity does not have to appear in retained output.
+    """
+    from hashlib import sha256
+
+    from sandbox.isolation.credential_binding import (
+        ALLOWED_AUTH_FORMS, ALLOWED_METHODS, canonical_host, canonical_path,
+        canonical_source_reference, canonical_timestamp,
+    )
+
+    def identity(value, label):
+        import re as _re
+        if not isinstance(value, str) or not _re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+            raise ValueError(label)
+        return value
+
+    def method(value):
+        if not isinstance(value, str) or value.upper() not in ALLOWED_METHODS:
+            raise ValueError("method")
+        return value.upper()
+
+    def version(value):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("binding version")
+        return value
+
+    if action == "credential-bind":
+        reference = canonical_source_reference(args.source_ref)
+        if args.auth_form not in ALLOWED_AUTH_FORMS:
+            raise ValueError("auth form")
+        return {
+            "binding_id": identity(args.binding_id, "binding id"),
+            "instance_id": identity(args.instance_id, "instance id"),
+            "credential_reference_digest": sha256(reference.encode()).hexdigest(),
+            "scheme": "https", "host": canonical_host(args.host), "port": 443,
+            "method": method(args.method), "path": canonical_path(args.path),
+            "auth_form": args.auth_form,
+            "expires_at": canonical_timestamp(args.expires_at),
+        }
+    if action == "credential-request":
+        return {
+            "binding_id": identity(args.binding_id, "binding id"),
+            "binding_version": version(args.binding_version),
+            "method": method(args.method), "path": canonical_path(args.path),
+        }
+    return {
+        "binding_id": identity(args.binding_id, "binding id"),
+        "binding_version": version(args.binding_version),
+    }
+
+
+def credential_acceptance(action, args):
+    """Accept exact non-secret metadata, then refuse without live evidence.
+
+    This is the public seam the authorized live matrix (T029) will drive.  It
+    stays fail-closed here: the capability is `implemented_unproven`, not
+    adoptable, and carries no evidence identity, so every acceptance action is
+    a bounded refusal that mutates nothing.
+    """
+    from sandbox.isolation.capability_report import (
+        CapabilityPrerequisite, CapabilityReport,
+    )
+
+    operation = f"native_{action.replace('-', '_')}"
+    try:
+        accepted = _credential_metadata(action, args)
+    except (TypeError, ValueError):
+        return {"ok": False, "operation": operation, "state": "blocked",
+                "mutated": False, "accepted": {},
+                "reason": {"code": "credential_metadata_invalid",
+                           "message": "acceptance metadata is missing or not exact"}}
+    declaration = _capability_declaration()
+    report = CapabilityReport(
+        support_tier=declaration["support_tier"],
+        adoptable=bool(declaration["adoptable"]),
+        evidence_id=declaration.get("evidence_id"),
+        prerequisites=(CapabilityPrerequisite(
+            "managed-native-live-proof", "unknown", "evidence_missing",
+        ),),
+    )
+    if report.admissible:
+        # Unreachable while the gate is open, and deliberately still a refusal:
+        # promoting the tier is T031's decision, not this command's.
+        return {"ok": False, "operation": operation, "state": "blocked",
+                "mutated": False, "accepted": accepted,
+                "support_tier": report.support_tier, "adoptable": report.adoptable,
+                "evidence_id": report.evidence_id,
+                "refusal_reasons": ["acceptance_review_required"],
+                "reason": {"code": "credential_acceptance_unreviewed"}}
+    return {"ok": False, "operation": operation, "state": "blocked", "mutated": False,
+            "accepted": accepted, "support_tier": report.support_tier,
+            "adoptable": report.adoptable, "evidence_id": report.evidence_id,
+            "refusal_reasons": list(report.derived_refusals),
+            "reason": {"code": "credential_acceptance_unproven",
+                       "message": "live isolation and credential evidence is missing"}}
+
+
 def credential_status(*, repository=None):
     """Return a secret-free, fail-closed Credential Vault capability report."""
     from sandbox.isolation.capability_report import (
         BindingState, CapabilityPrerequisite, CapabilityReport,
     )
-    from sandbox.isolation.manifest import MANAGED_ISOLATION_CAPABILITIES
-
-    declaration = next(
-        item for item in MANAGED_ISOLATION_CAPABILITIES
-        if item["capability_id"] == "outbound_credential_mediation"
-    )
+    declaration = _capability_declaration()
     bindings = ()
     status_error = None
     if repository is not None:
@@ -123,7 +248,8 @@ def _read_credential_repository():
 
 
 def _predispatch(args):
-    return getattr(args, "action", None) == "credential-status"
+    return getattr(args, "action", None) in (
+        "credential-status", *CREDENTIAL_ACCEPTANCE_ACTIONS)
 
 
 def cmd_native(cfg, args):
@@ -177,6 +303,8 @@ def cmd_native(cfg, args):
         result = _runtime_result(cfg, args, "status")
     elif args.action == "credential-status":
         result = credential_status(repository=_read_credential_repository())
+    elif args.action in CREDENTIAL_ACCEPTANCE_ACTIONS:
+        result = credential_acceptance(args.action, args)
     elif args.action == "cleanup":
         result = _runtime_result(cfg, args, "destroy")
     else:

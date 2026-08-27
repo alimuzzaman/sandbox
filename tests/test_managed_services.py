@@ -17,6 +17,44 @@ class Policy:
     resources = {"connections": 128, "runtime_seconds": 900}
 
 
+class BrokerPolicy(Policy):
+    network = {"guest_address": "10.203.0.2/30", "host_address": "10.203.0.1/30",
+               "veth": "sbv0123456789"}
+
+
+class BrokerProcess:
+    """A helper stub that answers with a bounded, non-secret status document."""
+
+    def __init__(self, *, returncode=0, stdout=None):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.calls = []
+
+    def run(self, argv, **kwargs):
+        self.calls.append((tuple(argv), kwargs))
+        return type("Result", (), {"returncode": self.returncode,
+                                   "stdout": self.stdout or ""})()
+
+
+def broker_plan(**overrides):
+    from sandbox.runtimes.managed.services import CredentialBrokerPlanCompiler
+    plan = CredentialBrokerPlanCompiler().compile(
+        BrokerPolicy(), egress_digest="b" * 64, broker_digest="c" * 64,
+        service_uid=4321, guest_port=18443, broker_epoch="epoch-1",
+    )
+    plan.update(overrides)
+    return plan
+
+
+def broker_status_document(plan, **overrides):
+    document = {"machine_id": plan["machine_id"], "policy_digest": plan["policy_digest"],
+                "egress_digest": plan["egress_digest"],
+                "broker_digest": plan["broker_digest"], "state": "absent",
+                "admission_open": False, "unit": plan["unit"]}
+    document.update(overrides)
+    return __import__("json").dumps(document)
+
+
 class TestManagedServices(unittest.TestCase):
     def test_extension_contract_is_rendered_inside_digest_bound_service_files(self):
         from sandbox.php_extensions.catalog import DEFAULT_CATALOG
@@ -130,6 +168,133 @@ class TestManagedServices(unittest.TestCase):
         plan["files"]["/etc/cron.d/sandbox-wordpress"] += "# tampered\n"
         with self.assertRaises(ValueError):
             ManagedServiceSupervisor(process=process, helper="/fixed/native-helper").activate(plan)
+        self.assertEqual(process.calls, [])
+
+
+class TestCredentialBrokerService(unittest.TestCase):
+    """Spec 045 T036: local plan/verb contracts only, never live proof."""
+
+    def test_plan_is_digest_bound_closed_and_carries_no_secret_field(self):
+        plan = broker_plan()
+        self.assertEqual(plan["unit"], "sandbox-credential-broker@sb-0123456789ab.service")
+        self.assertEqual(plan["executable"],
+                         "/usr/libexec/sandbox/native-credential-broker")
+        self.assertEqual(plan["state"], "credential_pending")
+        self.assertFalse(plan["admission_open"])
+        self.assertEqual(plan["host_address"], "10.203.0.1")
+        self.assertEqual(plan["guest_address"], "10.203.0.2")
+        # Only fixed identities may appear; nothing that could carry a value.
+        for name in ("source_reference", "secret", "token", "authorization",
+                     "password", "api_key", "lease"):
+            self.assertNotIn(name, repr(plan).lower())
+        # The digest covers the identity document, not the closed state fields.
+        from sandbox.isolation.models import canonical_digest
+        document = {key: value for key, value in plan.items()
+                    if key not in {"state", "admission_open", "digest"}}
+        self.assertEqual(plan["digest"], canonical_digest(document))
+
+    def test_plan_refuses_public_transport_and_invalid_identity(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerPlanCompiler
+
+        class PublicPolicy(BrokerPolicy):
+            network = {"guest_address": "8.8.8.8/30", "host_address": "8.8.4.4/30",
+                       "veth": "sbv0123456789"}
+
+        compiler = CredentialBrokerPlanCompiler()
+        with self.assertRaises(ValueError):
+            compiler.compile(PublicPolicy(), egress_digest="b" * 64, broker_digest="c" * 64,
+                             service_uid=4321, guest_port=18443, broker_epoch="epoch-1")
+        with self.assertRaises(ValueError):
+            compiler.compile(BrokerPolicy(), egress_digest="not-a-digest",
+                             broker_digest="c" * 64, service_uid=4321,
+                             guest_port=18443, broker_epoch="epoch-1")
+        with self.assertRaises(ValueError):
+            compiler.compile(BrokerPolicy(), egress_digest="b" * 64, broker_digest="c" * 64,
+                             service_uid=0, guest_port=18443, broker_epoch="epoch-1")
+
+    def test_supervisor_uses_only_fixed_digest_bound_verbs(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+        plan = broker_plan()
+        process = BrokerProcess(stdout=broker_status_document(plan))
+        supervisor = CredentialBrokerSupervisor(process=process, helper="/fixed/native-helper")
+        supervisor.status(plan)
+        supervisor.stop(plan)
+        self.assertEqual([call[0][3] for call in process.calls],
+                         ["credential-broker-status", "credential-broker-stop"])
+        for argv, kwargs in process.calls:
+            self.assertEqual(argv[:3], ("sudo", "-n", "/fixed/native-helper"))
+            self.assertEqual(argv[4:], (plan["machine_id"], plan["policy_digest"],
+                                        plan["egress_digest"], plan["broker_digest"]))
+            self.assertEqual(len(argv), 8)
+            self.assertEqual(kwargs["timeout"], 120)
+            self.assertNotIn(plan["unit"], argv)
+            self.assertNotIn(plan["executable"], argv)
+
+    def test_start_never_reports_open_admission(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+        plan = broker_plan()
+        for stdout, returncode in (
+            (broker_status_document(plan, state="credential_pending"), 0),
+            (broker_status_document(plan, state="ready", admission_open=True), 0),
+            ("", 69),
+        ):
+            with self.subTest(returncode=returncode):
+                supervisor = CredentialBrokerSupervisor(
+                    process=BrokerProcess(returncode=returncode, stdout=stdout),
+                    helper="/fixed/native-helper")
+                result = supervisor.start(plan)
+                self.assertFalse(result["admission_open"])
+                self.assertFalse(result["mutated"])
+
+    def test_status_refuses_unbounded_foreign_or_open_helper_output(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+        plan = broker_plan()
+        for stdout in (
+            "x" * 5000,
+            "not json",
+            broker_status_document(plan, machine_id="sb-ffffffffffff"),
+            broker_status_document(plan, admission_open=True),
+            broker_status_document(plan, state="wat"),
+            __import__("json").dumps({"state": "absent", "leaked": "value"}),
+        ):
+            with self.subTest(stdout=stdout[:24]):
+                supervisor = CredentialBrokerSupervisor(
+                    process=BrokerProcess(stdout=stdout), helper="/fixed/native-helper")
+                result = supervisor.status(plan)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["state"], "unavailable")
+                self.assertIsNone(supervisor.observe(plan))
+
+    def test_observation_reports_presence_only_from_a_read_that_answered(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+        plan = broker_plan()
+        for state, expected in (("absent", "absent"), ("present", "present")):
+            supervisor = CredentialBrokerSupervisor(
+                process=BrokerProcess(stdout=broker_status_document(plan, state=state)),
+                helper="/fixed/native-helper")
+            self.assertEqual(supervisor.observe(plan), {
+                "machine_id": plan["machine_id"], "policy_digest": plan["policy_digest"],
+                "resource": "credential_broker", "resource_digest": plan["broker_digest"],
+                "state": expected,
+            })
+        for state in ("drifted", "unavailable"):
+            supervisor = CredentialBrokerSupervisor(
+                process=BrokerProcess(stdout=broker_status_document(plan, state=state)),
+                helper="/fixed/native-helper")
+            self.assertIsNone(supervisor.observe(plan))
+
+    def test_tampered_plan_is_refused_before_any_helper_invocation(self):
+        from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+        process = BrokerProcess()
+        supervisor = CredentialBrokerSupervisor(process=process, helper="/fixed/native-helper")
+        for plan in (
+            broker_plan(broker_digest="d" * 64),
+            broker_plan(admission_open=True),
+            broker_plan(unit="sandbox-credential-broker@other.service"),
+            broker_plan(executable="/usr/bin/anything"),
+        ):
+            with self.subTest(plan=plan["unit"]), self.assertRaises(ValueError):
+                supervisor.start(plan)
         self.assertEqual(process.calls, [])
 
 

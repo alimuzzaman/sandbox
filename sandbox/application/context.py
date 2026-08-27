@@ -712,12 +712,17 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
     credential_supervisor = overrides.pop("credential_supervisor", None)
     credential_health = overrides.pop("credential_health", None)
     credential_recovery = overrides.pop("credential_recovery", None)
+    # The credential-broker service supervisor is an explicit opt-in seam. The
+    # default composition leaves it absent, so managed-native cleanup keeps its
+    # existing resource order and no broker verb is ever run.
+    credential_broker_service = overrides.pop("credential_broker_service", None)
     cleanup = overrides.pop("cleanup", None)
     if cleanup is None and native_repository is not None:
         cleanup = ManagedNativeCleanup(
             repository=native_repository, services=services, database=database,
             network=network, machine=machine, image=image, policy=policy,
             observe=ManagedCleanupObserver(process=process, helper=helper),
+            credential_broker=credential_broker_service,
         )
     return ManagedRuntimeDependencies(
         process=process,
@@ -733,6 +738,7 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         credential_supervisor=credential_supervisor,
         credential_health=credential_health,
         credential_recovery=credential_recovery,
+        credential_broker_service=credential_broker_service,
         verifier=verifier, launcher=launcher, plan_builder=plan_builder,
         provisioner=provisioner, cleanup=cleanup,
         **overrides,
@@ -992,6 +998,22 @@ def managed_native_credential_repository():
     if not path.is_file():
         return None
     return CredentialRepository(NativeRepository(path))
+
+
+def managed_native_credential_broker_service(*, process=None, helper=None):
+    """Compose the fixed-verb credential-broker service supervisor explicitly.
+
+    Nothing calls this during ordinary managed-native composition. It exists so
+    an authorized proof run can wire the supervisor deliberately; constructing
+    it starts nothing and opens no credential admission.
+    """
+    from sandbox.runtimes.managed.services import CredentialBrokerSupervisor
+    from sandbox.services import BoundedProcessRunner
+
+    return CredentialBrokerSupervisor(
+        process=process if process is not None else BoundedProcessRunner(),
+        helper=helper or "/usr/local/libexec/sandbox-native-helper",
+    )
 
 
 def managed_native_credential_broker(

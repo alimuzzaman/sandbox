@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -501,6 +502,208 @@ class TestInstalledProfileVersioning(unittest.TestCase):
         payload = self.helper.compile_apparmor_profile(self.machine, self.digest).encode()
         self.assertEqual(self.helper.installed_profile_version(payload),
                          self.helper.APPARMOR_PROFILE_VERSION)
+
+
+class TestCredentialBrokerHelperVerbs(unittest.TestCase):
+    """Spec 045 T036: fixed verbs, secret-free output, closed by default.
+
+    These are local contract checks. They do not prove systemd ownership,
+    Linux isolation, or any authorized Ubuntu lifecycle behaviour (T022).
+    """
+
+    MACHINE = "sb-0123456789ab"
+    POLICY = "d" * 64
+    EGRESS = "e" * 64
+    BROKER = "f" * 64
+
+    def setUp(self):
+        self.helper = _helper()
+        self.identity = mock.patch.object(
+            self.helper, "credential_broker_identity",
+            return_value=({}, self.EGRESS, self.BROKER))
+
+    def _call(self, verb):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            try:
+                verb(self.MACHINE, self.POLICY, self.EGRESS, self.BROKER)
+                code = 0
+            except SystemExit as exit_code:
+                code = exit_code.code
+        return code, json.loads(stream.getvalue())
+
+    def test_the_helper_protocol_is_exactly_three_credential_broker_verbs(self):
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        verbs = sorted(set(re.findall(r'"(credential-broker-[a-z]+)"', source)))
+        self.assertEqual(verbs, ["credential-broker-start", "credential-broker-status",
+                                 "credential-broker-stop"])
+
+    def test_start_is_closed_and_refuses_before_any_side_effect(self):
+        with self.identity, mock.patch.object(
+                self.helper, "credential_broker_executable_ready", return_value=False), \
+                mock.patch.object(self.helper, "run_optional") as run_optional, \
+                mock.patch.object(self.helper, "run_fixed") as run_fixed:
+            code, document = self._call(self.helper.credential_broker_start)
+        self.assertEqual(code, 69)
+        self.assertFalse(document["admission_open"])
+        self.assertEqual(document["state"], "blocked")
+        run_optional.assert_not_called()
+        run_fixed.assert_not_called()
+
+    def test_start_still_refuses_when_the_service_record_is_absent(self):
+        with self.identity, mock.patch.object(
+                self.helper, "credential_broker_executable_ready", return_value=True), \
+                mock.patch.object(self.helper, "credential_broker_service_record",
+                                  return_value=None):
+            code, document = self._call(self.helper.credential_broker_start)
+        self.assertEqual(code, 69)
+        self.assertFalse(document["admission_open"])
+
+    def test_start_never_activates_without_authorized_live_proof(self):
+        record = {"machine_id": self.MACHINE, "policy_digest": self.POLICY,
+                  "egress_digest": self.EGRESS, "broker_digest": self.BROKER,
+                  "executable_digest": "a" * 64, "service_uid": 4321,
+                  "unit": f"sandbox-credential-broker@{self.MACHINE}.service"}
+        with self.identity, mock.patch.object(
+                self.helper, "credential_broker_executable_ready", return_value=True), \
+                mock.patch.object(self.helper, "credential_broker_service_record",
+                                  return_value=record), \
+                mock.patch.object(self.helper, "run_fixed") as run_fixed:
+            code, document = self._call(self.helper.credential_broker_start)
+        self.assertEqual(code, 69)
+        self.assertEqual(document["state"], "blocked")
+        self.assertFalse(document["admission_open"])
+        run_fixed.assert_not_called()
+
+    def test_an_unanswered_unit_read_is_unavailable_and_never_absence(self):
+        with self.identity, mock.patch.object(self.helper, "run_optional",
+                                              return_value=_result(returncode=1)):
+            code, document = self._call(self.helper.credential_broker_status)
+        self.assertEqual(code, 69)
+        self.assertEqual(document["state"], "unavailable")
+
+    def test_status_reports_absent_present_and_drifted_apart(self):
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="absent"):
+            code, document = self._call(self.helper.credential_broker_status)
+        self.assertEqual((code, document["state"]), (0, "absent"))
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="present"), \
+                mock.patch.object(self.helper, "credential_broker_owned", return_value=True):
+            code, document = self._call(self.helper.credential_broker_status)
+        self.assertEqual((code, document["state"]), (0, "present"))
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="present"), \
+                mock.patch.object(self.helper, "credential_broker_owned", return_value=False):
+            code, document = self._call(self.helper.credential_broker_status)
+        self.assertEqual((code, document["state"]), (69, "drifted"))
+
+    def test_stop_is_idempotent_and_never_stops_a_foreign_unit(self):
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="absent"), \
+                mock.patch.object(self.helper, "run_optional") as run_optional:
+            code, document = self._call(self.helper.credential_broker_stop)
+        self.assertEqual((code, document["state"], document["stopped"]), (0, "absent", False))
+        run_optional.assert_not_called()
+
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="present"), \
+                mock.patch.object(self.helper, "credential_broker_owned", return_value=False), \
+                mock.patch.object(self.helper, "run_optional") as run_optional:
+            code, document = self._call(self.helper.credential_broker_stop)
+        self.assertEqual((code, document["state"]), (69, "drifted"))
+        run_optional.assert_not_called()
+
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="present"), \
+                mock.patch.object(self.helper, "credential_broker_owned", return_value=True), \
+                mock.patch.object(self.helper, "run_optional",
+                                  return_value=_result()) as run_optional:
+            code, document = self._call(self.helper.credential_broker_stop)
+        self.assertEqual((code, document["state"], document["stopped"]), (0, "absent", True))
+        self.assertEqual(run_optional.call_args[0][0],
+                         ("systemctl", "stop",
+                          f"sandbox-credential-broker@{self.MACHINE}.service"))
+
+    def test_every_emitted_document_is_the_fixed_non_secret_schema(self):
+        with self.identity, mock.patch.object(self.helper, "credential_broker_unit_state",
+                                              return_value="absent"):
+            _code, document = self._call(self.helper.credential_broker_status)
+        self.assertEqual(set(document), {"machine_id", "policy_digest", "egress_digest",
+                                         "broker_digest", "state", "admission_open", "unit"})
+        self.assertFalse(document["admission_open"])
+
+    def test_a_service_record_that_does_not_match_the_request_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = root / f"{self.MACHINE}.json"
+            record.write_text(json.dumps({
+                "machine_id": self.MACHINE, "policy_digest": self.POLICY,
+                "egress_digest": self.EGRESS, "broker_digest": "0" * 64,
+                "executable_digest": "a" * 64, "service_uid": 4321,
+                "unit": f"sandbox-credential-broker@{self.MACHINE}.service"}))
+            record.chmod(0o600)
+            with mock.patch.object(self.helper, "CREDENTIAL_BROKER_RECORD_ROOT", root):
+                if record.stat().st_uid != 0:
+                    # The ownership gate fires first for a non-root fixture,
+                    # which is itself the refusal this test asserts.
+                    with self.assertRaises(SystemExit):
+                        self.helper.credential_broker_service_record(
+                            self.MACHINE, self.POLICY, self.EGRESS, self.BROKER)
+                    return
+                with self.assertRaises(SystemExit):
+                    self.helper.credential_broker_service_record(
+                        self.MACHINE, self.POLICY, self.EGRESS, self.BROKER)
+
+    def test_an_absent_service_record_is_none_rather_than_an_invented_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(self.helper, "CREDENTIAL_BROKER_RECORD_ROOT",
+                                   Path(directory)):
+                self.assertIsNone(self.helper.credential_broker_service_record(
+                    self.MACHINE, self.POLICY, self.EGRESS, self.BROKER))
+
+
+class TestCredentialBrokerCleanupOrder(unittest.TestCase):
+    """The broker is closed and gone before anything it depends on is removed."""
+
+    def _cleanup(self, **overrides):
+        from sandbox.runtimes.managed.adapter import ManagedNativeCleanup
+        arguments = {"repository": None, "services": None, "database": None,
+                     "network": None, "machine": None, "image": None, "policy": None,
+                     "observe": None}
+        arguments.update(overrides)
+        return ManagedNativeCleanup(**arguments)
+
+    def test_the_broker_is_the_first_step_of_the_declared_order(self):
+        from sandbox.runtimes.managed.adapter import ManagedNativeCleanup
+        self.assertEqual(ManagedNativeCleanup.ORDER[0], "credential_broker")
+        self.assertLess(ManagedNativeCleanup.ORDER.index("credential_broker"),
+                        ManagedNativeCleanup.ORDER.index("network"))
+        self.assertLess(ManagedNativeCleanup.ORDER.index("credential_broker"),
+                        ManagedNativeCleanup.ORDER.index("machine"))
+
+    def test_the_broker_step_is_skipped_when_nothing_composes_one(self):
+        cleanup = self._cleanup()
+        self.assertNotIn("credential_broker", cleanup._effective_order({}))
+        self.assertEqual(cleanup._effective_order({}), (
+            "services", "database", "machine", "network", "mount", "image", "policy"))
+
+    def test_a_composed_broker_or_plan_entry_reinstates_the_step(self):
+        self.assertIn("credential_broker",
+                      self._cleanup(credential_broker=object())._effective_order({}))
+        self.assertIn("credential_broker", self._cleanup()._effective_order(
+            {"credential_broker": {"expected": {}, "plan": {}}}))
+
+    def test_an_unwired_or_silent_broker_observation_is_never_absence(self):
+        self.assertIsNone(self._cleanup()._observe_credential_broker({}))
+        supervisor = SimpleNamespace(observe=lambda _plan: None)
+        self.assertIsNone(
+            self._cleanup(credential_broker=supervisor)._observe_credential_broker({}))
+        answered = SimpleNamespace(observe=lambda _plan: {"state": "absent"})
+        self.assertEqual(
+            self._cleanup(credential_broker=answered)._observe_credential_broker({}),
+            {"state": "absent"})
 
 
 if __name__ == "__main__":

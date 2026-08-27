@@ -271,5 +271,72 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
         self.assertNotIn('("cron", "event", "run"', source)
 
 
+class CredentialAcceptanceSeamTest(unittest.TestCase):
+    """Spec 045 T037: the public seam the live matrix (T029) will drive.
+
+    These are offline checks of the command surface only. They prove nothing
+    about Ubuntu isolation, live credential behaviour, or evidence identity,
+    and T029 stays blocked until the authorized matrix runs.
+    """
+
+    def test_the_harness_carries_no_plaintext_credential_path(self):
+        source = HARNESS.read_text()
+        for forbidden in ("--secret", "--api-key", "--password", "--token",
+                          "credential_value", "plaintext"):
+            self.assertNotIn(forbidden, source)
+
+    def test_the_acceptance_actions_exist_on_the_public_sb_surface(self):
+        from sandbox.commands.native import ACTIONS, CREDENTIAL_ACCEPTANCE_ACTIONS
+        for action in CREDENTIAL_ACCEPTANCE_ACTIONS:
+            self.assertIn(action, ACTIONS)
+        self.assertEqual(CREDENTIAL_ACCEPTANCE_ACTIONS,
+                         ("credential-bind", "credential-request", "credential-revoke"))
+
+    def test_a_harness_style_sb_call_is_refused_and_mutates_nothing(self):
+        """Drive the seam exactly as the live harness would: `./sb native ...`."""
+        observed = []
+
+        def fake_run(argv, **kwargs):
+            observed.append((argv, kwargs))
+            return subprocess.run(
+                [sys.executable, str(ROOT / "sb"), *argv[1:]],
+                capture_output=True, text=True, timeout=kwargs.get("timeout", 60),
+            )
+
+        events = []
+        event = live.SbRunner(events=events, run=fake_run).call(
+            None, "native", "credential-bind", "--json",
+            "--source-ref", "vault/live-acceptance",
+            "--binding-id", "bind-live", "--instance-id", "sb-0123456789ab",
+            "--host", "api.example.com", "--path", "/v1/ping",
+            "--method", "GET", "--auth-form", "authorization_bearer",
+            "--expires-at", "2030-01-01T00:00:00Z", timeout=60,
+        )
+        document = event["json"]
+        self.assertIsInstance(document, dict)
+        self.assertFalse(document["ok"])
+        self.assertFalse(document["mutated"])
+        self.assertEqual(document["support_tier"], "implemented_unproven")
+        self.assertFalse(document["adoptable"])
+        self.assertIsNone(document["evidence_id"])
+        self.assertNotIn("vault/live-acceptance", event["stdout"]["text"])
+
+    def test_no_acceptance_action_can_report_a_proven_capability_here(self):
+        from sandbox.commands.native import credential_acceptance
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(
+            source_ref="vault/live-acceptance", binding_id="bind-live",
+            binding_version=1, instance_id="sb-0123456789ab", host="api.example.com",
+            path="/v1/ping", method="GET", auth_form="authorization_bearer",
+            expires_at="2030-01-01T00:00:00Z",
+        )
+        for action in ("credential-bind", "credential-request", "credential-revoke"):
+            result = credential_acceptance(action, args)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["state"], "blocked")
+            self.assertIsNone(result["evidence_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

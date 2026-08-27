@@ -43,6 +43,11 @@ BROKER_INSTALL_PATH = Path("/usr/local/libexec/sandbox-native-egress-broker")
 EGRESS_ROOT = Path("/etc/sandbox/native/egress")
 GRANT_ROOT = Path("/etc/sandbox/native/grants")
 GRANT_LOCK_ROOT = Path("/run/lock/sandbox-native")
+CREDENTIAL_BROKER_EXECUTABLE = Path("/usr/libexec/sandbox/native-credential-broker")
+CREDENTIAL_BROKER_RECORD_ROOT = Path("/etc/sandbox/native/credential-broker")
+CREDENTIAL_BROKER_RECORD_KEYS = {"machine_id", "policy_digest", "egress_digest",
+                                 "broker_digest", "executable_digest", "service_uid",
+                                 "unit"}
 FOREIGN_DATA_SENTINEL = Path("/var/lib/mysql/.sandbox-native-coexistence-sentinel")
 GRANT_AUTHORITY = "staged-v1"
 ABSENT_GRANT_DIGEST = "0" * 64
@@ -3419,6 +3424,194 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
                      sort_keys=True, separators=(",", ":")))
 
 
+# --- Credential Vault broker lifecycle (spec 045, T036) ----------------------
+#
+# These three verbs are the ONLY service-lifecycle surface the credential
+# broker gets, and they carry nothing but the machine identity and three
+# digests.  No credential byte, source reference, lease descriptor, socket, or
+# caller-selected unit/path/command/property can enter or leave through them.
+#
+# `credential-broker-start` is deliberately terminal in this release: the
+# reviewed broker executable (T035) is not installed by any code path and no
+# helper-owned service record is ever written, so start proves identity and
+# then refuses.  Activating a unit here would be inventing support for a
+# service that does not yet exist and has no authorized Ubuntu proof (T022).
+
+
+def credential_broker_unit(machine_id):
+    """The one unit identity this helper may ever own for an instance."""
+    return f"sandbox-credential-broker@{machine_id}.service"
+
+
+def credential_broker_description(machine_id, policy_digest, egress_digest, broker_digest):
+    return (f"Sandbox credential broker {machine_id} policy {policy_digest} "
+            f"egress {egress_digest} broker {broker_digest}")
+
+
+def credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                             *, state, ok, code, stopped=None):
+    """Emit one bounded, schema-fixed, non-secret status document."""
+    document = {"machine_id": machine_id, "policy_digest": policy_digest,
+                "egress_digest": egress_digest, "broker_digest": broker_digest,
+                "state": state, "admission_open": False,
+                "unit": credential_broker_unit(machine_id)}
+    if stopped is not None:
+        document["stopped"] = bool(stopped)
+    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    if ok:
+        # Every report is terminal: one verb emits exactly one document.
+        raise SystemExit(0)
+    # `code` names the refusal for the operator's log without echoing any
+    # child output; it is deliberately not part of the wire document.
+    print(code, file=sys.stderr)
+    raise SystemExit(69)
+
+
+def credential_broker_identity(machine_id, policy_digest, egress_digest, broker_digest):
+    """Prove policy and egress ownership before any broker-side action."""
+    _path, policy = applied_policy(machine_id, policy_digest)
+    egress_digest = digest_value(egress_digest)
+    broker_digest = digest_value(broker_digest)
+    record = installed_grant_record(machine_id, policy["digest"])
+    observed = record["grant_digest"] if record else ABSENT_GRANT_DIGEST
+    if observed != egress_digest:
+        fail("native credential broker egress digest changed")
+    return policy, egress_digest, broker_digest
+
+
+def credential_broker_executable_ready():
+    """True only when the reviewed broker executable is installed and ours."""
+    path = CREDENTIAL_BROKER_EXECUTABLE
+    try:
+        details = path.lstat()
+    except OSError:
+        return False
+    return (stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+            and details.st_uid == 0 and not details.st_mode & 0o022)
+
+
+def credential_broker_service_record(machine_id, policy_digest, egress_digest,
+                                     broker_digest):
+    """Read the helper-owned, secret-free service record, or None when absent.
+
+    The record is the only place a unit, user, or executable digest may come
+    from; a caller can never supply one.  A record that exists but does not
+    match the requested identity is a refusal, never a rewrite.
+    """
+    path = CREDENTIAL_BROKER_RECORD_ROOT / f"{machine_id}.json"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        fail("native credential broker service record is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != 0
+                or details.st_mode & 0o077 or details.st_size > 4096):
+            fail("native credential broker service record ownership is invalid")
+        payload = os.read(descriptor, 4096)
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(payload.decode())
+    except (UnicodeDecodeError, ValueError):
+        fail("native credential broker service record is invalid")
+    if not isinstance(value, dict) or set(value) != CREDENTIAL_BROKER_RECORD_KEYS:
+        fail("native credential broker service record is invalid")
+    if (value["machine_id"] != machine_id or value["policy_digest"] != policy_digest
+            or value["egress_digest"] != egress_digest
+            or value["broker_digest"] != broker_digest
+            or value["unit"] != credential_broker_unit(machine_id)):
+        fail("native credential broker service record changed")
+    return value
+
+
+def credential_broker_unit_state(unit):
+    """`present`, `absent`, or None when systemd did not answer at all."""
+    loaded = run_optional(("systemctl", "show", unit, "--property=LoadState", "--value"))
+    if loaded.returncode != 0:
+        return None
+    value = (loaded.stdout or "").strip()
+    if value == "":
+        return None
+    return "absent" if value == "not-found" else "present"
+
+
+def credential_broker_owned(machine_id, policy_digest, egress_digest, broker_digest):
+    """True when a present unit is exactly the one this identity describes."""
+    unit = credential_broker_unit(machine_id)
+    expected = credential_broker_description(machine_id, policy_digest, egress_digest,
+                                             broker_digest)
+    return unit_description(unit) == expected
+
+
+def credential_broker_start(machine_id, policy_digest, egress_digest, broker_digest):
+    _policy, egress_digest, broker_digest = credential_broker_identity(
+        machine_id, policy_digest, egress_digest, broker_digest)
+    if not credential_broker_executable_ready():
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="blocked", ok=False,
+                                 code="credential_broker_executable_unavailable")
+    if credential_broker_service_record(machine_id, policy_digest, egress_digest,
+                                        broker_digest) is None:
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="blocked", ok=False,
+                                 code="credential_broker_service_record_unavailable")
+    # Both prerequisites exist only after the reviewed standalone service and
+    # its authorized host proof land (T035/T022).  Until then this is a closed,
+    # side-effect-free refusal rather than an unproven activation.
+    credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                             state="blocked", ok=False,
+                             code="credential_broker_activation_unproven")
+
+
+def credential_broker_status(machine_id, policy_digest, egress_digest, broker_digest):
+    _policy, egress_digest, broker_digest = credential_broker_identity(
+        machine_id, policy_digest, egress_digest, broker_digest)
+    state = credential_broker_unit_state(credential_broker_unit(machine_id))
+    if state is None:
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="unavailable", ok=False,
+                                 code="credential_broker_status_unavailable")
+    if state == "present" and not credential_broker_owned(
+            machine_id, policy_digest, egress_digest, broker_digest):
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="drifted", ok=False,
+                                 code="credential_broker_ownership_changed")
+    credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                             state=state, ok=True, code="credential_broker_status")
+
+
+def credential_broker_stop(machine_id, policy_digest, egress_digest, broker_digest):
+    """Close admission and stop only the exact owned broker, idempotently."""
+    _policy, egress_digest, broker_digest = credential_broker_identity(
+        machine_id, policy_digest, egress_digest, broker_digest)
+    unit = credential_broker_unit(machine_id)
+    state = credential_broker_unit_state(unit)
+    if state is None:
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="unavailable", ok=False, stopped=False,
+                                 code="credential_broker_status_unavailable")
+    if state == "absent":
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="absent", ok=True, stopped=False,
+                                 code="credential_broker_absent")
+    if not credential_broker_owned(machine_id, policy_digest, egress_digest, broker_digest):
+        # A foreign or drifted unit is evidence, never something to stop.
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="drifted", ok=False, stopped=False,
+                                 code="credential_broker_ownership_changed")
+    stopped = run_optional(("systemctl", "stop", unit))
+    if stopped.returncode != 0:
+        credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                                 state="present", ok=False, stopped=False,
+                                 code="credential_broker_stop_failed")
+    credential_broker_report(machine_id, policy_digest, egress_digest, broker_digest,
+                             state="absent", ok=True, stopped=True,
+                             code="credential_broker_stopped")
+
+
 def credential_install(machine_id, policy_digest, name):
     _path, policy = applied_policy(machine_id, policy_digest)
     if not CREDENTIAL_NAME.fullmatch(name):
@@ -4598,6 +4791,15 @@ def main(argv=None):
     for name in ("services-activate", "services-health", "services-status", "services-stop"):
         action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
         action.add_argument("service_digest")
+    # The credential broker's entire helper protocol: three fixed verbs, each
+    # carrying only the machine identity and the policy, egress, and broker
+    # digests.  There is deliberately no endpoint, descriptor, path, unit,
+    # user, property, or credential argument.
+    for name in ("credential-broker-start", "credential-broker-status",
+                 "credential-broker-stop"):
+        action = sub.add_parser(name); action.add_argument("machine")
+        action.add_argument("policy_digest"); action.add_argument("egress_digest")
+        action.add_argument("broker_digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
         identity = machine(args.machine); checked_policy(args.path, identity); print("policy-ok")
@@ -4683,6 +4885,14 @@ def main(argv=None):
     elif args.verb == "cleanup-observe":
         require_root(); cleanup_observe(args.resource, machine(args.machine),
                                         digest_value(args.digest), args.resource_digest)
+    elif args.verb in {"credential-broker-start", "credential-broker-status",
+                       "credential-broker-stop"}:
+        require_root()
+        {"credential-broker-start": credential_broker_start,
+         "credential-broker-status": credential_broker_status,
+         "credential-broker-stop": credential_broker_stop}[args.verb](
+             machine(args.machine), digest_value(args.policy_digest),
+             digest_value(args.egress_digest), digest_value(args.broker_digest))
     elif args.verb == "credential-install":
         require_root(); credential_install(machine(args.machine), digest_value(args.digest), args.name)
     elif args.verb in {"services-activate", "services-health", "services-status", "services-stop"}:

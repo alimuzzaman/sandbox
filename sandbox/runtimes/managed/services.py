@@ -394,3 +394,215 @@ class ManagedServiceSupervisor:
         ok = self._run("services-status", plan)
         return {"ok": ok, "state": "ready" if ok else "unhealthy", "mutated": False,
                 "backend": dict(plan["backend"])}
+
+
+# --- Credential Vault broker service (spec 045, T036) ------------------------
+#
+# These plans and verbs are preparation only.  They are digest-bound and
+# secret-free by construction, and no composition path enables them: the
+# managed-native composition root leaves the supervisor absent, and the helper
+# verbs are closed by default.  Code presence here is not T022/T029 proof and
+# does not change `implemented_unproven`, `adoptable=false`, or the null
+# evidence identity.
+
+CREDENTIAL_BROKER_VERBS = (
+    "credential-broker-start", "credential-broker-status", "credential-broker-stop",
+)
+# Must stay identical to FIXED_EXECUTABLE in
+# tools/native-helper/native-credential-broker.py (T035).
+CREDENTIAL_BROKER_EXECUTABLE = "/usr/libexec/sandbox/native-credential-broker"
+CREDENTIAL_BROKER_STATES = frozenset({
+    "credential_pending", "ready", "draining", "closed", "blocked",
+})
+_BROKER_STATUS_FIELDS = frozenset({
+    "machine_id", "policy_digest", "egress_digest", "broker_digest",
+    "state", "admission_open", "unit", "stopped",
+})
+_MAX_BROKER_STATUS_BYTES = 4096
+
+
+def credential_broker_unit(machine_id):
+    """The one unit identity the helper is allowed to own for this instance."""
+    if not ManagedServiceSupervisor._MACHINE.fullmatch(str(machine_id)):
+        raise ValueError("managed credential broker machine identity is invalid")
+    return f"sandbox-credential-broker@{machine_id}.service"
+
+
+class CredentialBrokerPlanCompiler:
+    """Render a secret-free, digest-bound broker service plan.
+
+    The plan carries identities and digests only.  It has no source reference,
+    no credential value, no caller-supplied unit name, path, command, user, or
+    service property, and it is always compiled in the closed
+    ``credential_pending`` state.
+    """
+
+    def compile(self, policy, *, egress_digest, broker_digest, service_uid,
+                guest_port, broker_epoch):
+        machine_id = policy.machine_id
+        network = dict(getattr(policy, "network", {}) or {})
+        for name, value in (("egress digest", egress_digest),
+                            ("broker digest", broker_digest),
+                            ("policy digest", policy.digest)):
+            if not isinstance(value, str) or not ManagedServiceSupervisor._DIGEST.fullmatch(value):
+                raise ValueError(f"managed credential broker {name} is invalid")
+        if isinstance(service_uid, bool) or not isinstance(service_uid, int) \
+                or not 1 <= service_uid <= 2 ** 31 - 1:
+            raise ValueError("managed credential broker service uid is invalid")
+        if isinstance(guest_port, bool) or not isinstance(guest_port, int) \
+                or not 1024 <= guest_port <= 65535:
+            raise ValueError("managed credential broker guest port is invalid")
+        if not isinstance(broker_epoch, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}",
+                                                                 broker_epoch):
+            raise ValueError("managed credential broker epoch is invalid")
+        try:
+            host_address = str(ipaddress.ip_interface(network["host_address"]).ip)
+            guest_address = str(ipaddress.ip_interface(network["guest_address"]).ip)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("managed credential broker network is unavailable") from exc
+        interface = network.get("veth")
+        if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,15}", interface):
+            raise ValueError("managed credential broker interface is invalid")
+        for address in (host_address, guest_address):
+            if not ipaddress.ip_address(address).is_private:
+                raise ValueError("managed credential broker transport must stay guest-private")
+        document = {
+            "machine_id": machine_id, "policy_digest": policy.digest,
+            "egress_digest": egress_digest, "broker_digest": broker_digest,
+            "broker_epoch": broker_epoch,
+            "unit": credential_broker_unit(machine_id),
+            "executable": CREDENTIAL_BROKER_EXECUTABLE,
+            "service_uid": service_uid,
+            "guest_interface": interface, "host_address": host_address,
+            "guest_address": guest_address, "guest_port": guest_port,
+        }
+        return {**document, "state": "credential_pending", "admission_open": False,
+                "digest": canonical_digest(document)}
+
+
+class CredentialBrokerSupervisor:
+    """Run only the three fixed, digest-bound credential-broker helper verbs.
+
+    Every verb takes exactly the machine identity and the policy, egress, and
+    broker digests.  No credential byte, source reference, unit name, path,
+    command, or service property is ever passed to the helper, and helper
+    output is accepted only as a bounded, schema-checked, non-secret document.
+
+    `start` never opens admission: the returned document reports
+    ``admission_open`` false in every outcome, so a successful start is still a
+    closed broker.
+    """
+
+    def __init__(self, *, process, helper):
+        if not isinstance(helper, str) or not helper.startswith("/"):
+            raise ValueError("managed credential broker helper is invalid")
+        self.process = process
+        self.helper = helper
+
+    @classmethod
+    def _validate(cls, plan):
+        if not isinstance(plan, Mapping):
+            raise ValueError("managed credential broker plan is invalid")
+        expected = {"machine_id", "policy_digest", "egress_digest", "broker_digest",
+                    "broker_epoch", "unit", "executable", "service_uid",
+                    "guest_interface", "host_address", "guest_address", "guest_port",
+                    "state", "admission_open", "digest"}
+        if set(plan) != expected:
+            raise ValueError("managed credential broker plan is invalid")
+        machine_id = plan["machine_id"]
+        if not isinstance(machine_id, str) or not ManagedServiceSupervisor._MACHINE.fullmatch(machine_id):
+            raise ValueError("managed credential broker machine identity is invalid")
+        for name in ("policy_digest", "egress_digest", "broker_digest", "digest"):
+            value = plan[name]
+            if not isinstance(value, str) or not ManagedServiceSupervisor._DIGEST.fullmatch(value):
+                raise ValueError("managed credential broker identity is invalid")
+        if plan["unit"] != credential_broker_unit(machine_id):
+            raise ValueError("managed credential broker unit is invalid")
+        if plan["executable"] != CREDENTIAL_BROKER_EXECUTABLE:
+            raise ValueError("managed credential broker executable is invalid")
+        if plan["state"] not in CREDENTIAL_BROKER_STATES or plan["admission_open"] is not False:
+            raise ValueError("managed credential broker plan must stay closed")
+        document = {key: plan[key] for key in expected
+                    - {"state", "admission_open", "digest"}}
+        if canonical_digest(document) != plan["digest"]:
+            raise ValueError("managed credential broker plan digest changed")
+
+    def _run(self, verb, plan):
+        if verb not in CREDENTIAL_BROKER_VERBS:
+            raise ValueError("managed credential broker verb is invalid")
+        self._validate(plan)
+        return self.process.run(
+            ("sudo", "-n", self.helper, verb, plan["machine_id"], plan["policy_digest"],
+             plan["egress_digest"], plan["broker_digest"]),
+            timeout=120,
+        )
+
+    @classmethod
+    def _bounded_status(cls, plan, result):
+        """Accept only a small, schema-checked, non-secret helper document."""
+        text = getattr(result, "stdout", "") or ""
+        if not isinstance(text, str) or len(text.encode(errors="ignore")) > _MAX_BROKER_STATUS_BYTES:
+            return None
+        try:
+            document = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(document, Mapping) or set(document) - _BROKER_STATUS_FIELDS:
+            return None
+        if document.get("machine_id") != plan["machine_id"]:
+            return None
+        for name in ("policy_digest", "egress_digest", "broker_digest"):
+            if name in document and document[name] != plan[name]:
+                return None
+        state = document.get("state")
+        if state not in CREDENTIAL_BROKER_STATES | {"present", "absent", "drifted", "unavailable"}:
+            return None
+        if document.get("admission_open", False) is not False:
+            # A helper that claims open admission is refused rather than
+            # relayed: nothing in this release may open a credential path.
+            return None
+        return {key: document[key] for key in sorted(document)}
+
+    def start(self, plan):
+        result = self._run("credential-broker-start", plan)
+        status = self._bounded_status(plan, result)
+        ok = getattr(result, "returncode", 1) == 0
+        return {"ok": ok, "state": (status or {}).get("state", "blocked") if ok else "blocked",
+                "mutated": False, "admission_open": False,
+                "reason": {"code": "credential_broker_started" if ok
+                           else "credential_broker_start_refused"}}
+
+    def status(self, plan):
+        result = self._run("credential-broker-status", plan)
+        status = self._bounded_status(plan, result)
+        if getattr(result, "returncode", 1) != 0 or status is None:
+            return {"ok": False, "state": "unavailable", "mutated": False,
+                    "admission_open": False,
+                    "reason": {"code": "credential_broker_status_unavailable"}}
+        return {"ok": status["state"] in {"present", "absent"}, "state": status["state"],
+                "mutated": False, "admission_open": False,
+                "reason": {"code": "credential_broker_status"}}
+
+    def stop(self, plan):
+        result = self._run("credential-broker-stop", plan)
+        status = self._bounded_status(plan, result)
+        ok = getattr(result, "returncode", 1) == 0 and status is not None
+        return {"ok": ok, "state": "stopped" if ok else "stop_failed",
+                "mutated": bool(ok and status.get("stopped")),
+                "admission_open": False,
+                "reason": {"code": "credential_broker_stopped" if ok
+                           else "credential_broker_stop_failed"}}
+
+    def observe(self, plan):
+        """Return the cleanup observation shape the coordinator compares.
+
+        An unreadable or drifted broker is never absence: `status` reports
+        `unavailable`/`drifted` and the coordinator retains a recovery item
+        instead of removing anything.
+        """
+        report = self.status(plan)
+        if report["state"] not in {"present", "absent"}:
+            return None
+        return {"machine_id": plan["machine_id"], "policy_digest": plan["policy_digest"],
+                "resource": "credential_broker", "resource_digest": plan["broker_digest"],
+                "state": "absent" if report["state"] == "absent" else "present"}

@@ -21,7 +21,7 @@ _REFERENCE_KEY = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 _OPAQUE_REFERENCE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{2,255}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$")
+_OWNER = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._:/-]{0,511}$")
 
 ALLOWED_METHODS = frozenset({
     "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
@@ -99,6 +99,32 @@ def canonical_registered_source_reference(value: Any) -> str:
             or not _REFERENCE_KEY.fullmatch(pieces[1]):
         raise ValueError("credential source reference is not registered-source form")
     return canonical
+
+
+def canonical_binding_id(value: Any) -> str:
+    return _safe_text(value, label="binding id", pattern=_OPAQUE_ID)
+
+
+def canonical_instance_id(value: Any) -> str:
+    return _safe_text(value, label="instance id", pattern=_OPAQUE_ID)
+
+
+def canonical_owner(value: Any) -> str:
+    if not isinstance(value, str) or not _OWNER.fullmatch(value):
+        raise ValueError("credential owner is invalid")
+    if value.startswith("/"):
+        path, separator, label = value.partition("::")
+        if (not separator or not label or path == "/" or path.endswith("/")
+                or "//" in path or any(piece in {"", ".", ".."}
+                                       for piece in path.split("/")[1:])):
+            raise ValueError("credential owner is invalid")
+    return value
+
+
+def canonical_auth_profile(value: Any) -> str:
+    if value not in {"authorization_bearer", "x_api_key"}:
+        raise ValueError("credential authentication profile is not approved")
+    return value
 
 
 def canonical_timestamp(value: Any) -> str:
@@ -215,8 +241,7 @@ class CredentialBinding:
         expires_at = canonical_timestamp(self.expires_at)
         object.__setattr__(self, "expires_at", expires_at)
 
-        if not isinstance(self.owner, str) or not _OWNER.fullmatch(self.owner):
-            raise ValueError("credential owner is invalid")
+        object.__setattr__(self, "owner", canonical_owner(self.owner))
         if isinstance(self.version, bool) or not isinstance(self.version, int) \
                 or self.version < 1:
             raise ValueError("credential binding version is invalid")

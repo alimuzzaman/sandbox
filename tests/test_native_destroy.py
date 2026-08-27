@@ -72,5 +72,27 @@ class TestNativeDestroy(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertIn(self.policy.machine_id, self.repository.snapshot()["backends"])
 
+    def test_missing_ordinary_cleanup_entry_is_not_silently_skipped(self):
+        self.put_owned("backends")
+        plan = self.plan(); del plan["cleanup"]["services"]
+        result = self.cleaner().cleanup(self.request(), plan)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"]["code"], "cleanup_plan_unavailable")
+        self.assertEqual(self.calls, [])
+
+    def test_broker_top_level_and_cleanup_entry_must_appear_together(self):
+        self.put_owned("backends")
+        top_only = self.plan(); top_only["credential_broker"] = {"digest": "a" * 64}
+        result = self.cleaner().cleanup(self.request(), top_only)
+        self.assertEqual(result["reason"]["code"], "cleanup_plan_unavailable")
+        cleanup_only = self.plan()
+        cleanup_only["cleanup"]["credential_broker"] = {
+            "expected": {"owned": "credential_broker", "generation": 1},
+            "plan": {"name": "credential_broker"},
+        }
+        result = self.cleaner().cleanup(self.request(), cleanup_only)
+        self.assertEqual(result["reason"]["code"], "cleanup_plan_unavailable")
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == "__main__": unittest.main()

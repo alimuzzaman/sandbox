@@ -33,6 +33,7 @@ class TestManagedPlan(unittest.TestCase):
     def test_plan_is_deterministic_secret_free_and_allocations_do_not_overlap(self):
         from sandbox.isolation.resources import ResourcePolicyCompiler
         from sandbox.runtimes.managed.plan import ManagedPlanBuilder
+        from sandbox.runtimes.managed.services import CredentialBrokerPlanCompiler
         from sandbox.runtimes.managed.repository import NativeRepository
         with tempfile.TemporaryDirectory() as temp:
             repository = NativeRepository(Path(temp) / "state.json")
@@ -41,6 +42,9 @@ class TestManagedPlan(unittest.TestCase):
                 repository=repository, packages=packages, resources=ResourcePolicyCompiler(),
                 network=Network(), image=Component(), apparmor=Component(), machine=Component(),
                 database=Database(), services=Services(),
+                credential_broker_compiler=CredentialBrokerPlanCompiler(
+                    broker_digest="1" * 64, executable_digest="2" * 64,
+                    config_digest="3" * 64),
             )
             one = builder(SimpleNamespace(project_root=temp, label="default", arguments={}))
             again = builder(SimpleNamespace(project_root=temp, label="default", arguments={}))
@@ -53,6 +57,9 @@ class TestManagedPlan(unittest.TestCase):
             self.assertNotIn("password", repr(one).lower())
             self.assertFalse(one["policy"].network["default_route"])
             self.assertEqual(one["policy"].read_only_mounts[0]["target"], "/workspace")
+            self.assertEqual(next(iter(one["cleanup"])), "credential_broker")
+            self.assertEqual(one["cleanup"]["credential_broker"]["expected"]["resource_digest"],
+                             one["credential_broker"]["digest"])
 
     def test_apply_egress_argument_changes_only_the_separate_grant_set(self):
         from sandbox.isolation.resources import ResourcePolicyCompiler

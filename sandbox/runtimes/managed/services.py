@@ -19,6 +19,21 @@ PERSISTENT_WRITABLE_TARGETS = frozenset({
     "/var/www/html", "/var/lib/sandbox", "/var/log/sandbox", "/run/mysqld", "/run/php",
 })
 
+CREDENTIAL_BROKER_STATUS_FIELDS = frozenset({
+    "ok", "state", "machine_id", "policy_digest", "egress_digest", "broker_digest",
+    "executable_digest", "config_digest", "admission_open", "broker_epoch", "pid",
+    "process_start_identity", "service_uid", "unit_identity", "cgroup_identity",
+})
+CREDENTIAL_BROKER_SERVICE_UID = 991
+
+
+def credential_broker_unit_identity(machine_id):
+    return f"sandbox-credential-broker@{machine_id}.service"
+
+
+def credential_broker_cgroup_identity(machine_id):
+    return f"/sandbox.slice/credential-broker/{machine_id}"
+
 
 def _persistent_payload(command, writable_targets):
     argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
@@ -394,3 +409,169 @@ class ManagedServiceSupervisor:
         ok = self._run("services-status", plan)
         return {"ok": ok, "state": "ready" if ok else "unhealthy", "mutated": False,
                 "backend": dict(plan["backend"])}
+
+
+class CredentialBrokerPlanCompiler:
+    """Compile secret-free, digest-bound broker lifecycle metadata only."""
+
+    PORT = 18443
+    LIMITS = {"active_requests": 16, "frame_bytes": 65536,
+              "credential_bytes": 65536, "deadline_seconds": 30}
+
+    def __init__(self, *, broker_digest, executable_digest, config_digest):
+        for value in (broker_digest, executable_digest, config_digest):
+            if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise ValueError("credential broker reviewed digest is invalid")
+        self.broker_digest = broker_digest
+        self.executable_digest = executable_digest
+        self.config_digest = config_digest
+
+    def compile(self, policy, *, egress_digest):
+        if (not isinstance(getattr(policy, "machine_id", None), str)
+                or not re.fullmatch(r"sb-[a-f0-9]{12,32}", policy.machine_id)
+                or not isinstance(getattr(policy, "digest", None), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", policy.digest)
+                or not isinstance(egress_digest, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", egress_digest)):
+            raise ValueError("credential broker plan identity is invalid")
+        network = policy.network
+        interface = network.get("veth")
+        if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface):
+            raise ValueError("credential broker private-veth interface is invalid")
+        try:
+            host = ipaddress.ip_interface(network.get("host_address"))
+            guest = ipaddress.ip_interface(network.get("guest_address"))
+        except ValueError as exc:
+            raise ValueError("credential broker private addresses are invalid") from exc
+        usable = frozenset(host.network.hosts())
+        if (host.version != 4 or guest.version != 4 or not host.ip.is_private
+                or not guest.ip.is_private or host.network != guest.network or host.ip == guest.ip
+                or host.ip not in usable or guest.ip not in usable):
+            raise ValueError("credential broker private addresses are invalid")
+        plan = {
+            "machine_id": policy.machine_id,
+            "policy_digest": policy.digest,
+            "egress_digest": egress_digest,
+            "broker_digest": self.broker_digest,
+            "executable_digest": self.executable_digest,
+            "config_digest": self.config_digest,
+            "guest_interface": interface,
+            "subnet": str(host.network),
+            "host_address": str(host.ip),
+            "guest_address": str(guest.ip),
+            "guest_port": self.PORT,
+            "limits": dict(self.LIMITS),
+        }
+        plan["digest"] = canonical_digest(plan)
+        return plan
+
+
+class CredentialBrokerSupervisor:
+    """Fixed T036 helper lifecycle and ownership-enriched status envelope.
+
+    The T035 broker's ``service_status`` has fewer identity fields. It cannot be
+    passed here directly: the privileged helper must add and verify service UID,
+    unit, cgroup, executable, and config identity before this parser accepts it.
+    """
+
+    _MACHINE = re.compile(r"^sb-[a-f0-9]{12,32}$")
+    _DIGEST = re.compile(r"^[a-f0-9]{64}$")
+    _IDENTITY = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._:@/-]{0,255}$")
+    SERVICE_UID = CREDENTIAL_BROKER_SERVICE_UID
+    _STATUS_KEYS = CREDENTIAL_BROKER_STATUS_FIELDS
+
+    def __init__(self, *, process, helper, broker_digest, executable_digest, config_digest):
+        if not isinstance(helper, str) or not helper.startswith("/"):
+            raise ValueError("credential broker helper is invalid")
+        self.process, self.helper = process, helper
+        self.expected = {"broker_digest": broker_digest,
+                         "executable_digest": executable_digest,
+                         "config_digest": config_digest}
+        if any(not isinstance(value, str) or not self._DIGEST.fullmatch(value)
+               for value in self.expected.values()):
+            raise ValueError("credential broker reviewed digest is invalid")
+
+    @classmethod
+    def _validate(cls, plan):
+        if not isinstance(plan, Mapping) or set(plan) != {
+                "machine_id", "policy_digest", "egress_digest", "broker_digest",
+                "executable_digest", "config_digest", "guest_interface", "subnet",
+                "host_address", "guest_address", "guest_port", "limits", "digest"}:
+            raise ValueError("credential broker plan is invalid")
+        if not cls._MACHINE.fullmatch(str(plan["machine_id"])):
+            raise ValueError("credential broker machine identity is invalid")
+        for name in ("policy_digest", "egress_digest", "broker_digest",
+                     "executable_digest", "config_digest", "digest"):
+            if not isinstance(plan[name], str) or not cls._DIGEST.fullmatch(plan[name]):
+                raise ValueError("credential broker digest is invalid")
+        if canonical_digest({key: value for key, value in plan.items() if key != "digest"}) != plan["digest"]:
+            raise ValueError("credential broker plan digest changed")
+        if (plan["guest_port"] != CredentialBrokerPlanCompiler.PORT
+                or plan["limits"] != CredentialBrokerPlanCompiler.LIMITS):
+            raise ValueError("credential broker fixed limits changed")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", str(plan["guest_interface"])):
+            raise ValueError("credential broker interface changed")
+        try:
+            subnet = ipaddress.ip_network(plan["subnet"])
+            host = ipaddress.ip_address(plan["host_address"])
+            guest = ipaddress.ip_address(plan["guest_address"])
+        except ValueError as exc:
+            raise ValueError("credential broker addresses changed") from exc
+        usable = frozenset(subnet.hosts())
+        if (subnet.version != 4 or subnet.prefixlen != 30 or not subnet.is_private
+                or host not in usable or guest not in usable or host == guest):
+            raise ValueError("credential broker addresses changed")
+
+    def _argv(self, verb, plan):
+        self._validate(plan)
+        if any(plan[name] != value for name, value in self.expected.items()):
+            raise ValueError("credential broker reviewed identity changed")
+        return ("sudo", "-n", self.helper, verb, plan["machine_id"],
+                plan["policy_digest"], plan["egress_digest"], plan["broker_digest"])
+
+    def _run(self, verb, plan):
+        return self.process.run(self._argv(verb, plan), timeout=30)
+
+    def start(self, plan):
+        result = self._run("credential-broker-start", plan)
+        return {"ok": result.returncode == 0, "state": "credential_pending",
+                "mutated": result.returncode == 0}
+
+    def stop(self, plan):
+        result = self._run("credential-broker-stop", plan)
+        return {"ok": result.returncode == 0, "state": "stopped", "mutated": result.returncode == 0}
+
+    def status(self, plan):
+        result = self._run("credential-broker-status", plan)
+        if result.returncode != 0 or len((result.stdout or "").encode()) > 4096:
+            return {"ok": False, "state": "unavailable", "mutated": False}
+        try:
+            value = json.loads(result.stdout or "")
+        except (TypeError, json.JSONDecodeError):
+            return {"ok": False, "state": "unavailable", "mutated": False}
+        if isinstance(value, dict) and value.get("ok") is False:
+            return {"ok": False, "state": "unavailable", "mutated": False}
+        expected = {key: plan[key] for key in ("machine_id", "policy_digest", "egress_digest",
+                                                "broker_digest", "executable_digest", "config_digest")}
+        expected.update({"unit_identity": credential_broker_unit_identity(plan["machine_id"]),
+                         "cgroup_identity": credential_broker_cgroup_identity(plan["machine_id"])})
+        if (not isinstance(value, dict) or set(value) != self._STATUS_KEYS
+                or any(value.get(key) != item for key, item in expected.items())
+                or not isinstance(value.get("admission_open"), bool)
+                or value.get("state") not in {"credential_pending", "ready", "draining",
+                                               "closed", "blocked", "stopped"}
+                or (value.get("state") == "ready") is not value.get("admission_open")
+                or value.get("ok") is not True
+                or not isinstance(value.get("broker_epoch"), str)
+                or not self._IDENTITY.fullmatch(value["broker_epoch"])
+                or isinstance(value.get("pid"), bool) or not isinstance(value.get("pid"), int)
+                or value["pid"] < 1
+                or isinstance(value.get("service_uid"), bool)
+                or value.get("service_uid") != self.SERVICE_UID
+                or not isinstance(value.get("process_start_identity"), str)
+                or not re.fullmatch(r"[A-Za-z0-9/][A-Za-z0-9._:@/-]{0,255}",
+                                    value["process_start_identity"])
+                or not value["process_start_identity"].startswith(f"{value['pid']}:")
+                or value["state"] == "stopped" and value["admission_open"] is not False):
+            return {"ok": False, "state": "drifted", "mutated": False}
+        return {**value, "mutated": False}

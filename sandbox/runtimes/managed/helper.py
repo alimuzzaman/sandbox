@@ -9,6 +9,10 @@ from pathlib import Path
 from collections.abc import Mapping
 
 from sandbox.isolation.models import canonical_digest
+from sandbox.runtimes.managed.services import (
+    CREDENTIAL_BROKER_SERVICE_UID, CREDENTIAL_BROKER_STATUS_FIELDS,
+    credential_broker_cgroup_identity, credential_broker_unit_identity,
+)
 
 
 def validate_extension_package_allowlist(package_plan, *, catalog=None):
@@ -141,19 +145,58 @@ class ManagedCleanupObserver:
     """Request one exact, read-only ownership proof before each removal."""
 
     RESOURCES = frozenset({
-        "services", "database", "machine", "network", "mount", "image", "policy",
+        "credential_broker", "services", "database", "machine", "network", "mount", "image", "policy",
     })
 
-    def __init__(self, *, process, helper):
+    def __init__(self, *, process, helper, credential_status=None):
         self.process = process
         self.helper = helper
+        self.credential_status = credential_status
 
     def __call__(self, resource, plan):
         if resource not in self.RESOURCES or not isinstance(plan, dict):
             raise ValueError("managed cleanup observation is invalid")
         machine_id = plan.get("machine_id")
         policy_digest = plan.get("policy_digest")
-        resource_digest = plan.get("digest") if resource == "services" else policy_digest
+        resource_digest = plan.get("digest") if resource in {"credential_broker", "services"} else policy_digest
+        if resource == "credential_broker":
+            if not callable(self.credential_status):
+                raise RuntimeError("managed credential broker observation is unavailable")
+            status = self.credential_status(plan)
+            if not isinstance(status, dict) or status.get("state") == "drifted":
+                raise RuntimeError("managed credential broker observation is invalid")
+            if status.get("ok") is not True or status.get("state") == "unavailable":
+                raise RuntimeError("managed credential broker observation failed")
+            required = CREDENTIAL_BROKER_STATUS_FIELDS | {"mutated"}
+            if (set(status) != required or not isinstance(status.get("admission_open"), bool)
+                    or not isinstance(status.get("broker_epoch"), str)
+                    or not re.fullmatch(r"[A-Za-z0-9/][A-Za-z0-9._:@/-]{0,255}",
+                                        status["broker_epoch"])
+                    or status.get("unit_identity") != credential_broker_unit_identity(machine_id)
+                    or status.get("cgroup_identity") != credential_broker_cgroup_identity(machine_id)
+                    or isinstance(status.get("pid"), bool) or not isinstance(status.get("pid"), int)
+                    or status["pid"] < 1 or isinstance(status.get("service_uid"), bool)
+                    or status.get("service_uid") != CREDENTIAL_BROKER_SERVICE_UID
+                    or not isinstance(status.get("process_start_identity"), str)
+                    or not status["process_start_identity"].startswith(f"{status['pid']}" + ":")):
+                raise RuntimeError("managed credential broker observation is invalid")
+            for name in ("machine_id", "policy_digest", "egress_digest", "broker_digest",
+                         "executable_digest", "config_digest"):
+                if status.get(name) != plan.get(name):
+                    raise RuntimeError("managed credential broker observation is invalid")
+            if status.get("state") == "stopped":
+                if status["admission_open"] is not False:
+                    raise RuntimeError("managed credential broker observation is invalid")
+                state = "absent"
+            elif (status.get("state") in {"credential_pending", "ready", "draining",
+                                           "closed", "blocked"}
+                  and isinstance(status.get("pid"), int)):
+                state = "present"
+            else:
+                raise RuntimeError("managed credential broker observation is invalid")
+            return {"machine_id": machine_id, "policy_digest": policy_digest,
+                    "resource": resource, "resource_digest": resource_digest,
+                    "state": state}
         result = self.process.run(
             ("sudo", "-n", self.helper, "cleanup-observe", resource,
              machine_id, policy_digest, resource_digest), timeout=30,

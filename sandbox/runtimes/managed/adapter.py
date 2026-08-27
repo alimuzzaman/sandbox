@@ -77,6 +77,7 @@ class ManagedRuntimeDependencies:
     credential_supervisor: Any | None = None
     credential_health: Any | None = None
     credential_recovery: Any | None = None
+    credential_acceptance: Any | None = None
 
 
 class ManagedNativeCleanup:
@@ -89,10 +90,10 @@ class ManagedNativeCleanup:
     permission to make an educated guess.
     """
 
-    ORDER = ("services", "database", "machine", "network", "mount", "image", "policy")
+    ORDER = ("credential_broker", "services", "database", "machine", "network", "mount", "image", "policy")
 
     def __init__(self, *, repository, services, database, network, machine, image,
-                 policy, observe):
+                 policy, observe, credential_broker=None):
         self.repository = repository
         self.services = services
         self.database = database
@@ -101,6 +102,7 @@ class ManagedNativeCleanup:
         self.image = image
         self.policy = policy
         self.observe = observe
+        self.credential_broker = credential_broker
 
     @staticmethod
     def _owner(request):
@@ -176,6 +178,13 @@ class ManagedNativeCleanup:
             return {"ok": False, "state": "cleanup_incomplete", "mutated": True,
                     "cleanup": {"complete": False, "residual": ("state",)},
                     "reason": {"code": "cleanup_plan_unavailable"}}
+        ordinary = frozenset(self.ORDER) - {"credential_broker"}
+        expected = frozenset(self.ORDER) if "credential_broker" in plan else ordinary
+        if frozenset(entries) != expected:
+            self._retain(machine_id, owner, "state", "cleanup_plan_unavailable")
+            return {"ok": False, "state": "cleanup_incomplete", "mutated": False,
+                    "cleanup": {"complete": False, "residual": ("state",)},
+                    "reason": {"code": "cleanup_plan_unavailable"}}
 
         # Refuse foreign identity before stopping even an otherwise matching
         # service: a matching machine name alone never proves C ownership.
@@ -198,6 +207,7 @@ class ManagedNativeCleanup:
                     "reason": {"code": "cleanup_complete"}}
 
         components = {
+            "credential_broker": (self.credential_broker, "stop"),
             "services": (self.services, "stop"), "database": (self.database, "remove"),
             "network": (self.network, "remove"), "machine": (self.machine, "stop"),
             "mount": (self.image, "unmount"), "image": (self.image, "remove"),
@@ -224,7 +234,8 @@ class ManagedNativeCleanup:
             proven_removed.update(("services", "machine"))
         prior_removed = tuple(name for name in self.ORDER if name in proven_removed)
         removed, residual, mutated = [], [], False
-        for name in self.ORDER:
+        order = tuple(name for name in self.ORDER if name in entries)
+        for name in order:
             # Progress exists so a lost response cannot strand cleanup behind an
             # unreachable observer. It is not authority over the host, so a
             # resource it calls removed is still observed first: if the observer
@@ -660,13 +671,14 @@ class ManagedNativeAdapter:
     adapter_id = "ubuntu-nspawn"
     capabilities = frozenset({
         "preflight", "ensure", "status", "health", "open", "wordpress_cli",
-        "exec", "test", "apply", "destroy",
+        "exec", "test", "apply", "destroy", "credential_acceptance",
     })
 
     def __init__(self, *, preflight, repository, dependencies=None, launcher=None,
                  evidence_id=None, proof_candidate_authority=None,
                  credential_broker=None, credential_supervisor=None,
-                 credential_health=None, credential_recovery=None):
+                 credential_health=None, credential_recovery=None,
+                 credential_acceptance=None):
         self.preflight = preflight
         self.repository = repository
         self.dependencies = dependencies
@@ -683,9 +695,10 @@ class ManagedNativeAdapter:
                                   else getattr(dependencies, "credential_health", None))
         self.credential_recovery = (credential_recovery if credential_recovery is not None
                                     else getattr(dependencies, "credential_recovery", None))
-        self.proof_candidate = _is_proof_candidate_authority(
-            proof_candidate_authority,
-        )
+        self.credential_acceptance = (credential_acceptance if credential_acceptance is not None
+                                      else getattr(dependencies, "credential_acceptance", None))
+        self._proof_candidate_authority = proof_candidate_authority
+        self.proof_candidate = _is_proof_candidate_authority(proof_candidate_authority)
 
     @staticmethod
     def _owner(request):
@@ -1093,7 +1106,38 @@ class ManagedNativeAdapter:
         )
 
     def invoke(self, request):
-        if request.operation == "preflight":
+        if request.operation == "credential_acceptance":
+            from sandbox.runtimes.managed.credential_acceptance import (
+                public_credential_acceptance_result,
+                validate_credential_acceptance_service_result,
+            )
+            service = self.credential_acceptance
+            raw = request.arguments.get("request")
+            if not self.proof_candidate:
+                result = public_credential_acceptance_result({
+                    "action": raw.get("action", "request") if isinstance(raw, dict) else "request",
+                    "reason": {"code": "managed_runtime_unproven"},
+                })
+            elif service is None or not callable(getattr(service, "invoke", None)):
+                result = public_credential_acceptance_result({
+                    "action": raw.get("action", "request") if isinstance(raw, dict) else "request",
+                    "reason": {"code": "credential_acceptance_unavailable"},
+                })
+                result["proof_candidate"] = True
+            else:
+                try:
+                    result = service.invoke(
+                        raw,
+                        proof_candidate_authority=self._proof_candidate_authority,
+                    )
+                except Exception:
+                    result = public_credential_acceptance_result({
+                        "action": raw.get("action", "request") if isinstance(raw, dict) else "request",
+                        "reason": {"code": "credential_acceptance_indeterminate"},
+                    })
+                    result["proof_candidate"] = True
+                result = validate_credential_acceptance_service_result(result, raw)
+        elif request.operation == "preflight":
             result = self.preflight.inspect()
         elif request.operation in {"status", "health", "open"}:
             result = self._status(request)

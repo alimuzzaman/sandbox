@@ -692,6 +692,9 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
     machine = overrides.pop("machine", ManagedMachine(process=process, helper=helper))
     policy = overrides.pop("policy", ManagedPolicyStore(process=process, helper=helper))
     service_compiler = overrides.pop("service_compiler", ManagedServiceCompiler())
+    # T036 remains explicitly gated. Keep the compiler type available without
+    # changing ordinary managed-native plans or cleanup on default composition.
+    credential_broker_compiler = overrides.pop("credential_broker_compiler", None)
     paths = overrides.pop("paths", AllowedRootPathPolicy(allowed_roots))
     plan_builder = overrides.pop("plan_builder", None)
     if plan_builder is None and native_repository is not None:
@@ -702,6 +705,7 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
             services=service_compiler,
             descriptor_resolver=registry.load_project_config,
             paths=paths,
+            credential_broker_compiler=credential_broker_compiler,
         )
     wordpress = overrides.pop(
         "wordpress", ManagedWordPressBootstrap(process=process, helper=helper),
@@ -727,12 +731,18 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
     credential_supervisor = overrides.pop("credential_supervisor", None)
     credential_health = overrides.pop("credential_health", None)
     credential_recovery = overrides.pop("credential_recovery", None)
+    credential_acceptance = overrides.pop("credential_acceptance", None)
     cleanup = overrides.pop("cleanup", None)
     if cleanup is None and native_repository is not None:
         cleanup = ManagedNativeCleanup(
             repository=native_repository, services=services, database=database,
             network=network, machine=machine, image=image, policy=policy,
-            observe=ManagedCleanupObserver(process=process, helper=helper),
+            observe=ManagedCleanupObserver(
+                process=process, helper=helper,
+                credential_status=(credential_supervisor.status
+                                   if credential_supervisor is not None else None),
+            ),
+            credential_broker=credential_supervisor,
         )
     return ManagedRuntimeDependencies(
         process=process,
@@ -748,6 +758,7 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         credential_supervisor=credential_supervisor,
         credential_health=credential_health,
         credential_recovery=credential_recovery,
+        credential_acceptance=credential_acceptance,
         verifier=verifier, launcher=launcher, plan_builder=plan_builder,
         provisioner=provisioner, cleanup=cleanup,
         **overrides,

@@ -4579,6 +4579,13 @@ def main(argv=None):
         "services", "database", "machine", "network", "mount", "image", "policy"))
     cleanup_parser.add_argument("machine"); cleanup_parser.add_argument("digest")
     cleanup_parser.add_argument("resource_digest")
+    for name in ("credential-broker-start", "credential-broker-status",
+                 "credential-broker-stop"):
+        action = sub.add_parser(name)
+        action.add_argument("machine")
+        action.add_argument("policy_digest")
+        action.add_argument("egress_digest")
+        action.add_argument("broker_digest")
     probe = sub.add_parser("preflight-probe")
     probe.add_argument("probe", choices=PREFLIGHT_PROBES)
     sub.add_parser("preflight-probes")
@@ -4683,6 +4690,15 @@ def main(argv=None):
     elif args.verb == "cleanup-observe":
         require_root(); cleanup_observe(args.resource, machine(args.machine),
                                         digest_value(args.digest), args.resource_digest)
+    elif args.verb in {"credential-broker-start", "credential-broker-status",
+                       "credential-broker-stop"}:
+        # T036 reserves the exact fixed helper boundary, but the runnable unit,
+        # config installer, and ownership observer are not locally integrated.
+        # Refuse instead of fabricating a service or accepting a generic path.
+        require_root(); machine(args.machine)
+        digest_value(args.policy_digest); digest_value(args.egress_digest)
+        digest_value(args.broker_digest)
+        fail("native credential broker lifecycle is not installed")
     elif args.verb == "credential-install":
         require_root(); credential_install(machine(args.machine), digest_value(args.digest), args.name)
     elif args.verb in {"services-activate", "services-health", "services-status", "services-stop"}:

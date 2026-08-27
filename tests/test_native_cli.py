@@ -51,5 +51,47 @@ class TestNativeCli(unittest.TestCase):
         self.assertIn("support_unproven", result["refusal_reasons"])
         self.assertNotIn("source_reference", output.getvalue())
 
+    def test_credential_acceptance_routes_through_runtime_operation(self):
+        from sandbox.commands.native import cmd_native
+        from sandbox.runtimes.base import OperationResult
+
+        request = {"action": "revoke", "binding_id": "binding-0001", "version": 1,
+                   "machine_id": "sb-0123456789ab", "owner": "owner-0001"}
+        calls = []
+        service = SimpleNamespace(invoke=lambda value: (
+            calls.append(value) or OperationResult(
+                False, "credential_acceptance", value.project_root, "wordpress",
+                {"state": "blocked", "mutated": False, "proof_candidate": True,
+                 "adoptable": False, "reason": {"code": "credential_acceptance_unavailable"}},
+            )))
+        args = SimpleNamespace(action="credential-acceptance", json=True, project_dir=".",
+                               label="default", web_server="nginx",
+                               credential_request=json.dumps(request))
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.runtime_service", return_value=service), \
+                redirect_stdout(output):
+            cmd_native({}, args)
+        self.assertEqual(calls[0].operation, "credential_acceptance")
+        self.assertEqual(dict(calls[0].arguments["request"]), request)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["adoptable"])
+        self.assertEqual(result["reason"]["code"], "credential_acceptance_unavailable")
+
+    def test_credential_acceptance_rejects_secret_shaped_extra_before_dispatch(self):
+        from sandbox.commands.native import cmd_native
+        request = {"action": "revoke", "binding_id": "binding-0001", "version": 1,
+                   "machine_id": "sb-0123456789ab", "owner": "owner-0001",
+                   "body": "forbidden"}
+        args = SimpleNamespace(action="credential-acceptance", json=True, project_dir=".",
+                               label="default", web_server="nginx",
+                               credential_request=json.dumps(request))
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.runtime_service") as runtime, \
+                redirect_stdout(output):
+            cmd_native({}, args)
+        runtime.assert_not_called()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["reason"]["code"], "credential_acceptance_invalid")
+
 
 if __name__ == "__main__": unittest.main()

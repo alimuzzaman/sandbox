@@ -194,6 +194,20 @@ def _cgroup_absent(manifest):
     return _argv("/usr/bin/test", "-d", manifest["service"]["cgroup"])
 
 
+def _process_absent(manifest):
+    return _argv("/usr/bin/ps", "-o", "pid=", "-C", "native-credential-broker")
+
+
+def _route_absent(manifest):
+    return _argv("/usr/bin/ip", "-o", "route", "show", "dev",
+                 manifest["transport"]["guest_interface"])
+
+
+def _nftables_absent(manifest):
+    return _argv("/usr/sbin/nft", "list", "table", "inet",
+                 manifest["kernel"]["nftables_table"])
+
+
 def _temporary_absent(manifest):
     paths = manifest["cleanup"]["paths"]
     if not paths:
@@ -231,6 +245,21 @@ _GUEST_SOURCED = {
     "descriptor_absent_after_cleanup": "broker_status",
 }
 
+# How a check proves itself. Absence checks are the reason this exists: `test
+# -d` on a removed cgroup exits non-zero, and reading that as a failure meant a
+# correctly cleaned host reported `failed` while a host with leftover state
+# reported `passed` -- backwards in the one direction that matters.
+EXPECTATION_KINDS = ("exit_zero", "exit_nonzero", "empty_output")
+_EXPECTATIONS = {
+    "process_absent_after_cleanup": "exit_nonzero",
+    "route_absent_after_cleanup": "exit_nonzero",
+    "nftables_absent_after_cleanup": "exit_nonzero",
+    "interface_absent_after_cleanup": "exit_nonzero",
+    "cgroup_absent_after_cleanup": "exit_nonzero",
+    "temporary_absent_after_cleanup": "exit_nonzero",
+    "socket_absent_after_cleanup": "empty_output",
+}
+
 _HOST_BUILDERS = {
     "os_release_supported": _os_release,
     "kernel_release_expected": _kernel_release,
@@ -253,6 +282,9 @@ _HOST_BUILDERS = {
     "apparmor_profile_enforced": _apparmor_state,
     "no_unexpected_host_mount": _mount_state,
     "unit_absent_after_cleanup": _unit_absent,
+    "process_absent_after_cleanup": _process_absent,
+    "route_absent_after_cleanup": _route_absent,
+    "nftables_absent_after_cleanup": _nftables_absent,
     "socket_absent_after_cleanup": _socket_absent,
     "interface_absent_after_cleanup": _interface_absent,
     "cgroup_absent_after_cleanup": _cgroup_absent,
@@ -266,6 +298,13 @@ def catalog() -> tuple[str, ...]:
     return CHECK_IDS
 
 
+def expectation_kind(check_id: Any) -> str:
+    """What a passing result looks like for this check."""
+    if not isinstance(check_id, str) or check_id not in CHECK_IDS:
+        raise _refuse("check_unknown", str(check_id)[:64])
+    return _EXPECTATIONS.get(check_id, "exit_zero")
+
+
 def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
     """Return one bounded execution plan for a known check id."""
     if not isinstance(check_id, str) or check_id not in CHECK_IDS:
@@ -274,11 +313,13 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         raise _refuse("manifest_invalid")
     timeout = manifest["bounds"]["command_timeout_seconds"]
     output_bytes = min(manifest["bounds"]["max_output_bytes"], MAX_OUTPUT_BYTES)
+    expectation = expectation_kind(check_id)
     if check_id in _GUEST_SOURCED:
         return {
             "check_id": check_id,
             "kind": _GUEST_SOURCED[check_id],
             "argv": (),
+            "expectation": expectation,
             "timeout_seconds": timeout,
             "max_output_bytes": output_bytes,
             "redact": True,
@@ -287,6 +328,7 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         "check_id": check_id,
         "kind": "host_command",
         "argv": _HOST_BUILDERS[check_id](manifest),
+        "expectation": expectation,
         "timeout_seconds": timeout,
         "max_output_bytes": output_bytes,
         "redact": True,
@@ -345,6 +387,25 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         return {"check_id": check_id, "state": "blocked", "code": "probe_timeout",
                 "observations": (), "findings": ()}
     matched = tuple(item for item in expected if item in stdout)
+    expectation = expectation_kind(check_id)
+    if expectation == "exit_nonzero":
+        # The resource is proven gone because the command could not find it.
+        if completed["returncode"] == 0:
+            return {"check_id": check_id, "state": "failed",
+                    "code": "resource_still_present", "observations": matched,
+                    "findings": ()}
+        return {"check_id": check_id, "state": "passed", "code": "observed_absent",
+                "observations": (), "findings": ()}
+    if expectation == "empty_output":
+        if completed["returncode"] != 0:
+            return {"check_id": check_id, "state": "blocked",
+                    "code": "probe_nonzero_exit", "observations": (), "findings": ()}
+        if stdout.strip():
+            return {"check_id": check_id, "state": "failed",
+                    "code": "resource_still_present", "observations": matched,
+                    "findings": ()}
+        return {"check_id": check_id, "state": "passed", "code": "observed_absent",
+                "observations": (), "findings": ()}
     if completed["returncode"] != 0:
         return {"check_id": check_id, "state": "failed", "code": "probe_nonzero_exit",
                 "observations": matched, "findings": ()}
@@ -357,6 +418,7 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
 
 
 __all__ = [
-    "ALLOWED_EXECUTABLES", "CHECK_IDS", "MAX_ARGV", "MAX_OUTPUT_BYTES",
-    "ProbeError", "build", "catalog", "parse", "plan",
+    "ALLOWED_EXECUTABLES", "CHECK_IDS", "EXPECTATION_KINDS", "MAX_ARGV",
+    "MAX_OUTPUT_BYTES", "ProbeError", "build", "catalog", "expectation_kind",
+    "parse", "plan",
 ]

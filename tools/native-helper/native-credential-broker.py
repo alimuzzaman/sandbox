@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Offline-only guarded credential-broker transport and validation seams.
+"""Closed-by-default credential-broker transport and coordinator.
 
 The Linux listener, descriptor, and dispatcher probes plus guest/result codecs
 and pure controller/operation state are explicit opt-in and closed by default.
-This is a library contract, not a runnable service: no integrated coordinator or
-application/runtime path constructs it and no default is enabled. Code presence
-is not live Ubuntu proof or support-tier authority. Pure validation and
-injectable seams keep local tests non-privileged; T036 owns any later
-helper/service wiring and proof.
+The local coordinator is runnable only with reviewed injected dependencies; no
+ordinary application/runtime path constructs or enables it. Code presence is
+not live Ubuntu proof or support-tier authority. Pure validation and injectable
+seams keep local tests non-privileged; T036 owns helper/service wiring and proof.
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ MAX_GUEST_FRAME_BYTES = (
     ((MAX_GUEST_BODY_BYTES + 2) // 3) * 4 + MAX_GUEST_HEADERS_BYTES + 16 * 1024
 )
 MAX_ACTIVE_REQUESTS = 16
+MAX_REPLAY_LEASES = MAX_ACTIVE_REQUESTS * 4
 MAX_GUEST_RESULT_BODY_BYTES = 4 * 1024 * 1024
 MAX_GUEST_RESULT_FRAME_BYTES = (
     ((MAX_GUEST_RESULT_BODY_BYTES + 2) // 3) * 4 + MAX_GUEST_HEADERS_BYTES + 16 * 1024
@@ -1151,6 +1151,17 @@ class PendingOperationRegistry:
                 return None
             return dict(item["request"])
 
+    def connection_identity(self, operation_id: str) -> str | None:
+        """Return private rendezvous identity; never serialized to either peer."""
+        with self._lock:
+            item = self._items.get(operation_id)
+            return item["connection_identity"] if item is not None else None
+
+    def operation_terminal(self, operation_id: str) -> bool:
+        with self._lock:
+            item = self._items.get(operation_id)
+            return item is not None and item["result"] is not None
+
     def complete(self, operation_id: str, request_digest: str, result: Any) -> dict[str, Any]:
         from sandbox.isolation.credential_request_broker import BrokerResponse
 
@@ -1201,6 +1212,21 @@ class PendingOperationRegistry:
             item["state"] = "indeterminate"
             item["result"] = result
             return result
+
+    def fail_lease_attempt(
+        self, operation_id: str, request_digest: str, *, post_use: bool = False,
+    ) -> bool:
+        """Terminalize an exact claimed operation after a failed lease attempt."""
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["state"] not in {"claimed", "lease_bound"}:
+                return False
+            uncertain = post_use or item["state"] == "lease_bound"
+            item["state"] = "indeterminate" if uncertain else "refused"
+            item["result"] = bounded_error(
+                "operation_indeterminate" if uncertain else "operation_cancelled")
+            return True
 
     def refuse(
         self, operation_id: str, request_digest: str, *, owner: str, code: str,
@@ -1487,13 +1513,7 @@ def _readily_observable_trailing(connection) -> bool:
 
 
 class LinuxGuestEndpoint:
-    """Opt-in private-veth admission probe, not an integrated guest endpoint.
-
-    It proves bind/peer/frame ordering with fakes but deliberately refuses after
-    validation. The accepted wire contract requires the future coordinator to
-    retain this connection until a terminal result; sending `pending` here would
-    falsely present this preparatory seam as that operation flow.
-    """
+    """Opt-in private-veth endpoint; coordinator injection retains the guest."""
 
     def __init__(
         self,
@@ -1504,6 +1524,7 @@ class LinuxGuestEndpoint:
         enabled: bool = False,
         socket_factory=None,
         clock=None,
+        coordinator=None,
     ) -> None:
         if not _validate_service_identity(service) or not isinstance(registry, PendingOperationRegistry) \
                 or registry.service != service or not callable(connection_observer) \
@@ -1518,6 +1539,10 @@ class LinuxGuestEndpoint:
         self.listener = None
         self.admission_open = False
         self.terminal_closed = False
+        if coordinator is not None and (not isinstance(coordinator, CredentialBrokerCoordinator)
+                                        or coordinator.service != self.service):
+            raise ValueError("guest coordinator is invalid")
+        self.coordinator = coordinator
 
     def start(self) -> dict[str, Any]:
         if not self.enabled or self.terminal_closed or self.listener is not None:
@@ -1549,6 +1574,10 @@ class LinuxGuestEndpoint:
     def open_admission(self) -> dict[str, Any]:
         if self.listener is None or self.registry.service != self.service:
             return bounded_error("guest_listener_closed")
+        if self.coordinator is not None:
+            opened = self.coordinator.open_admission(self.service)
+            if not opened.get("ok"):
+                return opened
         self.admission_open = True
         return {"ok": True, "code": "guest_admission_open"}
 
@@ -1577,12 +1606,17 @@ class LinuxGuestEndpoint:
             checked = validate_guest_admission(self.service, observation, request)
             if not checked["ok"]:
                 return checked
-            result = {
-                **bounded_error("guest_coordinator_unavailable"),
-                "correlation_id": request["correlation_id"],
-            }
-            payload = encode_guest_terminal_result(result)
-            connection.sendall(payload)
+            if self.coordinator is not None:
+                result = self.coordinator.retain_guest(connection, observation, request)
+                if result.get("ok"):
+                    connection = None
+                    return result
+                if "correlation_id" not in result:
+                    result = {**result, "correlation_id": request["correlation_id"]}
+            else:
+                result = {**bounded_error("guest_coordinator_unavailable"),
+                          "correlation_id": request["correlation_id"]}
+            connection.sendall(encode_guest_terminal_result(result))
             return result
         except Exception:
             return bounded_error("guest_listener_unavailable")
@@ -1595,10 +1629,12 @@ class LinuxGuestEndpoint:
 
     def revoke(self, binding_id: str, binding_version: int | None = None) -> tuple[str, ...]:
         self.admission_open = False
-        return self.registry.revoke(binding_id, binding_version)
+        return (self.coordinator.revoke(binding_id, binding_version)
+                if self.coordinator is not None else self.registry.revoke(binding_id, binding_version))
 
     def expire(self, now: int) -> tuple[str, ...]:
-        selected = self.registry.expire(now)
+        selected = (self.coordinator.expire(now) if self.coordinator is not None
+                    else self.registry.expire(now))
         if selected:
             self.admission_open = False
         return selected
@@ -1612,7 +1648,7 @@ class LinuxGuestEndpoint:
                 listener.close()
             except OSError:
                 pass
-        self.registry.close()
+        self.coordinator.close() if self.coordinator is not None else self.registry.close()
         return {"ok": True, "code": "guest_listener_closed", "admission_open": False}
 
 
@@ -1916,14 +1952,7 @@ class LinuxLeaseDispatcher:
 
 
 class CredentialOperationAdapter:
-    """Closed placeholder for the required descriptor-backed request broker.
-
-    Direct `VerifiedHttpsUpstream` use would bypass proof, egress, concurrency,
-    error normalization, and broker redaction. A normal `CredentialRequestBroker`
-    resolves its own lease and cannot consume this service's descriptor. Until a
-    reviewed descriptor-backed request-broker entry point exists, production
-    construction fails closed.
-    """
+    """Descriptor-backed execution through the existing typed request broker."""
 
     def __init__(self, target: Any, *, binding: Any = None) -> None:
         from sandbox.isolation.credential_request_broker import CredentialRequestBroker
@@ -1931,12 +1960,42 @@ class CredentialOperationAdapter:
 
         if isinstance(target, VerifiedHttpsUpstream):
             raise ValueError("direct verified upstream adapter is forbidden")
-        if isinstance(target, CredentialRequestBroker):
-            raise ValueError("descriptor-backed request broker adapter is not implemented")
-        raise ValueError("credential operation adapter target is invalid")
+        if not isinstance(target, CredentialRequestBroker) \
+                or not isinstance(getattr(target, "upstream", None), VerifiedHttpsUpstream):
+            raise ValueError("credential operation adapter target is invalid")
+        if binding is not None:
+            from sandbox.isolation.credential_binding import CredentialBinding
+            if not isinstance(binding, CredentialBinding) \
+                    or binding.instance_id != target.instance_id:
+                raise ValueError("credential operation adapter binding is invalid")
+        self._target = target
+        self._binding = binding
 
     def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
-        raise RuntimeError("descriptor-backed request broker adapter is not implemented")
+        if machine_id != self._target.instance_id or not isinstance(material, bytearray) \
+                or not 0 < len(material) <= MAX_DESCRIPTOR_BYTES:
+            raise ValueError("descriptor-backed credential operation is invalid")
+        consumed = False
+
+        class DescriptorLease:
+            def consume(_self, callback):
+                nonlocal consumed
+                if consumed or not callable(callback):
+                    raise ValueError("descriptor credential lease is consumed")
+                consumed = True
+                return callback(bytes(material))
+
+        broker_request = dict(request)
+        if broker_request.pop("machine_id", None) != machine_id:
+            raise ValueError("descriptor-backed request identity is invalid")
+        if self._binding is not None and (
+            broker_request.get("binding_id") != self._binding.binding_id
+            or broker_request.get("binding_version") != self._binding.version
+        ):
+            raise ValueError("descriptor binding changed")
+        return self._target.request_with_lease(
+            broker_request, DescriptorLease(), transport_identity=machine_id,
+        )
 
 
 class OfflineTestOperationAdapter:
@@ -1949,6 +2008,239 @@ class OfflineTestOperationAdapter:
 
     def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
         return self._callback(dict(request), material)
+
+
+class CredentialBrokerCoordinator:
+    """Retain guest connections through claim, descriptor use, and terminal SBRS."""
+
+    def __init__(self, service: Any, *, controller: Any, adapter: Any,
+                 descriptor_reader=None, descriptor_closer=None, clock=None,
+                 replay_limit: int = MAX_REPLAY_LEASES,
+                 enabled: bool = False) -> None:
+        if not _validate_service_identity(service) or not isinstance(enabled, bool) \
+                or not isinstance(adapter, (CredentialOperationAdapter, OfflineTestOperationAdapter)) \
+                or not _integer(replay_limit, minimum=1, maximum=MAX_REPLAY_LEASES):
+            raise ValueError("credential coordinator configuration is invalid")
+        self.service = dict(service)
+        self.registry = PendingOperationRegistry(service)
+        self.claims = ControllerClaimChannel(service, self.registry, controller, clock=clock)
+        self.adapter = adapter
+        self.reader = descriptor_reader or _read_descriptor_once
+        self.closer = descriptor_closer or os.close
+        self.clock = clock or time.time
+        self.enabled = enabled
+        self.admission_open = False
+        self._guests: dict[str, Any] = {}
+        self._consumed: dict[str, tuple[int, str]] = {}
+        self._replay_limit = replay_limit
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def open_admission(self, observed_service: Any) -> dict[str, Any]:
+        if not self.enabled or self._closed or observed_service != self.service \
+                or not _validate_service_identity(observed_service):
+            return bounded_error("guest_listener_closed")
+        self.admission_open = True
+        return {"ok": True, "code": "guest_admission_open"}
+
+    def retain_guest(self, connection: Any, observation: Any, request: Any) -> dict[str, Any]:
+        if not self.admission_open or connection is None:
+            return bounded_error("guest_listener_closed")
+        checked = validate_guest_admission(self.service, observation, request)
+        if not checked["ok"]:
+            return checked
+        identity = observation["connection_identity"]
+        result = self.registry.submit(request, observation, now=int(self.clock()))
+        if not result.get("ok"):
+            return result
+        with self._lock:
+            if self._closed or identity in self._guests:
+                self.registry.guest_disconnected(identity)
+                return bounded_error("operation_not_pending")
+            self._guests[identity] = connection
+        return result
+
+    def handle_controller(self, message: Any, *, observed_peer: Any,
+                          connection_identity: str) -> dict[str, Any]:
+        if not self.admission_open:
+            return bounded_error("controller_denied")
+        result = self.claims.handle(message, observed_peer=observed_peer,
+                                    connection_identity=connection_identity)
+        if isinstance(message, dict) and message.get("type") == "REFUSE" \
+                and result.get("type") == "REFUSE" \
+                and result.get("code") in GUEST_ERROR_CODES:
+            guest = self.registry.connection_identity(message.get("operation_id"))
+            if guest is not None:
+                self._deliver(guest)
+        return result
+
+    def _deliver(self, connection_identity: str) -> dict[str, Any]:
+        result = self.registry.guest_result(connection_identity)
+        try:
+            packet = encode_guest_terminal_result(result)
+        except ValueError:
+            result = {**bounded_error("operation_indeterminate"),
+                      "correlation_id": result.get("correlation_id", "corr-invalid")}
+            packet = encode_guest_terminal_result(result)
+        with self._lock:
+            connection = self._guests.pop(connection_identity, None)
+        if connection is None:
+            return bounded_error("operation_not_pending")
+        try:
+            connection.sendall(packet)
+        except Exception:
+            self.registry.guest_disconnected(connection_identity)
+            try: connection.close()
+            except Exception: pass
+            return bounded_error("operation_indeterminate")
+        self.registry.guest_result(connection_identity, consume=True)
+        try: connection.close()
+        except Exception: pass
+        return result
+
+    def _deliver_operation(self, operation_id: str, lease_id: str) -> dict[str, Any]:
+        connection_identity = self.registry.connection_identity(operation_id)
+        if connection_identity is None:
+            return {"ok": False, "lease_id": lease_id, "outcome": "indeterminate"}
+        delivered = self._deliver(connection_identity)
+        return {"ok": bool(delivered.get("ok")), "lease_id": lease_id,
+                "outcome": "completed" if delivered.get("ok") else
+                "indeterminate" if delivered.get("code") == "operation_indeterminate"
+                else "refused"}
+
+    def _fail_lease_attempt(self, frame: Any, lease_id: str, *, post_use: bool = False) -> dict[str, Any]:
+        operation_id = frame.get("operation_id") if isinstance(frame, dict) else None
+        request_digest = frame.get("request_digest") if isinstance(frame, dict) else None
+        if _identity(operation_id) and _digest(request_digest):
+            self.registry.fail_lease_attempt(
+                operation_id, request_digest, post_use=post_use,
+            )
+            if self.registry.operation_terminal(operation_id) \
+                    and self.registry.connection_identity(operation_id) is not None:
+                return self._deliver_operation(operation_id, lease_id)
+        return {"ok": False, "lease_id": lease_id, "outcome": "refused"}
+
+    def _record_lease_attempt(self, lease_id: str, expires_at: Any) -> str:
+        now = int(self.clock())
+        if not _integer(expires_at, minimum=1):
+            return "invalid"
+        with self._lock:
+            for consumed_id, (expiry, epoch) in tuple(self._consumed.items()):
+                if expiry <= now or epoch != self.service["broker_epoch"]:
+                    self._consumed.pop(consumed_id, None)
+            if lease_id in self._consumed:
+                return "replayed"
+            if len(self._consumed) >= self._replay_limit:
+                return "exhausted"
+            self._consumed[lease_id] = (expires_at, self.service["broker_epoch"])
+            return "recorded"
+
+    def accept_descriptor(self, frame: Any, descriptor: Any, observation: Any, *,
+                          dispatcher_peer: Any, claim_owner: str) -> dict[str, Any]:
+        lease_id = frame.get("lease_id") if isinstance(frame, dict) else None
+        if not self.admission_open or not _identity(lease_id):
+            try: self.closer(descriptor)
+            except Exception: pass
+            return bounded_error("lease_channel_closed")
+        attempt = self._record_lease_attempt(lease_id, frame.get("expires_at"))
+        if attempt != "recorded":
+            try: self.closer(descriptor)
+            except Exception: pass
+            if attempt == "invalid":
+                return {"ok": False, "lease_id": lease_id, "outcome": "refused"}
+            if attempt == "exhausted":
+                return self._fail_lease_attempt(frame, lease_id)
+            return {"ok": False, "lease_id": lease_id, "outcome": "refused"}
+        # Consumption is terminal before descriptor inspection or credential read.
+        material = None
+        try:
+            checked = validate_dispatch_peer(self.service, dispatcher_peer, frame)
+            if not checked["ok"]:
+                return self._fail_lease_attempt(frame, lease_id)
+            bound = self.registry.bind_lease(frame, owner=claim_owner, now=int(self.clock()))
+            if not bound.get("ok"):
+                return self._fail_lease_attempt(frame, lease_id)
+            checked = _validate_descriptor(frame, observation)
+            if not checked["ok"]:
+                self.registry.complete_refused(frame["operation_id"], frame["request_digest"],
+                                               code="lease_unavailable")
+                return self._deliver_operation(frame["operation_id"], lease_id)
+            try:
+                material = self.reader(descriptor, frame["descriptor_size"])
+            except Exception:
+                self.registry.complete_indeterminate(
+                    frame["operation_id"], frame["request_digest"])
+                return self._deliver_operation(frame["operation_id"], lease_id)
+            if not isinstance(material, bytearray) or len(material) != frame["descriptor_size"]:
+                self.registry.complete_indeterminate(
+                    frame["operation_id"], frame["request_digest"])
+                return self._deliver_operation(frame["operation_id"], lease_id)
+            request = self.registry.trusted_request(frame["operation_id"], frame["request_digest"])
+            if request is None:
+                self.registry.complete_indeterminate(
+                    frame["operation_id"], frame["request_digest"])
+                return self._deliver_operation(frame["operation_id"], lease_id)
+            try:
+                response = self.adapter.execute(request, material,
+                                                machine_id=self.service["machine_id"])
+            except Exception:
+                result = self.registry.complete_indeterminate(
+                    frame["operation_id"], frame["request_digest"])
+            else:
+                from sandbox.isolation.credential_request_broker import BrokerResponse
+                if isinstance(response, BrokerResponse):
+                    result = self.registry.complete(
+                        frame["operation_id"], frame["request_digest"], response)
+                elif isinstance(response, dict) and response.get("outcome") == "refused":
+                    result = self.registry.complete_refused(
+                        frame["operation_id"], frame["request_digest"], code="broker_failed")
+                else:
+                    result = self.registry.complete_indeterminate(
+                        frame["operation_id"], frame["request_digest"])
+            return self._deliver_operation(frame["operation_id"], lease_id)
+        finally:
+            _wipe(material)
+            try: self.closer(descriptor)
+            except Exception: pass
+
+    def controller_disconnected(self, connection_identity: str) -> tuple[str, ...]:
+        affected = self.claims.disconnect(connection_identity)
+        for operation_id in affected:
+            guest = self.registry.connection_identity(operation_id)
+            if guest is not None:
+                self._deliver(guest)
+        return affected
+
+    def revoke(self, binding_id: str, binding_version: int | None = None) -> tuple[str, ...]:
+        self.admission_open = False
+        affected = self.registry.revoke(binding_id, binding_version)
+        for operation_id in affected:
+            guest = self.registry.connection_identity(operation_id)
+            if guest is not None: self._deliver(guest)
+        return affected
+
+    def expire(self, now: int) -> tuple[str, ...]:
+        affected = self.registry.expire(now)
+        if affected:
+            self.admission_open = False
+        for operation_id in affected:
+            guest = self.registry.connection_identity(operation_id)
+            if guest is not None: self._deliver(guest)
+        return affected
+
+    def close(self) -> dict[str, Any]:
+        self.admission_open = False
+        self._closed = True
+        affected = self.registry.close()
+        for operation_id in affected:
+            guest = self.registry.connection_identity(operation_id)
+            if guest is not None: self._deliver(guest)
+        with self._lock:
+            leftovers = tuple(self._guests.values()); self._guests.clear()
+        for connection in leftovers:
+            try: connection.close()
+            except Exception: pass
+        return {"ok": True, "code": "coordinator_closed", "admission_open": False}
 
 
 class LinuxLeaseEndpoint:

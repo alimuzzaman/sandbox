@@ -72,14 +72,14 @@ complete:
 
 1. T034 is complete locally: 16 fake/local standalone service and transport
    contract tests pass. They do not open real sockets or prove Linux isolation.
-2. T035 remains open: guarded private-veth, seqpacket, memfd, peer-auth, a guest
-   request codec, canonical terminal-result codec, and pure operation/controller
-   state seams exist. The legacy descriptor registry now binds operation and
-   request digests, but it is not the integrated operation flow. One retained
-   guest connection through claim, descriptor rendezvous, typed upstream use,
-   terminal result delivery, runnable cross-process coordination, and lifecycle
-   observation are not complete. Authorized host proof remains a separate
-   T022/T029/T031 gate.
+2. T035 remains open: guarded transport/descriptor seams and a local fake-driven
+   coordinator retain one guest through authenticated claim state, one-use
+   descriptor rendezvous, the existing typed request broker, terminal SBRS
+   delivery, and bounded cleanup. Production controller AF_UNIX/SOCK_SEQPACKET
+   listening/event-loop code, recvmsg/SCM_RIGHTS integration, kernel peer
+   observation, cross-process config/entrypoint, guest disconnect/deadline
+   processing, and lifecycle/audit observation remain incomplete. Authorized
+   host proof remains a separate T022/T029/T031 gate.
 3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
@@ -141,9 +141,11 @@ result. It must not substitute local Compose tests for managed-native proof.
 
 T032 records the standalone credential-broker service/transport planning
 contract, T033 records the accepted local security design, and T034 records
-the passing fake/local contract suite. T035 has codecs and pure state seams only
-and remains open for the integrated guest/controller/lease/upstream path,
-runnable cross-process service, and lifecycle observation. Authorized host
+the passing fake/local contract suite. T035 has a fake-driven retained-guest,
+claim, descriptor, typed-broker, and terminal-result coordinator, but remains
+open for production controller and SCM_RIGHTS endpoints, the cross-process
+service entrypoint, guest disconnect/deadline processing, and lifecycle/audit
+observation. Authorized host
 evidence remains under T022/T029/T031; T036-T037 remain open preparatory
 work. The helper/service lifecycle
 (T022), authorized live extension (T029), and independent release review (T031)

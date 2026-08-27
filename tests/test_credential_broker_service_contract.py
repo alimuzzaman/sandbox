@@ -1441,6 +1441,406 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
                 "/fixed/native-helper", "credential-broker-start", tainted_identity,
             )
 
+    def test_coordinator_retains_guest_claims_executes_once_and_delivers_sbrs(self):
+        broker = module()
+        controller = {"uid": 501, "pid": 9001,
+                      "process_start_identity": "9001:1234",
+                      "executable_digest": "9" * 64}
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+        material_seen = []
+        adapter = broker.OfflineTestOperationAdapter(
+            lambda request, material: material_seen.append((request, bytes(material))) or
+            BrokerResponse(200, {"content-type": "application/json"}, b'{"ok":true}',
+                           request["correlation_id"]),
+            offline_test=True,
+        )
+        closed = []
+        coordinator = broker.CredentialBrokerCoordinator(
+            service_identity(), controller=controller, adapter=adapter,
+            descriptor_reader=lambda _descriptor, size: bytearray(b"x" * size),
+            descriptor_closer=lambda descriptor: closed.append(descriptor),
+            clock=lambda: 1_900_000_000, enabled=True,
+        )
+        self.assertFalse(coordinator.admission_open)
+        guest = FakeGuestConnection(broker.encode_guest_request(guest_request()))
+        listener = FakeGuestListener((guest,))
+        endpoint = broker.LinuxGuestEndpoint(
+            service_identity(), registry=coordinator.registry,
+            connection_observer=lambda _connection: guest_observation(),
+            coordinator=coordinator, enabled=True,
+            socket_factory=lambda *_args: listener, clock=lambda: 1_900_000_000,
+        )
+        with mock.patch.object(broker, "_require_linux_guest_listener"), \
+                mock.patch.object(broker.socket, "SO_BINDTODEVICE", 25, create=True):
+            self.assertTrue(endpoint.start()["ok"])
+            self.assertTrue(endpoint.open_admission()["ok"])
+            pending = endpoint.receive_once()
+        self.assertTrue(pending["ok"])
+        self.assertEqual(guest.sent, [])
+        self.assertFalse(guest.closed)
+
+        claimed = coordinator.handle_controller({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-connection-1")
+        self.assertEqual(claimed["type"], "CLAIMED")
+        frame = lease_frame(
+            operation_id=claimed["operation_id"],
+            request_digest=claimed["request_digest"],
+        )
+        outcome = coordinator.accept_descriptor(
+            frame, 77, descriptor_observation(), dispatcher_peer=peer_identity(),
+            claim_owner="controller-connection-1",
+        )
+        self.assertEqual(outcome, {"ok": True, "lease_id": LEASE, "outcome": "completed"})
+        self.assertEqual(len(material_seen), 1)
+        self.assertEqual(len(material_seen[0][1]), 32)
+        self.assertEqual(closed, [77])
+        self.assertTrue(guest.closed)
+        self.assertEqual(len(guest.sent), 1)
+        terminal = broker.parse_guest_terminal_result(guest.sent[0])
+        self.assertEqual(terminal["correlation_id"], guest_request()["correlation_id"])
+        self.assertNotIn("operation_id", terminal)
+        self.assertNotIn("lease_id", terminal)
+        replay = coordinator.accept_descriptor(
+            frame, 78, descriptor_observation(), dispatcher_peer=peer_identity(),
+            claim_owner="controller-connection-1",
+        )
+        self.assertEqual(replay, {"ok": False, "lease_id": LEASE, "outcome": "refused"})
+        self.assertEqual(material_seen.__len__(), 1)
+        self.assertEqual(closed, [77, 78])
+        denied = coordinator.accept_descriptor(
+            lease_frame(lease_id="lease-denied-0123456789abcdef"), 79,
+            descriptor_observation(), dispatcher_peer=peer_identity(uid=502),
+            claim_owner="controller-connection-1",
+        )
+        self.assertEqual(denied, {
+            "ok": False, "lease_id": "lease-denied-0123456789abcdef",
+            "outcome": "refused",
+        })
+        self.assertEqual(closed, [77, 78, 79])
+        self.assertTrue(endpoint.close()["ok"])
+
+    def test_coordinator_cross_instance_malformed_claim_disconnect_revoke_and_close(self):
+        broker = module()
+        controller = {"uid": 501, "pid": 9001,
+                      "process_start_identity": "9001:1234",
+                      "executable_digest": "9" * 64}
+        adapter = broker.OfflineTestOperationAdapter(
+            lambda *_args: {"outcome": "refused"}, offline_test=True,
+        )
+        coordinator = broker.CredentialBrokerCoordinator(
+            service_identity(), controller=controller, adapter=adapter,
+            clock=lambda: 1_900_000_000, enabled=True,
+        )
+        self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+        self.assert_refusal(coordinator.retain_guest(
+            FakeGuestConnection(b""), guest_observation(peer_address="10.203.0.6"),
+            guest_request(),
+        ), "transport_denied")
+        guest = FakeGuestConnection(b"")
+        self.assertTrue(coordinator.retain_guest(
+            guest, guest_observation(), guest_request(),
+        )["ok"])
+        self.assert_refusal(coordinator.handle_controller({
+            "type": "UNKNOWN", "machine_id": MACHINE,
+        }, observed_peer=controller, connection_identity="controller-one"),
+            "controller_message_invalid")
+        claimed = coordinator.handle_controller({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-one")
+        self.assertEqual(claimed["type"], "CLAIMED")
+        coordinator.controller_disconnected("controller-one")
+        terminal = broker.parse_guest_terminal_result(guest.sent[0])
+        self.assertFalse(terminal["ok"])
+        self.assertEqual(terminal["code"], "operation_cancelled")
+        self.assertNotIn(claimed["operation_id"], repr(terminal))
+        self.assertFalse(coordinator.close()["admission_open"])
+
+    def test_coordinator_descriptor_validation_and_read_failure_are_terminal(self):
+        broker = module()
+        controller = {"uid": 501, "pid": 9001,
+                      "process_start_identity": "9001:1234",
+                      "executable_digest": "9" * 64}
+        cases = (
+            (descriptor_observation(seals=[]), lambda _fd, size: bytearray(size),
+             "refused", "lease_unavailable"),
+            (descriptor_observation(), lambda _fd, _size: (_ for _ in ()).throw(OSError()),
+             "indeterminate", "operation_indeterminate"),
+        )
+        for index, (observation, reader, expected_outcome, expected_code) in enumerate(cases):
+            with self.subTest(expected_outcome=expected_outcome):
+                closed = []
+                coordinator = broker.CredentialBrokerCoordinator(
+                    service_identity(), controller=controller,
+                    adapter=broker.OfflineTestOperationAdapter(
+                        lambda *_args: self.fail("invalid descriptor must not execute"),
+                        offline_test=True,
+                    ), descriptor_reader=reader,
+                    descriptor_closer=lambda descriptor: closed.append(descriptor),
+                    clock=lambda: 1_900_000_000, enabled=True,
+                )
+                self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+                guest = FakeGuestConnection(b"")
+                observed = guest_observation(connection_identity=f"connection-case-{index}")
+                self.assertTrue(coordinator.retain_guest(
+                    guest, observed, guest_request(correlation_id=f"corr-case-{index}"),
+                )["ok"])
+                owner = f"controller-case-{index}"
+                claimed = coordinator.handle_controller({
+                    "type": "CLAIM_NEXT", "machine_id": MACHINE,
+                    "broker_epoch": EPOCH, "sequence": 1,
+                }, observed_peer=controller, connection_identity=owner)
+                frame = lease_frame(
+                    lease_id=f"lease-case-{index}-0123456789",
+                    operation_id=claimed["operation_id"],
+                    request_digest=claimed["request_digest"],
+                )
+                outcome = coordinator.accept_descriptor(
+                    frame, 90 + index, observation,
+                    dispatcher_peer=peer_identity(), claim_owner=owner,
+                )
+                self.assertEqual(outcome["outcome"], expected_outcome)
+                self.assertEqual(closed, [90 + index])
+                terminal = broker.parse_guest_terminal_result(guest.sent[0])
+                self.assertEqual(terminal["code"], expected_code)
+                self.assertTrue(guest.closed)
+
+    def test_controller_refuse_and_failed_lease_attempts_deliver_exactly_once(self):
+        broker = module()
+        controller = {"uid": 501, "pid": 9001,
+                      "process_start_identity": "9001:1234",
+                      "executable_digest": "9" * 64}
+
+        def prepare(index):
+            closed = []
+            coordinator = broker.CredentialBrokerCoordinator(
+                service_identity(), controller=controller,
+                adapter=broker.OfflineTestOperationAdapter(
+                    lambda *_args: self.fail("failed lease must not execute"),
+                    offline_test=True,
+                ), descriptor_closer=lambda descriptor: closed.append(descriptor),
+                clock=lambda: 1_900_000_000, enabled=True,
+            )
+            self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+            guest = FakeGuestConnection(b"")
+            connection = f"connection-failure-{index}"
+            owner = f"controller-failure-{index}"
+            self.assertTrue(coordinator.retain_guest(
+                guest, guest_observation(connection_identity=connection),
+                guest_request(correlation_id=f"corr-failure-{index}"),
+            )["ok"])
+            claimed = coordinator.handle_controller({
+                "type": "CLAIM_NEXT", "machine_id": MACHINE,
+                "broker_epoch": EPOCH, "sequence": 1,
+            }, observed_peer=controller, connection_identity=owner)
+            return coordinator, guest, owner, claimed, closed
+
+        coordinator, guest, owner, claimed, _closed = prepare("refuse")
+        refused = coordinator.handle_controller({
+            "type": "REFUSE", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 2, "operation_id": claimed["operation_id"],
+            "request_digest": claimed["request_digest"], "code": "binding_not_ready",
+        }, observed_peer=controller, connection_identity=owner)
+        self.assertEqual(refused, {"type": "REFUSE", "code": "binding_not_ready"})
+        self.assertEqual(len(guest.sent), 1)
+        self.assertEqual(broker.parse_guest_terminal_result(guest.sent[0])["code"],
+                         "binding_not_ready")
+        self.assertEqual(coordinator.registry.count, 0)
+
+        cases = (
+            ("wrong-owner", {}, peer_identity(), "different-controller"),
+            ("stale-epoch", {"broker_epoch": NEXT_EPOCH}, peer_identity(), None),
+            ("stale-policy", {"policy_digest": "0" * 64}, peer_identity(), None),
+            ("wrong-request-digest", {"request_digest": "0" * 64}, peer_identity(), None),
+            ("failed-binding", {"binding_id": "binding-other-0123456789"}, peer_identity(), None),
+            ("dispatcher-mismatch", {}, peer_identity(uid=502), None),
+        )
+        for index, (name, overrides, peer, owner_override) in enumerate(cases):
+            with self.subTest(name=name):
+                coordinator, guest, owner, claimed, closed = prepare(index)
+                frame_values = {
+                    "lease_id": f"lease-failure-{index}-0123456789",
+                    "operation_id": claimed["operation_id"],
+                    "request_digest": claimed["request_digest"],
+                }
+                frame_values.update(overrides)
+                frame = lease_frame(**frame_values)
+                ack = coordinator.accept_descriptor(
+                    frame, 100 + index, descriptor_observation(),
+                    dispatcher_peer=peer, claim_owner=owner_override or owner,
+                )
+                self.assertEqual(ack["lease_id"], frame["lease_id"])
+                self.assertIn(ack["outcome"], {"refused", "indeterminate"})
+                self.assertEqual(len(guest.sent), 1)
+                self.assertTrue(guest.closed)
+                self.assertEqual(coordinator.registry.count, 0)
+                replay = coordinator.accept_descriptor(
+                    frame, 200 + index, descriptor_observation(),
+                    dispatcher_peer=peer_identity(), claim_owner=owner,
+                )
+                self.assertEqual(replay, {
+                    "ok": False, "lease_id": frame["lease_id"], "outcome": "refused",
+                })
+                self.assertEqual(len(guest.sent), 1)
+                self.assertEqual(closed, [100 + index, 200 + index])
+
+    def test_coordinator_replay_capacity_fails_closed_and_prunes_expiry(self):
+        broker = module()
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+        controller = {"uid": 501, "pid": 9001,
+                      "process_start_identity": "9001:1234",
+                      "executable_digest": "9" * 64}
+        now = [1_900_000_000]
+        executions = []
+        coordinator = broker.CredentialBrokerCoordinator(
+            service_identity(), controller=controller,
+            adapter=broker.OfflineTestOperationAdapter(
+                lambda request, _material: executions.append(request["correlation_id"]) or
+                BrokerResponse(200, {"content-type": "application/json"}, b"{}",
+                               request["correlation_id"]),
+                offline_test=True,
+            ), descriptor_reader=lambda _fd, size: bytearray(size),
+            descriptor_closer=lambda _fd: None, clock=lambda: now[0],
+            replay_limit=1, enabled=True,
+        )
+        self.assertTrue(coordinator.open_admission(service_identity())["ok"])
+
+        def operation(index, sequence, lease_id, expires_at):
+            guest = FakeGuestConnection(b"")
+            owner = "controller-capacity"
+            self.assertTrue(coordinator.retain_guest(
+                guest, guest_observation(connection_identity=f"connection-capacity-{index}"),
+                guest_request(correlation_id=f"corr-capacity-{index}"),
+            )["ok"])
+            claimed = coordinator.handle_controller({
+                "type": "CLAIM_NEXT", "machine_id": MACHINE,
+                "broker_epoch": EPOCH, "sequence": sequence,
+            }, observed_peer=controller, connection_identity=owner)
+            frame = lease_frame(
+                lease_id=lease_id, expires_at=expires_at,
+                operation_id=claimed["operation_id"],
+                request_digest=claimed["request_digest"],
+            )
+            return guest, coordinator.accept_descriptor(
+                frame, 300 + index, descriptor_observation(),
+                dispatcher_peer=peer_identity(), claim_owner=owner,
+            )
+
+        _guest, first = operation(1, 1, "lease-capacity-one-012345", now[0] + 10)
+        self.assertEqual(first["outcome"], "completed")
+        guest, exhausted = operation(2, 2, "lease-capacity-two-012345", now[0] + 20)
+        self.assertEqual(exhausted["outcome"], "refused")
+        self.assertEqual(broker.parse_guest_terminal_result(guest.sent[0])["code"],
+                         "operation_cancelled")
+        now[0] += 11
+        _guest, after_prune = operation(3, 3, "lease-capacity-three-0123", now[0] + 20)
+        self.assertEqual(after_prune["outcome"], "completed")
+        self.assertEqual(len(executions), 2)
+
+    def test_descriptor_backed_typed_adapter_uses_existing_broker_and_verified_upstream(self):
+        broker_module = module()
+        from datetime import datetime, timezone
+        from sandbox.isolation.credential_binding import CredentialBinding
+        from sandbox.isolation.credential_request_broker import (
+            CredentialBrokerError, CredentialRequestBroker,
+        )
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        binding = CredentialBinding(
+            BINDING, MACHINE, "fixture/API_TOKEN", POLICY_DIGEST, EGRESS_DIGEST,
+            BROKER_DIGEST, "https", "api.example.test", 443, "POST", "/v1/items",
+            "authorization_bearer", "2030-01-01T00:00:00Z", "owner-fixture",
+            version=7, state="ready",
+        )
+
+        class Upstream(VerifiedHttpsUpstream):
+            def request(self, observed_binding, request, credential):
+                self.observed = (observed_binding, request, bytes(credential))
+                return {"status": 200, "headers": {"content-type": "application/json"},
+                        "body": b'{"ok":true}'}
+
+        upstream = object.__new__(Upstream)
+        class UnusedResolver:
+            def issue(self, _binding):
+                raise AssertionError("target resolver must not be used")
+        target = CredentialRequestBroker(
+            MACHINE, UnusedResolver(), lambda identity: binding if identity == BINDING else None,
+            proof=lambda _binding: True, egress=lambda _binding: True,
+            upstream=upstream,
+            clock=lambda: datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+        adapter = broker_module.CredentialOperationAdapter(target, binding=binding)
+        material = bytearray(b"x" * 32)
+        response = adapter.execute(guest_request(), material, machine_id=MACHINE)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.correlation_id, guest_request()["correlation_id"])
+        self.assertEqual(upstream.observed[0], binding)
+        self.assertEqual(upstream.observed[2], b"x" * 32)
+        self.assertNotIn("x" * 32, repr(response))
+        target.close()
+        with self.assertRaises(CredentialBrokerError) as closed_error:
+            adapter.execute(guest_request(), bytearray(b"y" * 32), machine_id=MACHINE)
+        self.assertEqual(closed_error.exception.code, "broker_closed")
+
+        revoked_target = CredentialRequestBroker(
+            MACHINE, UnusedResolver(), lambda identity: binding if identity == BINDING else None,
+            proof=lambda _binding: True, egress=lambda _binding: True,
+            upstream=object.__new__(Upstream),
+            clock=lambda: datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+        revoked_target.close_binding(BINDING, binding_version=7)
+        with self.assertRaises(CredentialBrokerError) as revoked_error:
+            broker_module.CredentialOperationAdapter(
+                revoked_target, binding=binding,
+            ).execute(guest_request(), bytearray(b"z" * 32), machine_id=MACHINE)
+        self.assertEqual(revoked_error.exception.code, "binding_revoked")
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingUpstream(VerifiedHttpsUpstream):
+            def request(self, _binding, request, _credential):
+                entered.set()
+                release.wait(2)
+                return {"status": 200, "headers": {"content-type": "application/json"},
+                        "body": b"{}", "correlation_id": request.correlation_id}
+
+        concurrent_target = CredentialRequestBroker(
+            MACHINE, UnusedResolver(), lambda identity: binding if identity == BINDING else None,
+            proof=lambda _binding: True, egress=lambda _binding: True,
+            upstream=object.__new__(BlockingUpstream), max_concurrent=1,
+            clock=lambda: datetime(2029, 1, 1, tzinfo=timezone.utc),
+        )
+        concurrent_adapter = broker_module.CredentialOperationAdapter(
+            concurrent_target, binding=binding,
+        )
+        thread_errors = []
+
+        def first_request():
+            try:
+                concurrent_adapter.execute(
+                    guest_request(correlation_id="corr-thread-first"),
+                    bytearray(b"a" * 32), machine_id=MACHINE,
+                )
+            except Exception as exc:  # pragma: no cover - assertion below exposes it
+                thread_errors.append(exc)
+
+        worker = threading.Thread(target=first_request)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        with self.assertRaises(CredentialBrokerError) as concurrency_error:
+            concurrent_adapter.execute(
+                guest_request(correlation_id="corr-thread-second"),
+                bytearray(b"b" * 32), machine_id=MACHINE,
+            )
+        self.assertEqual(concurrency_error.exception.code, "concurrency_limit")
+        release.set()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(thread_errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

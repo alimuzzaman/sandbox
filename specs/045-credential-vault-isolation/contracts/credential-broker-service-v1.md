@@ -2,16 +2,23 @@
 
 ## Status
 
-This is a security-reviewed pre-implementation contract. It defines the minimum
-service, transport, lifecycle, and cleanup invariants needed to prepare T022
-locally. T033 accepts the concrete v1 transport design for failing-first T034
-contract tests only. It does not enable a credential-bearing runtime path,
+This security-reviewed contract defines the minimum service, transport,
+lifecycle, and cleanup invariants needed to prepare T022 locally. T033 accepted
+the concrete v1 transport design used by the local T034/T035 contract and
+implementation increments. It does not enable a credential-bearing runtime path,
 close T003, prove T022 or T029, or authorize an evidence/support-tier promotion
 under T031.
 
 The capability remains `implemented_unproven` with `adoptable=false` and no
 evidence ID. T034 is complete as a fake/local contract suite; T035 and later
 implementation remain open.
+
+The local retained-guest and supplied-lease coordinator does not close T035.
+T035 remains open for the production controller abstract `AF_UNIX`
+`SOCK_SEQPACKET` listener/event loop, `recvmsg`/`SCM_RIGHTS` endpoint, kernel
+peer observer, cross-process configuration and entrypoint, guest disconnect and
+deadline loop, and lifecycle/audit observer. T022, T029, and T031 remain blocked;
+this contract does not change support, evidence, or adoptability state.
 
 ## T033 security review decision
 
@@ -160,14 +167,31 @@ than copied to the guest. This is an allowlist, not a sensitive-header denylist.
 Credential application crosses only `CredentialOperationAdapter`. Production
 construction requires a descriptor-backed, request-scoped
 `CredentialRequestBroker` configured with `VerifiedHttpsUpstream`, preserving
-its proof, egress, concurrency, error-normalization, and redaction gates. Direct
-`VerifiedHttpsUpstream` construction is forbidden. The ordinary broker API
-cannot consume this service's descriptor, so the adapter remains construction-
-closed until that reviewed entry point exists. It never accepts an arbitrary
-completion callback. An offline fake adapter requires an explicit test gate and
-injected fake socket seam. The adapter returns a reviewed broker response or an
-explicit reviewed refusal/indeterminate outcome. Exceptions or an invalid/
-missing terminal result are `indeterminate` once lease use may have occurred.
+its proof, egress, concurrency, drain, error-normalization, and redaction gates.
+Direct `VerifiedHttpsUpstream` construction is forbidden.
+
+The reviewed supplied-lease entry point is
+`CredentialRequestBroker.request_with_lease(request, lease,
+transport_identity=...)`. It runs on the existing broker instance; it MUST NOT
+clone the broker or copy its dependencies into a second admission authority.
+The entry point therefore preserves that instance's closed state, revoked-
+binding set, active-request/concurrency limit, drain state, proof and egress
+checks, binding/scope validation, typed upstream, response normalization, and
+credential redaction. The supplied object is only the one-use descriptor lease
+created inside the broker after the exact peer, epoch, operation/request,
+binding/digest, expiry, seal/type/size, and replay checks pass. It is consumed
+once through the broker's existing credential callback; credential bytes remain
+inside that callback and never become request metadata, return data, retained
+state, or diagnostics. A supplied lease cannot bypass admission, replace proof
+or egress decisions, select another upstream, reopen a closed/revoked binding,
+or escape the broker's concurrency/drain accounting.
+
+`CredentialOperationAdapter` may invoke only that supplied-lease entry point on
+the reviewed existing broker instance. It never accepts an arbitrary completion
+callback. An offline fake adapter requires an explicit test gate and injected
+fake socket seam. The adapter returns a reviewed broker response or an explicit
+reviewed refusal/indeterminate outcome. Exceptions or an invalid/missing
+terminal result are `indeterminate` once lease use may have occurred.
 A descriptor acknowledgement reports `completed` only after the terminal
 broker/upstream outcome is known, `refused` only when non-effect is known, and
 otherwise `indeterminate`.

@@ -514,7 +514,13 @@ class CredentialRequestBroker:
         except Exception:
             raise CredentialBrokerError("upstream_failed", "credential upstream request failed", correlation_id=request.correlation_id) from None
 
-    def request(self, value: Mapping[str, Any] | BrokerRequest, *, transport_identity: str | None = None) -> BrokerResponse:
+    def _request_with_lease_supplier(
+        self,
+        value: Mapping[str, Any] | BrokerRequest,
+        *,
+        transport_identity: str | None,
+        lease_supplier: Callable[[CredentialBinding], Any],
+    ) -> BrokerResponse:
         if isinstance(value, BrokerRequest):
             request = BrokerRequest.from_mapping({
                 "binding_id": value.binding_id,
@@ -548,7 +554,7 @@ class CredentialRequestBroker:
             )
             pre_audited = True
             try:
-                lease = self.resolver.issue(binding)
+                lease = lease_supplier(binding)
             except CredentialBrokerError:
                 raise
             except SecretBrokerError as exc:
@@ -634,6 +640,27 @@ class CredentialRequestBroker:
             raise
         finally:
             self._release()
+
+    def request(self, value: Mapping[str, Any] | BrokerRequest, *, transport_identity: str | None = None) -> BrokerResponse:
+        return self._request_with_lease_supplier(
+            value, transport_identity=transport_identity,
+            lease_supplier=self.resolver.issue,
+        )
+
+    def request_with_lease(
+        self,
+        value: Mapping[str, Any] | BrokerRequest,
+        lease: Any,
+        *,
+        transport_identity: str | None = None,
+    ) -> BrokerResponse:
+        """Execute one descriptor-supplied lease under this broker's admission state."""
+        if lease is None or not callable(getattr(lease, "consume", None)):
+            raise CredentialBrokerError("lease_unavailable", "credential lease is unavailable")
+        return self._request_with_lease_supplier(
+            value, transport_identity=transport_identity,
+            lease_supplier=lambda _binding: lease,
+        )
 
     def handle(self, value: Mapping[str, Any] | BrokerRequest, *, transport_identity: str | None = None) -> dict[str, Any]:
         """Return the bounded public envelope used by a local broker adapter."""

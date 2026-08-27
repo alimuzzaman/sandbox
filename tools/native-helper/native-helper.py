@@ -56,6 +56,15 @@ FIXED_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
+# T042 declares these exact derived-plan lifecycle identities. T043 registers
+# only these fixed argv shapes. The local helper still refuses them because
+# installation and live ownership proof remain blocked under T022.
+CREDENTIAL_V2_LIFECYCLE_VERBS = (
+    "credential-controller-configure-v2", "credential-controller-start-v2",
+    "credential-controller-status-v2", "credential-controller-stop-v2",
+    "credential-broker-configure-v2", "credential-broker-start-v2",
+    "credential-broker-status-v2", "credential-broker-stop-v2",
+)
 OFFICIAL_APT_SOURCE = Path("/etc/apt/sources.list.d/ubuntu.sources")
 OFFICIAL_APT_URIS = {"http://archive.ubuntu.com/ubuntu", "http://security.ubuntu.com/ubuntu",
                      "https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu"}
@@ -4586,6 +4595,11 @@ def main(argv=None):
         action.add_argument("policy_digest")
         action.add_argument("egress_digest")
         action.add_argument("broker_digest")
+    for name in CREDENTIAL_V2_LIFECYCLE_VERBS:
+        action = sub.add_parser(name)
+        action.add_argument("machine")
+        action.add_argument("config_digest")
+        action.add_argument("plan_identity")
     probe = sub.add_parser("preflight-probe")
     probe.add_argument("probe", choices=PREFLIGHT_PROBES)
     sub.add_parser("preflight-probes")
@@ -4699,6 +4713,14 @@ def main(argv=None):
         digest_value(args.policy_digest); digest_value(args.egress_digest)
         digest_value(args.broker_digest)
         fail("native credential broker lifecycle is not installed")
+    elif args.verb in CREDENTIAL_V2_LIFECYCLE_VERBS:
+        # The argv contains no path, source handle, operation, request, lease,
+        # credential, or free-form action. The root helper will derive the
+        # canonical component config path when T022 installs reviewed units.
+        # Until then every fixed v2 action stays closed.
+        require_root(); machine(args.machine)
+        digest_value(args.config_digest); digest_value(args.plan_identity)
+        fail("native credential v2 lifecycle is not installed")
     elif args.verb == "credential-install":
         require_root(); credential_install(machine(args.machine), digest_value(args.digest), args.name)
     elif args.verb in {"services-activate", "services-health", "services-status", "services-stop"}:

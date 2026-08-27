@@ -25,6 +25,19 @@ class TestCredentialVaultSetup(unittest.TestCase):
                       declaration["contract_modules"])
         self.assertIn("sandbox.isolation.credential_request_broker",
                       declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_controller_protocol_v2",
+                      declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_controller_service_v2",
+                      declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_controller_authority_v2",
+                      declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_controller_audit_v2",
+                      declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_controller_lifecycle_v2",
+                      declaration["contract_modules"])
+        self.assertEqual(declaration["support_tier"], "implemented_unproven")
+        self.assertIsNone(declaration["evidence_id"])
+        self.assertFalse(declaration["adoptable"])
 
     def test_managed_runtime_declares_the_same_capability_without_promotion(self):
         from sandbox.runtimes.manifest import RUNTIME_DECLARATIONS

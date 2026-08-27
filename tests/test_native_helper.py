@@ -1483,5 +1483,17 @@ class TestNativeHelper(unittest.TestCase):
         with self.assertRaises(SystemExit):
             helper.main([*argv, "unexpected"])
 
+    def test_credential_v2_lifecycle_verbs_have_one_secret_free_fixed_shape(self):
+        helper = module()
+        for verb in helper.CREDENTIAL_V2_LIFECYCLE_VERBS:
+            with self.subTest(verb=verb), mock.patch.object(helper, "require_root"), \
+                    self.assertRaises(SystemExit):
+                helper.main([verb, "sb-0123456789ab", "1" * 64, "2" * 64])
+        with self.assertRaises(SystemExit):
+            helper.main([
+                "credential-broker-start-v2", "sb-0123456789ab",
+                "1" * 64, "2" * 64, "source-or-secret",
+            ])
+
 
 if __name__ == "__main__": unittest.main()

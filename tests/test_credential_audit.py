@@ -4,6 +4,22 @@ import unittest
 
 
 class TestCredentialAudit(unittest.TestCase):
+    def test_native_runtime_audit_rejects_internal_ids_and_diagnostics(self):
+        from tests.test_credential_broker_service_contract import module
+
+        broker = module()
+        audit = broker.BoundedAuditSink()
+        self.assertTrue(audit.append({
+            "event": "credential_effect", "phase": "pre",
+            "machine_id": "sb-0123456789ab", "outcome": "attempted",
+        }))
+        self.assertFalse(audit.append({
+            "event": "credential_effect", "phase": "post",
+            "machine_id": "sb-0123456789ab", "outcome": "completed",
+            "operation_id": "op-private",
+        }))
+        self.assertNotIn("operation_id", repr(audit.records))
+
     def test_records_are_bounded_and_secret_free(self):
         from sandbox.isolation.credential_audit import CredentialAuditLog
 

@@ -92,7 +92,8 @@ specs/045-credential-vault-isolation/
 │   ├── broker-request-v1.md
 │   ├── capability-report-v1.md
 │   ├── credential-binding-v1.md
-│   └── credential-broker-service-v1.md  # pre-implementation service/transport gate
+│   ├── credential-broker-service-v1.md  # superseded local v1 design/history
+│   └── credential-broker-controller-authority-v2.md # production authority gate
 ├── plan.md
 └── tasks.md
 ```
@@ -129,10 +130,11 @@ tests/
 application context and managed adapter, and keep the native helper limited to
 fixed privileged operations. The explicit HTTP broker is a separate component
 from the existing opaque CONNECT broker so callers cannot confuse transport
-reachability with credential authorization. The standalone service and
-instance-bound transport remain governed by
-`contracts/credential-broker-service-v1.md`; T033 accepted its sealed anonymous
-descriptor/peer-authenticated seqpacket design for T034 contract tests only.
+reachability with credential authorization. The production standalone service
+and instance-bound authority are governed by
+`contracts/credential-broker-controller-authority-v2.md`. The superseded v1
+contract and current endpoint/coordinator classes remain fake/local-only
+T034/T035 history until T043 convergence.
 
 ## Delivery phases
 
@@ -163,7 +165,7 @@ not authorize a weaker fallback.
 This is the append-only T032-T037 preparation chain added after the original
 task IDs were established:
 
-1. T032 records the standalone service, instance-bound guest transport, trusted
+1. T032 historically records the v1 standalone service, instance-bound guest transport, trusted
    lease, fixed helper, lifecycle, cleanup, and refusal invariants in
    `contracts/credential-broker-service-v1.md`. This planning artifact is
    complete, but it is not service implementation or proof.
@@ -186,10 +188,86 @@ task IDs were established:
 
 The dependency order is `T032 -> T033 -> T034 -> T035 -> T036`, followed by
 T022 authorized helper/service lifecycle proof; T036 also precedes T037.
-T003, T022, and T037 jointly precede T029, and T003/T022/T029 precede T031.
+T003, T022, T037, and T043 jointly precede T029, and
+T003/T022/T029/T043 precede T031.
 Local preparation keeps `implemented_unproven`, `adoptable=false`, and the null
 evidence ID. The T034 tests and T035 guarded seams cannot substitute for Ubuntu
 24.04 live evidence or independent final review.
+
+### Phase 1B — Replace the controller authority with strict v2
+
+The v1 controller/lease design is retained only as local history. T038 is the
+independently accepted local production-v2 contract task. It requires exactly one persistent controller per
+managed-native machine as the sole binding/repository, registered-source,
+proof, egress, operation-authorization, lease-dispatch, and durable-audit
+authority. The broker remains a separate enforcement boundary: it independently
+authenticates the controller's kernel process identity and verifies the exact
+operation/request/binding/digest/expiry authorization before descriptor use.
+
+The protocol is a non-negotiable v2 with exact `CLAIM_NEXT_V2`, `CLAIMED_V2`,
+`AUTHORIZE_V2`, `AUTHORIZED_V2`, `REFUSE_V2`, `ACTIVATE_V2`, `QUIESCE_V2`, and
+audit PRE/POST/ACK schemas. A v2 lease binds the controller and broker epochs,
+operation/request, binding version, fixed authentication form, proof/policy/
+egress/broker digests, authorization digest, sequence, and expiry. No v1
+downgrade, translation, or fallback is allowed.
+
+The dependency order is `T038 -> T039 -> T040 -> T041 -> T042 -> T043`. T038
+passed independent Sol High local design review; this does not replace the T031
+human release/source/evidence review.
+T039 now supplies only the pure reviewed registry, exact JSON/binary codecs,
+digest builders, temporal validators, and bounded replay state; it performs no
+I/O and wires no runtime path.
+The independently accepted local T040 implementation supplies an inert persistent controller service plus isolated broker
+v2 listener/connection classes. Explicit injected start owns one process epoch,
+mutual kernel/process authentication, HELLO/ACK, independent sequences,
+disconnect terminalization, and exactly one non-reconstructable T039 registry
+per authenticated connection. It adds no application/runtime composition or
+authorization, lease, audit, repository, proof, or egress authority.
+The independently accepted local T041 implementation supplies only isolated operation-bound authorization and lease
+admission. Eight fixed injected interfaces own binding, registered-source,
+scope, proof, egress, activation, expiry, and resolution decisions. Resolution
+starts only after the exact `AUTHORIZED_V2` acknowledgement and makes one
+capped lease dispatch attempt. The broker creates operations only after
+canonical guest validation, emits only the reviewed secret-free claim
+projection, verifies every authorization field against local request and
+sealed expectations, consumes authorization before descriptor inspection, and
+retains one exact sealed memfd only at `lease_bound`. Revocation, expiry,
+quiesce, disconnect, and mutation failures clean the exact owned state. T041
+adds no audit, adapter entry, upstream effect, application composition, or
+runtime activation. The independently accepted local T042 implementation
+supplies the inert durable controller-audit
+authority, broker-side PRE/effect/POST/lease-ACK sequencing, exact
+ACTIVATE/QUIESCE lifecycle messages, immutable secret-free derived config
+plans, fixed lifecycle verbs, ownership observation, and injected
+start/stop/cleanup ordering. Durable projections exclude operation, request,
+lease, authorization, and credential-bearing facts; semantic retries reuse one
+commit while conflicts fail closed. The one typed effect executor has no public
+upstream wiring and is never replayed after effect entry. This local
+implementation installs no service, composes no application/default path, and
+does not promote support. The independently Sol High-accepted T043 implementation provides one connected inert full-flow v2 harness,
+exact v2 managed/public bridges, canonical v2 executable config input, fixed
+helper verbs, terminal guest projection, reverse lifecycle cleanup, and explicit
+v1 runtime-fallback refusal. The guest bridge requires a broker-minted one-use
+capability bound to the exact broker object, private nonce, purpose, machine,
+epochs, and config; the production v1 factory is a fixed refusal. This is a
+trusted controller/application-process composition check, not an anti-reflection
+security boundary: arbitrary same-process Python reflection, monkeypatching,
+closure inspection, low-level object construction/mutation, or module-global
+mutation is process compromise and out of scope. Untrusted plugins have no
+Python execution in those processes and receive only the canonical guest socket
+schema; they cannot select an import, callback, Python object, controller path,
+validator, clock, session, or legacy handler. The enforced boundary is the
+authenticated cross-process socket and kernel identity. It drives the real T040-T042 objects and session
+transports through activation, claim, authorization, lease, durable audit,
+effect, terminal result, quiesce receipt, managed reverse stop, and cleanup; its
+connected hostile matrix and fresh broad local matrix pass. The first
+stitched-fixture candidate was rejected by final Sol High; the replacement is
+locally complete and independently accepted. Completed T043 remains a satisfied
+predecessor of the still-blocked live T022, T029, and T031 gates. Historical v1 test classes
+remain fake/local-only and cannot be installed or treated as authority.
+T022 and T029 still require authorized Ubuntu 24.04 evidence, and T031 still requires
+independent human security/source/evidence review. Contract completion alone
+does not change `implemented_unproven`, `adoptable=false`, or `evidence_id=null`.
 
 ### Phase 2 — Implement the explicit application-layer broker
 
@@ -200,7 +278,9 @@ evidence ID. The T034 tests and T035 guarded seams cannot substitute for Ubuntu
    only the approved bearer/API-key header. Reject redirects and unsupported
    methods/content/protocols rather than guessing.
 4. Bound bodies, responses, time, concurrency, cancellation, and error output;
-   treat upstream responses as untrusted and redact only defensively.
+   treat upstream responses as untrusted and redact only defensively. Never
+   deliberately emit authorization, but make no universal confinement claim
+   for arbitrary upstream transformations of reflected credential material.
 5. Deliver resolved material through a one-use broker launch channel and replace
    the process on revoke/expiry; make best-effort cleanup explicit.
 

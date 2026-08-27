@@ -157,9 +157,9 @@ class TestCredentialAcceptance(unittest.TestCase):
             proof_candidate_authority=_proof_candidate_authority("ubuntu-24.04-systemd-255"),
         )
         result = sealed.invoke(request)
-        self.assertEqual(service.calls, 1)
+        self.assertEqual(service.calls, 0)
         self.assertFalse(result.ok)
-        self.assertEqual(result.data["reason"]["code"], "credential_acceptance_indeterminate")
+        self.assertEqual(result.data["reason"]["code"], "credential_acceptance_unavailable")
         self.assertNotIn("secret", repr(result.data))
 
     def test_sealed_adapter_bounds_service_exception_without_diagnostic(self):
@@ -167,14 +167,13 @@ class TestCredentialAcceptance(unittest.TestCase):
         from sandbox.runtimes.managed.adapter import (
             ManagedNativeAdapter, _proof_candidate_authority,
         )
-
-        class Service:
-            def invoke(self, *_args, **_kwargs):
-                raise RuntimeError("private-diagnostic")
-
         adapter = ManagedNativeAdapter(
             preflight=SimpleNamespace(), repository=SimpleNamespace(),
-            credential_acceptance=Service(),
+            credential_acceptance=SimpleNamespace(
+                protocol="credential-broker-controller-v2",
+                invoke_v2=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("private-diagnostic")),
+            ),
             proof_candidate_authority=_proof_candidate_authority("ubuntu-24.04-systemd-255"),
         )
         result = adapter.invoke(OperationRequest(
@@ -183,10 +182,17 @@ class TestCredentialAcceptance(unittest.TestCase):
         ))
         self.assertFalse(result.ok)
         self.assertEqual(result.data["reason"],
-                         {"code": "credential_acceptance_indeterminate"})
+                         {"code": "credential_acceptance_unavailable"})
         self.assertTrue(result.data["proof_candidate"])
         self.assertFalse(result.data["adoptable"])
         self.assertNotIn("private-diagnostic", repr(result.data))
+
+    def test_v2_public_projector_cannot_be_built_from_arbitrary_callable(self):
+        from sandbox.runtimes.managed.credential_acceptance import (
+            CredentialAcceptanceControllerV2,
+        )
+        with self.assertRaises((TypeError, ValueError)):
+            CredentialAcceptanceControllerV2(lambda _request: {})
 
 
 if __name__ == "__main__":

@@ -1,8 +1,20 @@
 # Contract: Standalone Credential Broker Service v1
 
+> **Superseded for production:**
+> [`credential-broker-controller-authority-v2.md`](./credential-broker-controller-authority-v2.md)
+> is the only permitted contract for future runtime implementation. This v1
+> document remains local design/history for T032-T035. A production component
+> MUST NOT implement, negotiate, translate, or fall back to this controller or
+> lease protocol.
+
+Current v1 endpoint, coordinator, and supplied-lease classes are fake/local-only
+test seams until T043 converges them on v2. Their presence cannot complete T035,
+T036, T037, T022, T029, or T031, and they MUST NOT be installed or composed as
+a credential-bearing service.
+
 ## Status
 
-This security-reviewed contract defines the minimum service, transport,
+This previously reviewed contract defines the minimum service, transport,
 lifecycle, and cleanup invariants needed to prepare T022 locally. T033 accepted
 the concrete v1 transport design used by the local T034/T035 contract and
 implementation increments. It does not enable a credential-bearing runtime path,
@@ -20,7 +32,52 @@ peer observer, cross-process configuration and entrypoint, guest disconnect and
 deadline loop, and lifecycle/audit observer. T022, T029, and T031 remain blocked;
 this contract does not change support, evidence, or adoptability state.
 
-## T033 security review decision
+The v1 design did not make one persistent per-machine controller the sole
+binding/proof/egress/audit authority or give the broker a distinct exact
+operation-bound `AUTHORIZE` decision. Those gaps require v2. The v1
+`CLAIM_NEXT`, `CLAIMED`, `REFUSE`, `ACTIVATE`, `QUIESCE`, lease frame, and audit
+shapes are forbidden on the production path. Only their explicitly fake/local
+tests may remain while v2 is implemented.
+
+The next local runtime seams remain production-like but closed by default. A
+per-machine derived-path, canonical, secret-free runtime configuration binds
+the controller identity, machine/epoch, expected executable/config/policy/
+egress/broker digests, private-veth coordinates, and fixed limits. It MUST NOT
+contain a pre-start broker PID or process-start identity. Loading requires
+`O_NOFOLLOW`, a regular root-owned file, the reviewed service group, mode
+`0640`, a fixed size bound, canonical bytes, and the expected SHA-256 digest.
+The running broker derives its own PID and verifies start/digest/start to refuse
+PID reuse before exposing status or opening admission. Unknown or secret-shaped
+fields are refused.
+
+Broker start is always closed. Only an authenticated, sequence- and epoch-bound
+`ACTIVATE` message on the broker-owned controller channel may open guest and
+lease admission. `QUIESCE` closes both before drain. `CLAIM_NEXT` and `REFUSE`
+never open admission. The controller channel uses both connection
+`SO_PEERCRED` and per-packet `SCM_CREDENTIALS`, plus observed PID-start and
+executable identity. Accepted controller sockets persist with unique broker-
+generated connection IDs; EOF/error invokes controller disconnect and
+terminalizes its claims. Each packet requires exactly one `SCM_CREDENTIALS` and
+zero `SCM_RIGHTS`; unexpected rights are closed before refusal. The lease
+endpoint resolves `claim_owner` internally from
+the exact claimed operation in `PendingOperationRegistry`; no frame, caller, or
+public method may supply or override that owner string.
+
+Canonical lifecycle messages are exactly:
+`ACTIVATE(machine_id, broker_epoch, sequence)` ->
+`ACTIVATE(admission_open=true)` and
+`QUIESCE(machine_id, broker_epoch, sequence)` ->
+`QUIESCE(admission_open=false)`. No other lifecycle fields are accepted.
+
+Every credential-bearing attempt writes a bounded, secret-free pre-effect audit
+record before descriptor bytes reach the typed adapter and a terminal post-
+effect record before acknowledgement. Pre-effect append failure is a known
+refusal and performs no effect. Post-effect append failure makes both guest and
+lease outcomes `indeterminate`, even if upstream returned, because the terminal
+effect record is unproven. Audit records contain no operation, lease, request
+digest, descriptor, credential, headers, body, source reference, or diagnostic.
+
+## T033 historical v1 security review decision
 
 The selected v1 lease mechanism is one sealed Linux anonymous `memfd` transferred
 once with `SCM_RIGHTS` in one bounded frame over a broker-created abstract
@@ -148,6 +205,17 @@ fall back to a binding-only lookup. Any isolated pre-controller registry used
 by local descriptor tests is explicitly legacy and MUST bind both fields; it is
 not the new operation flow and is not runtime wiring.
 
+That rendezvous produces a coordinator-owned opaque prepared-attempt token. The
+token is held only in a bounded in-memory map, is bound atomically to the digest
+of the entire canonical frame plus the exact operation, guest, claim owner,
+epoch, and expiry, and is consumed once. Public
+descriptor acceptance always performs a fresh preparation; callers cannot mark
+an attempt as already recorded or prebound. Forged, stale, reused, cross-lease,
+cross-coordinator, revoked, expired, quiesced, or closed tokens refuse. Pending
+tokens are cleared on controller or guest disconnect, revoke, expiry, quiesce,
+and close. Guest disconnect clears only tokens owned by that guest operation;
+unrelated prepared operations remain usable.
+
 The guest submits one canonical `broker-request-v1` frame and keeps that exact
 connection open until one terminal result is written. No `pending` response is
 part of the guest wire contract. Success is the exact bounded shape `ok`, HTTP
@@ -230,8 +298,20 @@ anonymous-file type, required seals, size, frame bounds, peer, epoch, identities
 digests, and deadline. It atomically records the lease ID consumed before
 reading the descriptor or contacting upstream. Missing/extra descriptors,
 truncation, trailing data, stale/duplicate IDs, or any mismatch are terminal.
+For truncation flags or trailing bytes, the broker may recover only an exact
+canonical frame prefix whose declared length is complete. If that prefix
+identifies a currently claimed operation, the broker prepares and terminally
+refuses it before inspecting ancillary descriptors; otherwise it closes all
+received descriptors without inventing an identity. Accepted lease sockets use
+the fixed five-second receive/send timeout, and timeout or acknowledgement
+failure never reopens or replays an attempt.
+Once an extracted descriptor is transferred to coordinator acceptance, the
+coordinator alone owns its close. Every exception after token consumption,
+including descriptor validation failure, produces one bounded terminal guest
+result according to effect certainty, closes the descriptor exactly once, and
+still attempts one bounded acknowledgement.
 
-The accepted mechanism satisfies these rules:
+The historically accepted local v1 mechanism satisfies these rules:
 
 - credential bytes never enter root-helper argv, stdin, environment, protocol,
   unit text, service properties, configuration files, staging paths, durable

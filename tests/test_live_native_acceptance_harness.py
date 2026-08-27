@@ -81,6 +81,29 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
         self.assertEqual(event["json"]["reason"]["code"],
                          "credential_acceptance_unavailable")
 
+    def test_offline_acceptance_indeterminate_keeps_one_request_identity(self):
+        observed = []
+        request = {"action": "request", "binding_id": "binding-0001", "version": 3,
+                   "machine_id": "sb-0123456789ab", "owner": "owner-0001",
+                   "content_type": "application/json", "deadline_seconds": 5,
+                   "correlation_id": "correlation-0001"}
+
+        def fake_run(argv, **_kwargs):
+            observed.append(argv)
+            payload = {"ok": False, "state": "blocked", "mutated": False,
+                       "proof_candidate": True, "adoptable": False,
+                       "reason": {"code": "credential_acceptance_indeterminate"}}
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+        event = live.SbRunner(events=[], run=fake_run).call(
+            None, "native", "credential-acceptance", "--credential-request",
+            json.dumps(request, sort_keys=True, separators=(",", ":")), "--json", timeout=3,
+        )
+        self.assertEqual(len(observed), 1)
+        self.assertIn("correlation-0001", " ".join(observed[0]))
+        self.assertEqual(event["json"]["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+
     def test_boundary_requires_every_hostile_observation_to_be_denied(self):
         denied = {
             key: False for key in (

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
+from types import MappingProxyType
+from typing import Any, Callable
 
 from sandbox.isolation.credential_binding import (
     CredentialBinding, canonical_auth_profile, canonical_binding_id,
@@ -21,14 +24,76 @@ _FIELDS = {
                           "content_type", "deadline_seconds", "correlation_id"}),
     "revoke": frozenset({"action", "binding_id", "version", "machine_id", "owner"}),
 }
-_REASONS = frozenset({
-    "ready", "credential_acceptance_unavailable", "credential_acceptance_invalid",
+_SUCCESS_REASONS = frozenset({"ready"})
+_REFUSAL_REASONS = frozenset({
+    "credential_acceptance_unavailable", "credential_acceptance_invalid",
     "credential_owner_mismatch", "credential_preflight_failed", "managed_runtime_unproven",
     "credential_broker_status_mismatch", "credential_binding_unhealthy",
     "credential_egress_refused", "credential_acceptance_indeterminate",
+    "credential_protocol_unsupported", "credential_session_stale",
+    "credential_binding_stale", "credential_binding_mismatch",
+    "credential_lifecycle_refused", "credential_revoke_refused",
 })
 CONTROLLER_PROTOCOL_V2 = "credential-broker-controller-v2"
 _ACCEPTANCE_ISSUER = object()
+_INTERFACES_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ControllerAcceptanceInterfacesV2:
+    """Controller-owned, non-secret application authorities for public intent.
+
+    The public command cannot construct this object directly.  The authenticated
+    controller composition factory binds it to one exact v2 operation/lifecycle
+    session.  Every callable receives only the canonical public request and
+    exact secret-free authority projections; credential resolution and wire I/O
+    remain behind the controller.
+    """
+
+    _issuer: object
+    _session: Any
+    _operation_authority: Any
+    _lifecycle_authority: Any
+    status_authority: Callable[[Mapping[str, Any]], Mapping[str, Any]]
+    binding_authority: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+    egress_authority: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+    bind_authority: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+    request_authority: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+    revoke_authority: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+
+    def __post_init__(self):
+        if (self._issuer is not _INTERFACES_ISSUER
+                or getattr(self._operation_authority, "session", None) is not self._session
+                or getattr(self._lifecycle_authority, "session", None) is not self._session
+                or any(
+                not callable(getattr(self, name)) for name in (
+                    "status_authority", "binding_authority", "egress_authority",
+                    "bind_authority", "request_authority", "revoke_authority"))):
+            raise ValueError("credential acceptance authorities are invalid")
+
+
+def controller_acceptance_interfaces_v2(*, operation_authority, lifecycle_authority,
+                                        status_authority, binding_authority,
+                                        egress_authority, bind_authority,
+                                        request_authority, revoke_authority):
+    """Construct the controller-process authority bundle, never a CLI value."""
+
+    from sandbox.isolation.credential_controller_authority_v2 import (
+        ControllerOperationAuthorityV2,
+    )
+    from sandbox.isolation.credential_controller_lifecycle_v2 import (
+        ControllerLifecycleAuthorityV2,
+    )
+    if (type(operation_authority) is not ControllerOperationAuthorityV2
+            or type(lifecycle_authority) is not ControllerLifecycleAuthorityV2
+            or lifecycle_authority.session is not operation_authority.session):
+        raise ValueError("credential acceptance authorities are invalid")
+
+    return ControllerAcceptanceInterfacesV2(
+        _INTERFACES_ISSUER, operation_authority.session, operation_authority,
+        lifecycle_authority, status_authority, binding_authority, egress_authority,
+        bind_authority, request_authority, revoke_authority,
+    )
 
 
 class CredentialAcceptanceControllerV2:
@@ -42,10 +107,15 @@ class CredentialAcceptanceControllerV2:
 
     protocol = CONTROLLER_PROTOCOL_V2
 
-    def __init__(self, issuer, controller_authority):
-        if issuer is not _ACCEPTANCE_ISSUER:
+    __slots__ = ("_controller_authority", "_lifecycle_authority", "_interfaces")
+
+    def __init__(self, issuer, controller_authority, lifecycle_authority, interfaces):
+        if (issuer is not _ACCEPTANCE_ISSUER
+                or type(interfaces) is not ControllerAcceptanceInterfacesV2):
             raise ValueError("credential v2 controller authority is required")
         self._controller_authority = controller_authority
+        self._lifecycle_authority = lifecycle_authority
+        self._interfaces = interfaces
 
     def invoke_v2(self, raw, *, proof_candidate_authority=None):
         try:
@@ -56,21 +126,115 @@ class CredentialAcceptanceControllerV2:
         proof = _is_proof_candidate_authority(proof_candidate_authority)
         if not proof:
             return _refusal(request["action"], "managed_runtime_unproven")
-        # T037 has no accepted mapping from this public bind/request/revoke
-        # envelope into the connected controller operation state machine yet.
-        # Retaining the authenticated authority proves provenance, not permission.
-        return _refusal(request["action"], "credential_acceptance_unavailable", proof=True)
+        return self._invoke_authorities(request)
+
+    def _invoke_authorities(self, request):
+        action = request["action"]
+        authority = self._controller_authority
+        lifecycle = self._lifecycle_authority
+        session = getattr(authority, "session", None)
+        if self.protocol != CONTROLLER_PROTOCOL_V2:
+            return _refusal(action, "credential_protocol_unsupported", proof=True)
+        if (session is None
+                or getattr(lifecycle, "session", None) is not session
+                or getattr(session, "authenticated", False) is not True
+                or getattr(session, "broker_epoch", None) is None):
+            return _refusal(action, "credential_session_stale", proof=True)
+        canonical = MappingProxyType(dict(request))
+        try:
+            raw_status = self._interfaces.status_authority(canonical)
+        except Exception:
+            return _refusal(action, "credential_acceptance_unavailable", proof=True)
+        if (isinstance(raw_status, Mapping)
+                and raw_status.get("protocol") != CONTROLLER_PROTOCOL_V2):
+            return _refusal(action, "credential_protocol_unsupported", proof=True)
+        status = _controller_status(raw_status, authority)
+        if status is None:
+            return _refusal(action, "credential_broker_status_mismatch", proof=True)
+        if ((action == "request" and (status["admission_open"] is not True
+                                      or status["lifecycle_state"] != "active"))
+                or (action == "bind" and (status["admission_open"] is not False
+                                           or status["lifecycle_state"] != "closed"))
+                or (action == "revoke" and status["lifecycle_state"] == "indeterminate")):
+            return _refusal(action, "credential_lifecycle_refused", proof=True)
+        try:
+            raw_binding = self._interfaces.binding_authority(canonical, status)
+        except Exception:
+            return _refusal(action, "credential_acceptance_unavailable", proof=True)
+        binding = _binding_projection(raw_binding, request, authority)
+        if binding is None:
+            return _refusal(action, "credential_binding_mismatch", proof=True)
+        if binding["binding_state"] == "stale":
+            return _refusal(action, "credential_binding_stale", proof=True)
+        allowed_binding_states = {
+            "bind": {"prospective", "credential_pending", "revoked", "expired", "blocked"},
+            "request": {"ready"},
+            "revoke": {"credential_pending", "ready", "revoking", "revoked",
+                       "expired", "blocked"},
+        }
+        if binding["binding_state"] not in allowed_binding_states[action]:
+            return _refusal(action, "credential_binding_unhealthy", proof=True)
+        if action != "revoke":
+            try:
+                raw_egress = self._interfaces.egress_authority(canonical, binding)
+            except Exception:
+                return _refusal(action, "credential_acceptance_unavailable", proof=True)
+            if not _egress_projection(raw_egress, binding, authority):
+                return _refusal(action, "credential_egress_refused", proof=True)
+        handler = {"bind": self._interfaces.bind_authority,
+                   "request": self._interfaces.request_authority,
+                   "revoke": self._interfaces.revoke_authority}[action]
+        try:
+            lifecycle_receipt = lifecycle.begin_public_acceptance(
+                action=action,
+                active_operation_count=status["active_operation_count"],
+                lifecycle_state=status["lifecycle_state"],
+                admission_open=status["admission_open"],
+            )
+        except Exception:
+            return _refusal(action, "credential_lifecycle_refused", proof=True)
+        try:
+            raw_result = handler(canonical, binding)
+        except Exception:
+            # An action exception may follow an effect.  Never report a safe
+            # refusal or invite a new request identity in this state.
+            try:
+                lifecycle.finish_public_acceptance(lifecycle_receipt, accepted=False)
+            except Exception:
+                pass
+            return _refusal(action, "credential_acceptance_indeterminate", proof=True)
+        projected = _terminal_result(raw_result, request, proof=True)
+        accepted = projected.get("ok") is True
+        try:
+            current = lifecycle.finish_public_acceptance(
+                lifecycle_receipt, accepted=accepted,
+            )
+        except Exception:
+            current = False
+        if accepted and current is not True:
+            return _refusal(action, "credential_acceptance_indeterminate", proof=True)
+        return projected
 
 
-def build_credential_acceptance_controller_v2(receipt, controller_authority):
+def build_credential_acceptance_controller_v2(receipt, controller_authority,
+                                              lifecycle_authority, interfaces):
     from sandbox.isolation.credential_controller_authority_v2 import (
         ControllerOperationAuthorityV2,
     )
     from sandbox.isolation.credential_controller_service_v2 import (
         AuthenticatedCompositionReceiptV2,
     )
+    from sandbox.isolation.credential_controller_lifecycle_v2 import (
+        ControllerLifecycleAuthorityV2,
+    )
     if (type(receipt) is not AuthenticatedCompositionReceiptV2
-            or type(controller_authority) is not ControllerOperationAuthorityV2):
+            or type(controller_authority) is not ControllerOperationAuthorityV2
+            or type(lifecycle_authority) is not ControllerLifecycleAuthorityV2
+            or type(interfaces) is not ControllerAcceptanceInterfacesV2
+            or lifecycle_authority.session is not controller_authority.session
+            or interfaces._session is not controller_authority.session
+            or interfaces._operation_authority is not controller_authority
+            or interfaces._lifecycle_authority is not lifecycle_authority):
         raise ValueError("credential v2 controller receipt is required")
     try:
         receipt.consume_for_controller(
@@ -79,7 +243,7 @@ def build_credential_acceptance_controller_v2(receipt, controller_authority):
     except Exception:
         raise ValueError("credential v2 controller receipt is invalid") from None
     return CredentialAcceptanceControllerV2(
-        _ACCEPTANCE_ISSUER, controller_authority,
+        _ACCEPTANCE_ISSUER, controller_authority, lifecycle_authority, interfaces,
     )
 
 
@@ -133,6 +297,8 @@ def parse_credential_acceptance(value, *, now=None):
 
 
 def _refusal(action, code, *, proof=False):
+    if code not in _REFUSAL_REASONS:
+        code = "credential_acceptance_indeterminate"
     return {"ok": False, "action": action, "state": "blocked", "mutated": False,
             "decision": "refused", "reason": {"code": code},
             "proof_candidate": proof, "adoptable": False}
@@ -158,6 +324,117 @@ def _trusted_context(value, request):
     return value
 
 
+def _controller_status(value, authority):
+    """Validate one current secret-free status from the authenticated session."""
+
+    session = authority.session
+    configured = authority.config.configured_digests()
+    fields = {
+        "protocol", "machine_id", "broker_epoch", "controller_epoch",
+        "admission_open", "active_operation_count", "lifecycle_state",
+        *configured,
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        return None
+    value = dict(value)
+    if (configured.get("evidence_id") is None
+            or value["protocol"] != CONTROLLER_PROTOCOL_V2
+            or value["machine_id"] != authority.config.machine_id
+            or value["broker_epoch"] != session.broker_epoch
+            or value["controller_epoch"] != session.controller_epoch
+            or type(value["admission_open"]) is not bool
+            or type(value["active_operation_count"]) is not int
+            or not 0 <= value["active_operation_count"] <= 16
+            or value["lifecycle_state"] not in {
+                "closed", "active", "quiescing", "indeterminate"}
+            or value["admission_open"] != (value["lifecycle_state"] == "active")
+            or any(value.get(name) != expected
+                   for name, expected in configured.items())):
+        return None
+    return MappingProxyType(value)
+
+
+def _binding_projection(value, request, authority):
+    """Require exact binding/CAS identity without accepting a source handle."""
+
+    fields = {
+        "binding_id", "version", "machine_id", "owner", "binding_state",
+        "scheme", "host", "port", "method", "path", "auth_profile",
+        "policy_digest", "egress_digest", "broker_digest",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        return None
+    value = dict(value)
+    try:
+        canonical = {
+            "binding_id": canonical_binding_id(value["binding_id"]),
+            "machine_id": canonical_instance_id(value["machine_id"]),
+            "owner": canonical_owner(value["owner"]),
+            "auth_profile": canonical_auth_profile(value["auth_profile"]),
+        }
+        scope = CredentialBinding(
+            binding_id=canonical["binding_id"], instance_id=canonical["machine_id"],
+            source_reference="registered/OPAQUE", policy_digest=value["policy_digest"],
+            egress_digest=value["egress_digest"], broker_digest=value["broker_digest"],
+            scheme=value["scheme"], host=value["host"], port=value["port"],
+            method=value["method"], path=value["path"],
+            auth_form=canonical["auth_profile"], expires_at="2999-01-01T00:00:00Z",
+            owner=canonical["owner"], version=value["version"],
+            state="credential_pending",
+        )
+    except Exception:
+        return None
+    if (value["binding_id"] != request["binding_id"]
+            or value["version"] != request["version"]
+            or value["machine_id"] != request["machine_id"]
+            or value["owner"] != request["owner"]
+            or value["machine_id"] != authority.config.machine_id
+            or any(value.get(name) != authority.config.configured_digests()[name]
+                   for name in ("policy_digest", "egress_digest", "broker_digest"))
+            or (request["action"] == "bind" and any(
+                value.get(name) != request[name] for name in (
+                    "scheme", "host", "port", "method", "path", "auth_profile",
+                    "policy_digest", "egress_digest", "broker_digest")))):
+        return None
+    result = dict(value)
+    result.update({"scheme": scope.scheme, "host": scope.host, "port": scope.port,
+                   "method": scope.method, "path": scope.path,
+                   "auth_profile": scope.auth_profile})
+    return MappingProxyType(result)
+
+
+def _egress_projection(value, binding, authority):
+    fields = {"allowed", "scheme", "host", "port", "method", "path",
+              "egress_digest", "broker_digest"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        return False
+    value = dict(value)
+    configured = authority.config.configured_digests()
+    if (value.get("allowed") is not True
+            or value.get("scheme") != "https" or value.get("port") != 443
+            or value.get("egress_digest") != configured["egress_digest"]
+            or value.get("broker_digest") != configured["broker_digest"]):
+        return False
+    if any(value.get(name) != binding[name]
+           for name in ("scheme", "host", "port", "method", "path",
+                        "egress_digest", "broker_digest")):
+        return False
+    try:
+        CredentialBinding(
+            binding_id=binding["binding_id"], instance_id=binding["machine_id"],
+            source_reference="registered/OPAQUE", policy_digest=configured["policy_digest"],
+            egress_digest=value["egress_digest"], broker_digest=value["broker_digest"],
+            scheme=value["scheme"], host=value["host"], port=value["port"],
+            method=value["method"], path=value["path"],
+            auth_form=binding["auth_profile"],
+            expires_at="2999-01-01T00:00:00Z", owner=binding["owner"],
+            version=binding["version"], state="credential_pending",
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _terminal_result(raw, request, *, proof):
     action = request["action"]
     if not isinstance(raw, Mapping):
@@ -167,7 +444,7 @@ def _terminal_result(raw, request, *, proof):
             or not isinstance(raw["ok"], bool) or not isinstance(raw["mutated"], bool):
         return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
     reason = raw.get("reason")
-    if not isinstance(reason, Mapping) or set(reason) != {"code"} or reason["code"] not in _REASONS:
+    if not isinstance(reason, Mapping) or set(reason) != {"code"}:
         return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
     coherent = {"bind": (True, "bound", True, "accepted"),
                 "request": (True, "completed", True, "accepted"),
@@ -175,6 +452,14 @@ def _terminal_result(raw, request, *, proof):
     observed = (raw["ok"], raw["state"], raw["mutated"], raw["decision"])
     if observed not in {coherent, (False, "refused", False, "refused"),
                         (False, "indeterminate", False, "indeterminate")}:
+        return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
+    if observed == coherent and reason["code"] not in _SUCCESS_REASONS:
+        return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
+    if observed == (False, "refused", False, "refused"):
+        if reason["code"] not in _REFUSAL_REASONS:
+            return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
+        return _refusal(action, reason["code"], proof=proof)
+    if observed == (False, "indeterminate", False, "indeterminate"):
         return _refusal(action, "credential_acceptance_indeterminate", proof=proof)
     result = {**raw, "action": action, "binding_id": request["binding_id"],
               "version": request["version"], "machine_id": request["machine_id"],
@@ -194,7 +479,8 @@ def public_credential_acceptance_result(value):
     action = value.get("action") if isinstance(value, Mapping) and value.get("action") in _FIELDS else "request"
     code = (value.get("reason", {}).get("code") if isinstance(value, Mapping)
             and isinstance(value.get("reason"), Mapping) else None)
-    return _refusal(action, code if code in _REASONS else "credential_acceptance_indeterminate")
+    return _refusal(action, code if code in _REFUSAL_REASONS
+                    else "credential_acceptance_indeterminate")
 
 
 def validate_credential_acceptance_service_result(value, raw_request):
@@ -214,7 +500,8 @@ def validate_credential_acceptance_service_result(value, raw_request):
         if (value.get("ok") is False and value.get("action") == action
                 and value.get("state") == "blocked" and value.get("mutated") is False
                 and value.get("decision") == "refused" and set(value["reason"]) == {"code"}
-                and code in _REASONS and isinstance(value.get("proof_candidate"), bool)
+                and code in _REFUSAL_REASONS
+                and isinstance(value.get("proof_candidate"), bool)
                 and value.get("adoptable") is False):
             return value
         return _refusal(action, "credential_acceptance_indeterminate", proof=True)

@@ -165,8 +165,9 @@ complete and must converge on v2 before any production completion claim:
 
 These tasks are preparation, not live proof. T022 remains blocked until the
 local seams, T043 v2 convergence, and authorized Ubuntu helper/service lifecycle
-proof pass. T029 remains blocked on T003, T022, T037, T043, and the authorized
-live feature matrix. T031 remains blocked until T043, the exact clean source, contracts, live results, and
+proof pass. T037 and T043 are locally satisfied predecessors; T029 remains
+blocked on T003, T022, and the authorized live feature matrix. T031 remains
+blocked until T043, the exact clean source, contracts, live results, and
 cleanup evidence receive an independent final review. Support remains
 `implemented_unproven` with `adoptable=false` and no evidence ID.
 
@@ -224,9 +225,16 @@ the passing fake/local contract suite. T035 has a fake-driven retained-guest,
 claim, descriptor, typed-broker, and terminal-result coordinator, but remains
 open for production controller and SCM_RIGHTS endpoints, the cross-process
 service entrypoint, guest disconnect/deadline processing, and lifecycle/audit
-observation. Authorized host
-evidence remains under T022/T029/T031; T036-T037 remain open preparatory
-work, T039 is complete locally, T040 and T041 have independent local acceptance,
+observation. Authorized host evidence remains under T022/T029/T031; T036 remains open preparatory
+work. T037 is locally complete and independently accepted by Sol High (local
+only): its authenticated public
+projector consumes the existing T040 receipt, pins same-session T041/T042
+authorities, validates exact secret-free status/binding/egress projections, and
+keeps stale, mismatch, downgrade, unavailable, and indeterminate outcomes
+closed. The focused public/T040-T043/native set passed 131 tests, full credential
+discovery passed 312 tests, and adjacent native/application coverage passed 55 tests on
+this local macOS checkout. These are injected/offline results, not Linux kernel
+or installed-service proof. T039 is complete locally; T040 and T041 have independent local acceptance,
 T042 has independent local acceptance. The connected T043 implementation, opaque
 bridge provenance, exhaustive v2 config-loader coverage, and fresh full matrix
 are locally complete and independently accepted by Sol High. The helper/service

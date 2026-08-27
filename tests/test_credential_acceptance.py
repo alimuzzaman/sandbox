@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from datetime import datetime, timezone
+import threading
 
 
 def bind_request():
@@ -193,6 +194,381 @@ class TestCredentialAcceptance(unittest.TestCase):
         )
         with self.assertRaises((TypeError, ValueError)):
             CredentialAcceptanceControllerV2(lambda _request: {})
+
+    def test_authenticated_v2_public_bind_uses_exact_controller_authorities(self):
+        from sandbox.runtimes.managed.adapter import _proof_candidate_authority
+        from sandbox.runtimes.managed.credential_acceptance import (
+            build_credential_acceptance_controller_v2,
+            controller_acceptance_interfaces_v2,
+        )
+        from tests.test_credential_controller_integration_v2 import graph
+
+        runner, _events = graph()
+        runner.authenticate()
+        request = bind_request()
+        request.update({
+            "policy_digest": runner.config.policy_digest,
+            "egress_digest": runner.config.egress_digest,
+            "broker_digest": runner.config.broker_digest,
+        })
+        calls = []
+        status_count = [1]
+
+        def status(_request):
+            calls.append("status")
+            return {"protocol": "credential-broker-controller-v2",
+                    "machine_id": runner.config.machine_id,
+                    "broker_epoch": runner.controller_session.broker_epoch,
+                    "controller_epoch": runner.controller_session.controller_epoch,
+                    **runner.config.configured_digests(),
+                    "admission_open": False,
+                    "active_operation_count": status_count[0],
+                    "lifecycle_state": "closed"}
+
+        def binding(public, _status):
+            calls.append("binding")
+            return ({key: public[key] for key in (
+                "binding_id", "version", "machine_id", "owner", "scheme", "host",
+                "port", "method", "path", "auth_profile", "policy_digest",
+                "egress_digest", "broker_digest")}
+                    | {"binding_state": "prospective"})
+
+        def egress(public, _binding):
+            calls.append("egress")
+            return {"allowed": True, **{key: public[key] for key in (
+                "scheme", "host", "port", "method", "path", "egress_digest",
+                "broker_digest")}}
+
+        def bind(_public, _binding):
+            calls.append("bind")
+            return {"ok": True, "state": "bound", "mutated": True,
+                    "decision": "accepted", "reason": {"code": "ready"}}
+
+        interfaces = controller_acceptance_interfaces_v2(
+            operation_authority=runner.operation_authority,
+            lifecycle_authority=runner.lifecycle_authority,
+            status_authority=status, binding_authority=binding,
+            egress_authority=egress, bind_authority=bind,
+            request_authority=lambda *_args: self.fail("request called"),
+            revoke_authority=lambda *_args: self.fail("revoke called"),
+        )
+        service = build_credential_acceptance_controller_v2(
+            runner.controller_session.mint_composition_receipt("public_acceptance"),
+            runner.operation_authority, runner.lifecycle_authority, interfaces,
+        )
+        sealed = _proof_candidate_authority("ubuntu-24.04-systemd-255")
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_lifecycle_refused")
+        status_count[0] = 0
+        result = service.invoke_v2(
+            request, proof_candidate_authority=
+            sealed,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["status", "binding", "egress", "status",
+                                 "binding", "egress", "bind"])
+        self.assertNotIn("source_reference", result)
+        self.assertNotIn("broker_epoch", result)
+        runner.controller_session.close("test_complete")
+
+    def test_v2_public_authority_refuses_stale_mismatch_and_indeterminate_action(self):
+        from sandbox.runtimes.managed.adapter import _proof_candidate_authority
+        from sandbox.runtimes.managed.credential_acceptance import (
+            build_credential_acceptance_controller_v2,
+            controller_acceptance_interfaces_v2,
+        )
+        from tests.test_credential_controller_integration_v2 import graph
+
+        runner, _events = graph()
+        runner.authenticate()
+        runner.activate()
+        sealed = _proof_candidate_authority("ubuntu-24.04-systemd-255")
+        request = {"action": "request", "binding_id": "binding-0001", "version": 1,
+                   "machine_id": runner.config.machine_id,
+                   "owner": "/tmp/project::default", "content_type": "application/json",
+                   "deadline_seconds": 5, "correlation_id": "correlation-0001"}
+
+        status_protocol = ["credential-broker-controller-v1"]
+
+        status_count = [0]
+
+        def status(_request):
+            return {"protocol": status_protocol[0],
+                    "machine_id": runner.config.machine_id,
+                    "broker_epoch": runner.controller_session.broker_epoch,
+                    "controller_epoch": runner.controller_session.controller_epoch,
+                    **runner.config.configured_digests(), "admission_open": True,
+                    "active_operation_count": status_count[0],
+                    "lifecycle_state": "active"}
+
+        binding_state = ["stale"]
+
+        def binding(public, _status):
+            return {"binding_id": public["binding_id"], "version": public["version"],
+                    "machine_id": public["machine_id"], "owner": public["owner"],
+                    "binding_state": binding_state[0], "scheme": "https",
+                    "host": "api.example.test", "port": 443, "method": "POST",
+                    "path": "/v1/check", "auth_profile": "authorization_bearer",
+                    "policy_digest": runner.config.policy_digest,
+                    "egress_digest": runner.config.egress_digest,
+                    "broker_digest": runner.config.broker_digest}
+
+        egress_override = {}
+
+        def egress(_public, current):
+            result = {"allowed": True, **{key: current[key] for key in (
+                "scheme", "host", "port", "method", "path", "egress_digest",
+                "broker_digest")}}
+            result.update(egress_override)
+            return result
+
+        request_calls = []
+        request_mode = ["raise"]
+
+        def request_action(*_args):
+            request_calls.append("request")
+            if request_mode[0] == "raise":
+                raise RuntimeError("private-after-effect")
+            runner.quiesce()
+            return {"ok": True, "state": "completed", "mutated": True,
+                    "decision": "accepted", "reason": {"code": "ready"}}
+
+        interfaces = controller_acceptance_interfaces_v2(
+            operation_authority=runner.operation_authority,
+            lifecycle_authority=runner.lifecycle_authority,
+            status_authority=status, binding_authority=binding,
+            egress_authority=egress,
+            bind_authority=lambda *_args: self.fail("bind called"),
+            request_authority=request_action,
+            revoke_authority=lambda *_args: self.fail("revoke called"),
+        )
+        service = build_credential_acceptance_controller_v2(
+            runner.controller_session.mint_composition_receipt("public_acceptance"),
+            runner.operation_authority, runner.lifecycle_authority, interfaces,
+        )
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_protocol_unsupported")
+        status_protocol[0] = "credential-broker-controller-v2"
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_binding_stale")
+        binding_state[0] = "ready"
+        mismatches = {
+            "scheme": "http", "host": "other.example.test", "port": 444,
+            "method": "GET", "path": "/v1/other", "egress_digest": "f" * 64,
+            "broker_digest": "e" * 64,
+        }
+        for field, mismatch in mismatches.items():
+            with self.subTest(egress_field=field):
+                egress_override.clear(); egress_override[field] = mismatch
+                result = service.invoke_v2(request, proof_candidate_authority=sealed)
+                self.assertEqual(result["reason"]["code"], "credential_egress_refused")
+        egress_override.clear()
+        status_count[0] = 16
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_lifecycle_refused")
+        self.assertEqual(request_calls, [])
+        status_count[0] = 15
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_acceptance_indeterminate")
+        self.assertEqual(request_calls, ["request"])
+        self.assertNotIn("private-after-effect", repr(result))
+        self.assertEqual(runner.lifecycle_authority.public_acceptance_reservations()[
+            "request_receipts"], 0)
+
+        request_mode[0] = "quiesce"
+        status_count[0] = 0
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_acceptance_indeterminate")
+        self.assertEqual(request_calls, ["request", "request"])
+
+        runner.controller_session.close("test_stale")
+        result = service.invoke_v2(request, proof_candidate_authority=sealed)
+        self.assertEqual(result["reason"]["code"], "credential_session_stale")
+
+    def test_v2_public_revoke_does_not_depend_on_egress_health(self):
+        from sandbox.runtimes.managed.adapter import _proof_candidate_authority
+        from sandbox.runtimes.managed.credential_acceptance import (
+            build_credential_acceptance_controller_v2,
+            controller_acceptance_interfaces_v2,
+        )
+        from tests.test_credential_controller_integration_v2 import graph
+
+        runner, _events = graph(); runner.authenticate(); runner.activate()
+        request = {"action": "revoke", "binding_id": "binding-0001", "version": 7,
+                   "machine_id": runner.config.machine_id,
+                   "owner": "/tmp/project::default"}
+        calls = []
+
+        def status(_request):
+            calls.append("status")
+            return {"protocol": "credential-broker-controller-v2",
+                    "machine_id": runner.config.machine_id,
+                    "broker_epoch": runner.controller_session.broker_epoch,
+                    "controller_epoch": runner.controller_session.controller_epoch,
+                    **runner.config.configured_digests(), "admission_open": True,
+                    "active_operation_count": 7, "lifecycle_state": "active"}
+
+        def binding(public, _status):
+            calls.append("binding")
+            return {"binding_id": public["binding_id"], "version": public["version"],
+                    "machine_id": public["machine_id"], "owner": public["owner"],
+                    "binding_state": "ready", "scheme": "https",
+                    "host": "api.example.test", "port": 443, "method": "POST",
+                    "path": "/v1/check", "auth_profile": "authorization_bearer",
+                    "policy_digest": runner.config.policy_digest,
+                    "egress_digest": runner.config.egress_digest,
+                    "broker_digest": runner.config.broker_digest}
+
+        def revoke(_public, _binding):
+            calls.append("revoke")
+            runner.quiesce()
+            return {"ok": True, "state": "revoked", "mutated": True,
+                    "decision": "accepted", "reason": {"code": "ready"}}
+
+        interfaces = controller_acceptance_interfaces_v2(
+            operation_authority=runner.operation_authority,
+            lifecycle_authority=runner.lifecycle_authority,
+            status_authority=status, binding_authority=binding,
+            egress_authority=lambda *_args: self.fail("egress called during revoke"),
+            bind_authority=lambda *_args: self.fail("bind called"),
+            request_authority=lambda *_args: self.fail("request called"),
+            revoke_authority=revoke,
+        )
+        service = build_credential_acceptance_controller_v2(
+            runner.controller_session.mint_composition_receipt("public_acceptance"),
+            runner.operation_authority, runner.lifecycle_authority, interfaces,
+        )
+        result = service.invoke_v2(
+            request, proof_candidate_authority=
+            _proof_candidate_authority("ubuntu-24.04-systemd-255"),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "revoked")
+        self.assertEqual(calls, ["status", "binding", "revoke"])
+        runner.controller_session.close("test_complete")
+
+    def test_v2_public_factory_refuses_cross_session_and_receipt_replay(self):
+        from sandbox.runtimes.managed.credential_acceptance import (
+            build_credential_acceptance_controller_v2,
+            controller_acceptance_interfaces_v2,
+        )
+        from tests.test_credential_controller_integration_v2 import graph
+
+        first, _events = graph(); first.authenticate()
+        second, _events = graph(); second.authenticate()
+        interfaces = controller_acceptance_interfaces_v2(
+            operation_authority=first.operation_authority,
+            lifecycle_authority=first.lifecycle_authority,
+            status_authority=lambda *_args: {}, binding_authority=lambda *_args: {},
+            egress_authority=lambda *_args: {}, bind_authority=lambda *_args: {},
+            request_authority=lambda *_args: {}, revoke_authority=lambda *_args: {},
+        )
+        receipt = first.controller_session.mint_composition_receipt("public_acceptance")
+        with self.assertRaises(ValueError):
+            build_credential_acceptance_controller_v2(
+                receipt, first.operation_authority, second.lifecycle_authority, interfaces,
+            )
+        service = build_credential_acceptance_controller_v2(
+            receipt, first.operation_authority, first.lifecycle_authority, interfaces,
+        )
+        self.assertEqual(service.protocol, "credential-broker-controller-v2")
+        with self.assertRaises(ValueError):
+            build_credential_acceptance_controller_v2(
+                receipt, first.operation_authority, first.lifecycle_authority, interfaces,
+            )
+        second_receipt = second.controller_session.mint_composition_receipt(
+            "public_acceptance")
+        with self.assertRaises(ValueError):
+            build_credential_acceptance_controller_v2(
+                second_receipt, second.operation_authority,
+                second.lifecycle_authority, interfaces,
+            )
+        first.controller_session.close("test_complete")
+        second.controller_session.close("test_complete")
+
+    def test_success_and_refusal_reason_allowlists_are_disjoint(self):
+        from sandbox.runtimes.managed.credential_acceptance import (
+            _terminal_result, public_credential_acceptance_result,
+            validate_credential_acceptance_service_result,
+        )
+
+        request = bind_request()
+        refused_ready = {"ok": False, "state": "refused", "mutated": False,
+                         "decision": "refused", "reason": {"code": "ready"}}
+        result = _terminal_result(refused_ready, request, proof=True)
+        self.assertEqual(result["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+        accepted_refusal = {"ok": True, "state": "bound", "mutated": True,
+                            "decision": "accepted",
+                            "reason": {"code": "credential_binding_stale"}}
+        result = _terminal_result(accepted_refusal, request, proof=True)
+        self.assertEqual(result["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+        result = public_credential_acceptance_result(
+            {"action": "bind", "reason": {"code": "ready"}})
+        self.assertEqual(result["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+        public_refusal = {"ok": False, "action": "bind", "state": "blocked",
+                          "mutated": False, "decision": "refused",
+                          "reason": {"code": "ready"},
+                          "proof_candidate": True, "adoptable": False}
+        result = validate_credential_acceptance_service_result(public_refusal, request)
+        self.assertEqual(result["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+
+    def test_lifecycle_request_reservations_atomically_admit_sixteen_not_seventeen(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import LifecycleV2Error
+        from tests.test_credential_controller_integration_v2 import graph
+
+        runner, _events = graph(); runner.authenticate(); runner.activate()
+        lifecycle = runner.lifecycle_authority
+        barrier = threading.Barrier(18)
+        receipts = []
+        errors = []
+        result_lock = threading.Lock()
+
+        def reserve():
+            barrier.wait()
+            try:
+                receipt = lifecycle.begin_public_acceptance(
+                    action="request", active_operation_count=0,
+                    lifecycle_state="active", admission_open=True,
+                )
+            except LifecycleV2Error as exc:
+                with result_lock: errors.append(exc.code)
+            else:
+                with result_lock: receipts.append(receipt)
+
+        workers = [threading.Thread(target=reserve) for _index in range(17)]
+        for worker in workers: worker.start()
+        barrier.wait()
+        for worker in workers: worker.join(2)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(receipts), 16)
+        self.assertEqual(errors, ["public_acceptance_refused"])
+        self.assertEqual(dict(lifecycle.public_acceptance_reservations()), {
+            "request_receipts": 16, "action_receipts": 0, "total": 16,
+        })
+
+        first = receipts.pop()
+        self.assertTrue(lifecycle.finish_public_acceptance(first, accepted=True))
+        with self.assertRaisesRegex(LifecycleV2Error, "public_acceptance_refused"):
+            lifecycle.finish_public_acceptance(first, accepted=False)
+        for receipt in receipts:
+            self.assertTrue(lifecycle.finish_public_acceptance(receipt, accepted=False))
+        self.assertEqual(lifecycle.public_acceptance_reservations()["total"], 0)
+
+        abandoned = [lifecycle.begin_public_acceptance(
+            action="request", active_operation_count=0,
+            lifecycle_state="active", admission_open=True,
+        ) for _index in range(3)]
+        self.assertEqual(lifecycle.public_acceptance_reservations()["total"], 3)
+        lifecycle.close_public_acceptance()
+        self.assertEqual(lifecycle.public_acceptance_reservations()["total"], 0)
+        for receipt in abandoned:
+            with self.assertRaisesRegex(LifecycleV2Error, "public_acceptance_refused"):
+                lifecycle.finish_public_acceptance(receipt, accepted=False)
+        runner.controller_session.close("test_complete")
 
 
 if __name__ == "__main__":

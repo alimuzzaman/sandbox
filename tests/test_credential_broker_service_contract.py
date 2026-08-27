@@ -27,6 +27,8 @@ LEASE = "lease-0123456789ab"
 EPOCH = "epoch-0123456789ab"
 NEXT_EPOCH = "epoch-fedcba987654"
 CONNECTION = "kernel-connection-0123456789ab"
+OPERATION = "op-0123456789abcdef"
+REQUEST_DIGEST = "f" * 64
 POLICY_DIGEST = "a" * 64
 EGRESS_DIGEST = "b" * 64
 BROKER_DIGEST = "c" * 64
@@ -97,6 +99,16 @@ def guest_request(**overrides):
         "machine_id": MACHINE,
         "binding_id": BINDING,
         "binding_version": 7,
+        "scheme": "https",
+        "host": "api.example.test",
+        "port": 443,
+        "method": "POST",
+        "path": "/v1/items",
+        "headers": {"accept": "application/json"},
+        "body": b"{}",
+        "content_type": "application/json",
+        "deadline_ms": 5_000,
+        "correlation_id": "corr-0123456789abcdef",
     }
     value.update(overrides)
     return value
@@ -127,6 +139,8 @@ def lease_frame(**overrides):
         "policy_digest": POLICY_DIGEST,
         "egress_digest": EGRESS_DIGEST,
         "broker_digest": BROKER_DIGEST,
+        "operation_id": OPERATION,
+        "request_digest": REQUEST_DIGEST,
         "expires_at": 2_000_000_000,
         "descriptor_size": 32,
     }
@@ -141,6 +155,17 @@ def descriptor_observation(**overrides):
         "close_on_exec": True,
         "size": 32,
         "seals": ("write", "grow", "shrink", "seal"),
+    }
+    value.update(overrides)
+    return value
+
+
+def legacy_authorization(**overrides):
+    value = {
+        "lease_id": LEASE,
+        "operation_id": OPERATION,
+        "request_digest": REQUEST_DIGEST,
+        "expires_at": 2_000_000_000,
     }
     value.update(overrides)
     return value
@@ -464,12 +489,14 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertNotIn(EPOCH, repr(endpoint))
 
         drift_factory = mock.Mock(side_effect=AssertionError("drift must precede socket creation"))
-        drift_registry = broker.PendingRequestRegistry(service_identity())
+        drift_registry = broker.LegacyPendingLeaseRegistry(service_identity())
         drifted = broker.LinuxLeaseEndpoint(
             service_identity(), control_plane_uid=501,
             identity_observer=lambda: service_identity(pid=4124), enabled=True,
             registry=drift_registry,
-            internal_handoff=lambda _request, _material: {"outcome": "completed"},
+            adapter=broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
             socket_factory=drift_factory,
         )
         with mock.patch.object(broker, "_require_linux_transport"):
@@ -477,12 +504,14 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertFalse(drift_factory.called)
 
         root_factory = mock.Mock(side_effect=AssertionError("root must precede socket creation"))
-        root_registry = broker.PendingRequestRegistry(service_identity())
+        root_registry = broker.LegacyPendingLeaseRegistry(service_identity())
         root_endpoint = broker.LinuxLeaseEndpoint(
             service_identity(), control_plane_uid=501,
             identity_observer=lambda: service_identity(), enabled=True,
             registry=root_registry,
-            internal_handoff=lambda _request, _material: {"outcome": "completed"},
+            adapter=broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
             socket_factory=root_factory,
         )
         with mock.patch.object(broker.os, "geteuid", return_value=0):
@@ -496,17 +525,19 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         invalid_descriptor = FakeConnection(broker, packet, descriptor=77)
         replay = FakeConnection(broker, packet, descriptor=78)
         listener = FakeListener((wrong_peer, invalid_descriptor, replay))
-        registry = broker.PendingRequestRegistry(service_identity())
+        registry = broker.LegacyPendingLeaseRegistry(service_identity())
         self.assertTrue(registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": LEASE, "expires_at": 2_000_000_000},
+            legacy_authorization(),
             now=1_900_000_000,
         )["ok"])
         endpoint = broker.LinuxLeaseEndpoint(
             service_identity(), control_plane_uid=501,
             identity_observer=lambda: service_identity(), enabled=True,
             registry=registry,
-            internal_handoff=lambda _request, _material: {"outcome": "completed"},
+            adapter=broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ),
             socket_factory=lambda *_args: listener,
             clock=lambda: 1_900_000_000,
         )
@@ -533,6 +564,38 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertTrue(listener.closed)
         self.assert_refusal(endpoint.start(), "lease_channel_closed")
 
+    def test_legacy_endpoint_refuses_wrong_operation_before_descriptor_read(self):
+        broker = module()
+        connection = FakeConnection(
+            broker, broker.encode_lease_frame(
+                lease_frame(operation_id="op-wrong-operation"),
+            ), descriptor=77,
+        )
+        listener = FakeListener((connection,))
+        registry = broker.LegacyPendingLeaseRegistry(service_identity())
+        self.assertTrue(registry.register(
+            guest_request(), guest_observation(), legacy_authorization(),
+            now=1_900_000_000,
+        )["ok"])
+        endpoint = broker.LinuxLeaseEndpoint(
+            service_identity(), control_plane_uid=501,
+            identity_observer=lambda: service_identity(), registry=registry,
+            adapter=broker.OfflineTestOperationAdapter(
+                lambda _request, _material: {"outcome": "completed"}, offline_test=True,
+            ), enabled=True, socket_factory=lambda *_args: listener,
+            clock=lambda: 1_900_000_000,
+        )
+        with mock.patch.object(broker, "_require_linux_transport"), \
+                mock.patch.object(broker.socket, "SO_PEERCRED", 17, create=True), \
+                mock.patch.object(broker, "_linux_descriptor_observation") as observe, \
+                mock.patch.object(broker.os, "close") as close:
+            self.assertTrue(endpoint.start()["ok"])
+            self.assertTrue(endpoint.open_admission(service_identity())["ok"])
+            self.assert_refusal(endpoint.receive_once(), "lease_identity_mismatch")
+            self.assertFalse(observe.called)
+            self.assertEqual(close.call_args_list, [mock.call(77)])
+        endpoint.close()
+
     def test_fake_private_veth_listener_binds_exact_interface_before_guest_parse(self):
         broker = module()
         packet = broker.encode_guest_request(guest_request())
@@ -540,7 +603,9 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         trailing = FakeGuestConnection(packet + b"x")
         good = FakeGuestConnection(packet)
         listener = FakeGuestListener((wrong, trailing, good))
-        registry = broker.PendingRequestRegistry(service_identity())
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
 
         def observe(connection):
             self.assertEqual(connection.recv_calls, 0)
@@ -549,18 +614,13 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         endpoint = broker.LinuxGuestEndpoint(
             service_identity(), registry=registry,
             connection_observer=observe,
-            request_authorizer=lambda _request: {
-                "lease_id": LEASE, "expires_at": 2_000_000_000,
-            },
             enabled=True, socket_factory=lambda *_args: listener,
             clock=lambda: 1_900_000_000,
         )
         root_listener = broker.LinuxGuestEndpoint(
-            service_identity(), registry=broker.PendingRequestRegistry(service_identity()),
+            service_identity(), registry=broker.PendingOperationRegistry(service_identity()),
             connection_observer=observe,
-            request_authorizer=lambda _request: {
-                "lease_id": LEASE, "expires_at": 2_000_000_000,
-            }, enabled=True,
+            enabled=True,
             socket_factory=mock.Mock(
                 side_effect=AssertionError("root must precede guest socket creation"),
             ),
@@ -578,10 +638,15 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
             self.assert_refusal(endpoint.receive_once(), "transport_denied")
             self.assertEqual(wrong.recv_calls, 0)
             self.assert_refusal(endpoint.receive_once(), "guest_frame_invalid")
-            pending = endpoint.receive_once()
-            self.assertTrue(pending["ok"])
-            self.assertEqual(pending["lease_id"], LEASE)
-            self.assertEqual(registry.tracker.count, 1)
+            unavailable = endpoint.receive_once()
+            self.assert_refusal(unavailable, "guest_coordinator_unavailable")
+            self.assertEqual(
+                broker.parse_guest_terminal_result(good.sent[-1]), unavailable,
+            )
+            self.assertEqual(unavailable["correlation_id"], guest_request()["correlation_id"])
+            self.assertNotIn("lease_id", unavailable)
+            self.assertNotIn("operation_id", unavailable)
+            self.assertEqual(registry.count, 0)
         endpoint.close()
 
     def test_fake_dispatcher_proves_peer_sends_once_and_closes_every_path(self):
@@ -657,10 +722,10 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
 
     def test_receiver_rendezvous_handoff_wipes_buffer_and_acks_terminal_outcome(self):
         broker = module()
-        registry = broker.PendingRequestRegistry(service_identity())
+        registry = broker.LegacyPendingLeaseRegistry(service_identity())
         self.assertTrue(registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": LEASE, "expires_at": 2_000_000_000},
+            legacy_authorization(),
             now=1_900_000_000,
         )["ok"])
         packet = broker.encode_lease_frame(lease_frame())
@@ -681,7 +746,8 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         endpoint = broker.LinuxLeaseEndpoint(
             service_identity(), control_plane_uid=501,
             identity_observer=lambda: service_identity(), registry=registry,
-            internal_handoff=handoff, descriptor_reader=read_once,
+            adapter=broker.OfflineTestOperationAdapter(handoff, offline_test=True),
+            descriptor_reader=read_once,
             enabled=True, socket_factory=lambda *_args: listener,
             clock=lambda: 1_900_000_000,
         )
@@ -736,18 +802,25 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
 
     def test_pending_lifecycle_enforces_sixteen_revoke_expiry_and_restart(self):
         broker = module()
-        registry = broker.PendingRequestRegistry(service_identity())
+        registry = broker.LegacyPendingLeaseRegistry(service_identity())
         for index in range(broker.MAX_ACTIVE_REQUESTS):
             result = registry.register(
                 guest_request(), guest_observation(),
-                {"lease_id": f"lease-{index:012d}", "expires_at": 2_000_000_000},
+                legacy_authorization(
+                    lease_id=f"lease-{index:012d}",
+                    operation_id=f"op-{index:012d}",
+                    request_digest=f"{index:064x}",
+                ),
                 now=1_900_000_000,
             )
             self.assertTrue(result["ok"])
         self.assertEqual(registry.tracker.count, 16)
         self.assert_refusal(registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": "lease-over-limit", "expires_at": 2_000_000_000},
+            legacy_authorization(
+                lease_id="lease-over-limit", operation_id="op-over-limit",
+                request_digest="9" * 64,
+            ),
             now=1_900_000_000,
         ), "request_limit")
         self.assertEqual(len(registry.revoke(BINDING, 7)), 16)
@@ -755,7 +828,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
 
         self.assertTrue(registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": LEASE, "expires_at": 1_900_000_001},
+            legacy_authorization(expires_at=1_900_000_001),
             now=1_900_000_000,
         )["ok"])
         self.assertEqual(registry.expire(1_900_000_001), (LEASE,))
@@ -763,7 +836,7 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
 
         self.assertTrue(registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": LEASE, "expires_at": 2_000_000_000},
+            legacy_authorization(),
             now=1_900_000_000,
         )["ok"])
         restarted = service_identity(
@@ -773,10 +846,10 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertEqual(registry.restart(restarted), (LEASE,))
         self.assertEqual(registry.tracker.count, 0)
 
-        mismatch_registry = broker.PendingRequestRegistry(service_identity())
+        mismatch_registry = broker.LegacyPendingLeaseRegistry(service_identity())
         self.assertTrue(mismatch_registry.register(
             guest_request(), guest_observation(),
-            {"lease_id": LEASE, "expires_at": 2_000_000_000},
+            legacy_authorization(),
             now=1_900_000_000,
         )["ok"])
         pending, mismatch = mismatch_registry.consume(
@@ -785,6 +858,30 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         self.assertIsNone(pending)
         self.assert_refusal(mismatch, "lease_identity_mismatch")
         self.assertEqual(mismatch_registry.tracker.count, 0)
+
+        digest_registry = broker.LegacyPendingLeaseRegistry(service_identity())
+        self.assertTrue(digest_registry.register(
+            guest_request(), guest_observation(), legacy_authorization(),
+            now=1_900_000_000,
+        )["ok"])
+        pending, mismatch = digest_registry.consume(
+            lease_frame(request_digest="0" * 64), now=1_900_000_000,
+        )
+        self.assertIsNone(pending)
+        self.assert_refusal(mismatch, "lease_identity_mismatch")
+        self.assertEqual(digest_registry.tracker.count, 0)
+
+        operation_registry = broker.LegacyPendingLeaseRegistry(service_identity())
+        self.assertTrue(operation_registry.register(
+            guest_request(), guest_observation(), legacy_authorization(),
+            now=1_900_000_000,
+        )["ok"])
+        pending, mismatch = operation_registry.consume(
+            lease_frame(operation_id="op-wrong-operation"), now=1_900_000_000,
+        )
+        self.assertIsNone(pending)
+        self.assert_refusal(mismatch, "lease_identity_mismatch")
+        self.assertEqual(operation_registry.tracker.count, 0)
 
         tracker = broker.ActiveRequestTracker()
         self.assertTrue(tracker.begin(LEASE, BINDING, 7, 2_000_000_000))
@@ -815,6 +912,483 @@ class TestCredentialBrokerServiceContract(unittest.TestCase):
         with mock.patch.object(broker.sys, "platform", "linux"):
             live = broker.live_transport_status()
         self.assert_refusal(live, "live_transport_unproven")
+
+    def test_pure_guest_operation_state_claim_bind_and_result_hides_internal_ids(self):
+        broker = module()
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        request = guest_request()
+        submitted = registry.submit(
+            request, guest_observation(), now=1_900_000_000,
+        )
+        self.assertEqual(submitted, {
+            "ok": True, "state": "credential_pending",
+            "correlation_id": request["correlation_id"],
+        })
+        self.assertNotIn("operation", repr(submitted))
+        self.assertNotIn("lease", repr(submitted))
+
+        controller = {
+            "uid": 501,
+            "pid": 9001,
+            "process_start_identity": "9001:1234",
+            "executable_digest": "9" * 64,
+        }
+        channel = broker.ControllerClaimChannel(service_identity(), registry, controller)
+        claimed = channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-connection-1")
+        self.assertEqual(claimed["type"], "CLAIMED")
+        self.assertEqual({
+            key: claimed[key] for key in (
+                "scheme", "host", "port", "method", "path", "body_bytes",
+                "content_type", "deadline_ms", "correlation_id",
+            )
+        }, {
+            "scheme": "https", "host": "api.example.test", "port": 443,
+            "method": "POST", "path": "/v1/items", "body_bytes": 2,
+            "content_type": "application/json", "deadline_ms": 5_000,
+            "correlation_id": request["correlation_id"],
+        })
+        self.assertGreater(claimed["header_bytes"], 0)
+        self.assertNotIn("headers", claimed)
+        self.assertNotIn("body", claimed)
+        self.assertEqual(
+            broker.parse_controller_message(broker.encode_controller_message(claimed)),
+            claimed,
+        )
+        digest = broker.guest_request_digest(request)
+        self.assertEqual(claimed["request_digest"], digest)
+        frame = lease_frame(operation_id=OPERATION, request_digest=digest)
+        self.assertTrue(registry.bind_lease(
+            frame, owner="controller-connection-1", now=1_900_000_000,
+        )["ok"])
+
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+        response = BrokerResponse(
+            status=201, headers={"content-type": "application/json"}, body=b"{\"ok\":true}",
+            correlation_id=request["correlation_id"],
+        )
+        completed = registry.complete(OPERATION, digest, response)
+        self.assertTrue(completed["ok"])
+        public = registry.guest_result(CONNECTION, consume=True)
+        self.assertEqual(public, completed)
+        self.assertNotIn(OPERATION, repr(public))
+        self.assertNotIn(LEASE, repr(public))
+        self.assertNotIn(digest, repr(public))
+
+    def test_full_guest_frame_enforces_https_bounds_and_security_headers(self):
+        broker = module()
+        request = guest_request()
+        packet = broker.encode_guest_request(request)
+        self.assertEqual(broker.parse_guest_request(packet), request)
+        for invalid in (
+            guest_request(scheme="http"),
+            guest_request(headers={"authorization": "guest-value"}),
+            guest_request(headers={"x-api-key": "guest-value"}),
+            guest_request(headers={"x-long": "x" * (broker.MAX_GUEST_HEADERS_BYTES + 1)}),
+            guest_request(body=b"x" * (broker.MAX_GUEST_BODY_BYTES + 1)),
+            guest_request(deadline_ms=30_001),
+        ):
+            with self.subTest(invalid=repr(invalid)[:80]):
+                with self.assertRaises(ValueError):
+                    broker.encode_guest_request(invalid)
+
+    def test_controller_claim_is_owned_once_and_disconnect_is_terminal(self):
+        broker = module()
+        operation_ids = iter((OPERATION, "op-fedcba9876543210"))
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: next(operation_ids),
+        )
+        self.assertTrue(registry.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        self.assertTrue(registry.submit(
+            guest_request(correlation_id="corr-second"),
+            guest_observation(connection_identity="kernel-connection-second"),
+            now=1_900_000_000,
+        )["ok"])
+        controller = {
+            "uid": 501, "pid": 9001, "process_start_identity": "9001:1234",
+            "executable_digest": "9" * 64,
+        }
+        channel = broker.ControllerClaimChannel(service_identity(), registry, controller)
+        first = channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-one")
+        second = channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-two")
+        self.assertNotEqual(first["operation_id"], second["operation_id"])
+        self.assert_refusal(channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 2,
+        }, observed_peer={**controller, "pid": 9002},
+            connection_identity="controller-one"), "controller_denied")
+        self.assertEqual(channel.disconnect("controller-one"), (first["operation_id"],))
+        result = registry.guest_result(CONNECTION)
+        self.assert_refusal(result, "operation_cancelled")
+        self.assertNotIn(first["operation_id"], repr(result))
+
+    def test_sixteen_simultaneous_guest_requests_get_distinct_private_operations(self):
+        broker = module()
+        id_lock = threading.Lock()
+        next_id = 0
+
+        def id_factory():
+            nonlocal next_id
+            with id_lock:
+                next_id += 1
+                return f"op-{next_id:016d}"
+
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=id_factory,
+        )
+        barrier = threading.Barrier(broker.MAX_ACTIVE_REQUESTS + 1)
+        results = []
+        result_lock = threading.Lock()
+
+        def submit(index):
+            barrier.wait()
+            result = registry.submit(
+                guest_request(correlation_id=f"corr-{index}"),
+                guest_observation(connection_identity=f"connection-{index:016d}"),
+                now=1_900_000_000,
+            )
+            with result_lock:
+                results.append(result)
+
+        threads = [
+            threading.Thread(target=submit, args=(index,))
+            for index in range(broker.MAX_ACTIVE_REQUESTS)
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(results), broker.MAX_ACTIVE_REQUESTS)
+        self.assertTrue(all(result.get("ok") is True for result in results))
+        self.assertEqual(registry.count, broker.MAX_ACTIVE_REQUESTS)
+        self.assert_refusal(registry.submit(
+            guest_request(correlation_id="corr-over-limit"),
+            guest_observation(connection_identity="connection-over-limit"),
+            now=1_900_000_000,
+        ), "request_limit")
+
+    def test_lease_binding_refuses_request_digest_or_claim_owner_mismatch(self):
+        broker = module()
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(registry.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        self.assertEqual(registry.claim_next(
+            "controller-one", now=1_900_000_000,
+        )["type"], "CLAIMED")
+        digest = broker.guest_request_digest(guest_request())
+        self.assert_refusal(registry.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest=digest),
+            owner="controller-two", now=1_900_000_000,
+        ), "operation_not_pending")
+        self.assert_refusal(registry.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest="0" * 64),
+            owner="controller-one", now=1_900_000_000,
+        ), "request_digest_mismatch")
+
+    def test_controller_refusal_is_distinct_from_disconnect_indeterminate(self):
+        broker = module()
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(registry.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        controller = {
+            "uid": 501, "pid": 9001, "process_start_identity": "9001:1234",
+            "executable_digest": "9" * 64,
+        }
+        channel = broker.ControllerClaimChannel(service_identity(), registry, controller)
+        claimed = channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-one")
+        refused = channel.handle({
+            "type": "REFUSE", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 2, "operation_id": claimed["operation_id"],
+            "request_digest": claimed["request_digest"], "code": "binding_expired",
+        }, observed_peer=controller, connection_identity="controller-one")
+        self.assertEqual(refused, {"type": "REFUSE", "code": "binding_expired"})
+        public = registry.guest_result(CONNECTION)
+        self.assert_refusal(public, "binding_expired")
+        self.assertNotEqual(public.get("code"), "operation_indeterminate")
+
+    def test_controller_rejects_unknown_type_and_unreviewed_refusal_code(self):
+        broker = module()
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(registry.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        controller = {
+            "uid": 501, "pid": 9001, "process_start_identity": "9001:1234",
+            "executable_digest": "9" * 64,
+        }
+        channel = broker.ControllerClaimChannel(
+            service_identity(), registry, controller, clock=lambda: 1_900_000_000,
+        )
+        self.assert_refusal(channel.handle({
+            "type": "COMPLETE", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-one"),
+            "controller_message_invalid")
+        claimed = channel.handle({
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }, observed_peer=controller, connection_identity="controller-one")
+        self.assertEqual(claimed["type"], "CLAIMED")
+        self.assert_refusal(channel.handle({
+            "type": "REFUSE", "machine_id": MACHINE, "broker_epoch": EPOCH,
+            "sequence": 2, "operation_id": claimed["operation_id"],
+            "request_digest": claimed["request_digest"], "code": "arbitrary_code",
+        }, observed_peer=controller, connection_identity="controller-one"),
+            "controller_message_invalid")
+        with self.assertRaises(ValueError):
+            broker.encode_controller_message({
+                "type": "REFUSE", "machine_id": MACHINE, "broker_epoch": EPOCH,
+                "sequence": 2, "operation_id": claimed["operation_id"],
+                "request_digest": claimed["request_digest"], "code": "arbitrary_code",
+            })
+
+    def test_operation_deadline_and_disconnect_certainty_follow_lease_boundary(self):
+        broker = module()
+        expired = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(expired.submit(
+            guest_request(deadline_ms=1_000), guest_observation(), now=100,
+        )["ok"])
+        self.assertEqual(expired.claim_next("controller-one", now=101), {
+            "type": "NO_PENDING",
+        })
+        self.assert_refusal(expired.guest_result(CONNECTION), "lease_expired")
+
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(registry.submit(
+            guest_request(deadline_ms=5_000), guest_observation(), now=100,
+        )["ok"])
+        claimed = registry.claim_next("controller-one", now=101)
+        digest = claimed["request_digest"]
+        self.assert_refusal(registry.bind_lease(
+            lease_frame(
+                operation_id=OPERATION, request_digest=digest,
+                expires_at=2_000_000_000,
+            ), owner="controller-one", now=105,
+        ), "lease_expired")
+
+        post_lease = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(post_lease.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        claimed = post_lease.claim_next("controller-one", now=1_900_000_001)
+        digest = claimed["request_digest"]
+        self.assertTrue(post_lease.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest=digest),
+            owner="controller-one", now=1_900_000_002,
+        )["ok"])
+        self.assertEqual(post_lease.controller_disconnected("controller-one"), (OPERATION,))
+        self.assert_refusal(post_lease.guest_result(CONNECTION), "operation_indeterminate")
+        post_lease.guest_result(CONNECTION, consume=True)
+        self.assertEqual(post_lease.count, 0)
+
+    def test_registry_close_refuses_before_lease_and_is_indeterminate_after(self):
+        broker = module()
+        pending = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(pending.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        pending.close()
+        self.assert_refusal(pending.guest_result(CONNECTION), "operation_cancelled")
+
+        bound = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(bound.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        claimed = bound.claim_next("controller-one", now=1_900_000_001)
+        self.assertTrue(bound.bind_lease(
+            lease_frame(
+                operation_id=OPERATION, request_digest=claimed["request_digest"],
+            ), owner="controller-one", now=1_900_000_002,
+        )["ok"])
+        bound.close()
+        self.assert_refusal(bound.guest_result(CONNECTION), "operation_indeterminate")
+
+    def test_arbitrary_error_completion_becomes_indeterminate(self):
+        broker = module()
+        registry = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(registry.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        claimed = registry.claim_next("controller-one", now=1_900_000_001)
+        digest = claimed["request_digest"]
+        self.assertTrue(registry.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest=digest),
+            owner="controller-one", now=1_900_000_002,
+        )["ok"])
+        self.assert_refusal(registry.complete(
+            OPERATION, digest, {"ok": False, "code": "binding_expired"},
+        ), "operation_indeterminate")
+        self.assert_refusal(registry.guest_result(CONNECTION), "operation_indeterminate")
+
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+        invalid = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(invalid.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        claimed = invalid.claim_next("controller-one", now=1_900_000_001)
+        digest = claimed["request_digest"]
+        self.assertTrue(invalid.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest=digest),
+            owner="controller-one", now=1_900_000_002,
+        )["ok"])
+        malformed = BrokerResponse(
+            status=200, headers={"authorization": "not-reviewed"}, body=b"ok",
+            correlation_id=guest_request()["correlation_id"],
+        )
+        self.assert_refusal(
+            invalid.complete(OPERATION, digest, malformed),
+            "operation_indeterminate",
+        )
+
+        correlation = broker.PendingOperationRegistry(
+            service_identity(), id_factory=lambda: OPERATION,
+        )
+        self.assertTrue(correlation.submit(
+            guest_request(), guest_observation(), now=1_900_000_000,
+        )["ok"])
+        claimed = correlation.claim_next("controller-one", now=1_900_000_001)
+        digest = claimed["request_digest"]
+        self.assertTrue(correlation.bind_lease(
+            lease_frame(operation_id=OPERATION, request_digest=digest),
+            owner="controller-one", now=1_900_000_002,
+        )["ok"])
+        mismatched = BrokerResponse(
+            status=200, headers={"content-type": "application/json"}, body=b"{}",
+            correlation_id="corr-wrong-request",
+        )
+        self.assert_refusal(
+            correlation.complete(OPERATION, digest, mismatched),
+            "operation_indeterminate",
+        )
+        self.assert_refusal(
+            correlation.guest_result(CONNECTION), "operation_indeterminate",
+        )
+
+    def test_canonical_terminal_result_serializes_binary_without_internal_ids(self):
+        broker = module()
+        success = {
+            "ok": True,
+            "status": 200,
+            "headers": {"content-type": "application/octet-stream"},
+            "body": b"\x00\xffbinary",
+            "correlation_id": "corr-binary",
+        }
+        packet = broker.encode_guest_terminal_result(success)
+        self.assertEqual(broker.parse_guest_terminal_result(packet), success)
+        self.assertNotIn(OPERATION.encode("ascii"), packet)
+        self.assertNotIn(LEASE.encode("ascii"), packet)
+
+        error = {
+            **broker.bounded_error("operation_indeterminate"),
+            "correlation_id": "corr-error",
+        }
+        encoded_error = broker.encode_guest_terminal_result(error)
+        self.assertEqual(broker.parse_guest_terminal_result(encoded_error), error)
+        with self.assertRaises(ValueError):
+            broker.encode_guest_terminal_result({**success, "lease_id": LEASE})
+        with self.assertRaises(ValueError):
+            broker.encode_guest_terminal_result({
+                **success, "headers": {"authorization": "not-allowed"},
+            })
+        for header in ("x-unreviewed", "set-cookie"):
+            with self.subTest(header=header), self.assertRaises(ValueError):
+                broker.encode_guest_terminal_result({
+                    **success, "headers": {header: "not-reviewed"},
+                })
+        with self.assertRaises(ValueError):
+            broker.encode_guest_terminal_result({
+                **success, "headers": {"X-Test": "one", "x-test": "two"},
+            })
+        with self.assertRaises(ValueError):
+            broker.encode_guest_terminal_result({
+                **error, "code": "made_up_guest_code",
+                "message": "credential broker request refused",
+            })
+
+    def test_operation_adapter_refuses_direct_upstream_and_unintegrated_broker(self):
+        broker = module()
+        with self.assertRaises(ValueError):
+            broker.CredentialOperationAdapter(lambda *_args: None)
+        with self.assertRaises(ValueError):
+            broker.OfflineTestOperationAdapter(lambda *_args: None)
+        fake = broker.OfflineTestOperationAdapter(
+            lambda _request, _material: {"outcome": "refused"}, offline_test=True,
+        )
+        self.assertEqual(fake.execute(
+            guest_request(), bytearray(b"x"), machine_id=MACHINE,
+        ), {"outcome": "refused"})
+        with self.assertRaises(ValueError):
+            broker.LinuxLeaseEndpoint(
+                service_identity(), control_plane_uid=501,
+                identity_observer=lambda: service_identity(),
+                registry=broker.LegacyPendingLeaseRegistry(service_identity()),
+                adapter=fake, enabled=True,
+            )
+
+        claim = {
+            "type": "CLAIM_NEXT", "machine_id": MACHINE,
+            "broker_epoch": EPOCH, "sequence": 1,
+        }
+        self.assertEqual(
+            broker.parse_controller_message(broker.encode_controller_message(claim)), claim,
+        )
+        with self.assertRaises(ValueError):
+            broker.parse_controller_message(broker.encode_controller_message(claim) + b"x")
+
+        from sandbox.isolation.credential_request_broker import CredentialRequestBroker
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+        with self.assertRaises(ValueError):
+            broker.CredentialOperationAdapter(object.__new__(CredentialRequestBroker))
+        with self.assertRaises(ValueError):
+            broker.CredentialOperationAdapter(object.__new__(VerifiedHttpsUpstream))
+
+        production_placeholder = object.__new__(broker.CredentialOperationAdapter)
+        with self.assertRaises(ValueError):
+            broker.LinuxLeaseEndpoint(
+                service_identity(), control_plane_uid=501,
+                identity_observer=lambda: service_identity(),
+                registry=broker.LegacyPendingLeaseRegistry(service_identity()),
+                adapter=production_placeholder, enabled=True,
+            )
 
     def test_helper_boundary_has_only_fixed_digest_bound_lifecycle_verbs(self):
         broker = module()

@@ -49,6 +49,8 @@ class TestProbeCommandModel(unittest.TestCase):
             "response_size_bounded", "request_timeout_bounded",
             "concurrency_ceiling_enforced", "epoch_rotates_on_restart",
             "quiesce_before_drain", "drain_precedes_stop",
+            "process_absent_after_cleanup", "route_absent_after_cleanup",
+            "nftables_absent_after_cleanup",
             "nftables_default_drop", "apparmor_profile_enforced",
             "unit_absent_after_cleanup", "socket_absent_after_cleanup",
             "interface_absent_after_cleanup", "cgroup_absent_after_cleanup",
@@ -157,6 +159,52 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual(parsed["observations"], ())
         self.assertNotIn("aaaaaaaaaaaaaaaaaaaa", repr(parsed))
         self.assertIn("authorization_header", parsed["findings"])
+
+    def test_absence_checks_pass_only_when_the_resource_is_gone(self):
+        # A cleaned host makes these commands fail. Reading that as a failed
+        # check reported a clean host as bad and a dirty host as good.
+        for check_id in ("process_absent_after_cleanup", "route_absent_after_cleanup",
+                         "nftables_absent_after_cleanup",
+                         "interface_absent_after_cleanup",
+                         "cgroup_absent_after_cleanup",
+                         "temporary_absent_after_cleanup"):
+            with self.subTest(check_id=check_id):
+                self.assertEqual(probes.expectation_kind(check_id), "exit_nonzero")
+                gone = probes.parse(check_id, result(returncode=1), self.manifest)
+                self.assertEqual(gone["state"], "passed")
+                self.assertEqual(gone["code"], "observed_absent")
+                present = probes.parse(check_id, result(returncode=0), self.manifest)
+                self.assertEqual(present["state"], "failed")
+                self.assertEqual(present["code"], "resource_still_present")
+
+    def test_an_empty_output_absence_check_reads_output_not_exit_status(self):
+        check_id = "socket_absent_after_cleanup"
+        self.assertEqual(probes.expectation_kind(check_id), "empty_output")
+        gone = probes.parse(check_id, result(stdout="\n"), self.manifest)
+        self.assertEqual(gone["state"], "passed")
+        present = probes.parse(
+            check_id, result(stdout="u_str LISTEN 0 1 @sandbox-lease 0 * 0\n"),
+            self.manifest)
+        self.assertEqual(present["state"], "failed")
+        self.assertEqual(present["code"], "resource_still_present")
+        unreadable = probes.parse(check_id, result(returncode=1), self.manifest)
+        self.assertEqual(unreadable["state"], "blocked")
+
+    def test_presence_checks_keep_the_ordinary_exit_zero_expectation(self):
+        self.assertEqual(probes.expectation_kind("unit_identity_expected"), "exit_zero")
+        self.assertEqual(probes.expectation_kind("unit_absent_after_cleanup"),
+                         "exit_zero")
+        parsed = probes.parse("unit_absent_after_cleanup", result(
+            stdout="LoadState=not-found\n", expected=["LoadState=not-found"]),
+            self.manifest)
+        self.assertEqual(parsed["state"], "passed")
+
+    def test_every_plan_entry_declares_its_expectation(self):
+        for entry in probes.plan(self.manifest):
+            with self.subTest(check_id=entry["check_id"]):
+                self.assertIn(entry["expectation"], probes.EXPECTATION_KINDS)
+        with self.assertRaises(probes.ProbeError):
+            probes.expectation_kind("not_a_check")
 
     def test_parsed_results_never_carry_raw_output(self):
         parsed = probes.parse("os_release_supported", result(

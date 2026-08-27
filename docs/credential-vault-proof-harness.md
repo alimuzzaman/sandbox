@@ -18,7 +18,11 @@ Only things about itself, offline:
 - partial evidence never classifies as `passed_live`, and cleanup trouble
   outranks a clean result;
 - every planned probe is an argv array of allowlisted, manifest-derived tokens
-  with a finite timeout and bounded, redacted output;
+  with a finite timeout and bounded, redacted output, and each declares how it
+  proves itself: `exit_zero`, `exit_nonzero`, or `empty_output`. Absence checks
+  use the latter two, because a removed cgroup makes `test -d` exit non-zero
+  and reading that as a failure would report a clean host as bad and a host
+  with leftover state as good;
 - a completed bundle is refused when it is stale, copied, mixed-revision,
   contradictory, incomplete, or carries fake markers;
 - a resource that cannot be proven ours is retained, never removed;

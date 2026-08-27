@@ -139,6 +139,18 @@ proof. These IDs are append-only to preserve references to T022/T029/T031.
 - [ ] T036 [US3] Add secret-free digest-bound broker plans, fixed helper lifecycle verbs, broker-first cleanup observation/order, and inert dependency wiring in `sandbox/runtimes/managed/services.py`, `tools/native-helper/native-helper.py`, `sandbox/runtimes/managed/adapter.py`, and `sandbox/application/context.py`, with local coverage in `tests/test_managed_services.py`, `tests/test_native_cleanup_observation.py`, and `tests/test_credential_wiring.py` (LOCAL ONLY: the plan compiler, fixed supervisor argv/status schema, broker-first cleanup seam, and inert composition exist. The helper verbs deliberately refuse because reviewed unit/config installation and ownership observation are not integrated; T036 remains open and T022 remains blocked.)
 - [ ] T037 [US1] Add a proof-gated public `./sb` acceptance surface that accepts only opaque source references and exact non-secret binding/request/revoke metadata in `sandbox/commands/native.py`, then add offline public-command and harness coverage in `tests/test_native_cli.py` and `tests/test_live_native_acceptance_harness.py` (LOCAL ONLY: an exact tagged codec, public projector, runtime operation, and offline `SbRunner` refusal check exist. Default unsealed composition returns `managed_runtime_unproven`; only a sealed invocation with an absent service returns `credential_acceptance_unavailable`. Integrated T036 status/binding/egress action wiring remains open; partial results are not evidence and T029 remains blocked.)
 
+## Phase 9: Authorized-proof harness preparation
+
+**Goal**: Make the future authorized Ubuntu 24.04 run for T022 and T029
+deterministic, replay-safe, bounded, secret-safe, and independently reviewable.
+These IDs are append-only. Nothing in this phase executes a live check, and no
+item here changes `implemented_unproven`, `adoptable=false`, or the null
+evidence identity.
+
+- [x] T038 Add the versioned acceptance manifest, canonical encoding, plan digest, revision gate, and no-leak scanner in `tests/credential_vault_proof/manifest.py` and `tests/credential_vault_proof/scanner.py`. **DONE:** exact-key schema, bounded strings/lists/files, forbidden-key and secret-shape refusal, digest-stable canonical JSON, and a revision mismatch that refuses before any test action.
+- [x] T039 Add the replay-safe proof-run ledger, live probe command model, evidence bundle validator, and cleanup verifier in `tests/credential_vault_proof/ledger.py`, `probes.py`, `bundle.py`, and `cleanup.py`. **DONE:** one request identity per run, ledger-first retry, `acceptance_unknown` for empty/malformed acceptance, cleanup overriding success, allowlisted argv-only probes with bounded redacted parsing, and a bundle validator that refuses stale, copied, mixed-revision, contradictory, incomplete, or fake-marked evidence.
+- [x] T040 Add the offline runner, deterministic report, runbook, and local test suites in `tests/credential_vault_proof/cli.py`, `report.py`, `docs/credential-vault-proof-harness.md`, and `tests/test_credential_vault_*.py`. **DONE:** seven fixed verbs with bounded error codes and no execution path, a report that separates local harness behaviour from live evidence, and 100 offline tests that need no Linux, root, systemd, socket, or network access.
+
 ## Parallel execution examples
 
 ### After foundational work

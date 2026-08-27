@@ -171,9 +171,12 @@ task IDs were established:
    the contract selects one sealed anonymous `memfd` transferred once with
    `SCM_RIGHTS` over a broker-owned abstract `AF_UNIX` `SOCK_SEQPACKET` socket,
    with kernel peer checks and exact broker-process verification before send.
-3. T034 adds failing-first local service/transport contracts; T035 implements
-   the reviewed unprivileged executable; T036 adds secret-free helper
-   supervision, broker-first cleanup, and inert composition wiring.
+3. T034 adds the passing fake/local service and transport contracts. T035 has
+   guarded private-veth, seqpacket, memfd, peer-auth, rendezvous, and lifecycle
+   seams, but remains open for the full guest protocol/result path, runnable
+   coordinator, cross-process rendezvous, and exact broker/upstream integration.
+   T036 adds secret-free helper supervision, broker-first cleanup, and inert
+   composition wiring.
 4. T037 adds a proof-gated public `./sb` acceptance seam and offline harness
    coverage using only opaque references and non-secret metadata.
 
@@ -181,8 +184,8 @@ The dependency order is `T032 -> T033 -> T034 -> T035 -> T036`, followed by
 T022 authorized helper/service lifecycle proof; T036 also precedes T037.
 T003, T022, and T037 jointly precede T029, and T003/T022/T029 precede T031.
 Local preparation keeps `implemented_unproven`, `adoptable=false`, and the null
-evidence ID. It cannot substitute for Ubuntu 24.04 live evidence or independent
-final review.
+evidence ID. The T034 tests and T035 guarded seams cannot substitute for Ubuntu
+24.04 live evidence or independent final review.
 
 ### Phase 2 — Implement the explicit application-layer broker
 

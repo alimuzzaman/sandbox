@@ -212,6 +212,27 @@ class TestBundleValidator(BundleTestCase):
         self.build(check_states=states, classification="passed_live")
         self.assert_refused("result_contradiction")
 
+    def test_a_bundle_that_omits_required_checks_is_refused(self):
+        # The manifest digest binds the plan; this binds the record's own check
+        # set to it. Otherwise an omitted required check is neither failed nor
+        # blocked, just absent, and a passed_live claim survives without it.
+        states = {"os_release_supported": "passed"}
+        self.build(check_states=states, events=fixtures.events(states))
+        self.assert_refused("check_missing")
+
+    def test_a_bundle_with_an_unplanned_check_is_refused(self):
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        states["a_check_nobody_planned"] = "passed"
+        self.build(check_states=states, events=fixtures.events(states))
+        self.assert_refused("check_unplanned")
+
+    def test_an_unplanned_file_in_a_nested_directory_is_refused(self):
+        self.build()
+        nested = self.root / "extra"
+        nested.mkdir()
+        (nested / "smuggled.json").write_text('{"note":"unplanned"}')
+        self.assert_refused("artifact_unplanned")
+
     def test_evidence_dated_after_now_is_refused(self):
         self.build()
         self.assert_refused("evidence_from_the_future", now="2026-08-01T00:00:00Z")

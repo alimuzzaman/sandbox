@@ -172,9 +172,14 @@ task IDs were established:
    `SCM_RIGHTS` over a broker-owned abstract `AF_UNIX` `SOCK_SEQPACKET` socket,
    with kernel peer checks and exact broker-process verification before send.
 3. T034 adds the passing fake/local service and transport contracts. T035 has
-   guarded private-veth, seqpacket, memfd, peer-auth, rendezvous, and lifecycle
-   seams, but remains open for the full guest protocol/result path, runnable
-   coordinator, cross-process rendezvous, and exact broker/upstream integration.
+   guarded private-veth, seqpacket, memfd, peer-auth, a guest request codec,
+   canonical terminal-result codec, and pure operation/controller state seams.
+   The legacy local descriptor registry binds operation/request digests but is
+   not the new operation flow. T035 remains open for one integrated guest
+   connection through controller claim, descriptor rendezvous, typed upstream
+   execution, terminal result delivery, runnable cross-process coordination,
+   and lifecycle observation. Authorized host proof belongs to T022/T029/T031,
+   not T035 completion.
    T036 adds secret-free helper supervision, broker-first cleanup, and inert
    composition wiring.
 4. T037 adds a proof-gated public `./sb` acceptance seam and offline harness

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Offline-only guarded credential-broker transport and validation seams.
 
-The Linux listener, descriptor, and dispatcher code is explicit opt-in and
-closed by default.  This is a library contract, not a runnable service: no
-application/runtime path constructs it and no default is enabled.  Code
-presence is not live Ubuntu proof or support-tier authority.  Pure validation
-and injectable kernel seams keep local tests non-privileged; T036 owns any
-later helper/service wiring and proof.
+The Linux listener, descriptor, and dispatcher probes plus guest/result codecs
+and pure controller/operation state are explicit opt-in and closed by default.
+This is a library contract, not a runnable service: no integrated coordinator or
+application/runtime path constructs it and no default is enabled. Code presence
+is not live Ubuntu proof or support-tier authority. Pure validation and
+injectable seams keep local tests non-privileged; T036 owns any later
+helper/service wiring and proof.
 """
 
 from __future__ import annotations
 
 from array import array
+import base64
 import fcntl
 import hashlib
 import ipaddress
@@ -24,14 +26,23 @@ import struct
 import sys
 import threading
 import time
+import uuid
 from typing import Any
 
 
 PROTOCOL_VERSION = 1
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_FRAME_BYTES = 4096
-MAX_GUEST_FRAME_BYTES = 64 * 1024
+MAX_GUEST_HEADERS_BYTES = 64 * 1024
+MAX_GUEST_BODY_BYTES = 1024 * 1024
+MAX_GUEST_FRAME_BYTES = (
+    ((MAX_GUEST_BODY_BYTES + 2) // 3) * 4 + MAX_GUEST_HEADERS_BYTES + 16 * 1024
+)
 MAX_ACTIVE_REQUESTS = 16
+MAX_GUEST_RESULT_BODY_BYTES = 4 * 1024 * 1024
+MAX_GUEST_RESULT_FRAME_BYTES = (
+    ((MAX_GUEST_RESULT_BODY_BYTES + 2) // 3) * 4 + MAX_GUEST_HEADERS_BYTES + 16 * 1024
+)
 MAX_SAFE_DOCUMENT_BYTES = 1024
 HELPER_VERBS = (
     "credential-broker-start",
@@ -46,6 +57,8 @@ FIXED_EXECUTABLE = "/usr/libexec/sandbox/native-credential-broker"
 _FRAME_MAGIC = b"SBCL"
 _FRAME_HEADER = struct.Struct("!4sBI")
 _GUEST_MAGIC = b"SBGR"
+_CONTROLLER_MAGIC = b"SBCC"
+_GUEST_RESULT_MAGIC = b"SBRS"
 _PEER_CREDENTIALS = struct.Struct("3i")
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._:@/-]{0,255}$")
@@ -69,12 +82,51 @@ _GUEST_OBSERVATION_FIELDS = frozenset((
     "peer_verified",
 ))
 _GUEST_REQUEST_FIELDS = frozenset((
-    "machine_id", "binding_id", "binding_version",
+    "machine_id", "binding_id", "binding_version", "scheme", "host", "port",
+    "method", "path", "headers", "body", "content_type", "deadline_ms",
+    "correlation_id",
 ))
 _FRAME_FIELDS = frozenset((
     "protocol_version", "lease_id", "broker_epoch", "machine_id",
     "binding_id", "binding_version", "policy_digest", "egress_digest",
-    "broker_digest", "expires_at", "descriptor_size",
+    "broker_digest", "operation_id", "request_digest", "expires_at",
+    "descriptor_size",
+))
+_CONTROLLER_IDENTITY_FIELDS = frozenset((
+    "uid", "pid", "process_start_identity", "executable_digest",
+))
+_CLAIM_NEXT_FIELDS = frozenset((
+    "type", "machine_id", "broker_epoch", "sequence",
+))
+_REFUSE_FIELDS = frozenset((
+    "type", "machine_id", "broker_epoch", "sequence", "operation_id",
+    "request_digest", "code",
+))
+_CLAIMED_FIELDS = frozenset((
+    "type", "machine_id", "broker_epoch", "operation_id", "request_digest",
+    "binding_id", "binding_version", "scheme", "host", "port", "method",
+    "path", "header_bytes", "body_bytes", "content_type", "deadline_ms",
+    "correlation_id",
+))
+_CONTROL_REFUSAL_FIELDS = frozenset(("type", "code"))
+_NO_PENDING_FIELDS = frozenset(("type",))
+CONTROLLER_REFUSAL_CODES = frozenset((
+    "binding_unknown", "binding_not_ready", "binding_expired",
+    "proof_unavailable", "egress_not_authorized", "request_scope_mismatch",
+    "source_unavailable", "lease_unavailable", "operation_cancelled",
+))
+GUEST_ERROR_CODES = frozenset((
+    "adapter_invalid", "binding_expired", "binding_not_ready", "binding_unknown",
+    "broker_closed", "concurrency_limit", "egress_not_authorized",
+    "guest_coordinator_unavailable", "guest_frame_invalid", "lease_expired",
+    "lease_unavailable", "operation_cancelled", "operation_indeterminate",
+    "proof_unavailable", "request_limit", "request_scope_mismatch",
+    "response_body_too_large", "source_unavailable", "transport_denied",
+    "upstream_failed", "upstream_timeout",
+))
+GUEST_RESPONSE_HEADERS = frozenset((
+    "cache-control", "content-language", "content-type", "etag",
+    "last-modified", "retry-after",
 ))
 _DESCRIPTOR_FIELDS = frozenset((
     "descriptor_count", "anonymous_memfd", "close_on_exec", "size", "seals",
@@ -92,12 +144,22 @@ _SAFE_SUMMARIES = {
     "dispatcher_denied": "lease dispatcher identity is denied",
     "frame_invalid": "lease frame is invalid",
     "guest_frame_invalid": "guest request frame is invalid",
+    "guest_request_pending": "guest request is pending",
     "guest_listener_closed": "guest listener is closed",
     "guest_listener_unavailable": "guest listener is unavailable",
+    "guest_coordinator_unavailable": "guest coordinator is not implemented",
     "lease_handoff_required": "lease requires an internal broker handoff",
     "lease_ack_indeterminate": "lease acknowledgement is indeterminate",
     "lease_not_pending": "lease has no matching pending request",
     "request_limit": "broker active request limit is reached",
+    "controller_denied": "controller identity is denied",
+    "controller_message_invalid": "controller message is invalid",
+    "operation_not_pending": "broker operation is not pending",
+    "operation_claimed": "broker operation is already claimed",
+    "operation_indeterminate": "broker operation outcome is indeterminate",
+    "operation_cancelled": "broker operation was refused before lease use",
+    "request_digest_mismatch": "broker request digest does not match",
+    "adapter_invalid": "credential operation adapter is invalid",
     "root_execution_denied": "credential broker transport refuses root execution",
     "lease_channel_closed": "trusted lease channel is closed",
     "lease_channel_unavailable": "trusted lease channel is unavailable",
@@ -139,6 +201,51 @@ def _address(value: Any) -> bool:
         return isinstance(value, str) and str(ipaddress.ip_address(value)) == value
     except ValueError:
         return False
+
+
+def _canonical_guest_request(value: Any) -> dict[str, Any]:
+    """Mirror the existing BrokerRequest validator and retain machine binding."""
+    item = _mapping(value, _GUEST_REQUEST_FIELDS)
+    if item is None or not _machine(item["machine_id"]):
+        raise ValueError("guest request is invalid")
+    try:
+        from sandbox.isolation.credential_request_broker import BrokerRequest
+
+        request = BrokerRequest.from_mapping({
+            key: item[key] for key in _GUEST_REQUEST_FIELDS if key != "machine_id"
+        })
+    except Exception as exc:
+        raise ValueError("guest request is invalid") from exc
+    return {
+        "machine_id": item["machine_id"],
+        "binding_id": request.binding_id,
+        "binding_version": request.binding_version,
+        "scheme": request.scheme,
+        "host": request.host,
+        "port": request.port,
+        "method": request.method,
+        "path": request.path,
+        "headers": dict(request.headers),
+        "body": bytes(request.body),
+        "content_type": request.content_type,
+        "deadline_ms": request.deadline_ms,
+        "correlation_id": request.correlation_id,
+    }
+
+
+def _wire_guest_request(value: Any) -> dict[str, Any]:
+    item = _canonical_guest_request(value)
+    wire = dict(item)
+    wire["body"] = base64.b64encode(item["body"]).decode("ascii")
+    return wire
+
+
+def guest_request_digest(value: Any) -> str:
+    wire = _wire_guest_request(value)
+    payload = json.dumps(
+        wire, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _safe_code(value: Any) -> str:
@@ -218,7 +325,10 @@ def validate_guest_admission(
 ) -> dict[str, Any]:
     """Validate the exact private-veth tuple before guest request parsing."""
     observed = _mapping(observation, _GUEST_OBSERVATION_FIELDS)
-    requested = _mapping(request, _GUEST_REQUEST_FIELDS)
+    try:
+        requested = _canonical_guest_request(request)
+    except ValueError:
+        requested = None
     transport = validate_guest_transport(service, observed)
     if not transport["ok"] or requested is None:
         return bounded_error("transport_denied")
@@ -349,6 +459,8 @@ def _validate_frame_identity(service: Any, frame: Any, *, now: int) -> dict[str,
     if not all((
         value["protocol_version"] == PROTOCOL_VERSION,
         _identity(value["lease_id"]),
+        _identity(value["operation_id"]),
+        _digest(value["request_digest"]),
         _identity(value["broker_epoch"]),
         _machine(value["machine_id"]),
         _identity(value["binding_id"]),
@@ -465,9 +577,7 @@ def parse_lease_frame(packet: Any) -> dict[str, Any]:
 
 
 def encode_guest_request(request: Any) -> bytes:
-    value = _mapping(request, _GUEST_REQUEST_FIELDS)
-    if value is None:
-        raise ValueError("guest request is invalid")
+    value = _wire_guest_request(request)
     payload = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode("ascii")
@@ -482,13 +592,157 @@ def parse_guest_request(packet: Any) -> dict[str, Any]:
     try:
         magic, version, payload_size = _FRAME_HEADER.unpack(packet[:_FRAME_HEADER.size])
         payload = packet[_FRAME_HEADER.size:]
-        value = json.loads(payload.decode("ascii"))
-    except (struct.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        wire = json.loads(payload.decode("ascii"))
+        if _mapping(wire, _GUEST_REQUEST_FIELDS) is None \
+                or not isinstance(wire["body"], str):
+            raise ValueError("guest request is invalid")
+        value = dict(wire)
+        value["body"] = base64.b64decode(wire["body"], validate=True)
+        value = _canonical_guest_request(value)
+    except (struct.error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("guest request is invalid") from exc
     if magic != _GUEST_MAGIC or version != PROTOCOL_VERSION or payload_size != len(payload) \
-            or _mapping(value, _GUEST_REQUEST_FIELDS) is None \
             or encode_guest_request(value) != packet:
         raise ValueError("guest request is invalid")
+    return value
+
+
+def encode_controller_message(message: Any) -> bytes:
+    if not isinstance(message, dict):
+        raise ValueError("controller message is invalid")
+    fields = {
+        "CLAIM_NEXT": _CLAIM_NEXT_FIELDS,
+        "CLAIMED": _CLAIMED_FIELDS,
+        "NO_PENDING": _NO_PENDING_FIELDS,
+        "REFUSE": _REFUSE_FIELDS if "operation_id" in message else _CONTROL_REFUSAL_FIELDS,
+    }.get(message.get("type"))
+    if fields is None or _mapping(message, fields) is None:
+        raise ValueError("controller message is invalid")
+    kind = message["type"]
+    if kind in {"CLAIM_NEXT", "CLAIMED"} and not all((
+        _machine(message["machine_id"]), _identity(message["broker_epoch"]),
+    )):
+        raise ValueError("controller message is invalid")
+    if kind == "CLAIM_NEXT" and not _integer(message["sequence"], minimum=1):
+        raise ValueError("controller message is invalid")
+    if kind == "CLAIMED" and not all((
+        _identity(message["operation_id"]), _digest(message["request_digest"]),
+        _identity(message["binding_id"]),
+        _integer(message["binding_version"], minimum=1),
+        message["scheme"] == "https", _identity(message["host"]),
+        _integer(message["port"], minimum=1, maximum=65535),
+        _identity(message["method"]), isinstance(message["path"], str),
+        _integer(message["header_bytes"], maximum=MAX_GUEST_HEADERS_BYTES),
+        _integer(message["body_bytes"], maximum=MAX_GUEST_BODY_BYTES),
+        message["content_type"] is None or isinstance(message["content_type"], str),
+        _integer(message["deadline_ms"], minimum=1, maximum=30_000),
+        _identity(message["correlation_id"]),
+    )):
+        raise ValueError("controller message is invalid")
+    if kind == "REFUSE" and "operation_id" in message and not all((
+        _machine(message["machine_id"]), _identity(message["broker_epoch"]),
+        _integer(message["sequence"], minimum=1), _identity(message["operation_id"]),
+        _digest(message["request_digest"]), message["code"] in CONTROLLER_REFUSAL_CODES,
+    )):
+        raise ValueError("controller message is invalid")
+    if kind == "REFUSE" and "operation_id" not in message \
+            and _safe_code(message["code"]) != message["code"]:
+        raise ValueError("controller message is invalid")
+    payload = json.dumps(
+        message, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    if _FRAME_HEADER.size + len(payload) > MAX_FRAME_BYTES:
+        raise ValueError("controller message exceeds the fixed bound")
+    return _FRAME_HEADER.pack(_CONTROLLER_MAGIC, PROTOCOL_VERSION, len(payload)) + payload
+
+
+def parse_controller_message(packet: Any) -> dict[str, Any]:
+    if not isinstance(packet, bytes) or not _FRAME_HEADER.size <= len(packet) <= MAX_FRAME_BYTES:
+        raise ValueError("controller message is invalid")
+    try:
+        magic, version, payload_size = _FRAME_HEADER.unpack(packet[:_FRAME_HEADER.size])
+        payload = packet[_FRAME_HEADER.size:]
+        value = json.loads(payload.decode("ascii"))
+    except (struct.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("controller message is invalid") from exc
+    if magic != _CONTROLLER_MAGIC or version != PROTOCOL_VERSION \
+            or payload_size != len(payload) or encode_controller_message(value) != packet:
+        raise ValueError("controller message is invalid")
+    return value
+
+
+def encode_guest_terminal_result(result: Any) -> bytes:
+    """Encode one terminal guest result without operation or lease identities."""
+    if not isinstance(result, dict) or "operation_id" in result or "lease_id" in result:
+        raise ValueError("guest terminal result is invalid")
+    if result.get("ok") is True:
+        fields = {"ok", "status", "headers", "body", "correlation_id"}
+        if set(result) != fields or not _integer(result["status"], minimum=100, maximum=599) \
+                or not isinstance(result["headers"], dict) \
+                or not isinstance(result["body"], bytes) \
+                or len(result["body"]) > MAX_GUEST_RESULT_BODY_BYTES \
+                or not _identity(result["correlation_id"]):
+            raise ValueError("guest terminal result is invalid")
+        header_bytes = 0
+        normalized_names: set[str] = set()
+        for name, text in result["headers"].items():
+            normalized = name.lower() if isinstance(name, str) else ""
+            if not isinstance(name, str) or not re.fullmatch(
+                r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name,
+            ) or name != normalized or normalized in normalized_names \
+                    or normalized not in GUEST_RESPONSE_HEADERS \
+                    or not isinstance(text, str) \
+                    or any(ord(character) < 32 or ord(character) == 127 for character in text):
+                raise ValueError("guest terminal result is invalid")
+            normalized_names.add(normalized)
+            try:
+                header_bytes += len(name.encode("ascii")) + len(text.encode("utf-8")) + 4
+            except UnicodeEncodeError as exc:
+                raise ValueError("guest terminal result is invalid") from exc
+        if header_bytes > MAX_GUEST_HEADERS_BYTES:
+            raise ValueError("guest terminal result is invalid")
+        wire = dict(result)
+        wire["body"] = base64.b64encode(result["body"]).decode("ascii")
+    else:
+        fields = {"ok", "code", "message", "retryable", "correlation_id"}
+        if set(result) != fields or result.get("ok") is not False \
+                or result["code"] not in GUEST_ERROR_CODES \
+                or not isinstance(result["message"], str) or len(result["message"]) > 256 \
+                or not isinstance(result["retryable"], bool) \
+                or not _identity(result["correlation_id"]):
+            raise ValueError("guest terminal result is invalid")
+        expected_message = _SAFE_SUMMARIES.get(
+            result["code"], "credential broker request refused",
+        )
+        if result["message"] != expected_message:
+            raise ValueError("guest terminal result is invalid")
+        wire = dict(result)
+    payload = json.dumps(
+        wire, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    if _FRAME_HEADER.size + len(payload) > MAX_GUEST_RESULT_FRAME_BYTES:
+        raise ValueError("guest terminal result exceeds the fixed bound")
+    return _FRAME_HEADER.pack(
+        _GUEST_RESULT_MAGIC, PROTOCOL_VERSION, len(payload),
+    ) + payload
+
+
+def parse_guest_terminal_result(packet: Any) -> dict[str, Any]:
+    if not isinstance(packet, bytes) or not _FRAME_HEADER.size <= len(packet) \
+            <= MAX_GUEST_RESULT_FRAME_BYTES:
+        raise ValueError("guest terminal result is invalid")
+    try:
+        magic, version, payload_size = _FRAME_HEADER.unpack(packet[:_FRAME_HEADER.size])
+        payload = packet[_FRAME_HEADER.size:]
+        wire = json.loads(payload.decode("ascii"))
+        value = dict(wire)
+        if value.get("ok") is True:
+            value["body"] = base64.b64decode(value["body"], validate=True)
+    except (struct.error, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise ValueError("guest terminal result is invalid") from exc
+    if magic != _GUEST_RESULT_MAGIC or version != PROTOCOL_VERSION \
+            or payload_size != len(payload) or encode_guest_terminal_result(value) != packet:
+        raise ValueError("guest terminal result is invalid")
     return value
 
 
@@ -600,8 +854,13 @@ class ActiveRequestTracker:
             return True
 
 
-class PendingRequestRegistry:
-    """Rendezvous metadata for verified guest requests and trusted leases."""
+class LegacyPendingLeaseRegistry:
+    """Isolated pre-controller lease test seam; not the operation protocol.
+
+    This remains only so the guarded descriptor endpoint can be tested before a
+    real coordinator exists.  Its records now bind operation and request digest
+    metadata, but it MUST NOT be wired as the guest/controller operation path.
+    """
 
     def __init__(self, service: Any, *, tracker: ActiveRequestTracker | None = None) -> None:
         if not _validate_service_identity(service):
@@ -623,8 +882,10 @@ class PendingRequestRegistry:
         if self._closed or not validate_guest_admission(self.service, observation, request)["ok"] \
                 or not isinstance(authorization, dict):
             return bounded_error("transport_denied")
-        expected = {"lease_id", "expires_at"}
+        expected = {"lease_id", "operation_id", "request_digest", "expires_at"}
         if set(authorization) != expected or not _identity(authorization["lease_id"]) \
+                or not _identity(authorization["operation_id"]) \
+                or not _digest(authorization["request_digest"]) \
                 or not _integer(authorization["expires_at"], minimum=1) \
                 or authorization["expires_at"] <= now:
             return bounded_error("lease_not_pending")
@@ -636,6 +897,8 @@ class PendingRequestRegistry:
             return bounded_error("request_limit")
         record = {
             "lease_id": lease_id,
+            "operation_id": authorization["operation_id"],
+            "request_digest": authorization["request_digest"],
             "machine_id": self.service["machine_id"],
             "broker_epoch": self.service["broker_epoch"],
             "binding_id": request["binding_id"],
@@ -662,7 +925,8 @@ class PendingRequestRegistry:
         if record is None:
             return None, bounded_error("lease_not_pending")
         fields = (
-            "lease_id", "machine_id", "broker_epoch", "binding_id", "binding_version",
+            "lease_id", "operation_id", "request_digest", "machine_id",
+            "broker_epoch", "binding_id", "binding_version",
             "policy_digest", "egress_digest", "broker_digest", "expires_at",
         )
         if any(record[field] != frame.get(field) for field in fields) \
@@ -724,6 +988,411 @@ class PendingRequestRegistry:
             self._pending.clear()
         self.tracker.close()
         return selected
+
+
+class PendingOperationRegistry:
+    """Private guest/result rendezvous using broker-generated operation IDs."""
+
+    def __init__(
+        self,
+        service: Any,
+        *,
+        id_factory=None,
+        limit: int = MAX_ACTIVE_REQUESTS,
+    ) -> None:
+        if not _validate_service_identity(service) \
+                or not _integer(limit, minimum=1, maximum=MAX_ACTIVE_REQUESTS):
+            raise ValueError("pending operation registry configuration is invalid")
+        self.service = dict(service)
+        self._id_factory = id_factory or (lambda: f"op-{uuid.uuid4().hex}")
+        if not callable(self._id_factory):
+            raise ValueError("pending operation ID factory is invalid")
+        self._limit = limit
+        self._items: dict[str, dict[str, Any]] = {}
+        self._connection_index: dict[str, str] = {}
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def submit(
+        self,
+        request: Any,
+        observation: Any,
+        *,
+        now: int,
+    ) -> dict[str, Any]:
+        checked = validate_guest_admission(self.service, observation, request)
+        if not checked["ok"] or not _integer(now, minimum=0):
+            return bounded_error("transport_denied")
+        try:
+            canonical = _canonical_guest_request(request)
+            digest = guest_request_digest(canonical)
+            operation_id = self._id_factory()
+        except (TypeError, ValueError):
+            return bounded_error("guest_frame_invalid")
+        connection_id = observation["connection_identity"]
+        if not _identity(operation_id):
+            return bounded_error("operation_not_pending")
+        with self._lock:
+            active = sum(item["result"] is None for item in self._items.values())
+            if self._closed or active >= self._limit:
+                return bounded_error("request_limit")
+            if len(self._items) >= self._limit * 2:
+                for stale_id, stale in tuple(self._items.items()):
+                    if stale["result"] is not None:
+                        self._items.pop(stale_id, None)
+                        self._connection_index.pop(stale["connection_identity"], None)
+                        if len(self._items) < self._limit * 2:
+                            break
+            if operation_id in self._items or connection_id in self._connection_index:
+                return bounded_error("operation_not_pending")
+            self._items[operation_id] = {
+                "operation_id": operation_id,
+                "request_digest": digest,
+                "request": canonical,
+                "connection_identity": connection_id,
+                "created_at": now,
+                "deadline_at": now + max(1, (canonical["deadline_ms"] + 999) // 1000),
+                "state": "pending",
+                "claim_owner": None,
+                "lease_id": None,
+                "expires_at": None,
+                "result": None,
+            }
+            self._connection_index[connection_id] = operation_id
+        return _bounded_document({
+            "ok": True,
+            "state": "credential_pending",
+            "correlation_id": canonical["correlation_id"],
+        })
+
+    def claim_next(self, owner: str, *, now: int) -> dict[str, Any]:
+        if not _identity(owner) or not _integer(now, minimum=0):
+            return bounded_error("controller_denied")
+        with self._lock:
+            for item in self._items.values():
+                if item["state"] == "pending":
+                    if item["deadline_at"] <= now:
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("lease_expired")
+                        continue
+                    item["state"] = "claimed"
+                    item["claim_owner"] = owner
+                    request = item["request"]
+                    header_bytes = sum(
+                        len(name.encode("ascii")) + len(text.encode("utf-8")) + 4
+                        for name, text in request["headers"].items()
+                    )
+                    claimed = {
+                        "type": "CLAIMED",
+                        "operation_id": item["operation_id"],
+                        "request_digest": item["request_digest"],
+                        "machine_id": self.service["machine_id"],
+                        "broker_epoch": self.service["broker_epoch"],
+                        "binding_id": request["binding_id"],
+                        "binding_version": request["binding_version"],
+                        "scheme": request["scheme"],
+                        "host": request["host"],
+                        "port": request["port"],
+                        "method": request["method"],
+                        "path": request["path"],
+                        "header_bytes": header_bytes,
+                        "body_bytes": len(request["body"]),
+                        "content_type": request["content_type"],
+                        "deadline_ms": request["deadline_ms"],
+                        "correlation_id": request["correlation_id"],
+                    }
+                    try:
+                        encode_controller_message(claimed)
+                    except ValueError:
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("request_scope_mismatch")
+                        continue
+                    return claimed
+        return {"type": "NO_PENDING"}
+
+    def bind_lease(self, frame: Any, *, owner: str, now: int) -> dict[str, Any]:
+        checked = _validate_frame_identity(self.service, frame, now=now)
+        if not checked["ok"]:
+            return checked
+        operation_id = frame["operation_id"]
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["state"] != "claimed" or item["claim_owner"] != owner:
+                return bounded_error("operation_not_pending")
+            if item["deadline_at"] <= now:
+                item["state"] = "refused"
+                item["result"] = bounded_error("lease_expired")
+                return bounded_error("lease_expired")
+            if item["request_digest"] != frame["request_digest"]:
+                item["state"] = "refused"
+                item["result"] = bounded_error("operation_cancelled")
+                return bounded_error("request_digest_mismatch")
+            request = item["request"]
+            if request["binding_id"] != frame["binding_id"] \
+                    or request["binding_version"] != frame["binding_version"]:
+                item["state"] = "refused"
+                item["result"] = bounded_error("operation_cancelled")
+                return bounded_error("lease_identity_mismatch")
+            item["state"] = "lease_bound"
+            item["lease_id"] = frame["lease_id"]
+            item["expires_at"] = frame["expires_at"]
+            return {"ok": True, "code": "lease_rendezvous"}
+
+    def trusted_request(self, operation_id: str, request_digest: str) -> dict[str, Any] | None:
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["state"] != "lease_bound":
+                return None
+            return dict(item["request"])
+
+    def complete(self, operation_id: str, request_digest: str, result: Any) -> dict[str, Any]:
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+
+        if not isinstance(result, BrokerResponse):
+            return self.complete_indeterminate(operation_id, request_digest)
+        public = _guest_public_result(result)
+        try:
+            encode_guest_terminal_result(public)
+        except ValueError:
+            return self.complete_indeterminate(operation_id, request_digest)
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["state"] != "lease_bound":
+                return bounded_error("operation_not_pending")
+            if result.correlation_id != item["request"]["correlation_id"]:
+                item["state"] = "indeterminate"
+                item["result"] = bounded_error("operation_indeterminate")
+                return item["result"]
+            item["state"] = "completed"
+            item["result"] = public
+        return public
+
+    def complete_refused(
+        self, operation_id: str, request_digest: str, *, code: str,
+    ) -> dict[str, Any]:
+        if code not in GUEST_ERROR_CODES or code == "operation_indeterminate":
+            return self.complete_indeterminate(operation_id, request_digest)
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["state"] != "lease_bound":
+                return bounded_error("operation_not_pending")
+            result = bounded_error(code)
+            item["state"] = "refused"
+            item["result"] = result
+            return result
+
+    def complete_indeterminate(
+        self, operation_id: str, request_digest: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["state"] != "lease_bound":
+                return bounded_error("operation_not_pending")
+            result = bounded_error("operation_indeterminate")
+            item["state"] = "indeterminate"
+            item["result"] = result
+            return result
+
+    def refuse(
+        self, operation_id: str, request_digest: str, *, owner: str, code: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None or item["request_digest"] != request_digest \
+                    or item["claim_owner"] != owner or item["state"] != "claimed":
+                return bounded_error("operation_not_pending")
+            result = bounded_error(code)
+            item["state"] = "refused"
+            item["result"] = result
+            return result
+
+    def controller_disconnected(self, owner: str) -> tuple[str, ...]:
+        selected = []
+        with self._lock:
+            for operation_id, item in self._items.items():
+                if item["claim_owner"] == owner and item["state"] in {"claimed", "lease_bound"}:
+                    if item["state"] == "claimed":
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("operation_cancelled")
+                    else:
+                        item["state"] = "indeterminate"
+                        item["result"] = bounded_error("operation_indeterminate")
+                    selected.append(operation_id)
+        return tuple(selected)
+
+    def guest_result(self, connection_identity: str, *, consume: bool = False) -> dict[str, Any]:
+        with self._lock:
+            operation_id = self._connection_index.get(connection_identity)
+            item = self._items.get(operation_id) if operation_id else None
+            if item is None:
+                return bounded_error("operation_not_pending")
+            result = item["result"]
+            if result is None:
+                return _bounded_document({
+                    "ok": True,
+                    "state": "credential_pending",
+                    "correlation_id": item["request"]["correlation_id"],
+                })
+            public = dict(result)
+            if public.get("ok") is False and "correlation_id" not in public:
+                public["correlation_id"] = item["request"]["correlation_id"]
+            if consume:
+                self._items.pop(operation_id, None)
+                self._connection_index.pop(connection_identity, None)
+            return public
+
+    def guest_disconnected(self, connection_identity: str) -> dict[str, Any]:
+        """Terminalize and reclaim the private record when its guest leaves."""
+        with self._lock:
+            operation_id = self._connection_index.pop(connection_identity, None)
+            item = self._items.pop(operation_id, None) if operation_id else None
+            if item is None:
+                return bounded_error("operation_not_pending")
+            if item["result"] is not None:
+                return dict(item["result"])
+            if item["state"] == "lease_bound":
+                return bounded_error("operation_indeterminate")
+            return bounded_error("operation_cancelled")
+
+    def close(self) -> tuple[str, ...]:
+        with self._lock:
+            self._closed = True
+            selected = tuple(self._items)
+            for item in self._items.values():
+                if item["result"] is None:
+                    if item["state"] == "lease_bound":
+                        item["state"] = "indeterminate"
+                        item["result"] = bounded_error("operation_indeterminate")
+                    else:
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("operation_cancelled")
+            return selected
+
+    def revoke(self, binding_id: str, binding_version: int | None = None) -> tuple[str, ...]:
+        selected = []
+        with self._lock:
+            for operation_id, item in self._items.items():
+                request = item["request"]
+                if request["binding_id"] == binding_id \
+                        and (binding_version is None
+                             or request["binding_version"] == binding_version) \
+                        and item["result"] is None:
+                    if item["state"] == "lease_bound":
+                        item["state"] = "indeterminate"
+                        item["result"] = bounded_error("operation_indeterminate")
+                    else:
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("operation_cancelled")
+                    selected.append(operation_id)
+        return tuple(selected)
+
+    def expire(self, now: int) -> tuple[str, ...]:
+        if not _integer(now, minimum=0):
+            return ()
+        selected = []
+        with self._lock:
+            for operation_id, item in self._items.items():
+                expired = item["deadline_at"] <= now \
+                    or (item["expires_at"] is not None and item["expires_at"] <= now)
+                if expired and item["result"] is None:
+                    if item["state"] == "lease_bound":
+                        item["state"] = "indeterminate"
+                        item["result"] = bounded_error("operation_indeterminate")
+                    else:
+                        item["state"] = "refused"
+                        item["result"] = bounded_error("lease_expired")
+                    selected.append(operation_id)
+        return tuple(selected)
+
+
+def _guest_public_result(value: Any) -> dict[str, Any]:
+    """Return only the reviewed guest response/error shape; never internal IDs."""
+    try:
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+
+        if isinstance(value, BrokerResponse):
+            return {
+                "ok": True,
+                "status": value.status,
+                "headers": dict(value.headers),
+                "body": bytes(value.body),
+                "correlation_id": value.correlation_id,
+            }
+    except ImportError:
+        pass
+    return bounded_error("adapter_invalid")
+
+
+class ControllerClaimChannel:
+    """Pure authenticated CLAIM_NEXT/REFUSE state machine for seqpacket use."""
+
+    def __init__(
+        self, service: Any, registry: PendingOperationRegistry, controller: Any,
+        *, clock=None,
+    ) -> None:
+        identity = _mapping(controller, _CONTROLLER_IDENTITY_FIELDS)
+        if not _validate_service_identity(service) or not isinstance(registry, PendingOperationRegistry) \
+                or registry.service != service or identity is None or not all((
+                    _integer(identity["uid"], minimum=1, maximum=2**31 - 1),
+                    _integer(identity["pid"], minimum=1, maximum=2**31 - 1),
+                    _identity(identity["process_start_identity"]),
+                    _digest(identity["executable_digest"]),
+                )) or (clock is not None and not callable(clock)):
+            raise ValueError("controller claim channel configuration is invalid")
+        self.service = dict(service)
+        self.registry = registry
+        self.controller = dict(identity)
+        self._sequences: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._clock = clock or time.time
+
+    def handle(self, message: Any, *, observed_peer: Any, connection_identity: str) -> dict[str, Any]:
+        if observed_peer != self.controller or not _identity(connection_identity):
+            return bounded_error("controller_denied")
+        if not isinstance(message, dict):
+            return bounded_error("controller_message_invalid")
+        if message.get("type") not in {"CLAIM_NEXT", "REFUSE"}:
+            return bounded_error("controller_message_invalid")
+        expected = _CLAIM_NEXT_FIELDS if message["type"] == "CLAIM_NEXT" else _REFUSE_FIELDS
+        value = _mapping(message, expected)
+        if value is None or value["machine_id"] != self.service["machine_id"] \
+                or value["broker_epoch"] != self.service["broker_epoch"] \
+                or not _integer(value["sequence"], minimum=1):
+            return bounded_error("controller_message_invalid")
+        if value["type"] == "REFUSE" and (
+            not _identity(value["operation_id"])
+            or not _digest(value["request_digest"])
+            or value["code"] not in CONTROLLER_REFUSAL_CODES
+        ):
+            return bounded_error("controller_message_invalid")
+        with self._lock:
+            expected_sequence = self._sequences.get(connection_identity, 0) + 1
+            if value["sequence"] != expected_sequence:
+                return bounded_error("controller_message_invalid")
+            self._sequences[connection_identity] = expected_sequence
+        if value["type"] == "CLAIM_NEXT":
+            return self.registry.claim_next(
+                connection_identity, now=int(self._clock()),
+            )
+        refused = self.registry.refuse(
+            value["operation_id"], value["request_digest"], owner=connection_identity,
+            code=value["code"],
+        )
+        return {"type": "REFUSE", "code": refused.get("code", "broker_failed")}
+
+    def disconnect(self, connection_identity: str) -> tuple[str, ...]:
+        with self._lock:
+            self._sequences.pop(connection_identity, None)
+        return self.registry.controller_disconnected(connection_identity)
 
 
 class LeaseReceiver:
@@ -818,27 +1487,31 @@ def _readily_observable_trailing(connection) -> bool:
 
 
 class LinuxGuestEndpoint:
-    """Opt-in exact private-veth listener; no default runtime constructs it."""
+    """Opt-in private-veth admission probe, not an integrated guest endpoint.
+
+    It proves bind/peer/frame ordering with fakes but deliberately refuses after
+    validation. The accepted wire contract requires the future coordinator to
+    retain this connection until a terminal result; sending `pending` here would
+    falsely present this preparatory seam as that operation flow.
+    """
 
     def __init__(
         self,
         service: Any,
         *,
-        registry: PendingRequestRegistry,
+        registry: PendingOperationRegistry,
         connection_observer,
-        request_authorizer,
         enabled: bool = False,
         socket_factory=None,
         clock=None,
     ) -> None:
-        if not _validate_service_identity(service) or not isinstance(registry, PendingRequestRegistry) \
+        if not _validate_service_identity(service) or not isinstance(registry, PendingOperationRegistry) \
                 or registry.service != service or not callable(connection_observer) \
-                or not callable(request_authorizer) or not isinstance(enabled, bool):
+                or not isinstance(enabled, bool):
             raise ValueError("guest listener configuration is invalid")
         self.service = dict(service)
         self.registry = registry
         self.connection_observer = connection_observer
-        self.request_authorizer = request_authorizer
         self.enabled = enabled
         self.socket_factory = socket_factory or socket.socket
         self.clock = clock or time.time
@@ -904,13 +1577,11 @@ class LinuxGuestEndpoint:
             checked = validate_guest_admission(self.service, observation, request)
             if not checked["ok"]:
                 return checked
-            authorization = self.request_authorizer(dict(request))
-            result = self.registry.register(
-                request, observation, authorization, now=int(self.clock()),
-            )
-            payload = json.dumps(
-                _bounded_document(result), sort_keys=True, separators=(",", ":"),
-            ).encode("ascii")
+            result = {
+                **bounded_error("guest_coordinator_unavailable"),
+                "correlation_id": request["correlation_id"],
+            }
+            payload = encode_guest_terminal_result(result)
             connection.sendall(payload)
             return result
         except Exception:
@@ -1242,18 +1913,56 @@ class LinuxLeaseDispatcher:
                     self.kernel.close(connection)
                 except OSError:
                     pass
-class LinuxLeaseEndpoint:
-    """Opt-in, broker-owned abstract seqpacket lease endpoint.
 
-    Construction is inert and admission is closed.  ``start`` is Linux-only
-    and requires an exact external process-identity observer.  No runtime code
-    constructs this class by default; T036 owns any later lifecycle wiring.
+
+class CredentialOperationAdapter:
+    """Closed placeholder for the required descriptor-backed request broker.
+
+    Direct `VerifiedHttpsUpstream` use would bypass proof, egress, concurrency,
+    error normalization, and broker redaction. A normal `CredentialRequestBroker`
+    resolves its own lease and cannot consume this service's descriptor. Until a
+    reviewed descriptor-backed request-broker entry point exists, production
+    construction fails closed.
+    """
+
+    def __init__(self, target: Any, *, binding: Any = None) -> None:
+        from sandbox.isolation.credential_request_broker import CredentialRequestBroker
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        if isinstance(target, VerifiedHttpsUpstream):
+            raise ValueError("direct verified upstream adapter is forbidden")
+        if isinstance(target, CredentialRequestBroker):
+            raise ValueError("descriptor-backed request broker adapter is not implemented")
+        raise ValueError("credential operation adapter target is invalid")
+
+    def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
+        raise RuntimeError("descriptor-backed request broker adapter is not implemented")
+
+
+class OfflineTestOperationAdapter:
+    """Explicit fake-only adapter; construction requires an offline test gate."""
+
+    def __init__(self, callback, *, offline_test: bool = False) -> None:
+        if offline_test is not True or not callable(callback):
+            raise ValueError("offline credential adapter is disabled")
+        self._callback = callback
+
+    def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
+        return self._callback(dict(request), material)
+
+
+class LinuxLeaseEndpoint:
+    """Offline-only legacy descriptor endpoint probe.
+
+    Construction is inert and admission is closed. Enabling requires both the
+    explicit offline adapter and an injected socket factory, so this legacy
+    registry can never become a real production endpoint.
     """
 
     __slots__ = (
         "_service", "_control_plane_uid", "_identity_observer", "_socket_factory",
         "_listener", "_enabled", "_admission_open", "_consumed", "_clock",
-        "_terminal_closed", "_registry", "_internal_handoff", "_descriptor_reader",
+        "_terminal_closed", "_registry", "_adapter", "_descriptor_reader",
         "_consumed_lock",
     )
 
@@ -1263,8 +1972,8 @@ class LinuxLeaseEndpoint:
         *,
         control_plane_uid: int,
         identity_observer,
-        registry: PendingRequestRegistry | None = None,
-        internal_handoff=None,
+        registry: LegacyPendingLeaseRegistry | None = None,
+        adapter: OfflineTestOperationAdapter | None = None,
         descriptor_reader=None,
         enabled: bool = False,
         socket_factory=None,
@@ -1278,9 +1987,11 @@ class LinuxLeaseEndpoint:
             raise ValueError("trusted lease socket factory is invalid")
         if clock is not None and not callable(clock):
             raise ValueError("trusted lease clock is invalid")
-        if enabled and (not isinstance(registry, PendingRequestRegistry)
-                        or registry.service != service or not callable(internal_handoff)):
-            raise ValueError("enabled lease endpoint requires pending rendezvous and handoff")
+        if enabled and (not isinstance(registry, LegacyPendingLeaseRegistry)
+                        or registry.service != service
+                        or not isinstance(adapter, OfflineTestOperationAdapter)
+                        or socket_factory is None):
+            raise ValueError("legacy lease endpoint requires offline fake seams")
         if descriptor_reader is not None and not callable(descriptor_reader):
             raise ValueError("trusted descriptor reader is invalid")
         self._service = dict(service)
@@ -1295,7 +2006,7 @@ class LinuxLeaseEndpoint:
         self._clock = clock or __import__("time").time
         self._terminal_closed = False
         self._registry = registry
-        self._internal_handoff = internal_handoff
+        self._adapter = adapter
         self._descriptor_reader = descriptor_reader or _read_descriptor_once
 
     @property
@@ -1464,8 +2175,18 @@ class LinuxLeaseEndpoint:
                 if self._registry.tracker.cancelled(lease_id):
                     outcome = "refused"
                 else:
-                    handoff = self._internal_handoff(dict(pending["request"]), material)
-                    outcome = handoff.get("outcome") if isinstance(handoff, dict) else None
+                    adapted = self._adapter.execute(
+                        dict(pending["request"]), material,
+                        machine_id=self._service["machine_id"],
+                    )
+                    if isinstance(adapted, dict):
+                        outcome = adapted.get("outcome")
+                    else:
+                        try:
+                            from sandbox.isolation.credential_request_broker import BrokerResponse
+                            outcome = "completed" if isinstance(adapted, BrokerResponse) else None
+                        except ImportError:
+                            outcome = None
                     if self._registry.tracker.cancelled(lease_id):
                         outcome = "refused"
                 if outcome not in {"completed", "refused", "indeterminate"}:

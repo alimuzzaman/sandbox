@@ -95,8 +95,14 @@ complete and must converge on v2 before any production completion claim:
    integrated installed cross-process
    executable using real kernel-owned controller/lease/guest listeners, config
    ownership lifecycle, a continuous disconnect/deadline loop, and observed
-   lifecycle/audit cleanup remain incomplete. Authorized host proof remains a
-   separate T022/T029/T031 gate.
+   lifecycle/audit cleanup remain incomplete. The reviewed foundation now also
+   supplies a pure strict SBG2/SBR2 guest codec, the fixed private-veth tuple
+   and topology observation contract, canonical reciprocal full-set egress
+   projection, a pinned hostname/SNI/resolved-IP decision, and a phase-exact
+   immutable one-shot authorized-effect boundary. These are
+   production-shaped but closed and uninstalled. Finishing the local executable
+   is T035; proving its real Ubuntu 24.04 systemd/kernel behavior is separately
+   T022/T029, followed by T031 human review.
 3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
@@ -223,9 +229,11 @@ T032 records the historical v1 standalone credential-broker service/transport
 planning contract, T033 records the accepted local security design, and T034 records
 the passing fake/local contract suite. T035 has a fake-driven retained-guest,
 claim, descriptor, typed-broker, and terminal-result coordinator, but remains
-open for production controller and SCM_RIGHTS endpoints, the cross-process
-service entrypoint, guest disconnect/deadline processing, and lifecycle/audit
-observation. Authorized host evidence remains under T022/T029/T031; T036 remains open preparatory
+open for the closed/uninstalled cross-process service entrypoint, real
+controller/lease/guest listeners, guest disconnect/deadline processing, and
+lifecycle/audit observation. Its strict v2 guest, topology, egress-projection,
+and one-shot effect foundations are local code only. Authorized Ubuntu proof
+remains under T022/T029 and human review under T031; T036 remains open preparatory
 work. T037 is locally complete and independently accepted by Sol High (local
 only): its authenticated public
 projector consumes the existing T040 receipt, pins same-session T041/T042

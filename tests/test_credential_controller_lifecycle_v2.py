@@ -15,11 +15,24 @@ from sandbox.isolation.credential_controller_lifecycle_v2 import (
     verify_owned_config,
 )
 from sandbox.runtimes.managed.services import compile_credential_service_plans_v2
+from sandbox.isolation.models import EgressGrant, EgressGrantSet
 from tests import test_credential_controller_audit_v2 as audit_fixtures
 
 
 DIGESTS = [hashlib.sha256(f"lifecycle-{index}".encode()).hexdigest()
            for index in range(8)]
+
+
+def egress_projection(policy_digest, *, with_grant=False):
+    grants = ()
+    if with_grant:
+        grants = (EgressGrant(
+            "grant-lifecycle", "sb-0123456789ab", "public_cidr_tcp",
+            ("93.184.216.0/24",), (443,), "2999-01-01T00:00:00Z"),)
+    selected = EgressGrantSet("sb-0123456789ab", policy_digest, grants)
+    value = selected.to_dict()
+    value["egress_digest"] = value.pop("grant_digest")
+    return value
 
 
 def document(component="controller", **changes):
@@ -36,6 +49,7 @@ def document(component="controller", **changes):
         proof_digest=audit_fixtures.CONFIG.proof_digest,
         effective_isolation_digest=audit_fixtures.CONFIG.effective_isolation_digest,
         evidence_id=audit_fixtures.CONFIG.evidence_id,
+        egress_projection=egress_projection(audit_fixtures.CONFIG.policy_digest),
         peer_executable_digest=DIGESTS[1 if controller else 0],
         peer_config_digest=DIGESTS[7 if controller else 6],
         own_config_digest=DIGESTS[6 if controller else 7],
@@ -151,15 +165,17 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
             )
 
     def test_managed_service_compiler_derives_both_closed_plan_identities(self):
+        projection = egress_projection(DIGESTS[1])
         plans = compile_credential_service_plans_v2(
             machine_id="sb-0123456789ab", service_gid=2001,
             controller_executable_digest=DIGESTS[0],
             broker_executable_digest=DIGESTS[1],
             controller_config_identity="sandbox-v2-controller-config",
             broker_config_identity="sandbox-v2-broker-config",
-            policy_digest=DIGESTS[1], egress_digest=DIGESTS[2],
+            policy_digest=DIGESTS[1], egress_digest=projection["egress_digest"],
             broker_digest=DIGESTS[3], proof_digest=DIGESTS[4],
             effective_isolation_digest=DIGESTS[5], evidence_id=None,
+            egress_projection=projection,
             controller_config_digest=DIGESTS[6], broker_config_digest=DIGESTS[7],
             controller_endpoint_identity="v2-controller.sock",
             lease_endpoint_identity="v2-lease.sock",
@@ -169,6 +185,10 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
         self.assertEqual(plans["controller"].document["service_uid"], 992)
         self.assertEqual(plans["broker"].document["service_uid"], 993)
         self.assertIsNone(plans["broker"].document["evidence_id"])
+        self.assertEqual(plans["controller"].document["egress_projection"],
+                         plans["broker"].document["egress_projection"])
+        with self.assertRaises(TypeError):
+            plans["broker"].document["egress_projection"]["grants"] = ()
 
     def test_unknown_secret_or_runtime_fields_are_refused(self):
         for name, value in (
@@ -191,6 +211,19 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
     def test_cross_plan_peer_identity_mismatch_is_refused(self):
         controller = DerivedServiceConfigV2.derive(document("controller"))
         broker_doc = document("broker", peer_executable_digest=DIGESTS[2])
+        broker = DerivedServiceConfigV2.derive(broker_doc)
+        with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
+            ManagedCredentialLifecycleV2(
+                controller, broker, Executor(), audit_fixtures.session())
+
+    def test_cross_plan_egress_projection_mismatch_is_refused(self):
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        changed_projection = egress_projection(
+            audit_fixtures.CONFIG.policy_digest, with_grant=True)
+        broker_doc = document(
+            "broker", egress_digest=changed_projection["egress_digest"],
+            egress_projection=changed_projection,
+        )
         broker = DerivedServiceConfigV2.derive(broker_doc)
         with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
             ManagedCredentialLifecycleV2(

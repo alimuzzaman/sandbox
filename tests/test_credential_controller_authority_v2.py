@@ -103,7 +103,7 @@ def claim(operation="operation-012345"):
     }
 
 
-def interfaces(events, *, auth_form="authorization_bearer"):
+def interfaces(events, *, auth_form="authorization_bearer", config=CONFIG):
     def binding_authority(value):
         events.append("binding")
         return {"binding_id": value["binding_id"], "binding_version": 1,
@@ -115,12 +115,12 @@ def interfaces(events, *, auth_form="authorization_bearer"):
         source_authority=lambda binding: events.append("source") or binding["source_handle"],
         scope_authority=lambda _binding, _claim: events.append("scope") or True,
         proof_authority=lambda _binding, _claim: events.append("proof") or {
-            "policy_digest": CONFIG.policy_digest, "proof_digest": CONFIG.proof_digest,
-            "effective_isolation_digest": CONFIG.effective_isolation_digest,
-            "evidence_id": CONFIG.evidence_id,
+            "policy_digest": config.policy_digest, "proof_digest": config.proof_digest,
+            "effective_isolation_digest": config.effective_isolation_digest,
+            "evidence_id": config.evidence_id,
         },
         egress_authority=lambda _binding, _claim: events.append("egress") or {
-            "egress_digest": CONFIG.egress_digest, "broker_digest": CONFIG.broker_digest,
+            "egress_digest": config.egress_digest, "broker_digest": config.broker_digest,
         },
         activation_authority=lambda: events.append("activation") or {
             "admission_open": True,

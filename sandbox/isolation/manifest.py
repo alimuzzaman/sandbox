@@ -12,6 +12,7 @@ MANAGED_ISOLATION_CAPABILITIES = ({
         "sandbox.isolation.credential_binding",
         "sandbox.isolation.credential_request_broker",
         "sandbox.isolation.credential_controller_protocol_v2",
+        "sandbox.isolation.credential_guest_protocol_v2",
         "sandbox.isolation.credential_controller_service_v2",
         "sandbox.isolation.credential_controller_authority_v2",
         "sandbox.isolation.credential_controller_audit_v2",

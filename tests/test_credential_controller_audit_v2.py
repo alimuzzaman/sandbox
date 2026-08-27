@@ -14,6 +14,7 @@ from sandbox.isolation.credential_controller_service_v2 import (
     ControllerServiceConfig,
     ProcessIdentity,
 )
+from sandbox.isolation.models import EgressGrantSet
 
 
 NOW = 1_800_000_000_000
@@ -41,7 +42,8 @@ def identity(offset):
 
 CONFIG = ControllerServiceConfig(
     machine_id=MACHINE, controller=identity(0), broker=identity(1),
-    policy_digest=DIGESTS[0], egress_digest=DIGESTS[1],
+    policy_digest=DIGESTS[0],
+    egress_digest=EgressGrantSet(MACHINE, DIGESTS[0]).digest,
     broker_digest=DIGESTS[2], proof_digest=DIGESTS[3],
     effective_isolation_digest=DIGESTS[4], evidence_id="evidence-0123456",
 )

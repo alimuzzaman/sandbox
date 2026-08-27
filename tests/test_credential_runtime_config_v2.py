@@ -108,8 +108,7 @@ class TestCredentialRuntimeConfigV2(unittest.TestCase):
         for name, value in (("component", "controller"),
                             ("machine_id", "sb-ffffffffffff"),
                             ("service_gid", 2002)):
-            changed = dict(selected.document)
-            changed["bounds"] = dict(changed["bounds"])
+            changed = json.loads(selected.canonical_bytes)
             changed[name] = value
             documents.append(json.dumps(changed, sort_keys=True,
                                         separators=(",", ":")).encode("ascii"))

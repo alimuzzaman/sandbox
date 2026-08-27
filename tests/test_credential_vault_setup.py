@@ -27,6 +27,8 @@ class TestCredentialVaultSetup(unittest.TestCase):
                       declaration["contract_modules"])
         self.assertIn("sandbox.isolation.credential_controller_protocol_v2",
                       declaration["contract_modules"])
+        self.assertIn("sandbox.isolation.credential_guest_protocol_v2",
+                      declaration["contract_modules"])
         self.assertIn("sandbox.isolation.credential_controller_service_v2",
                       declaration["contract_modules"])
         self.assertIn("sandbox.isolation.credential_controller_authority_v2",

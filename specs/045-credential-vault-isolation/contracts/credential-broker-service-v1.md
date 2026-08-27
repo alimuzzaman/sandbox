@@ -298,17 +298,20 @@ still applies. The resolver has no source reader, no path resolver, and no
 plaintext-return operation; the only material it can surrender is the buffer
 the trusted lease channel just delivered, exactly once.
 
-Two boundaries are deliberately outside this executable and keep the standalone
-`--serve` path a refusal:
+`LinuxGuestConnectionObserver` derives that connection state from the kernel
+rather than from the caller: the bound device is read back from the accepted
+socket, the addresses come from the socket names, and reachability is decided
+by an on-link route on that exact device in `/proc/net/route`. Anything
+unreadable, off-device, routed through a gateway, or on loopback is reported
+unverified, and the transport validator refuses it. A rotated broker epoch
+invalidates an older observation.
 
-1. the kernel-derived guest connection observer, which must prove the exact
-   veth, tuple, epoch, and peer state; and
-2. the credential adapter, whose binding loader, proof, and egress gates belong
-   to the trusted control plane, not to this executable's argv or config.
-
-A trusted control-plane process that supplies both can run the coordinator
-cross-process. The executable alone starts nothing, opens no admission, and
-returns a bounded refusal.
+One boundary is deliberately outside this executable and keeps the standalone
+`--serve` path a refusal: the credential adapter, whose binding loader, proof,
+and egress gates belong to the trusted control plane, not to this executable's
+argv or configuration. A trusted control-plane process that supplies one can
+run the coordinator cross-process. The executable alone starts nothing, opens
+no admission, and returns a bounded refusal.
 
 ## Local verification boundary
 

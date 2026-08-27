@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from array import array
 import struct
+import socket
 import threading
 import unittest
 from unittest import mock
@@ -76,6 +77,11 @@ class FakeConnection:
     def close(self): self.closed += 1
 
 
+class FakeArmedLeaseListener:
+    def __init__(self): self.closed = 0
+    def close(self): self.closed += 1
+
+
 def controller_session():
     session = ControllerBrokerSession(
         FakeConnection(), CONFIG, CONTROLLER_EPOCH,
@@ -139,14 +145,20 @@ def authority(events, *, auth_form="authorization_bearer"):
     )
 
 
-def lease_exchange(owner, callback=lambda *_args: True, *, durable=True):
+def lease_exchange(owner, callback=lambda *_args: True, *, durable=True,
+                   ack_ancillary=None, ack_flags=0, ack_closer=None):
     class LeaseSocket:
         def __init__(self):
             self.ack = b""
             self.timeout_ms = 1000
             self.closed = 0
 
-        def getsockopt(self, *_args):
+        def setsockopt(self, *_args):
+            return None
+
+        def getsockopt(self, *args):
+            if args == (socket.SOL_SOCKET, 4):
+                return 1
             return struct.pack("3i", BROKER.pid, BROKER.uid, BROKER.gid)
 
         def settimeout(self, value):
@@ -180,12 +192,18 @@ def lease_exchange(owner, callback=lambda *_args: True, *, durable=True):
             })
             return len(packet)
 
-        def recv(self, _size): return self.ack
+        def recvmsg(self, _size, _ancillary_size, _flags=0):
+            ancillary = ack_ancillary
+            if ancillary is None:
+                ancillary = [(socket.SOL_SOCKET, 3, struct.pack(
+                    "3i", BROKER.pid, BROKER.uid, BROKER.gid))]
+            return self.ack, ancillary, ack_flags, None
         def close(self): self.closed += 1
 
     return owner.session.accept_lease_socket(
         LeaseSocket(), observer=lambda *_peer: BROKER,
-        so_peercred=1, scm_rights=2)
+        so_peercred=1, so_passcred=4, scm_credentials=3, scm_rights=2,
+        closer=ack_closer or (lambda _fd: None))
 
 
 def accept_controller_ack(owner, ack):
@@ -228,6 +246,17 @@ def guest_request():
         "body": b'{"not":"projected"}', "content_type": "application/json",
         "deadline_ms": 10_000, "correlation_id": "corr-1",
     }
+
+
+def lease_address(authorization):
+    return broker.lease_endpoint_address_v2(
+        machine_id=MACHINE, broker_epoch=BROKER_EPOCH,
+        controller_epoch=CONTROLLER_EPOCH, broker_digest=CONFIG.broker_digest,
+        broker_config_digest=CONFIG.broker.config_digest,
+        controller_config_digest=CONFIG.controller.config_digest,
+        operation_id=authorization["operation_id"],
+        authorization_digest=authorization["authorization_digest"],
+    )
 
 
 class TestControllerAuthorityV2(unittest.TestCase):
@@ -444,6 +473,101 @@ class TestControllerAuthorityV2(unittest.TestCase):
         self.assertEqual((attempts, closed), ([1], [71]))
         self.assertEqual(retained[0], bytearray(len(retained[0])))
 
+    def test_lease_ack_requires_exact_credentials_and_refuses_all_rights(self):
+        credentials = (socket.SOL_SOCKET, 3, struct.pack(
+            "3i", BROKER.pid, BROKER.uid, BROKER.gid))
+        cases = {
+            "rights": [credentials, (socket.SOL_SOCKET, 2,
+                                      array("i", [91]).tobytes())],
+            "duplicate_credentials": [credentials, credentials],
+            "unknown": [credentials, (socket.SOL_SOCKET, 9999, b"x")],
+        }
+        for name, ancillary in cases.items():
+            with self.subTest(name=name):
+                events = []
+                owner = authority(events)
+                authorization = decide_claim(owner)
+                ack = {
+                    "type": "AUTHORIZED_V2", "sequence": 3,
+                    **{key: authorization[key] for key in (
+                        "protocol", "machine_id", "broker_epoch", "controller_epoch",
+                        "operation_id", "request_digest", "binding_id", "binding_version",
+                        "decision_id", "authorization_digest",
+                        "authorization_expires_at_unix_ms",
+                    )}, "reply_to": authorization["sequence"],
+                }
+                accept_controller_ack(owner, ack)
+                rights_closed = []
+                dispatcher = lease_exchange(
+                    owner, ack_ancillary=ancillary, ack_closer=rights_closed.append)
+                with self.assertRaisesRegex(ControllerAuthorityV2Error,
+                                            "lease_ack_invalid"):
+                    owner.acknowledge_and_dispatch(
+                        ack, now_ms=NOW + 1, lease_sequence=1,
+                        memfd_factory=lambda material: {
+                            "descriptor": 92, "descriptor_size": len(material),
+                            "anonymous_memfd": True, "close_on_exec": True,
+                            "seals": {"write", "grow", "shrink", "seal"}},
+                        dispatcher=dispatcher, descriptor_closer=lambda _fd: None,
+                    )
+                self.assertEqual(dispatcher.operation_id,
+                                 authorization["operation_id"])
+                self.assertEqual(dispatcher.authorization_digest,
+                                 authorization["authorization_digest"])
+                self.assertTrue(dispatcher._used)
+                self.assertTrue(dispatcher._closed)
+                self.assertEqual(rights_closed, [91] if name == "rights" else [])
+
+    def test_ack_rights_cleanup_failure_runs_full_session_cleanup_once(self):
+        events = []
+        owner = authority(events)
+        authorization = decide_claim(owner)
+        ack = {
+            "type": "AUTHORIZED_V2", "sequence": 3,
+            **{key: authorization[key] for key in (
+                "protocol", "machine_id", "broker_epoch", "controller_epoch",
+                "operation_id", "request_digest", "binding_id", "binding_version",
+                "decision_id", "authorization_digest",
+                "authorization_expires_at_unix_ms",
+            )}, "reply_to": authorization["sequence"],
+        }
+        accept_controller_ack(owner, ack)
+        second = lease_exchange(owner)
+        cleanup_attempts = []
+        def fail_right_close(descriptor):
+            cleanup_attempts.append(descriptor)
+            raise OSError("close refused")
+        credentials = (socket.SOL_SOCKET, 3, struct.pack(
+            "3i", BROKER.pid, BROKER.uid, BROKER.gid))
+        failing = lease_exchange(
+            owner, ack_ancillary=[
+                credentials,
+                (socket.SOL_SOCKET, 2, array("i", [93]).tobytes()),
+            ],
+            ack_closer=fail_right_close,
+        )
+        with self.assertRaisesRegex(ControllerAuthorityV2Error,
+                                    "lease_dispatch_invalid"):
+            owner.acknowledge_and_dispatch(
+                ack, now_ms=NOW + 1, lease_sequence=1,
+                memfd_factory=lambda material: {
+                    "descriptor": 94, "descriptor_size": len(material),
+                    "anonymous_memfd": True, "close_on_exec": True,
+                    "seals": {"write", "grow", "shrink", "seal"}},
+                dispatcher=failing, descriptor_closer=lambda _fd: None)
+        self.assertEqual(cleanup_attempts, [93])
+        self.assertEqual(owner.session.connection.closed, 1)
+        self.assertEqual(second._connection.closed, 1)
+        self.assertEqual(failing._connection.closed, 1)
+        self.assertEqual(owner.session._lease_sockets, {})
+        expected = {"ok": False, "code": "packet_rights_cleanup_failed",
+                    "admission_open": False}
+        self.assertEqual(owner.session.close(), expected)
+        self.assertEqual(owner.session.close(), expected)
+        self.assertEqual(owner.session.connection.closed, 1)
+        self.assertEqual(second._connection.closed, 1)
+        self.assertEqual(cleanup_attempts, [93])
+
     def test_descriptor_cleanup_failure_is_sticky_and_never_reported_success(self):
         events = []
         owner = authority(events)
@@ -530,6 +654,7 @@ class TestBrokerOperationAuthorityV2(unittest.TestCase):
     def setUp(self):
         self.connection = broker.BrokerControllerV2Connection(
             FakeConnection(), CONFIG, BROKER_EPOCH, "broker-owner-0123456789",
+            lease_endpoint_factory=lambda *_args: FakeArmedLeaseListener(),
         )
         self.connection.controller_epoch = CONTROLLER_EPOCH
         self.connection.authenticated = True
@@ -574,8 +699,8 @@ class TestBrokerOperationAuthorityV2(unittest.TestCase):
             operation_id, connection or FakeConnection(),
             observer=lambda *_kernel_peer: peer, so_peercred=1)
 
-    def _claimed_authorization_message(self):
-        self.guest_submit(guest_request(), connection_identity="guest-1")
+    def _claimed_authorization_message(self, connection_identity="guest-1"):
+        self.guest_submit(guest_request(), connection_identity=connection_identity)
         claimed = self.connection.operations.claim_next(
             owner=self.connection.owner, reply_to=2, sequence=2, now_ms=NOW,
         )
@@ -707,6 +832,331 @@ class TestBrokerOperationAuthorityV2(unittest.TestCase):
         self.assertEqual(ack["type"], "AUTHORIZED_V2")
         self.assertEqual(ack["authorization_digest"], authorization["authorization_digest"])
         self.assertEqual(self.connection.operations.state(claimed["operation_id"]), "authorized")
+
+    def test_lease_endpoint_is_armed_before_authorized_ack(self):
+        events = []
+        original_send = self.connection.connection.sendall
+        self.connection.connection.sendall = lambda packet: (
+            events.append("authorized"), original_send(packet)
+        )[-1]
+
+        class Armed:
+            def close(self):
+                events.append("closed")
+
+        self.connection._lease_endpoint_factory = lambda address, endpoint: (
+            events.append(("armed", address, endpoint.operation_id)) or Armed()
+        )
+        claimed, authorization, ack = self._claim_and_authorize()
+        self.assertEqual(events[0][0], "armed")
+        self.assertEqual(events[1], "authorized")
+        self.assertEqual(len(events[0][1]), 93)
+        self.assertEqual(events[0][2], claimed["operation_id"])
+        self.assertEqual(ack["authorization_digest"], authorization["authorization_digest"])
+
+    def test_lease_endpoint_collision_is_terminal_before_authorized_ack(self):
+        sent_before = len(self.connection.connection.sent)
+        self.connection._lease_endpoint_factory = lambda *_args: (_ for _ in ()).throw(
+            OSError(__import__("errno").EADDRINUSE, "occupied")
+        )
+        with self.assertRaisesRegex(ControllerServiceV2Error, "lease_endpoint_collision"):
+            self._claim_and_authorize()
+        self.assertEqual(len(self.connection.connection.sent), sent_before)
+        self.assertFalse(self.connection.admission_open)
+
+    def test_missing_lease_endpoint_factory_refuses_before_authorized_ack(self):
+        self.connection._lease_endpoint_factory = None
+        sent_before = len(self.connection.connection.sent)
+        claimed, _authorization = self._claimed_authorization_message()
+        with self.assertRaisesRegex(ControllerServiceV2Error,
+                                    "lease_endpoint_unavailable"):
+            self.connection.handle_authority_v2(_authorization, now_ms=NOW)
+        self.assertEqual(len(self.connection.connection.sent), sent_before)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertNotIn(claimed["operation_id"], self.connection._lease_endpoints)
+
+    def test_lease_endpoint_factory_without_listener_refuses_before_ack(self):
+        self.connection._lease_endpoint_factory = lambda *_args: None
+        sent_before = len(self.connection.connection.sent)
+        claimed, authorization = self._claimed_authorization_message()
+        with self.assertRaisesRegex(ControllerServiceV2Error,
+                                    "lease_endpoint_unavailable"):
+            self.connection.handle_authority_v2(authorization, now_ms=NOW)
+        self.assertEqual(len(self.connection.connection.sent), sent_before)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertEqual(self.connection._lease_endpoints, {})
+
+    def test_lease_listener_prescans_all_rights_before_malformed_rejection(self):
+        claimed, authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection._lease_endpoints[claimed["operation_id"]]
+        accepted = FakeConnection()
+        accepted.settimeout = lambda _value: None
+        rights = array("i", [41, 42]).tobytes()
+        accepted.recvmsg = lambda *_args: (
+            b"x" * 732,
+            [(socket.SOL_SOCKET, 9999, b"bad"),
+             (socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)],
+            getattr(socket, "MSG_CTRUNC", 0), None,
+        )
+
+        class Listener:
+            def __init__(self): self.closed = 0
+            def setsockopt(self, *_args): pass
+            def bind(self, _address): pass
+            def listen(self, _backlog): pass
+            def settimeout(self, _value): pass
+            def accept(self): return accepted, None
+            def close(self): self.closed += 1
+
+        listener = Listener()
+        closed = []
+        selected_address = lease_address(authorization)
+        endpoint.address = selected_address
+        transport = broker.LinuxLeaseOperationV2Listener(
+            selected_address, endpoint,
+            observer=lambda *_peer: CONTROLLER, now_ms=lambda: NOW,
+            descriptor_observer=self._descriptor_observer,
+            descriptor_closer=closed.append,
+            socket_factory=lambda *_args: listener,
+            so_peercred=1, so_passcred=2,
+            scm_credentials=3, scm_rights=socket.SCM_RIGHTS,
+        )
+        with self.assertRaisesRegex(ControllerServiceV2Error, "lease_ancillary_invalid"):
+            transport.receive_once()
+        self.assertEqual(closed, [41, 42])
+        self.assertEqual(accepted.closed, 1)
+        self.assertEqual(listener.closed, 1)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertEqual(self.connection.operations.active_count(), 0)
+        self.assertNotIn(claimed["operation_id"], self.connection._lease_endpoints)
+
+    def test_lease_listener_reports_rights_cleanup_failure_without_retry(self):
+        claimed, authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection._lease_endpoints[claimed["operation_id"]]
+        accepted = FakeConnection()
+        accepted.settimeout = lambda _value: None
+        accepted.recvmsg = lambda *_args: (
+            b"bad", [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                       array("i", [44]).tobytes())], 0, None)
+
+        class Listener:
+            def setsockopt(self, *_args): pass
+            def bind(self, _address): pass
+            def listen(self, _backlog): pass
+            def settimeout(self, _value): pass
+            def accept(self): return accepted, None
+            def close(self): pass
+
+        attempts = []
+        def refuse_close(value):
+            attempts.append(value)
+            raise OSError("close refused")
+        selected_address = lease_address(authorization)
+        endpoint.address = selected_address
+        transport = broker.LinuxLeaseOperationV2Listener(
+            selected_address, endpoint,
+            observer=lambda *_peer: CONTROLLER, now_ms=lambda: NOW,
+            descriptor_observer=self._descriptor_observer,
+            descriptor_closer=refuse_close,
+            socket_factory=lambda *_args: Listener(),
+            so_peercred=1, so_passcred=2,
+            scm_credentials=3, scm_rights=socket.SCM_RIGHTS,
+        )
+        with self.assertRaisesRegex(ControllerServiceV2Error, "descriptor_cleanup_failed"):
+            transport.receive_once()
+        with self.assertRaisesRegex(ControllerServiceV2Error, "descriptor_cleanup_failed"):
+            transport.close()
+        self.assertEqual(attempts, [44])
+        self.assertEqual(self.connection.close(), {
+            "ok": False, "code": "descriptor_cleanup_failed",
+            "admission_open": False})
+        self.assertEqual(attempts, [44])
+
+    def test_first_attempt_peer_mismatch_terminalizes_authorized_operation(self):
+        claimed, authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection._lease_endpoints[claimed["operation_id"]]
+        accepted = FakeConnection()
+        accepted.settimeout = lambda _value: None
+        reads = []
+        accepted.recvmsg = lambda *_args: reads.append(1) or (b"", [], 0, None)
+
+        class Listener:
+            def __init__(self): self.closed = 0
+            def setsockopt(self, *_args): pass
+            def bind(self, _address): pass
+            def listen(self, _backlog): pass
+            def settimeout(self, _value): pass
+            def accept(self): return accepted, None
+            def close(self): self.closed += 1
+
+        listener = Listener()
+        selected_address = lease_address(authorization)
+        endpoint.address = selected_address
+        transport = broker.LinuxLeaseOperationV2Listener(
+            selected_address, endpoint, observer=lambda *_peer: BROKER,
+            now_ms=lambda: NOW, descriptor_observer=self._descriptor_observer,
+            descriptor_closer=lambda _fd: None,
+            socket_factory=lambda *_args: listener,
+            so_peercred=1, so_passcred=2, scm_credentials=3,
+            scm_rights=socket.SCM_RIGHTS,
+        )
+        with self.assertRaisesRegex(ControllerServiceV2Error,
+                                    "lease_ancillary_invalid"):
+            transport.receive_once()
+        self.assertEqual(reads, [])
+        self.assertEqual(accepted.closed, 1)
+        self.assertEqual(listener.closed, 1)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertNotIn(claimed["operation_id"], self.connection._lease_endpoints)
+
+    def test_sixteen_failed_deliveries_release_authorization_registry_capacity(self):
+        ids = iter(f"operation-fail{index:02d}" for index in range(16))
+        self.connection.operations = broker._V2OperationRegistry(
+            machine_id=MACHINE, broker_epoch=BROKER_EPOCH,
+            controller_epoch=CONTROLLER_EPOCH, owner=self.connection.owner,
+            id_factory=lambda: next(ids))
+        for index in range(16):
+            claimed, authorization = self._claimed_authorization_message(
+                connection_identity=f"guest-fail-{index}")
+            _ack = self.connection.handle_authority_v2(authorization, now_ms=NOW)
+            endpoint = self.connection.lease_endpoint_v2(claimed["operation_id"])
+            with self.assertRaisesRegex(ControllerServiceV2Error, "lease_invalid"):
+                endpoint.accept(
+                    b"x" * 732, [], descriptor_observer=self._descriptor_observer,
+                    descriptor_closer=lambda _fd: None, now_ms=NOW,
+                    accepted_socket_receipt=self._receipt(claimed["operation_id"]),
+                )
+            listener = endpoint.listener
+            endpoint.close()
+            self.connection._finish_lease_endpoint_attempt_v2(
+                claimed["operation_id"], listener, failed=True)
+            self.assertEqual(self.connection.registry._items, {})
+            self.assertEqual(self.connection.registry._tombstones, {})
+            self.assertEqual(self.connection.operations.state(
+                claimed["operation_id"]), "refused")
+
+        extra = AuthorizationIdentity(
+            owner=self.connection.owner, machine_id=MACHINE,
+            broker_epoch=BROKER_EPOCH, controller_epoch=CONTROLLER_EPOCH,
+            operation_id="operation-extra17", request_digest=DIGESTS[5],
+            binding_id="binding-extra123", binding_version=1,
+            decision_id="decision-extra123",
+            authorization_digest="e" * 64,
+            expires_at_unix_ms=NOW + 1000,
+            binding_expires_at_unix_ms=NOW + 2000,
+            activation_expires_at_unix_ms=NOW + 5000,
+            request_deadline_unix_ms=NOW + 5000)
+        self.connection.registry.insert(extra, now_ms=NOW)
+        self.assertIn(extra.operation_id, self.connection.registry._items)
+
+    def test_quiesce_closes_blocked_accepted_recvmsg_exactly_once(self):
+        claimed, authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection.lease_endpoint_v2(claimed["operation_id"])
+        entered = threading.Event()
+        released = threading.Event()
+
+        class Accepted(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.settimeout = lambda _value: None
+            def recvmsg(self, *_args):
+                entered.set()
+                released.wait(2)
+                raise OSError("closed")
+            def close(self):
+                self.closed += 1
+                released.set()
+
+        accepted = Accepted()
+        class Listener:
+            def __init__(self): self.closed = 0
+            def setsockopt(self, *_args): pass
+            def bind(self, _address): pass
+            def listen(self, _backlog): pass
+            def settimeout(self, _value): pass
+            def accept(self): return accepted, None
+            def close(self): self.closed += 1
+
+        listener = Listener()
+        selected_address = lease_address(authorization)
+        endpoint.address = selected_address
+        transport = broker.LinuxLeaseOperationV2Listener(
+            selected_address, endpoint, observer=lambda *_peer: CONTROLLER,
+            now_ms=lambda: NOW, descriptor_observer=self._descriptor_observer,
+            descriptor_closer=lambda _fd: None,
+            socket_factory=lambda *_args: listener,
+            so_peercred=1, so_passcred=2, scm_credentials=3,
+            scm_rights=socket.SCM_RIGHTS)
+        endpoint.listener = transport
+        errors = []
+        def receive():
+            try:
+                transport.receive_once()
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=receive, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        self.connection.set_admission_v2(
+            admission_open=False, activation_expires_at_unix_ms=None,
+            now_ms=NOW)
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(accepted.closed, 1)
+        self.assertEqual(listener.closed, 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ControllerServiceV2Error)
+        self.assertEqual(self.connection._lease_endpoints, {})
+
+    def test_lease_listener_accepts_one_exact_packet_and_transfers_ownership_once(self):
+        claimed, authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection._lease_endpoints[claimed["operation_id"]]
+        accepted = FakeConnection()
+        accepted.settimeout = lambda _value: None
+        packet = self._lease_packet(authorization)
+        accepted.recvmsg = lambda *_args: (
+            packet,
+            [(socket.SOL_SOCKET, 3,
+              struct.pack("3i", CONTROLLER.pid, CONTROLLER.uid, CONTROLLER.gid)),
+             (socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [43]).tobytes())],
+            0, None,
+        )
+
+        class Listener:
+            def __init__(self): self.closed = 0
+            def setsockopt(self, *_args): pass
+            def bind(self, _address): pass
+            def listen(self, _backlog): pass
+            def settimeout(self, _value): pass
+            def accept(self): return accepted, None
+            def close(self): self.closed += 1
+
+        listener = Listener()
+        closed = []
+        selected_address = lease_address(authorization)
+        endpoint.address = selected_address
+        transport = broker.LinuxLeaseOperationV2Listener(
+            selected_address, endpoint,
+            observer=lambda *_peer: CONTROLLER, now_ms=lambda: NOW,
+            descriptor_observer=self._descriptor_observer,
+            descriptor_closer=closed.append,
+            socket_factory=lambda *_args: listener,
+            so_peercred=1, so_passcred=2,
+            scm_credentials=3, scm_rights=socket.SCM_RIGHTS,
+        )
+        self.assertEqual(transport.receive_once()["code"], "lease_bound")
+        self.assertEqual(listener.closed, 1)
+        self.assertEqual(accepted.closed, 0)
+        self.assertEqual(closed, [])
+        with self.assertRaisesRegex(ControllerServiceV2Error, "lease_endpoint_consumed"):
+            transport.receive_once()
+        self.connection.close("test_complete")
+        self.assertEqual(accepted.closed, 1)
+        self.assertEqual(closed, [43])
 
     def test_every_known_authorization_mismatch_terminalizes_and_corrected_retry_refuses(self):
         mutations = {
@@ -849,6 +1299,7 @@ class TestBrokerOperationAuthorityV2(unittest.TestCase):
     def test_admission_quiesce_is_irreversible_for_epoch(self):
         claimed, authorization, _ack = self._claim_and_authorize()
         endpoint = self.connection.lease_endpoint_v2(claimed["operation_id"])
+        armed_listener = endpoint.listener
         self.assertEqual(self.connection.set_admission_v2(
             admission_open=False, activation_expires_at_unix_ms=None, now_ms=NOW,
         )["code"], "admission_closed")
@@ -881,6 +1332,40 @@ class TestBrokerOperationAuthorityV2(unittest.TestCase):
                 accepted_socket_receipt=self._receipt(claimed["operation_id"]),
             )
         self.assertEqual(closed, [])
+        self.assertEqual(armed_listener.closed, 1)
+        self.assertEqual(self.connection._lease_endpoints, {})
+
+    def test_revoke_closes_and_removes_unaccepted_armed_listener(self):
+        claimed, _authorization, _ack = self._claim_and_authorize()
+        endpoint = self.connection.lease_endpoint_v2(claimed["operation_id"])
+        listener = endpoint.listener
+        self.assertEqual(self.connection.revoke_v2("binding-01234567"), 1)
+        self.assertEqual(listener.closed, 1)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertNotIn(claimed["operation_id"], self.connection._lease_endpoints)
+
+    def test_quiesce_removes_armed_listener_and_keeps_cleanup_failure_sticky(self):
+        calls = []
+        class FailingListener:
+            def close(self):
+                calls.append(1)
+                raise OSError("host detail")
+        self.connection._lease_endpoint_factory = lambda *_args: FailingListener()
+        claimed, _authorization, _ack = self._claim_and_authorize()
+        with self.assertRaisesRegex(ControllerServiceV2Error,
+                                    "lease_endpoint_cleanup_failed"):
+            self.connection.set_admission_v2(
+                admission_open=False, activation_expires_at_unix_ms=None,
+                now_ms=NOW)
+        self.assertEqual(self.connection.operations.state(
+            claimed["operation_id"]), "refused")
+        self.assertEqual(self.connection._lease_endpoints, {})
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.connection.close(), {
+            "ok": False, "code": "lease_endpoint_cleanup_failed",
+            "admission_open": False})
+        self.assertEqual(calls, [1])
 
     def test_quiesce_returns_and_preserves_first_cleanup_failure(self):
         self.guest_submit(

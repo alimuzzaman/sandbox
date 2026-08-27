@@ -92,8 +92,11 @@ complete and must converge on v2 before any production completion claim:
    handling for truncated/trailing lease frames, accepted-socket timeouts,
    canonical per-machine root/group-owned config loading, injected controller/
    SCM_RIGHTS endpoints, bounded selector handling, and audit certainty. An
-   integrated installed cross-process
-   executable using real kernel-owned controller/lease/guest listeners, config
+   exact reviewed per-operation abstract v2 lease listener/address derivation,
+   one-second controller connect, collision refusal, ancillary prescan, one-use
+   socket/descriptor ownership, and reciprocal registry digest/bounds are now
+   implemented with injected local tests. An integrated installed cross-process
+   executable using real kernel-owned controller/guest listeners, config
    ownership lifecycle, a continuous disconnect/deadline loop, and observed
    lifecycle/audit cleanup remain incomplete. The reviewed foundation now also
    supplies a pure strict SBG2/SBR2 guest codec, the fixed private-veth tuple

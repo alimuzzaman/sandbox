@@ -89,6 +89,22 @@ descriptors; the dispatcher owns the client socket and original anonymous
 descriptor until the single transfer attempt. The root helper and service
 supervisor own or inherit none of those descriptors.
 
+The broker derives one operation address as NUL plus
+`sandbox-credential-lease-v2-` plus lower-case SHA-256 hex over the reviewed
+domain-separated canonical JSON of protocol, purpose, endpoint identity,
+machine, both epochs, broker and reciprocal config digests, operation, and
+authorization. The exact result is 93 bytes. It is armed before authorization
+acknowledgement, never unlinked or reused, and has no filesystem/TCP/v1
+alternative. The reciprocal configs pin the immutable lease-endpoint registry
+digest plus the one-packet, 1,000 ms, 732-byte frame, 444-byte ACK, and
+exactly-one-descriptor bounds.
+The controller must enable and read back `SO_PASSCRED`; connect and ACK waits
+are capped by the remaining authorization lifetime. Its receipt pins the exact
+derived address, operation, authorization digest, and expiry. A listener tracks
+an accepted socket separately from its armed socket so quiesce can interrupt a
+blocked `recvmsg` once. Failed first deliveries retain the operation replay
+tombstone but release the separate authorization-registry entry.
+
 Before transfer, the controller verifies the connected peer against the exact
 broker PID, service UID, process start identity, unit/cgroup identity, and
 executable/config digest reported through bounded secret-free lifecycle state.

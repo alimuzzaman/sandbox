@@ -955,8 +955,10 @@ class AuthorizationRegistry:
     """Bounded, exact-match, one-use authorization state for one broker.
 
     At most 16 total active identities plus epoch-lifetime tombstones exist.
-    Tombstones are never pruned in this registry: after 16 distinct operation
-    IDs, capacity refuses until an explicit new-epoch registry is constructed.
+    Tombstones are never time-pruned. The sole release is a broker-confirmed
+    failed pre-effect delivery after the operation registry has independently
+    recorded its epoch-lifetime replay tombstone; successful consumption and
+    every other terminal path retain this registry's tombstone.
     """
 
     __slots__ = ("_items", "_tombstones", "_closed", "_clock",
@@ -1074,6 +1076,25 @@ class AuthorizationRegistry:
             item = self._items.pop(key)
             self._tombstone(item)
         return len(removed)
+
+    def release_failed_delivery(self, *, machine_id: Any = None,
+                                broker_epoch: Any = None,
+                                controller_epoch: Any = None,
+                                owner: Any = None,
+                                operation_id: str | None = None) -> bool:
+        """Release only a broker-terminalized pre-effect delivery authorization.
+
+        The operation registry retains the epoch-lifetime replay tombstone. This
+        registry therefore must not retain a second capacity-consuming copy.
+        """
+
+        self._require_pinned(machine_id=machine_id, broker_epoch=broker_epoch,
+                             controller_epoch=controller_epoch, owner=owner)
+        if operation_id is None or not _valid_identifier("operation_id", operation_id):
+            raise ProtocolV2Error("revoke_scope_invalid")
+        removed = self._items.pop(operation_id, None) is not None
+        removed = self._tombstones.pop(operation_id, None) is not None or removed
+        return removed
 
     def quiesce(self) -> int:
         self._closed = True

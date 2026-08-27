@@ -19,6 +19,7 @@ from .credential_controller_protocol_v2 import PROTOCOL, digest_document
 from .credential_controller_service_v2 import (
     ControllerBrokerSession,
     ControllerServiceV2Error,
+    lease_endpoint_registry_digest_v2,
 )
 from .credential_controller_audit_v2 import ControllerAuditAuthorityV2
 from .credential_guest_protocol_v2 import canonical_egress_projection_v2
@@ -46,6 +47,7 @@ _PLAN_KEYS = frozenset((
     "peer_executable_digest", "peer_config_digest",
     "controller_endpoint_identity", "lease_endpoint_identity",
     "guest_endpoint_identity",
+    "lease_endpoint_registry_digest",
     "egress_projection",
     "own_config_digest",
 ))
@@ -53,6 +55,8 @@ _BOUND_KEYS = frozenset((
     "controller_frame_bytes", "lease_frame_bytes", "lease_ack_bytes",
     "handshake_timeout_ms", "audit_ack_timeout_ms", "audit_transport_retries",
     "lease_ack_timeout_ms", "drain_timeout_ms", "max_active_operations",
+    "lease_connect_timeout_ms", "lease_endpoint_address_bytes",
+    "lease_packets_per_endpoint",
 ))
 _FIXED_BOUNDS = {
     "controller_frame_bytes": 16384, "lease_frame_bytes": 732,
@@ -60,6 +64,8 @@ _FIXED_BOUNDS = {
     "audit_ack_timeout_ms": 1000, "audit_transport_retries": 1,
     "lease_ack_timeout_ms": 1000, "drain_timeout_ms": 5000,
     "max_active_operations": 16,
+    "lease_connect_timeout_ms": 1000, "lease_endpoint_address_bytes": 93,
+    "lease_packets_per_endpoint": 1,
 }
 _QUIESCE_RECEIPT_ISSUER = object()
 _PUBLIC_ACCEPTANCE_RECEIPT_ISSUER = object()
@@ -147,9 +153,12 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
     for name in ("executable_digest", "peer_executable_digest", "peer_config_digest",
                  "own_config_digest",
                  "policy_digest", "egress_digest", "broker_digest",
-                 "proof_digest", "effective_isolation_digest"):
+                 "proof_digest", "effective_isolation_digest",
+                 "lease_endpoint_registry_digest"):
         if not isinstance(value.get(name), str) or _DIGEST.fullmatch(value[name]) is None:
             raise LifecycleV2Error("config_invalid")
+    if value["lease_endpoint_registry_digest"] != lease_endpoint_registry_digest_v2():
+        raise LifecycleV2Error("config_invalid")
     evidence = value.get("evidence_id")
     if evidence is not None and (not isinstance(evidence, str)
                                  or re.fullmatch(r"evidence-[a-z0-9]{7,54}", evidence) is None):
@@ -303,7 +312,8 @@ class ManagedCredentialLifecycleV2:
                     "policy_digest", "egress_digest", "broker_digest", "proof_digest",
                     "effective_isolation_digest", "evidence_id", "service_gid", "bounds",
                     "controller_endpoint_identity", "lease_endpoint_identity",
-                    "guest_endpoint_identity", "egress_projection"))
+                    "guest_endpoint_identity", "lease_endpoint_registry_digest",
+                    "egress_projection"))
                 or not isinstance(session, ControllerBrokerSession)
                 or not session.authenticated
                 or session.config.machine_id != controller.machine_id
@@ -780,6 +790,7 @@ def derived_config_document(*, machine_id: str, component: str,
         "controller_endpoint_identity": controller_endpoint_identity,
         "lease_endpoint_identity": lease_endpoint_identity,
         "guest_endpoint_identity": guest_endpoint_identity,
+        "lease_endpoint_registry_digest": lease_endpoint_registry_digest_v2(),
         "egress_projection": egress_projection,
         "bounds": dict(_FIXED_BOUNDS),
     }

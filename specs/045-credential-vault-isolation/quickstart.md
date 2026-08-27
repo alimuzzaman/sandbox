@@ -67,10 +67,15 @@ separate trusted one-use lease boundary, fixed secret-free helper verbs,
 broker-first cleanup, and explicit refusal/evidence rules. This does not start a
 service or enable the feature.
 
-The remaining local preparatory chain is still open:
+The local preparatory chain now has a verified test increment, but is not
+complete:
 
-1. T034: add failing-first standalone service/transport contract tests.
-2. T035: implement the reviewed unprivileged standalone broker executable.
+1. T034 is complete locally: 16 fake/local standalone service and transport
+   contract tests pass. They do not open real sockets or prove Linux isolation.
+2. T035 remains open: guarded private-veth, seqpacket, memfd, peer-auth,
+   rendezvous, and lifecycle seams exist, but the full guest request/result
+   protocol, runnable coordinator, cross-process rendezvous, and exact broker /
+   upstream integration are not complete.
 3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
@@ -131,8 +136,10 @@ include commands, host/runtime identity, evidence ID, elapsed bounds, and cleanu
 result. It must not substitute local Compose tests for managed-native proof.
 
 T032 records the standalone credential-broker service/transport planning
-contract and T033 records the accepted local security design. T034-T037 remain
-open preparatory work. The helper/service lifecycle
+contract, T033 records the accepted local security design, and T034 records
+the passing fake/local contract suite. T035 remains open for the missing
+service-level protocol/coordinator seams; T036-T037 remain open preparatory
+work. The helper/service lifecycle
 (T022), authorized live extension (T029), and independent release review (T031)
 remain blocked. No support tier or evidence ID may be promoted from this local
 result.

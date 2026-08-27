@@ -10,7 +10,8 @@ close T003, prove T022 or T029, or authorize an evidence/support-tier promotion
 under T031.
 
 The capability remains `implemented_unproven` with `adoptable=false` and no
-evidence ID. T034 and later implementation remain open.
+evidence ID. T034 is complete as a fake/local contract suite; T035 and later
+implementation remain open.
 
 ## T033 security review decision
 

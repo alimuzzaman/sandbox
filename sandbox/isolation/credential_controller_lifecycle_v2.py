@@ -21,6 +21,7 @@ from .credential_controller_service_v2 import (
     ControllerServiceV2Error,
 )
 from .credential_controller_audit_v2 import ControllerAuditAuthorityV2
+from .credential_guest_protocol_v2 import canonical_egress_projection_v2
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -45,6 +46,7 @@ _PLAN_KEYS = frozenset((
     "peer_executable_digest", "peer_config_digest",
     "controller_endpoint_identity", "lease_endpoint_identity",
     "guest_endpoint_identity",
+    "egress_projection",
     "own_config_digest",
 ))
 _BOUND_KEYS = frozenset((
@@ -167,8 +169,23 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
             or value.get("lease_endpoint_identity") != "v2-lease.sock"
             or value.get("guest_endpoint_identity") != "v2-guest.sock"):
         raise LifecycleV2Error("config_invalid")
-    plain = {key: (dict(item) if isinstance(item, Mapping) else item)
-             for key, item in value.items()}
+    try:
+        egress_projection = canonical_egress_projection_v2(value.get("egress_projection"))
+    except Exception:
+        raise LifecycleV2Error("config_invalid") from None
+    if (egress_projection["machine_id"] != machine_id
+            or egress_projection["base_policy_digest"] != value.get("policy_digest")
+            or egress_projection["egress_digest"] != value.get("egress_digest")):
+        raise LifecycleV2Error("config_invalid")
+
+    def plain(item):
+        if isinstance(item, Mapping):
+            return {key: plain(selected) for key, selected in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [plain(selected) for selected in item]
+        return item
+
+    plain = {key: plain(item) for key, item in value.items()}
     encoded = json.dumps(plain, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     if len(encoded) > 16384 or _FORBIDDEN_TEXT.search(encoded.decode("ascii")):
         # Field names in the reviewed schema are allowed; scan only values.
@@ -197,6 +214,7 @@ class DerivedServiceConfigV2:
             raise LifecycleV2Error("config_invalid") from None
         if (type(self.document) is not MappingProxyType
                 or type(self.document.get("bounds")) is not MappingProxyType
+                or type(self.document.get("egress_projection")) is not MappingProxyType
                 or type(self.canonical_bytes) is not bytes
                 or self.canonical_bytes != encoded
                 or not isinstance(self.config_digest, str)
@@ -214,6 +232,12 @@ class DerivedServiceConfigV2:
             raise LifecycleV2Error("config_invalid") from None
         encoded = canonical_config_bytes(copied)
         copied["bounds"] = MappingProxyType(dict(copied["bounds"]))
+        projection = copied["egress_projection"]
+        projection["grants"] = tuple(MappingProxyType({
+            **item, "destinations": tuple(item["destinations"]),
+            "ports": tuple(item["ports"]),
+        }) for item in projection["grants"])
+        copied["egress_projection"] = MappingProxyType(projection)
         frozen = MappingProxyType(copied)
         return cls(document=frozen, canonical_bytes=encoded,
                    config_digest=hashlib.sha256(encoded).hexdigest(),
@@ -279,7 +303,7 @@ class ManagedCredentialLifecycleV2:
                     "policy_digest", "egress_digest", "broker_digest", "proof_digest",
                     "effective_isolation_digest", "evidence_id", "service_gid", "bounds",
                     "controller_endpoint_identity", "lease_endpoint_identity",
-                    "guest_endpoint_identity"))
+                    "guest_endpoint_identity", "egress_projection"))
                 or not isinstance(session, ControllerBrokerSession)
                 or not session.authenticated
                 or session.config.machine_id != controller.machine_id
@@ -739,7 +763,8 @@ def derived_config_document(*, machine_id: str, component: str,
                             own_config_digest: str,
                             controller_endpoint_identity: str,
                             lease_endpoint_identity: str,
-                            guest_endpoint_identity: str) -> dict[str, Any]:
+                            guest_endpoint_identity: str,
+                            egress_projection: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 2, "machine_id": machine_id, "component": component,
         "unit_identity": unit_identity, "service_uid": service_uid,
@@ -755,6 +780,7 @@ def derived_config_document(*, machine_id: str, component: str,
         "controller_endpoint_identity": controller_endpoint_identity,
         "lease_endpoint_identity": lease_endpoint_identity,
         "guest_endpoint_identity": guest_endpoint_identity,
+        "egress_projection": egress_projection,
         "bounds": dict(_FIXED_BOUNDS),
     }
 

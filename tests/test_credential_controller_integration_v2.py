@@ -1,5 +1,6 @@
 import unittest
 import socket
+import dataclasses
 
 from sandbox.isolation.credential_controller_audit_v2 import (
     CredentialEffectExecutorV2,
@@ -13,6 +14,7 @@ from sandbox.isolation.credential_controller_integration_v2 import (
 )
 from sandbox.isolation.credential_controller_protocol_v2 import encode_controller_frame
 from sandbox.isolation.credential_controller_service_v2 import ControllerServiceV2Error
+from sandbox.isolation.models import EgressGrantSet
 from tests import test_credential_controller_authority_v2 as fixtures
 
 
@@ -25,14 +27,23 @@ class OneShotExecutor(CredentialEffectExecutorV2):
         return EffectResultV2("completed", "completed", "upstream_completed")
 
 
+def valid_config():
+    return dataclasses.replace(
+        fixtures.CONFIG,
+        egress_digest=EgressGrantSet(
+            fixtures.MACHINE, fixtures.CONFIG.policy_digest).digest,
+    )
+
+
 def graph(*, repository=None, executor=None):
     events = []
+    config = valid_config()
     runner = ConnectedOfflineCredentialV2(
-        config=fixtures.CONFIG,
+        config=config,
         broker_connection_type=fixtures.broker.BrokerControllerV2Connection,
         controller_epoch=fixtures.CONTROLLER_EPOCH,
         broker_epoch=fixtures.BROKER_EPOCH,
-        interfaces=fixtures.interfaces(events),
+        interfaces=fixtures.interfaces(events, config=config),
         repository=repository or MemoryAuditRepositoryV2(),
         executor=executor or OneShotExecutor(),
         now_ms=fixtures.NOW,
@@ -274,11 +285,12 @@ class TestConnectedCredentialControllerIntegrationV2(unittest.TestCase):
         self.assertEqual([item["phase"] for item in repository.committed], ["pre"])
 
         repository.append_hook = None
+        config = valid_config()
         recovered = ConnectedOfflineCredentialV2(
-            config=fixtures.CONFIG,
+            config=config,
             broker_connection_type=fixtures.broker.BrokerControllerV2Connection,
             controller_epoch="03" * 16, broker_epoch="04" * 16,
-            interfaces=fixtures.interfaces([]), repository=repository,
+            interfaces=fixtures.interfaces([], config=config), repository=repository,
             executor=OneShotExecutor(), now_ms=fixtures.NOW + 100,
         )
         recovered.authenticate()

@@ -134,7 +134,11 @@ reachability with credential authorization. The production standalone service
 and instance-bound authority are governed by
 `contracts/credential-broker-controller-authority-v2.md`. The superseded v1
 contract and current endpoint/coordinator classes remain fake/local-only
-T034/T035 history until T043 convergence.
+T034/T035 history until T043 convergence. The strict v2 guest foundation is
+separate: SBG2/SBR2, private-veth topology projection, reciprocal full-set
+egress projection with canonical empty-set verification, one immutable
+hostname/SNI/resolved-IP decision, and the phase-exact typed one-shot effect contract are
+production-shaped local contracts but do not install or enable a broker.
 
 ## Delivery phases
 
@@ -176,11 +180,13 @@ task IDs were established:
 3. T034 adds the passing fake/local service and transport contracts. T035 now
    has a guarded fake-driven coordinator that retains one guest through claim,
    one-use descriptor rendezvous, existing typed-broker execution, terminal
-   SBRS delivery, and bounded cleanup. T035 remains open for the production
+   SBRS delivery, and bounded cleanup. T035 remains open for the local
+   production-shaped, closed and uninstalled
    controller AF_UNIX/SOCK_SEQPACKET listener/event loop, recvmsg/SCM_RIGHTS
    endpoint, kernel peer observer, cross-process config/entrypoint, guest
-   disconnect/deadline loop, and lifecycle/audit observer. Authorized host
-   proof belongs to T022/T029/T031, not T035 completion.
+   disconnect/deadline loop, and lifecycle/audit observer. T035 completion may
+   establish that local code shape only. Authorized Ubuntu/systemd/kernel proof
+   belongs to T022/T029 and human evidence review to T031.
    T036 adds secret-free helper supervision, broker-first cleanup, and inert
    composition wiring.
 4. T037 adds a proof-gated public `./sb` acceptance seam and offline harness

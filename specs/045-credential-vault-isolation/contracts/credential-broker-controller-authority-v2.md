@@ -314,6 +314,130 @@ An unversioned name, `*_V1`, unknown version, mixed-version frame, protocol
 probe, translation, compatibility shim, retry using another version, or v1
 lease is terminally refused. There is no negotiation or downgrade response.
 
+## Normative guest protocol v2 registry
+
+The guest channel is distinct from the controller and lease channels. It is one
+private-veth `AF_INET`/`SOCK_STREAM` listener for exactly one managed-native
+machine. The derived tuple is exact: one Linux interface of at most 15 ASCII
+characters, one canonical-string RFC1918 IPv4 `/30`, its two usable addresses assigned once as
+broker and guest, and broker port `18443`. The listener MUST set
+`SO_BINDTODEVICE`, read it back, and compare the exact interface before bind.
+Before reading guest bytes it MUST use kernel-owned topology observation to
+match machine, interface, `/30`, broker address/port, guest address, route
+interface/source, isolated guest network namespace, and non-forwarded,
+non-loopback arrival. Source address alone is never identity.
+The managed policy MUST say `egress=deny` and `default_route=false`.
+Integer address forms and loopback, link-local, reserved, unspecified,
+multicast, non-RFC1918, non-canonical, or differently prefixed addresses are
+refused before listener construction.
+
+Each TCP connection carries exactly one request followed by exactly one
+terminal result. The inactivity timeout is 5 seconds. The operation deadline is
+1 through 30,000 ms from original request receipt and cannot be restarted by a
+claim, authorization, lease, audit retry, reconnect, or guest retry. EOF before
+one whole frame, a second request, trailing bytes, half-close ambiguity, or
+unreadable topology is terminal. The broker closes the connection after the
+one result send attempt; it never streams or pipelines.
+
+Both envelopes use the exact nine-byte network-order header `!4sBI`: four-byte
+magic, one-byte version `2`, and an unsigned four-byte JSON payload length.
+Request magic is `SBG2`; result magic is `SBR2`. `SBGR`, `SBRS`, version 1,
+unknown versions, other magic, a non-exact length, or trailing bytes are
+refused without negotiation or translation.
+
+Payloads are canonical ASCII JSON: sorted keys, no whitespace, duplicate keys,
+floats, NaN, alternate base64, alternate header spelling/order, missing keys,
+extra keys, or an integer outside 1 through 9,007,199,254,740,991 are refused.
+Request payload keys are exactly:
+
+```text
+protocol="credential-broker-guest-v2"
+machine_id, binding_id, binding_version,
+scheme="https", host, port=443, method, path,
+headers, body, content_type, deadline_ms, correlation_id
+```
+
+`headers` is a lexicographically name-sorted array of unique `[name,value]`
+pairs. Names are canonical lower-case HTTP token names. Authorization,
+proxy-authorization, x-api-key, Host, Content-Length, and every hop-by-hop
+header are forbidden. Values contain no controls. Total name/value framing is
+at most 65,536 bytes. `body` is strict canonical base64 of at most 1,048,576
+decoded bytes. `content_type` is null or one canonical lower-case registered
+value. Host/path/method and identifier rules are the same strict rules used by
+`CLAIMED_V2`; the guest cannot supply an auth form, source reference,
+credential, operation/decision/audit/lease identity, epoch, authorization,
+policy/proof/egress/broker digest, evidence identity, callback, import, or
+transport authority.
+
+`request_digest` is SHA-256 over the exact canonical request JSON payload,
+excluding the nine-byte envelope. The broker derives it only after the kernel
+transport and canonical request pass. Equivalent alternate encodings do not
+exist.
+
+A success result has exactly `protocol`, `ok=true`, `status`, `headers`, `body`,
+and `correlation_id`. Status is 200 through 299; 3xx is never delivered.
+Response headers use only `cache-control`, `content-language`, `content-type`,
+`etag`, `expires`, `last-modified`, `retry-after`, and `vary`, with the same
+64-KiB bound. Body is strict canonical base64 of at most 4,194,304 decoded
+bytes. A failure has exactly `protocol`, `ok=false`, `state`, `code`,
+`retryable=false`, and `correlation_id`; state is `refused` or `indeterminate`
+and code is one fixed controller-contract refusal/post reason projected without
+arbitrary text. Operation, request, binding, decision, audit, lease,
+authorization, source, credential, descriptor, digest, exception, path, PID,
+upstream body, and diagnostic fields are forbidden from failure results.
+The registry owns the exact state/code partition consumed by validation:
+`indeterminate` permits only `audit_unavailable`, `deadline_exceeded`,
+`guest_disconnected`, and `internal_indeterminate`; `refused` permits the
+remaining fixed failure codes plus `deadline_exceeded`. Deadline is the sole
+code valid in both states because its state depends on whether effect entry
+already occurred.
+
+`sandbox.isolation.credential_guest_protocol_v2` is the sole registry/codec for
+this channel. Its immutable machine-readable registry includes every envelope,
+canonical-JSON rule, exact schema/type/enum, scalar and packet bound, POST
+phase combination, topology observation, egress-decision invariant, and
+effect-entry rule. Its reviewed digest is pinned by tests, so changing a
+security rule changes the registry digest. The historical v1 `SBGR`/`SBRS` helpers remain tests/history only
+and MUST NOT be called by a v2 executable.
+
+## Authorized effect execution v2
+
+The broker may enter an effect only with one immutable
+`AuthorizedEffectContextV2`. It binds the exact canonical `GuestRequestV2`,
+one immutable `AuthorizedEgressDecisionV2` and its exact matching egress
+digest, machine and both epochs, operation and request digest, binding/version,
+decision, authorization digest and fixed auth form, lease identity/sequence,
+sealed descriptor size, and request, binding, authorization, lease, and
+activation deadlines. It contains no credential bytes, source reference,
+resolver, repository, arbitrary callback, socket, filesystem path, or public
+proxy choice.
+Lease sequence is an exact integer from 1 through 9,007,199,254,740,991; boolean,
+zero, overflow, and arbitrarily large integer forms are refused.
+
+The egress decision records the canonical non-numeric request hostname as the
+exact TLS SNI, port 443, the complete unique numerically sorted tuple of
+canonical public IPv4 strings returned by the one authorized resolution, and
+the canonical full egress-projection digest. Both hostname and every resolved
+address MUST intersect current unrevoked grants. The exact tuple is also the
+nft destination set. The executor cannot replace it, re-resolve it, use numeric
+SNI, or accept a later DNS answer.
+
+`EffectExecutionV2` records the full machine/epoch/operation/lease identity as
+entered before calling its typed implementation. The identity remains
+tombstoned for the process epoch and a second call is `effect_replayed`; an
+exception of any kind, including a typed protocol exception, or an invalid
+typed result after entry is `effect_indeterminate`, never
+a retry. The only result is `EffectExecutionResultV2`, pairing one exact
+`GuestResultV2` with an allowed POST `outcome_class`, `effect_certainty`, and
+`reason_code` plus an exact `pre_effect` or `effect_entered` phase. `pre_effect`
+permits only refused/none with upstream-refused, deadline, revoke, or invalid
+lease. `effect_entered` permits completed/completed/upstream-completed or the
+accepted indeterminate combinations; in particular a deadline after entry is
+indeterminate/possible and never refused/none. Failure result code equals POST
+reason, and every result correlation ID equals the exact request correlation
+ID. This is an execution contract, not an upstream implementation or a public
+credential/proxy API.
+
 ## Mandatory mutual handshake
 
 No lifecycle, claim, authorization, lease, or audit traffic is accepted before
@@ -887,7 +1011,14 @@ The broker's canonical root-owned/group-readable configuration may contain only
 machine identity, expected controller/service identities, both executable and
 config digests, endpoint identities, policy/egress/broker digest expectations,
 helper-produced sealed proof digest, effective-isolation digest, opaque evidence
-identity (or null to force closed state), and fixed bounds. The helper derives
+identity (or null to force closed state), the exact secret-free full egress
+projection, and fixed bounds. The projection contains exactly machine and base
+policy identities, the `EgressGrantSet` digest, and the canonical full set of
+grant IDs, kinds, destinations, ports, expiries, and revoked states. It contains
+no DNS answer selected by a caller and is identical in reciprocal controller
+and broker configs. Validation reconstructs `EgressGrantSet` and verifies its
+canonical digest even when the grant set is empty; an empty caller-forged
+digest is never accepted. The helper derives
 and seals this secret-free expectation record from the accepted immutable plan;
 the controller cannot rewrite it, and the broker never reads proof/evidence
 repositories or evaluates live isolation. It contains no binding, source reference, auth form,
@@ -896,6 +1027,18 @@ credential material, header/body, proof result, or evidence promotion. It is
 loaded with no-follow, regular-file, owner/group/mode, size, canonical-byte, and
 digest checks. PID/start identity is observed after process start and checked
 start/digest/start to refuse PID reuse.
+
+For an HTTPS effect, DNS authorization is a full-set intersection rather than
+an any-address shortcut: one current non-revoked `hostname_https` grant must
+exactly cover the canonical host and port 443, at least one current
+`public_cidr_tcp` grant must exist, and every independently resolved public IPv4
+address must fall within the union of the full current CIDR set. Empty, private,
+loopback, link-local, multicast, mixed, partially covered, expired, revoked,
+wrong-owner, wrong-policy, or wrong-digest sets refuse. DNS pinning and the
+effective nft set must use that same complete address set; a subset cannot
+authorize or preserve an effect. The resulting immutable authorized decision
+pins that sorted canonical address tuple, exact non-numeric hostname/SNI,
+port 443, and projection digest through effect execution; it cannot re-resolve.
 
 The two derived service records use fixed service roles, UIDs, unit identities,
 and endpoint identities. Each record pins its own executable/config digest and

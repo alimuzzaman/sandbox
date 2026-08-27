@@ -25,6 +25,7 @@ from credential_vault_proof import (  # noqa: E402
 REQUEST = "cv-proof-0001"
 START = "2026-09-01T10:00:00Z"
 END = "2026-09-01T12:00:00Z"
+NOW = "2026-09-02T00:00:00Z"
 
 
 class BundleTestCase(unittest.TestCase):
@@ -42,11 +43,6 @@ class BundleTestCase(unittest.TestCase):
         states = check_states or {
             name: "passed" for name in manifest_module.check_ids(self.manifest)
         }
-        recorded = {}
-        for name in artifacts:
-            payload = json.dumps({"artifact": name}, sort_keys=True).encode()
-            (self.root / name).write_bytes(payload)
-            recorded[name] = hashlib.sha256(payload).hexdigest()
         record = {
             "version": ledger_module.LEDGER_VERSION,
             "request_id": REQUEST,
@@ -57,11 +53,29 @@ class BundleTestCase(unittest.TestCase):
             "started_at": START,
             "terminal_at": terminal_at,
             "checks": dict(states),
-            "artifacts": recorded,
+            "artifacts": {},
             "cleanup_state": cleanup,
             "classification": classification,
             "provenance": provenance,
         }
+        cleanup_observations = list(fixtures.cleanup_observations(self.manifest))
+        if cleanup == "incomplete":
+            cleanup_observations[0] = {
+                **cleanup_observations[0], "state": "present", "owned": True,
+            }
+        recorded = {}
+        for name in artifacts:
+            if name == "checks.json":
+                document = fixtures.check_artifact(self.manifest, record)
+            elif name == "cleanup.json":
+                document = fixtures.cleanup_artifact(
+                    self.manifest, record, observations=cleanup_observations)
+            else:
+                document = {"artifact": name}
+            payload = manifest_module.canonical_json(document).encode()
+            (self.root / name).write_bytes(payload)
+            recorded[name] = hashlib.sha256(payload).hexdigest()
+        record["artifacts"] = recorded
         (self.root / "run.json").write_text(
             manifest_module.canonical_json(record) + "\n")
         (self.root / "events.json").write_text(manifest_module.canonical_json(
@@ -70,6 +84,7 @@ class BundleTestCase(unittest.TestCase):
         return record
 
     def validate(self, **kwargs):
+        kwargs.setdefault("now", NOW)
         return bundle_module.validate_bundle(
             self.root, manifest=self.manifest, **kwargs)
 
@@ -180,6 +195,19 @@ class TestBundleValidator(BundleTestCase):
         self.build(events=events)
         self.assert_refused("events_terminal_missing")
 
+    def test_events_must_stay_inside_the_run_window(self):
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        before = fixtures.events(states)
+        before[0] = {**before[0], "at": "2026-09-01T09:59:00Z"}
+        self.build(events=before)
+        self.assert_refused("events_outside_run")
+
+        self.setUp()
+        after = fixtures.events(states)
+        after[-1] = {**after[-1], "at": "2026-09-01T12:01:00Z"}
+        self.build(events=after)
+        self.assert_refused("events_outside_run")
+
     def test_contradictory_ledger_and_event_results_are_refused(self):
         states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
         events = fixtures.events(states)
@@ -236,7 +264,87 @@ class TestBundleValidator(BundleTestCase):
     def test_evidence_dated_after_now_is_refused(self):
         self.build()
         self.assert_refused("evidence_from_the_future", now="2026-08-01T00:00:00Z")
-        self.assertTrue(self.validate(now="2026-12-01T00:00:00Z")["ok"])
+        self.assertTrue(self.validate(now="2026-09-02T00:00:00Z")["ok"])
+
+    def test_stale_evidence_is_refused_even_when_everything_else_matches(self):
+        self.build()
+        self.assert_refused("evidence_stale", now="2026-09-04T00:00:00Z")
+
+    def test_artifact_contents_are_schema_checked_and_bound_to_the_record(self):
+        self.build()
+        for payload in (b"{}", b'{"artifact":"checks.json"}'):
+            with self.subTest(payload=payload):
+                (self.root / "checks.json").write_bytes(payload)
+                self.assert_refused("artifact_digest_mismatch")
+                self.build()
+
+        record = self.build()
+        document = json.loads((self.root / "checks.json").read_text())
+        document["checks"]["os_release_supported"]["state"] = "failed"
+        payload = manifest_module.canonical_json(document).encode()
+        (self.root / "checks.json").write_bytes(payload)
+        record["artifacts"]["checks.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_check_contradiction")
+
+    def test_matching_digest_does_not_make_arbitrary_artifact_content_valid(self):
+        record = self.build()
+        payload = b"{}"
+        (self.root / "checks.json").write_bytes(payload)
+        record["artifacts"]["checks.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_schema_invalid")
+
+    def test_a_passed_artifact_cannot_use_an_unrelated_result_code(self):
+        record = self.build()
+        document = json.loads((self.root / "checks.json").read_text())
+        document["checks"]["os_release_supported"]["code"] = "made_up"
+        payload = manifest_module.canonical_json(document).encode()
+        (self.root / "checks.json").write_bytes(payload)
+        record["artifacts"]["checks.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_check_code_invalid")
+
+    def test_artifact_versions_are_exact_integers(self):
+        record = self.build()
+        document = json.loads((self.root / "checks.json").read_text())
+        document["version"] = True
+        payload = manifest_module.canonical_json(document).encode()
+        (self.root / "checks.json").write_bytes(payload)
+        record["artifacts"]["checks.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_binding_mismatch")
+
+    def test_artifact_fake_markers_are_refused_even_with_a_matching_digest(self):
+        record = self.build()
+        document = json.loads((self.root / "checks.json").read_text())
+        document["checks"]["os_release_supported"]["observations"] = ["fake"]
+        payload = manifest_module.canonical_json(document).encode()
+        (self.root / "checks.json").write_bytes(payload)
+        record["artifacts"]["checks.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("fake_evidence_marker")
+
+    def test_cleanup_artifact_cannot_contradict_a_complete_record(self):
+        record = self.build()
+        document = json.loads((self.root / "cleanup.json").read_text())
+        document["state"] = "incomplete"
+        payload = manifest_module.canonical_json(document).encode()
+        (self.root / "cleanup.json").write_bytes(payload)
+        record["artifacts"]["cleanup.json"] = hashlib.sha256(payload).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_cleanup_contradiction")
+
+    def test_bundle_owner_mismatch_is_refused(self):
+        self.build()
+        import os
+        self.assert_refused("bundle_foreign_owner", owner_uid=os.getuid() + 1)
 
     def test_symlinked_or_oversize_artifacts_are_refused(self):
         self.build()

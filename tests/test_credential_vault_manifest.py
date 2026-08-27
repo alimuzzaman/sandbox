@@ -144,6 +144,59 @@ class TestAcceptanceManifest(unittest.TestCase):
         with self.assertRaises(manifest_module.ManifestError):
             manifest_module.validate_manifest(empty)
 
+    def test_checks_must_be_catalogued_and_bind_nonempty_exit_zero_expectations(self):
+        unknown = fixtures.manifest()
+        unknown["checks"] = [dict(item) for item in unknown["checks"]]
+        unknown["checks"][0]["check_id"] = "invented_check"
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(unknown)
+        self.assertEqual(raised.exception.code, "check_unknown")
+
+        empty_expected = fixtures.manifest()
+        empty_expected["checks"] = [dict(item) for item in empty_expected["checks"]]
+        empty_expected["checks"][0]["expected"] = []
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(empty_expected)
+        self.assertEqual(raised.exception.code, "expected_observation_missing")
+
+        too_many_expected = fixtures.manifest()
+        too_many_expected["checks"] = [dict(item) for item in too_many_expected["checks"]]
+        too_many_expected["checks"][0]["expected"] = [
+            "24.04-{0}".format(index) for index in range(
+                manifest_module.MAX_EXPECTED_OBSERVATIONS + 1)
+        ]
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(too_many_expected)
+        self.assertEqual(raised.exception.code, "list_invalid")
+
+    def test_multiplicity_is_refused_until_all_targets_have_probes(self):
+        document = fixtures.manifest()
+        document["cleanup"] = dict(document["cleanup"])
+        document["cleanup"]["paths"] = [
+            "/run/sandbox-native/credential-broker",
+            "/run/sandbox-native/credential-broker-2",
+        ]
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(document)
+        self.assertEqual(raised.exception.code, "cleanup_multiplicity_unsupported")
+
+    def test_cleanup_targets_must_match_the_probe_targets(self):
+        document = fixtures.manifest()
+        document["cleanup"] = dict(document["cleanup"])
+        document["cleanup"]["sockets"] = ["@unplanned-cleanup-socket"]
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(document)
+        self.assertEqual(raised.exception.code, "cleanup_binding_mismatch")
+
+    def test_artifacts_declare_known_schemas_and_complete_set(self):
+        document = fixtures.manifest()
+        document["artifacts"] = [dict(document["artifacts"][0]),
+                                  dict(document["artifacts"][1])]
+        document["artifacts"][0]["schema"] = "unknown_v1"
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(document)
+        self.assertEqual(raised.exception.code, "artifact_schema_invalid")
+
     def test_a_revision_mismatch_refuses_before_any_test_action(self):
         document = manifest_module.validate_manifest(fixtures.manifest())
         self.assertTrue(manifest_module.assert_revision(document, {
@@ -175,6 +228,13 @@ class TestAcceptanceManifest(unittest.TestCase):
             pretty.write_text(json.dumps(document, indent=2))
             with self.assertRaises(manifest_module.ManifestError) as raised:
                 manifest_module.load_manifest(pretty)
+            self.assertEqual(raised.exception.code, "encoding_not_canonical")
+
+            extra_newline = root / "extra-newline.json"
+            extra_newline.write_text(
+                manifest_module.canonical_json(document) + "\n\n")
+            with self.assertRaises(manifest_module.ManifestError) as raised:
+                manifest_module.load_manifest(extra_newline)
             self.assertEqual(raised.exception.code, "encoding_not_canonical")
 
             link = root / "link.json"

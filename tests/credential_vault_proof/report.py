@@ -30,7 +30,6 @@ def build_report(*, manifest: Any, record: Any, bundle: Any = None,
     required = tuple(item["check_id"] for item in manifest["checks"] if item["required"])
     optional = tuple(item["check_id"] for item in manifest["checks"]
                      if not item["required"])
-    live = record.get("provenance") == "live_authorized_host" if isinstance(record, dict) else False
     passed = tuple(sorted(name for name, state in checks.items() if state == "passed"))
     failed = tuple(sorted(name for name, state in checks.items() if state == "failed"))
     blocked = tuple(sorted(name for name, state in checks.items()
@@ -43,6 +42,22 @@ def build_report(*, manifest: Any, record: Any, bundle: Any = None,
     classification = record.get("classification") if isinstance(record, dict) else None
     if classification is not None and classification not in CLASSIFICATIONS:
         classification = None
+    # A provenance label alone is not evidence. Only the exact success shape
+    # returned by validate_bundle may make check states appear as live.
+    bundle_verified = (
+        isinstance(bundle, dict)
+        and bundle.get("ok") is True
+        and bundle.get("code") == "bundle_verified"
+        and bundle.get("classification") == classification
+        and isinstance(record, dict)
+        and bundle.get("request_id") == record.get("request_id")
+        and bundle.get("manifest_digest") == record.get("manifest_digest")
+    )
+    live = (
+        isinstance(record, dict)
+        and record.get("provenance") == "live_authorized_host"
+        and bundle_verified
+    )
     cleanup_state = record.get("cleanup_state") if isinstance(record, dict) else None
     retained = tuple(
         f"{item['kind']}:{item['identity']}:{item['reason_code']}"
@@ -59,8 +74,7 @@ def build_report(*, manifest: Any, record: Any, bundle: Any = None,
         "adoptable": ADOPTABLE,
         "evidence_id": EVIDENCE_ID,
         "manifest_id": manifest["manifest_id"],
-        "manifest_digest": (bundle or {}).get("manifest_digest")
-        if isinstance(bundle, dict) else None,
+        "manifest_digest": bundle.get("manifest_digest") if bundle_verified else None,
         "request_id": record.get("request_id") if isinstance(record, dict) else None,
         "provenance": record.get("provenance") if isinstance(record, dict) else None,
         "classification": classification,

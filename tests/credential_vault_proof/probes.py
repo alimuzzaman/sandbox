@@ -64,6 +64,10 @@ def _argv(*parts: Any) -> tuple[str, ...]:
 
 def _unit(manifest: dict[str, Any], index: int = 0) -> str:
     units = manifest["service"]["units"]
+    if not isinstance(units, (list, tuple)):
+        raise _refuse("unit_unknown")
+    if len(units) > 1:
+        raise _refuse("unit_multiplicity_unsupported")
     if index >= len(units):
         raise _refuse("unit_unknown")
     return units[index]
@@ -191,7 +195,7 @@ def _interface_absent(manifest):
 
 
 def _cgroup_absent(manifest):
-    return _argv("/usr/bin/test", "-d", manifest["service"]["cgroup"])
+    return _argv("/usr/bin/stat", "-c", "%F", manifest["service"]["cgroup"])
 
 
 def _process_absent(manifest):
@@ -212,7 +216,9 @@ def _temporary_absent(manifest):
     paths = manifest["cleanup"]["paths"]
     if not paths:
         raise _refuse("cleanup_path_unknown")
-    return _argv("/usr/bin/test", "-e", paths[0])
+    if len(paths) > 1:
+        raise _refuse("cleanup_multiplicity_unsupported")
+    return _argv("/usr/bin/stat", "-c", "%F", paths[0])
 
 
 # Checks whose evidence comes from the broker's own bounded status or from a
@@ -251,13 +257,25 @@ _GUEST_SOURCED = {
 # reported `passed` -- backwards in the one direction that matters.
 EXPECTATION_KINDS = ("exit_zero", "exit_nonzero", "empty_output")
 _EXPECTATIONS = {
-    "process_absent_after_cleanup": "exit_nonzero",
-    "route_absent_after_cleanup": "exit_nonzero",
+    "process_absent_after_cleanup": "empty_output",
+    "route_absent_after_cleanup": "empty_output",
     "nftables_absent_after_cleanup": "exit_nonzero",
     "interface_absent_after_cleanup": "exit_nonzero",
     "cgroup_absent_after_cleanup": "exit_nonzero",
     "temporary_absent_after_cleanup": "exit_nonzero",
     "socket_absent_after_cleanup": "empty_output",
+}
+
+# A non-zero exit is meaningful only when it is the documented "not found"
+# result for that tool. Other exits (missing executable, permission failure,
+# malformed invocation, and so on) are blocked rather than turned into proof of
+# absence. The marker is matched in bounded diagnostics and is never retained.
+_ABSENCE_RULES = {
+    "nftables_absent_after_cleanup": (1, ("no such file or directory",
+                                             "no such table", "not found")),
+    "interface_absent_after_cleanup": (1, ("does not exist",)),
+    "cgroup_absent_after_cleanup": (1, ("no such file or directory",)),
+    "temporary_absent_after_cleanup": (1, ("no such file or directory",)),
 }
 
 _HOST_BUILDERS = {
@@ -298,6 +316,17 @@ def catalog() -> tuple[str, ...]:
     return CHECK_IDS
 
 
+def _manifest_expected(check_id: str, manifest: dict[str, Any]) -> tuple[str, ...]:
+    for item in manifest.get("checks", ()):
+        if isinstance(item, dict) and item.get("check_id") == check_id:
+            expected = item.get("expected")
+            if isinstance(expected, list) and all(isinstance(value, str)
+                                                  for value in expected):
+                return tuple(expected)
+            break
+    raise _refuse("check_not_planned", check_id)
+
+
 def expectation_kind(check_id: Any) -> str:
     """What a passing result looks like for this check."""
     if not isinstance(check_id, str) or check_id not in CHECK_IDS:
@@ -314,12 +343,18 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
     timeout = manifest["bounds"]["command_timeout_seconds"]
     output_bytes = min(manifest["bounds"]["max_output_bytes"], MAX_OUTPUT_BYTES)
     expectation = expectation_kind(check_id)
+    expected = _manifest_expected(check_id, manifest)
+    if expectation == "exit_zero" and not expected:
+        raise _refuse("expected_observation_missing", check_id)
+    if expectation == "empty_output" and expected:
+        raise _refuse("expected_observation_unusable", check_id)
     if check_id in _GUEST_SOURCED:
         return {
             "check_id": check_id,
             "kind": _GUEST_SOURCED[check_id],
             "argv": (),
             "expectation": expectation,
+            "expected": expected,
             "timeout_seconds": timeout,
             "max_output_bytes": output_bytes,
             "redact": True,
@@ -329,6 +364,7 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
         "kind": "host_command",
         "argv": _HOST_BUILDERS[check_id](manifest),
         "expectation": expectation,
+        "expected": expected,
         "timeout_seconds": timeout,
         "max_output_bytes": output_bytes,
         "redact": True,
@@ -368,17 +404,30 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         raise _refuse("result_schema_invalid", check_id)
     limit = min(manifest["bounds"]["max_output_bytes"], MAX_OUTPUT_BYTES)
     stdout = _bounded_output(completed["stdout"], limit)
-    _bounded_output(completed["stderr"], limit)
+    stderr = _bounded_output(completed["stderr"], limit)
     if not isinstance(completed["timed_out"], bool):
         raise _refuse("result_schema_invalid", check_id)
     if not isinstance(completed["returncode"], int) \
             or isinstance(completed["returncode"], bool):
         raise _refuse("result_schema_invalid", check_id)
-    expected = completed["expected"]
-    if not isinstance(expected, list) or len(expected) > MAX_OBSERVATIONS \
-            or any(not isinstance(item, str) or len(item) > 256 for item in expected):
+    supplied_expected = completed["expected"]
+    if not isinstance(supplied_expected, list) or len(supplied_expected) > MAX_OBSERVATIONS \
+            or any(not isinstance(item, str) or len(item) > 256
+                   for item in supplied_expected):
         raise _refuse("result_schema_invalid", check_id)
+    expected = _manifest_expected(check_id, manifest)
+    expectation = expectation_kind(check_id)
+    # Keep the parser safe even when a caller bypasses manifest validation.
+    # Otherwise an exit-zero check with an empty caller/manifest expectation
+    # list would pass without observing anything at all.
+    if expectation == "exit_zero" and not expected:
+        raise _refuse("expected_observation_missing", check_id)
+    if expectation == "empty_output" and expected:
+        raise _refuse("expected_observation_unusable", check_id)
+    if tuple(supplied_expected) != expected:
+        raise _refuse("result_expectation_mismatch", check_id)
     findings = scanner.scan_text(stdout, location=f"{check_id}.stdout")
+    findings += scanner.scan_text(stderr, location=f"{check_id}.stderr")
     if findings:
         return {"check_id": check_id, "state": "blocked",
                 "code": "secret_like_output", "observations": (),
@@ -387,12 +436,25 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         return {"check_id": check_id, "state": "blocked", "code": "probe_timeout",
                 "observations": (), "findings": ()}
     matched = tuple(item for item in expected if item in stdout)
-    expectation = expectation_kind(check_id)
     if expectation == "exit_nonzero":
-        # The resource is proven gone because the command could not find it.
         if completed["returncode"] == 0:
             return {"check_id": check_id, "state": "failed",
                     "code": "resource_still_present", "observations": matched,
+                    "findings": ()}
+        rule = _ABSENCE_RULES.get(check_id)
+        if rule is None:
+            return {"check_id": check_id, "state": "blocked",
+                    "code": "absence_unproven", "observations": (),
+                    "findings": ()}
+        expected_returncode, markers = rule
+        if completed["returncode"] != expected_returncode:
+            return {"check_id": check_id, "state": "blocked",
+                    "code": "probe_exit_unexpected", "observations": (),
+                    "findings": ()}
+        diagnostic = stderr.lower()
+        if markers and not any(marker in diagnostic for marker in markers):
+            return {"check_id": check_id, "state": "blocked",
+                    "code": "absence_unproven", "observations": (),
                     "findings": ()}
         return {"check_id": check_id, "state": "passed", "code": "observed_absent",
                 "observations": (), "findings": ()}
@@ -400,6 +462,10 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         if completed["returncode"] != 0:
             return {"check_id": check_id, "state": "blocked",
                     "code": "probe_nonzero_exit", "observations": (), "findings": ()}
+        if stderr.strip():
+            return {"check_id": check_id, "state": "blocked",
+                    "code": "probe_diagnostic_output", "observations": (),
+                    "findings": ()}
         if stdout.strip():
             return {"check_id": check_id, "state": "failed",
                     "code": "resource_still_present", "observations": matched,

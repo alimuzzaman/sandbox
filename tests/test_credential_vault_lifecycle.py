@@ -45,9 +45,10 @@ class TestHarnessLifecycle(unittest.TestCase):
         self.assertFalse(self.ledger.should_launch(REQUEST)["launch"])
 
         for entry in probes.plan(self.manifest):
+            expected = list(entry["expected"])
             parsed = probes.parse(entry["check_id"], {
-                "returncode": 0, "stdout": "observed\n", "stderr": "",
-                "timed_out": False, "expected": ["observed"],
+                "returncode": 0, "stdout": " ".join(expected), "stderr": "",
+                "timed_out": False, "expected": expected,
             }, self.manifest)
             self.ledger.record_check(REQUEST, entry["check_id"], parsed["state"])
 
@@ -58,15 +59,19 @@ class TestHarnessLifecycle(unittest.TestCase):
 
         bundle_root = self.root / "bundle"
         bundle_root.mkdir(exist_ok=True)
-        for name in manifest_module.artifact_names(self.manifest):
-            payload = manifest_module.canonical_json({"artifact": name}).encode()
-            (bundle_root / name).write_bytes(payload)
-            self.ledger.record_artifact(REQUEST, name,
-                                        hashlib.sha256(payload).hexdigest())
-
         record = self.ledger.finalize(
             REQUEST, required=manifest_module.required_check_ids(self.manifest),
             terminal_at=END)
+        for name in manifest_module.artifact_names(self.manifest):
+            if name == "checks.json":
+                document = fixtures.check_artifact(self.manifest, record)
+            else:
+                document = fixtures.cleanup_artifact(self.manifest, record)
+            payload = manifest_module.canonical_json(document).encode()
+            (bundle_root / name).write_bytes(payload)
+            self.ledger.record_artifact(REQUEST, name,
+                                        hashlib.sha256(payload).hexdigest())
+        record = self.ledger.read(REQUEST)
         states = {name: "passed" for name in record["checks"]}
         (bundle_root / "events.json").write_text(
             manifest_module.canonical_json(fixtures.events(states)))
@@ -99,7 +104,8 @@ class TestHarnessLifecycle(unittest.TestCase):
         self.assertEqual(record["classification"], "passed_live")
         self.assertTrue(verified["ok"])
         result = bundle_module.validate_bundle(
-            bundle_root, manifest=self.manifest, expected_request_id=REQUEST)
+            bundle_root, manifest=self.manifest, expected_request_id=REQUEST,
+            now="2026-09-02T00:00:00Z")
         self.assertTrue(result["ok"])
         self.assertEqual(result["classification"], "passed_live")
 

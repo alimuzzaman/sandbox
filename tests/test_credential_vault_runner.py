@@ -197,6 +197,12 @@ class TestReportRendering(RunnerTestCase):
             terminal_at=END)
         built = report_module.build_report(
             manifest=self.manifest, record=record,
+            bundle={
+                "ok": True, "code": "bundle_verified",
+                "classification": record["classification"],
+                "request_id": record["request_id"],
+                "manifest_digest": record["manifest_digest"],
+            },
             harness_tests=("manifest", "ledger", "probes"),
         )
         self.assertEqual(built["classification"], "passed_live")
@@ -217,8 +223,38 @@ class TestReportRendering(RunnerTestCase):
         built = report_module.build_report(manifest=self.manifest, record=record)
         self.assertEqual(built["live_checks_passed"], ())
         self.assertEqual(len(built["checks_blocked"]), 8)
+        self.assertIsNone(built["manifest_digest"])
         self.assertIn("t022_helper_service_proof",
                       built["independent_review_pending"])
+
+    def test_a_live_label_without_a_validated_bundle_is_not_live_evidence(self):
+        store, _record = self._record()
+        store.record_acceptance(REQUEST, fixtures.acceptance())
+        for check_id in manifest_module.check_ids(self.manifest):
+            store.record_check(REQUEST, check_id, "passed")
+        record = store.record_cleanup(REQUEST, "complete")
+        built = report_module.build_report(manifest=self.manifest, record=record)
+        self.assertEqual(record["provenance"], "live_authorized_host")
+        self.assertEqual(built["live_checks_passed"], ())
+        self.assertEqual(len(built["checks_blocked"]), 8)
+        self.assertIn("t022_helper_service_proof",
+                      built["independent_review_pending"])
+
+    def test_render_report_without_a_bundle_is_blocked_even_for_a_live_label(self):
+        store, _record = self._record()
+        store.record_acceptance(REQUEST, fixtures.acceptance())
+        for check_id in manifest_module.check_ids(self.manifest):
+            store.record_check(REQUEST, check_id, "passed")
+        store.record_cleanup(REQUEST, "complete")
+        store.finalize(
+            REQUEST, required=manifest_module.required_check_ids(self.manifest),
+            terminal_at=END)
+        code, output = self.run_cli(
+            "render-report", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path), "--request-id", REQUEST,
+        )
+        self.assertEqual(code, cli.EXIT_BLOCKED)
+        self.assertIn("live_checks_passed: 0", output)
 
     def test_rendering_is_deterministic_and_free_of_exception_text(self):
         store, record = self._record()

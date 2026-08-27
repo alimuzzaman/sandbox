@@ -15,9 +15,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import stat
+import tempfile
 from typing import Any
 
 from . import scanner
@@ -42,6 +44,9 @@ _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{3,127}$")
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 _ARTIFACT = re.compile(r"^[a-z][a-z0-9._-]{2,63}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
+_MACHINE_ID = re.compile(r"^sb-[a-f0-9]{12}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 _RECORD_FIELDS = frozenset({
@@ -75,11 +80,22 @@ def _identity(value: Any, pattern: re.Pattern[str], location: str) -> str:
     return value
 
 
+def _timestamp(value: Any, location: str) -> str:
+    _identity(value, _TIMESTAMP, location)
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise _refuse("timestamp_invalid", location) from None
+    return value
+
+
 def validate_record(document: Any) -> dict[str, Any]:
     """Accept only an exact, bounded, secret-free ledger record."""
     if not isinstance(document, dict) or frozenset(document) != _RECORD_FIELDS:
         raise _refuse("schema_unknown_key")
-    if document["version"] != LEDGER_VERSION:
+    if isinstance(document["version"], bool) \
+            or not isinstance(document["version"], int) \
+            or document["version"] != LEDGER_VERSION:
         raise _refuse("version_unsupported")
     findings = scanner.scan_document(document, location="record")
     if findings:
@@ -92,17 +108,24 @@ def validate_record(document: Any) -> dict[str, Any]:
     expected = document["expected"]
     if not isinstance(expected, dict) or frozenset(expected) != _EXPECTED_FIELDS:
         raise _refuse("schema_unknown_key", "expected")
+    _identity(target["machine_id"], _MACHINE_ID, "target.machine_id")
+    _identity(target["broker_epoch"], _IDENTITY, "target.broker_epoch")
+    _identity(target["host_label"], _IDENTITY, "target.host_label")
+    _identity(expected["git_sha"], _GIT_SHA, "expected.git_sha")
+    _identity(expected["sandbox_revision"], _IDENTITY,
+              "expected.sandbox_revision")
     job = document["job"]
     if not isinstance(job, dict) or frozenset(job) != _JOB_FIELDS \
+            or not isinstance(job["state"], str) \
             or job["state"] not in ACCEPTANCE_STATES:
         raise _refuse("schema_unknown_key", "job")
     if job["job_id"] is not None:
         _identity(job["job_id"], _JOB_ID, "job.job_id")
     if job["state"] == "accepted" and job["job_id"] is None:
         raise _refuse("acceptance_contradiction", "job")
-    _identity(document["started_at"], _TIMESTAMP, "started_at")
+    _timestamp(document["started_at"], "started_at")
     if document["terminal_at"] is not None:
-        _identity(document["terminal_at"], _TIMESTAMP, "terminal_at")
+        _timestamp(document["terminal_at"], "terminal_at")
         if document["terminal_at"] < document["started_at"]:
             raise _refuse("timestamp_not_monotonic", "terminal_at")
     checks = document["checks"]
@@ -110,7 +133,7 @@ def validate_record(document: Any) -> dict[str, Any]:
         raise _refuse("schema_unknown_key", "checks")
     for name, state in checks.items():
         _identity(name, _CHECK_ID, f"checks.{name}")
-        if state not in CHECK_STATES:
+        if not isinstance(state, str) or state not in CHECK_STATES:
             raise _refuse("field_invalid", f"checks.{name}")
     artifacts = document["artifacts"]
     if not isinstance(artifacts, dict) or len(artifacts) > MAX_ARTIFACTS:
@@ -118,12 +141,15 @@ def validate_record(document: Any) -> dict[str, Any]:
     for name, digest in artifacts.items():
         _identity(name, _ARTIFACT, f"artifacts.{name}")
         _identity(digest, _DIGEST, f"artifacts.{name}")
-    if document["cleanup_state"] not in CLEANUP_STATES:
+    if not isinstance(document["cleanup_state"], str) \
+            or document["cleanup_state"] not in CLEANUP_STATES:
         raise _refuse("field_invalid", "cleanup_state")
     if document["classification"] is not None \
-            and document["classification"] not in CLASSIFICATIONS:
+            and (not isinstance(document["classification"], str) \
+                 or document["classification"] not in CLASSIFICATIONS):
         raise _refuse("field_invalid", "classification")
-    if document["provenance"] not in PROVENANCE:
+    if not isinstance(document["provenance"], str) \
+            or document["provenance"] not in PROVENANCE:
         raise _refuse("field_invalid", "provenance")
     return document
 
@@ -167,8 +193,27 @@ class ProofRunLedger:
         _identity(request_id, _REQUEST_ID, "request_id")
         return self.root / f"{request_id}.json"
 
+    def _validate_root(self, *, allow_missing: bool) -> None:
+        if self.root.is_symlink():
+            raise _refuse("ledger_root_symlink", str(self.root))
+        if not self.root.exists():
+            if allow_missing:
+                return
+            raise _refuse("ledger_root_unreadable", str(self.root))
+        try:
+            details = self.root.lstat()
+        except OSError as exc:
+            raise _refuse("ledger_root_unreadable", str(self.root)) from exc
+        if not stat.S_ISDIR(details.st_mode):
+            raise _refuse("ledger_root_not_directory", str(self.root))
+        if details.st_uid != self.owner_uid:
+            raise _refuse("ledger_root_foreign_owner", str(self.root))
+        if details.st_mode & 0o077:
+            raise _refuse("ledger_root_permissions", str(self.root))
+
     def read(self, request_id: str) -> dict[str, Any] | None:
         """Return one record, refusing anything unsafe rather than repairing it."""
+        self._validate_root(allow_missing=True)
         path = self._path(request_id)
         if not path.exists() and not path.is_symlink():
             return None
@@ -193,26 +238,39 @@ class ProofRunLedger:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise _refuse("record_corrupt", str(path)) from exc
         record = validate_record(document)
-        if canonical_json(record).encode("ascii") != raw.rstrip(b"\n"):
+        expected = canonical_json(record).encode("ascii")
+        actual = raw[:-1] if raw.endswith(b"\n") else raw
+        if expected != actual:
             raise _refuse("encoding_not_canonical", str(path))
         return record
 
     def _write(self, record: dict[str, Any]) -> dict[str, Any]:
         validate_record(record)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._validate_root(allow_missing=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._validate_root(allow_missing=False)
         path = self._path(record["request_id"])
         payload = canonical_json(record).encode("ascii") + b"\n"
         if len(payload) > MAX_RECORD_BYTES:
             raise _refuse("record_oversize", str(path))
-        temporary = path.with_suffix(".json.tmp")
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600,
-        )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{record['request_id']}.", suffix=".tmp", dir=self.root)
+        temporary = Path(temporary_name)
         try:
-            os.write(descriptor, payload)
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(descriptor, payload[offset:])
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, path)
+        try:
+            os.replace(temporary, path)
+        except OSError as exc:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise _refuse("record_write_failed", str(path)) from exc
         return record
 
     def open_run(self, *, request_id: str, manifest: dict[str, Any],
@@ -221,7 +279,7 @@ class ProofRunLedger:
         """Create or re-attach one run identity; conflicting inputs are refused."""
         from .manifest import manifest_digest
 
-        if provenance not in PROVENANCE:
+        if not isinstance(provenance, str) or provenance not in PROVENANCE:
             raise _refuse("field_invalid", "provenance")
         digest = manifest_digest_value or manifest_digest(manifest)
         record = {
@@ -261,7 +319,8 @@ class ProofRunLedger:
             candidate = acceptance.get("job_id")
             if isinstance(candidate, str) and _JOB_ID.fullmatch(candidate):
                 accepted = acceptance.get("accepted")
-                state = "accepted" if accepted is not False else "refused"
+                state = "accepted" if accepted is True \
+                    else "refused" if accepted is False else "unknown"
                 job_id = candidate if state == "accepted" else None
             elif acceptance.get("accepted") is False:
                 state = "refused"
@@ -297,7 +356,8 @@ class ProofRunLedger:
         if record is None:
             raise _refuse("run_unknown", request_id)
         _identity(check_id, _CHECK_ID, "check_id")
-        if state not in CHECK_STATES or state == "pending":
+        if not isinstance(state, str) or state not in CHECK_STATES \
+                or state == "pending":
             raise _refuse("field_invalid", "state")
         if check_id not in record["checks"]:
             raise _refuse("check_unknown", check_id)
@@ -323,7 +383,8 @@ class ProofRunLedger:
         record = self.read(request_id)
         if record is None:
             raise _refuse("run_unknown", request_id)
-        if state not in CLEANUP_STATES or state == "pending":
+        if not isinstance(state, str) or state not in CLEANUP_STATES \
+                or state == "pending":
             raise _refuse("field_invalid", "cleanup_state")
         if record["cleanup_state"] == "incomplete" and state == "complete":
             raise _refuse("cleanup_contradiction", "cleanup_state")

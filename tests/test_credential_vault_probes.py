@@ -29,6 +29,20 @@ class TestProbeCommandModel(unittest.TestCase):
     def setUp(self):
         self.manifest = manifest_module.validate_manifest(fixtures.manifest())
 
+    def planned_manifest(self, check_id, expected):
+        document = fixtures.manifest()
+        document["checks"] = [dict(item) for item in document["checks"]]
+        for item in document["checks"]:
+            if item["check_id"] == check_id:
+                item["expected"] = expected
+                break
+        else:
+            document["checks"].append({
+                "check_id": check_id, "category": "cleanup", "required": True,
+                "description": "additional planned fixture check", "expected": expected,
+            })
+        return manifest_module.validate_manifest(document)
+
     def test_the_catalog_covers_every_future_check_family(self):
         catalog = set(probes.catalog())
         for check_id in (
@@ -60,7 +74,7 @@ class TestProbeCommandModel(unittest.TestCase):
                 self.assertIn(check_id, catalog)
 
     def test_every_host_plan_is_an_allowlisted_bounded_argv_array(self):
-        for check_id in probes.catalog():
+        for check_id in manifest_module.check_ids(self.manifest):
             with self.subTest(check_id=check_id):
                 entry = probes.build(check_id, self.manifest)
                 self.assertIsInstance(entry["argv"], tuple)
@@ -80,14 +94,10 @@ class TestProbeCommandModel(unittest.TestCase):
                     self.assertIn(entry["kind"], {"broker_status", "guest_probe"})
 
     def test_plans_use_only_manifest_derived_identifiers(self):
-        entry = probes.build("veth_identity_expected", self.manifest)
-        self.assertIn(self.manifest["transport"]["guest_interface"], entry["argv"])
-        entry = probes.build("lease_socket_owned", self.manifest)
-        self.assertIn(self.manifest["transport"]["lease_socket"], entry["argv"])
         entry = probes.build("unit_identity_expected", self.manifest)
         self.assertIn(self.manifest["service"]["units"][0], entry["argv"])
-        entry = probes.build("nftables_default_drop", self.manifest)
-        self.assertIn(self.manifest["kernel"]["nftables_table"], entry["argv"])
+        entry = probes.build("lease_socket_owned", self.manifest)
+        self.assertIn(self.manifest["transport"]["lease_socket"], entry["argv"])
 
     def test_an_unknown_or_caller_supplied_command_is_refused(self):
         for check_id in ("rm", "../etc/passwd", "os_release_supported ; rm -rf /",
@@ -101,10 +111,10 @@ class TestProbeCommandModel(unittest.TestCase):
         # The manifest validator already refuses this shape; the builder is the
         # second gate, so a bypassed validator still cannot inject a token.
         hostile = dict(self.manifest)
-        hostile["transport"] = dict(self.manifest["transport"])
-        hostile["transport"]["guest_interface"] = "eth0; rm -rf /"
+        hostile["service"] = dict(self.manifest["service"])
+        hostile["service"]["units"] = ["bad.service; rm -rf /"]
         with self.assertRaises(probes.ProbeError) as raised:
-            probes.build("veth_identity_expected", hostile)
+            probes.build("unit_identity_expected", hostile)
         self.assertEqual(raised.exception.code, "argv_token_invalid")
 
     def test_the_plan_follows_manifest_order_and_covers_every_check(self):
@@ -132,11 +142,11 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual(missing["code"], "expected_observation_missing")
 
         nonzero = probes.parse("os_release_supported", result(
-            returncode=1, expected=[]), self.manifest)
+            returncode=1, expected=["24.04"]), self.manifest)
         self.assertEqual(nonzero["state"], "failed")
 
         timed_out = probes.parse("os_release_supported", result(
-            timed_out=True, expected=[]), self.manifest)
+            timed_out=True, expected=["24.04"]), self.manifest)
         self.assertEqual(timed_out["state"], "blocked")
         self.assertEqual(timed_out["code"], "probe_timeout")
 
@@ -161,43 +171,83 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertIn("authorization_header", parsed["findings"])
 
     def test_absence_checks_pass_only_when_the_resource_is_gone(self):
-        # A cleaned host makes these commands fail. Reading that as a failed
-        # check reported a clean host as bad and a dirty host as good.
-        for check_id in ("process_absent_after_cleanup", "route_absent_after_cleanup",
-                         "nftables_absent_after_cleanup",
+        # A cleaned host either returns an exact not-found diagnostic or an
+        # empty successful listing. Broken commands never count as absence.
+        for check_id in ("nftables_absent_after_cleanup",
                          "interface_absent_after_cleanup",
                          "cgroup_absent_after_cleanup",
                          "temporary_absent_after_cleanup"):
             with self.subTest(check_id=check_id):
+                manifest = self.planned_manifest(check_id, [])
                 self.assertEqual(probes.expectation_kind(check_id), "exit_nonzero")
-                gone = probes.parse(check_id, result(returncode=1), self.manifest)
+                marker = "does not exist" if check_id == "interface_absent_after_cleanup" \
+                    else "No such file or directory"
+                gone = probes.parse(check_id, result(
+                    returncode=1, stderr=marker), manifest)
                 self.assertEqual(gone["state"], "passed")
                 self.assertEqual(gone["code"], "observed_absent")
-                present = probes.parse(check_id, result(returncode=0), self.manifest)
+                present = probes.parse(check_id, result(returncode=0), manifest)
                 self.assertEqual(present["state"], "failed")
                 self.assertEqual(present["code"], "resource_still_present")
 
+                for returncode, stderr in ((126, "Permission denied"),
+                                           (127, "command not found"),
+                                           (2, "malformed invocation"),
+                                           (1, "Permission denied")):
+                    broken = probes.parse(check_id, result(
+                        returncode=returncode, stderr=stderr), manifest)
+                    self.assertEqual(broken["state"], "blocked")
+                    self.assertIn(broken["code"],
+                                  {"probe_exit_unexpected", "absence_unproven"})
+
+        for check_id in ("process_absent_after_cleanup", "route_absent_after_cleanup"):
+            with self.subTest(check_id=check_id):
+                manifest = self.planned_manifest(check_id, [])
+                self.assertEqual(probes.expectation_kind(check_id), "empty_output")
+                gone = probes.parse(check_id, result(), manifest)
+                self.assertEqual(gone["state"], "passed")
+                present = probes.parse(check_id, result(stdout="leftover\n"), manifest)
+                self.assertEqual(present["state"], "failed")
+
     def test_an_empty_output_absence_check_reads_output_not_exit_status(self):
         check_id = "socket_absent_after_cleanup"
+        manifest = self.planned_manifest(check_id, [])
         self.assertEqual(probes.expectation_kind(check_id), "empty_output")
-        gone = probes.parse(check_id, result(stdout="\n"), self.manifest)
+        gone = probes.parse(check_id, result(stdout="\n"), manifest)
         self.assertEqual(gone["state"], "passed")
         present = probes.parse(
             check_id, result(stdout="u_str LISTEN 0 1 @sandbox-lease 0 * 0\n"),
-            self.manifest)
+            manifest)
         self.assertEqual(present["state"], "failed")
         self.assertEqual(present["code"], "resource_still_present")
-        unreadable = probes.parse(check_id, result(returncode=1), self.manifest)
+        unreadable = probes.parse(check_id, result(returncode=1), manifest)
         self.assertEqual(unreadable["state"], "blocked")
 
     def test_presence_checks_keep_the_ordinary_exit_zero_expectation(self):
+        manifest = self.planned_manifest("unit_absent_after_cleanup",
+                                         ["LoadState=not-found"])
         self.assertEqual(probes.expectation_kind("unit_identity_expected"), "exit_zero")
         self.assertEqual(probes.expectation_kind("unit_absent_after_cleanup"),
                          "exit_zero")
         parsed = probes.parse("unit_absent_after_cleanup", result(
             stdout="LoadState=not-found\n", expected=["LoadState=not-found"]),
-            self.manifest)
+            manifest)
         self.assertEqual(parsed["state"], "passed")
+
+    def test_result_expectations_are_manifest_bound(self):
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.parse("os_release_supported", result(expected=[]), self.manifest)
+        self.assertEqual(raised.exception.code, "result_expectation_mismatch")
+
+    def test_exit_zero_checks_cannot_pass_with_empty_expected_observations(self):
+        hostile = dict(self.manifest)
+        hostile["checks"] = [dict(item) for item in self.manifest["checks"]]
+        hostile["checks"][0]["expected"] = []
+        with self.assertRaises(probes.ProbeError):
+            probes.build(hostile["checks"][0]["check_id"], hostile)
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.parse(hostile["checks"][0]["check_id"], result(expected=[]), hostile)
+        self.assertEqual(raised.exception.code, "expected_observation_missing")
 
     def test_every_plan_entry_declares_its_expectation(self):
         for entry in probes.plan(self.manifest):

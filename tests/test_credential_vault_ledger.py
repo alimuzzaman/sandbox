@@ -76,7 +76,9 @@ class TestProofRunLedger(LedgerTestCase):
 
     def test_empty_or_malformed_acceptance_is_acceptance_unknown(self):
         for acceptance in ({}, {"job_id": ""}, {"job_id": None}, "", None,
-                           {"job_id": "x"}, {"accepted": True}):
+                           {"job_id": "x"}, {"accepted": True},
+                           {"job_id": "job-fixture-0001"},
+                           {"job_id": "job-fixture-0001", "accepted": "yes"}):
             with self.subTest(acceptance=acceptance):
                 request_id = f"cv-proof-{abs(hash(repr(acceptance))) % 10000:04d}"
                 self.open_run(request_id=request_id)
@@ -223,6 +225,11 @@ class TestProofRunLedger(LedgerTestCase):
             self.ledger.read(REQUEST)
         self.assertEqual(raised.exception.code, "encoding_not_canonical")
 
+        path.write_bytes(raw + b"\n")
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            self.ledger.read(REQUEST)
+        self.assertEqual(raised.exception.code, "encoding_not_canonical")
+
         path.write_text("{not json")
         with self.assertRaises(ledger_module.LedgerError) as raised:
             self.ledger.read(REQUEST)
@@ -245,7 +252,7 @@ class TestProofRunLedger(LedgerTestCase):
         foreign = ledger_module.ProofRunLedger(self.root, owner_uid=os.getuid() + 1)
         with self.assertRaises(ledger_module.LedgerError) as raised:
             foreign.read(REQUEST)
-        self.assertEqual(raised.exception.code, "record_foreign_owner")
+        self.assertEqual(raised.exception.code, "ledger_root_foreign_owner")
 
     def test_records_refuse_secret_like_or_unknown_fields(self):
         record = self.open_run()
@@ -269,6 +276,14 @@ class TestProofRunLedger(LedgerTestCase):
         with self.assertRaises(ledger_module.LedgerError) as raised:
             ledger_module.validate_record(backwards)
         self.assertEqual(raised.exception.code, "timestamp_not_monotonic")
+
+    def test_calendar_invalid_timestamps_are_refused(self):
+        record = self.open_run()
+        malformed = dict(record)
+        malformed["started_at"] = "2026-99-99T10:00:00Z"
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            ledger_module.validate_record(malformed)
+        self.assertEqual(raised.exception.code, "timestamp_invalid")
 
     def test_artifact_digests_are_stable_and_bounded(self):
         self.assertEqual(len(ledger_module.artifact_digest(b"payload")), 64)

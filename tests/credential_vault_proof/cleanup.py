@@ -60,12 +60,12 @@ def expected_resources(manifest: dict[str, Any]) -> tuple[dict[str, str], ...]:
 def _validate_observation(value: Any, location: str) -> dict[str, Any]:
     if not isinstance(value, dict) or frozenset(value) != _OBSERVATION_FIELDS:
         raise _refuse("observation_schema_invalid", location)
-    if value["kind"] not in RESOURCE_KINDS:
+    if not isinstance(value["kind"], str) or value["kind"] not in RESOURCE_KINDS:
         raise _refuse("observation_kind_invalid", location)
     if not isinstance(value["identity"], str) \
             or not _IDENTITY.fullmatch(value["identity"]):
         raise _refuse("observation_identity_invalid", location)
-    if value["state"] not in OBSERVED_STATES:
+    if not isinstance(value["state"], str) or value["state"] not in OBSERVED_STATES:
         raise _refuse("observation_state_invalid", location)
     if not isinstance(value["owned"], bool):
         raise _refuse("observation_ownership_invalid", location)

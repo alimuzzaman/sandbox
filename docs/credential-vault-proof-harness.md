@@ -20,13 +20,20 @@ Only things about itself, offline:
 - every planned probe is an argv array of allowlisted, manifest-derived tokens
   with a finite timeout and bounded, redacted output, and each declares how it
   proves itself: `exit_zero`, `exit_nonzero`, or `empty_output`. Absence checks
-  use the latter two, because a removed cgroup makes `test -d` exit non-zero
-  and reading that as a failure would report a clean host as bad and a host
-  with leftover state as good;
-- a completed bundle is refused when it is stale, copied, mixed-revision,
-  contradictory, incomplete, or carries fake markers;
+  use the latter two, because a removed resource either produces an exact
+  tool-specific not-found diagnostic or an empty successful listing. A missing
+  executable, permission error, malformed invocation, timeout, or other
+  diagnostic is blocked, never treated as absence;
+- every check carries its expected observations in the manifest, and the two
+  planned artifacts declare exact schemas. A completed bundle is refused when
+  it is stale, copied, mixed-revision, contradictory, incomplete, or carries
+  fake markers;
+- event timestamps are canonical, monotonic, and inside the run's declared
+  start/terminal window;
 - a resource that cannot be proven ours is retained, never removed;
-- the report keeps local harness behaviour and live evidence visibly apart.
+- the report keeps local harness behaviour and live evidence visibly apart: a
+  provenance label without the exact result of `validate-bundle` never makes a
+  check live.
 
 ## What it does not prove
 
@@ -46,6 +53,12 @@ does **not** establish:
 
 Every local test uses injected fakes. A run whose provenance is
 `local_injected_fake` is refused by the bundle validator by design.
+`live_authorized_host` is an operator assertion, not a cryptographic host
+attestation: this offline validator can bind files to the manifest, request,
+revision, owner, timestamps, and declared schemas, but it cannot prove that an
+authorized host actually produced them. An accepted bundle therefore still
+requires independent review and external host/job evidence; it never closes
+T031 by itself.
 
 ## Prerequisites for the authorized host
 
@@ -70,17 +83,27 @@ Every local test uses injected fakes. A run whose provenance is
 4. **poll the ledger** — a retry calls `should_launch` first. The ledger, not
    the operator's memory, decides whether anything may start.
 5. **collect** — `record-artifact` for each planned artifact, then `finalize`.
-6. **validate** — `validate-bundle` against the same manifest. This is where
-   copied, stale, mixed-revision, or contradictory evidence dies.
+6. **validate** — `validate-bundle --now <UTC timestamp>` against the same
+   manifest. This is where copied, stale, mixed-revision, or contradictory
+   evidence dies. The supplied clock is required so the configured evidence-age
+   bound is applied deterministically.
 7. **clean up** — verify absence with the cleanup verifier. A foreign or
    unreadable resource is a retained item for a human, never a deletion.
 8. **review independently** — a reviewer who did not run the harness reads the
    bundle and the report and decides. Only that decision closes T031.
 
+The T038-T040 task range is reserved for this harness. Review hardening found
+after it is complete must use a separately assigned follow-up range; do not
+copy `tasks.md` between the archive and merge branches because their progress
+records are intentionally different.
+
 ## Evidence retention and redaction
 
 - Artifacts are named in the manifest and hashed in the ledger. Anything not
   planned is refused as an unplanned artifact.
+- `checks.json` and `cleanup.json` are canonical, request- and manifest-bound
+  documents. Their contents are validated against the ledger and the cleanup
+  verifier; a matching digest alone is not evidence.
 - Raw stdout and stderr are never persisted. A parsed check keeps its state, a
   stable code, and the small set of expected observations that matched.
 - The no-leak scanner runs over the evidence directory before a bundle is
@@ -88,6 +111,14 @@ Every local test uses injected fakes. A run whose provenance is
 - Ledger records are owner-only, canonical, and bounded. Symlinked,
   foreign-owned, oversized, corrupt, or non-canonical records are refused
   rather than repaired.
+- Bundle roots and members must be regular files owned by the reviewing
+  operator. Evidence older than the manifest's `max_evidence_age_seconds` is
+  stale and refused.
+- A report only lists live check results when it is given the exact
+  `bundle_verified` result bound to the same request and manifest; a ledger
+  provenance label by itself is not enough. The CLI therefore needs both
+  `--bundle <directory>` and `--now <UTC timestamp>` to render a validated live
+  report; without them it returns a blocked report.
 - No credential, source reference, header, body, operation ID, lease ID, or
   request digest may appear anywhere in a manifest, record, artifact, or
   report.

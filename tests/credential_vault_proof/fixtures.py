@@ -33,7 +33,7 @@ SECRET_SHAPED = {
 
 def manifest(**overrides: Any) -> dict[str, Any]:
     document = {
-        "version": 1,
+        "version": 2,
         "manifest_id": "credential-vault-proof-fixture",
         "source": {"git_sha": GIT_SHA, "sandbox_revision": SANDBOX_REVISION},
         "target": {"machine_id": MACHINE_ID, "broker_epoch": BROKER_EPOCH,
@@ -68,7 +68,7 @@ def manifest(**overrides: Any) -> dict[str, Any]:
             "drain_seconds": 5, "command_timeout_seconds": 30,
             "max_request_headers": 65536, "max_request_body": 1048576,
             "max_response_body": 4194304, "max_concurrent": 16,
-            "max_output_bytes": 65536,
+            "max_output_bytes": 65536, "max_evidence_age_seconds": 86400,
         },
         "cleanup": {
             "units": ["sandbox-credential-broker@sb-0123456789ab.service"],
@@ -80,25 +80,36 @@ def manifest(**overrides: Any) -> dict[str, Any]:
         },
         "checks": [
             {"check_id": "os_release_supported", "category": "platform",
-             "required": True, "description": "host runs the supported release"},
+             "required": True, "description": "host runs the supported release",
+             "expected": ["24.04"]},
             {"check_id": "sandbox_revision_expected", "category": "revision",
-             "required": True, "description": "installed revision matches the plan"},
+             "required": True, "description": "installed revision matches the plan",
+             "expected": [SANDBOX_REVISION]},
             {"check_id": "unit_identity_expected", "category": "service_identity",
-             "required": True, "description": "unit identity and ownership match"},
+             "required": True, "description": "unit identity and ownership match",
+             "expected": ["Id=sandbox-credential-broker@sb-0123456789ab.service",
+                          "LoadState=loaded"]},
             {"check_id": "lease_socket_owned", "category": "transport",
-             "required": True, "description": "lease socket is broker owned"},
+             "required": True, "description": "lease socket is broker owned",
+             "expected": ["@sandbox-credential-broker-lease-0001"]},
             {"check_id": "scm_rights_exactly_one", "category": "descriptor",
-             "required": True, "description": "exactly one descriptor is accepted"},
+             "required": True, "description": "exactly one descriptor is accepted",
+             "expected": ["count=1"]},
             {"check_id": "guest_cannot_reach_controller", "category": "network",
-             "required": True, "description": "guest cannot reach the controller"},
+             "required": True, "description": "guest cannot reach the controller",
+             "expected": ["unreachable"]},
             {"check_id": "unit_absent_after_cleanup", "category": "cleanup",
-             "required": True, "description": "unit is gone after cleanup"},
+             "required": True, "description": "unit is gone after cleanup",
+             "expected": ["LoadState=not-found"]},
             {"check_id": "route_table_expected", "category": "network",
-             "required": False, "description": "route table matches the plan"},
+             "required": False, "description": "route table matches the plan",
+             "expected": ["10.203.0.2"]},
         ],
         "artifacts": [
-            {"name": "checks.json", "sha256": None, "max_bytes": 262144},
-            {"name": "cleanup.json", "sha256": None, "max_bytes": 65536},
+            {"name": "checks.json", "schema": "check_results_v1",
+             "sha256": None, "max_bytes": 262144},
+            {"name": "cleanup.json", "schema": "cleanup_observations_v1",
+             "sha256": None, "max_bytes": 65536},
         ],
     }
     document.update(overrides)
@@ -144,7 +155,58 @@ def events(check_states: Any, *, start_at: str = "2026-09-01T10:00:00Z"
     return document
 
 
+def check_artifact(manifest_document: Any, record: Any) -> dict[str, Any]:
+    """Build the declared check-results artifact for an offline fixture run."""
+    from . import probes
+
+    checks = {}
+    planned = {item["check_id"]: item for item in manifest_document["checks"]}
+    for check_id, item in planned.items():
+        state = record["checks"].get(check_id, "pending")
+        expectation = probes.expectation_kind(check_id)
+        expected = tuple(item["expected"])
+        if state == "passed":
+            code = "observed_absent" if expectation != "exit_zero" else "observed"
+            observations = list(expected) if expectation == "exit_zero" else []
+        elif state == "failed":
+            code, observations = "resource_still_present", []
+        elif state == "blocked":
+            code, observations = "probe_timeout", []
+        else:
+            code, observations = "skipped", []
+        checks[check_id] = {
+            "state": state, "code": code, "observations": observations,
+        }
+    return {
+        "version": 1,
+        "request_id": record["request_id"],
+        "manifest_digest": record["manifest_digest"],
+        "checks": checks,
+    }
+
+
+def cleanup_artifact(manifest_document: Any, record: Any, *,
+                     observations: Any = None) -> dict[str, Any]:
+    """Build the declared cleanup-results artifact for an offline fixture run."""
+    from . import cleanup
+
+    source = (cleanup_observations(manifest_document) if observations is None
+              else observations)
+    verified = cleanup.verify(manifest_document, source)
+    return {
+        "version": 1,
+        "request_id": record["request_id"],
+        "manifest_digest": record["manifest_digest"],
+        "state": verified["state"],
+        "observations": list(source),
+        "removed": list(verified["removed"]),
+        "retained": [dict(item) for item in verified["retained"]],
+        "unexpected": list(verified["unexpected"]),
+    }
+
+
 __all__ = [
     "BROKER_EPOCH", "GIT_SHA", "HOST_LABEL", "MACHINE_ID", "SANDBOX_REVISION",
-    "SYNTHETIC_MARKER", "acceptance", "cleanup_observations", "events", "manifest",
+    "SYNTHETIC_MARKER", "acceptance", "check_artifact", "cleanup_artifact",
+    "cleanup_observations", "events", "manifest",
 ]

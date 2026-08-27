@@ -1474,4 +1474,14 @@ class TestNativeHelper(unittest.TestCase):
         self.assertEqual(masked, list(units))
 
 
+    def test_credential_broker_lifecycle_boundary_is_fixed_and_fail_closed(self):
+        helper = module()
+        argv = ["credential-broker-status", "sb-0123456789ab",
+                "1" * 64, "2" * 64, "3" * 64]
+        with mock.patch.object(helper, "require_root"), self.assertRaises(SystemExit):
+            helper.main(argv)
+        with self.assertRaises(SystemExit):
+            helper.main([*argv, "unexpected"])
+
+
 if __name__ == "__main__": unittest.main()

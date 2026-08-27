@@ -9,7 +9,7 @@ from sandbox.registry import CommandSpec, register_specs
 
 
 ACTIONS = ("support", "preflight", "baseline", "install-plan", "install", "status", "cleanup",
-           "credential-status")
+           "credential-status", "credential-acceptance")
 
 
 def configure_parser(parser):
@@ -19,6 +19,7 @@ def configure_parser(parser):
     parser.add_argument("--label", default="default")
     parser.add_argument("--web-server", choices=("nginx", "apache"), default="nginx")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--credential-request")
 
 
 def _emit(value, as_json):
@@ -29,7 +30,7 @@ def _emit(value, as_json):
         print(f"  {reason['code']}: {', '.join(reason.get('missing', ())) or reason.get('message', '')}")
 
 
-def _runtime_result(cfg, args, operation):
+def _runtime_result(cfg, args, operation, *, arguments=None):
     """Keep status and conservative cleanup on the adapter contract.
 
     This command never calls package management: installed host packages are
@@ -40,7 +41,7 @@ def _runtime_result(cfg, args, operation):
     from sandbox.runtimes.base import OperationError, OperationRequest
 
     result = runtime_service(cfg).invoke(OperationRequest(
-        args.project_dir, operation, label=args.label,
+        args.project_dir, operation, label=args.label, arguments=arguments or {},
     ))
     if isinstance(result, OperationError):
         return {"ok": False, "operation": f"native_{operation}", "state": "blocked",
@@ -177,6 +178,19 @@ def cmd_native(cfg, args):
         result = _runtime_result(cfg, args, "status")
     elif args.action == "credential-status":
         result = credential_status(repository=_read_credential_repository())
+    elif args.action == "credential-acceptance":
+        try:
+            request = json.loads(args.credential_request or "")
+            from sandbox.runtimes.managed.credential_acceptance import parse_credential_acceptance
+            request = parse_credential_acceptance(request)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result = {"ok": False, "operation": "native_credential_acceptance",
+                      "state": "blocked", "mutated": False,
+                      "proof_candidate": False, "adoptable": False,
+                      "reason": {"code": "credential_acceptance_invalid"}}
+        else:
+            result = _runtime_result(cfg, args, "credential_acceptance",
+                                     arguments={"request": request})
     elif args.action == "cleanup":
         result = _runtime_result(cfg, args, "destroy")
     else:

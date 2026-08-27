@@ -7,6 +7,29 @@ from types import SimpleNamespace
 
 
 class TestCredentialWiring(unittest.TestCase):
+    def test_default_managed_dependencies_leave_t036_inert_without_process_calls(self):
+        from sandbox.application.context import managed_native_dependencies
+        from sandbox.runtimes.managed.repository import NativeRepository
+
+        class Process:
+            def __init__(self): self.calls = []
+            def run(self, *args, **kwargs):
+                self.calls.append((args, kwargs)); raise AssertionError("composition executed a process")
+
+        with tempfile.TemporaryDirectory() as directory:
+            process = Process()
+            registry = SimpleNamespace(
+                sandbox_base=lambda: Path(directory),
+                load_project_config=lambda *_args, **_kwargs: {},
+            )
+            dependencies = managed_native_dependencies(
+                {}, registry=registry, allowed_roots=(directory,), process=process,
+                native_repository=NativeRepository(Path(directory) / "state.json"),
+            )
+        self.assertEqual(process.calls, [])
+        self.assertIsNone(dependencies.credential_supervisor)
+        self.assertIsNone(dependencies.plan_builder.credential_broker_compiler)
+        self.assertIsNone(dependencies.cleanup.credential_broker)
     def test_context_factory_requires_explicit_dependencies_and_scopes_lookup(self):
         from sandbox.application.context import managed_native_credential_broker
 

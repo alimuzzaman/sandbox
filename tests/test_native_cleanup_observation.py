@@ -503,5 +503,46 @@ class TestInstalledProfileVersioning(unittest.TestCase):
                          self.helper.APPARMOR_PROFILE_VERSION)
 
 
+class TestCredentialBrokerCleanupObservation(unittest.TestCase):
+    def plan(self):
+        return {"machine_id": "sb-0123456789ab", "policy_digest": "1" * 64,
+                "egress_digest": "2" * 64, "broker_digest": "3" * 64,
+                "executable_digest": "4" * 64, "config_digest": "5" * 64,
+                "digest": "6" * 64}
+
+    def observer(self, status):
+        from sandbox.runtimes.managed.helper import ManagedCleanupObserver
+        return ManagedCleanupObserver(process=SimpleNamespace(), helper="/fixed/helper",
+                                      credential_status=lambda _plan: status)
+
+    def test_exact_stopped_is_absent_and_closed_is_present(self):
+        plan = self.plan()
+        base = {key: plan[key] for key in ("machine_id", "policy_digest", "egress_digest",
+                                            "broker_digest", "executable_digest", "config_digest")}
+        base.update({"ok": True, "admission_open": False, "mutated": False,
+                     "broker_epoch": "7" * 64, "pid": 123,
+                     "process_start_identity": "123:991827", "service_uid": 991,
+                     "unit_identity": f"sandbox-credential-broker@{plan['machine_id']}.service",
+                     "cgroup_identity": f"/sandbox.slice/credential-broker/{plan['machine_id']}"})
+        stopped = self.observer({**base, "state": "stopped"})("credential_broker", plan)
+        present = self.observer({**base, "state": "credential_pending"})("credential_broker", plan)
+        self.assertEqual(stopped["state"], "absent")
+        self.assertEqual(present["state"], "present")
+
+    def test_failed_stopped_drift_and_unavailable_are_not_absence(self):
+        plan = self.plan(); base = {key: plan[key] for key in
+                                    ("machine_id", "policy_digest", "egress_digest",
+                                     "broker_digest", "executable_digest", "config_digest")}
+        base.update({"admission_open": False, "mutated": False, "broker_epoch": "7" * 64,
+                     "pid": 123, "process_start_identity": "123:991827", "service_uid": 991,
+                     "unit_identity": f"sandbox-credential-broker@{plan['machine_id']}.service",
+                     "cgroup_identity": f"/sandbox.slice/credential-broker/{plan['machine_id']}"})
+        for status in ({**base, "ok": False, "state": "stopped"},
+                       {**base, "ok": True, "state": "drifted"},
+                       {"ok": False, "state": "unavailable"}):
+            with self.subTest(status=status), self.assertRaises(RuntimeError):
+                self.observer(status)("credential_broker", plan)
+
+
 if __name__ == "__main__":
     unittest.main()

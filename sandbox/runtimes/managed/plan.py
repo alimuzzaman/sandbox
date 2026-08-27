@@ -328,7 +328,8 @@ class ManagedPlanBuilder:
 
     def __init__(self, *, repository, packages, resources, network, image,
                  apparmor, machine, database, services, web_server="nginx",
-                 descriptor_resolver=None, paths=None, extension_planner=None):
+                 descriptor_resolver=None, paths=None, extension_planner=None,
+                 credential_broker_compiler=None):
         self.repository = repository
         self.packages = packages
         self.resources = resources
@@ -342,6 +343,7 @@ class ManagedPlanBuilder:
         self.descriptor_resolver = descriptor_resolver
         self.paths = paths
         self.extension_planner = extension_planner
+        self.credential_broker_compiler = credential_broker_compiler
 
     def _identity(self, request):
         root = Path(request.project_root).expanduser().resolve(strict=True)
@@ -451,6 +453,9 @@ class ManagedPlanBuilder:
             credentials=database["credential_refs"],
         )
         grant_set = EgressGrantSet(machine_id, policy.digest, tuple(grants))
+        credential_broker = (self.credential_broker_compiler.compile(
+            policy, egress_digest=grant_set.digest,
+        ) if self.credential_broker_compiler is not None else None)
         if extension_plan is None:
             service_plan = self.services.compile(
                 policy, web_server=web_server, wp_cron_enabled=wp_cron_enabled,
@@ -486,10 +491,14 @@ class ManagedPlanBuilder:
             "machine": self.machine.plan(policy),
             "network": self.network.plan(policy),
             "database": database_plan, "services": service_plan,
+            **({"credential_broker": credential_broker}
+               if credential_broker is not None else {}),
             "wordpress": {"machine_id": machine_id, "policy_digest": policy.digest},
             "record": record,
         }
         cleanup_plans = {
+            **({"credential_broker": credential_broker}
+               if credential_broker is not None else {}),
             "services": service_plan, "database": database_plan,
             "machine": plan["machine"], "network": plan["network"],
             "mount": plan["image"], "image": plan["image"],
@@ -500,7 +509,9 @@ class ManagedPlanBuilder:
                 "expected": {
                     "machine_id": machine_id, "policy_digest": policy.digest,
                     "resource": name,
-                    "resource_digest": (service_plan["digest"]
+                    "resource_digest": (credential_broker["digest"]
+                                        if name == "credential_broker"
+                                        else service_plan["digest"]
                                         if name == "services" else policy.digest),
                 },
                 "plan": value,

@@ -56,6 +56,31 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
         self.assertLessEqual(len(event["stdout"]["text"].encode()), live.MAX_CAPTURE_BYTES)
         self.assertEqual(event["json"], {"ok": True})
 
+    def test_offline_credential_acceptance_uses_public_sb_and_cannot_be_evidence(self):
+        observed = []
+        request = {"action": "revoke", "binding_id": "binding-0001", "version": 1,
+                   "machine_id": "sb-0123456789ab", "owner": "owner-0001"}
+
+        def fake_run(argv, **kwargs):
+            observed.append(argv)
+            payload = {"ok": False, "state": "blocked", "mutated": False,
+                       "proof_candidate": True, "adoptable": False,
+                       "reason": {"code": "credential_acceptance_unavailable"}}
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+        event = live.SbRunner(events=[], run=fake_run).call(
+            None, "native", "credential-acceptance", "--credential-request",
+            json.dumps(request, sort_keys=True, separators=(",", ":")), "--json", timeout=3,
+        )
+        self.assertEqual(Path(observed[0][0]), live.SB)
+        self.assertEqual(observed[0][1:3], ["native", "credential-acceptance"])
+        serialized = " ".join(observed[0])
+        for forbidden in ("password", "token", "lease_id", "operation_id", "descriptor"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertFalse(event["json"]["ok"])
+        self.assertEqual(event["json"]["reason"]["code"],
+                         "credential_acceptance_unavailable")
+
     def test_boundary_requires_every_hostile_observation_to_be_denied(self):
         denied = {
             key: False for key in (

@@ -145,6 +145,7 @@ def lease_frame(**overrides):
         "broker_digest": BROKER_DIGEST,
         "operation_id": OPERATION,
         "request_digest": REQUEST_DIGEST,
+        "auth_form": "authorization_bearer",
         "expires_at": 2_000_000_000,
         "descriptor_size": 32,
     }
@@ -2010,6 +2011,179 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
         self.assert_refusal(registry.guest_disconnected(CONNECTION), "operation_cancelled")
         self.assert_refusal(registry.guest_result(CONNECTION), "operation_not_pending")
 
+    # --- controller-authorized execution ------------------------------------
+
+    def test_the_lease_frame_carries_only_an_approved_auth_profile(self):
+        self.assertEqual(self.broker.AUTH_PROFILES,
+                         frozenset({"authorization_bearer", "x_api_key"}))
+        for value in ("bearer", "guest_header", "", None, 7):
+            with self.subTest(auth_form=value):
+                self.assert_refusal(self.broker._validate_frame_identity(
+                    service_identity(), lease_frame(auth_form=value), now=1_000,
+                ), "frame_invalid")
+        self.assertTrue(self.broker._validate_frame_identity(
+            service_identity(), lease_frame(auth_form="x_api_key"), now=1_000,
+        )["ok"])
+
+    def test_the_authorized_binding_is_rebuilt_only_from_trusted_metadata(self):
+        request = self.broker._canonical_guest_request(guest_request())
+        binding = self.broker.controller_authorized_binding(
+            service_identity(), lease_frame(), request,
+        )
+        self.assertEqual(binding.binding_id, BINDING)
+        self.assertEqual(binding.instance_id, MACHINE)
+        self.assertEqual(binding.version, 7)
+        self.assertEqual(binding.state, "ready")
+        self.assertEqual(binding.auth_form, "authorization_bearer")
+        self.assertEqual(binding.policy_digest, POLICY_DIGEST)
+        self.assertEqual(binding.host, "api.example.test")
+        # The reference names no source this process could ever read.
+        self.assertTrue(binding.source_reference.startswith("ref:descriptor:"))
+        self.assertNotIn("/", binding.source_reference)
+        for bad in (lease_frame(auth_form="bearer"), lease_frame(expires_at=0),
+                    {"protocol_version": 1}):
+            with self.subTest(frame=tuple(sorted(bad))[:2]):
+                with self.assertRaises(ValueError):
+                    self.broker.controller_authorized_binding(
+                        service_identity(), bad, request,
+                    )
+
+    def test_the_binding_authority_requires_the_exact_service_digests(self):
+        authority = self.broker.ControllerAuthorizedBindings(service_identity())
+        request = self.broker._canonical_guest_request(guest_request())
+        binding = self.broker.controller_authorized_binding(
+            service_identity(), lease_frame(), request,
+        )
+        self.assertIsNone(authority(BINDING))
+        authority.install(binding)
+        self.assertIs(authority(BINDING), binding)
+        self.assertIsNone(authority("binding-other"))
+        self.assertTrue(authority.proof(binding))
+        self.assertTrue(authority.egress(binding))
+        drifted = self.broker.ControllerAuthorizedBindings(
+            service_identity(policy_digest="9" * 64),
+        )
+        self.assertFalse(drifted.proof(binding))
+        stale_egress = self.broker.ControllerAuthorizedBindings(
+            service_identity(egress_digest="9" * 64),
+        )
+        self.assertFalse(stale_egress.egress(binding))
+        authority.clear()
+        self.assertIsNone(authority(BINDING))
+        with self.assertRaises(ValueError):
+            authority.install({"binding_id": BINDING})
+
+    def test_a_built_adapter_executes_only_a_controller_authorized_operation(self):
+        from sandbox.isolation.credential_request_broker import BrokerResponse
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        transport = FakeTransport()
+        adapter = self.broker.build_operation_adapter(
+            service_identity(),
+            upstream=VerifiedHttpsUpstream(
+                resolver=lambda _host: ("93.184.216.34",),
+                connector=lambda *_args: transport,
+            ),
+        )
+        request = self.broker._canonical_guest_request(guest_request())
+        # Without the controller's authorization there is no binding at all.
+        unauthorized = adapter.execute(request, bytearray(b"m" * 8), machine_id=MACHINE)
+        self.assertEqual(unauthorized["outcome"], "refused")
+        self.assertEqual(unauthorized["code"], "binding_unknown")
+        self.assertEqual(transport.calls, [])
+
+        authorization = self.broker.controller_authorized_binding(
+            service_identity(), lease_frame(), request,
+        )
+        result = adapter.execute(request, bytearray(b"m" * 8), machine_id=MACHINE,
+                                 authorization=authorization)
+        self.assertIsInstance(result, BrokerResponse)
+        applied = {key.lower() for key in transport.calls[0][2]}
+        self.assertIn("authorization", applied)
+        # The authorization is cleared with the operation.
+        again = adapter.execute(request, bytearray(b"m" * 8), machine_id=MACHINE)
+        self.assertEqual(again["outcome"], "refused")
+
+    def test_a_built_adapter_refuses_a_drifted_or_expired_authorization(self):
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        transport = FakeTransport()
+        adapter = self.broker.build_operation_adapter(
+            service_identity(),
+            upstream=VerifiedHttpsUpstream(
+                resolver=lambda _host: ("93.184.216.34",),
+                connector=lambda *_args: transport,
+            ),
+        )
+        request = self.broker._canonical_guest_request(guest_request())
+        drifted = self.broker.controller_authorized_binding(
+            service_identity(policy_digest="9" * 64),
+            lease_frame(policy_digest="9" * 64), request,
+        )
+        refused = adapter.execute(request, bytearray(b"m" * 8), machine_id=MACHINE,
+                                  authorization=drifted)
+        self.assertEqual(refused["outcome"], "refused")
+        self.assertEqual(transport.calls, [])
+
+        mismatched = self.broker.controller_authorized_binding(
+            service_identity(), lease_frame(), request,
+        )
+        wrong_scope = self.broker._canonical_guest_request(
+            guest_request(path="/v1/other"),
+        )
+        scope_refused = adapter.execute(wrong_scope, bytearray(b"m" * 8),
+                                        machine_id=MACHINE, authorization=mismatched)
+        self.assertEqual(scope_refused["outcome"], "refused")
+        self.assertEqual(scope_refused["code"], "request_scope_mismatch")
+        self.assertEqual(transport.calls, [])
+
+    def test_the_descriptor_endpoint_executes_through_the_built_adapter(self):
+        from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"])
+        transport = FakeTransport()
+        adapter = self.broker.build_operation_adapter(
+            service_identity(),
+            upstream=VerifiedHttpsUpstream(
+                resolver=lambda _host: ("93.184.216.34",),
+                connector=lambda *_args: transport,
+            ),
+        )
+        endpoint, _connection = self._operation_endpoint(
+            registry=registry, frame=frame, adapter=adapter,
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assertTrue(endpoint.receive_once()["ok"])
+        delivered = registry.guest_result(CONNECTION)
+        self.assertTrue(delivered["ok"])
+        self.assertEqual(delivered["status"], 200)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertNotIn("m" * 8, repr(delivered))
+        self.assertNotIn(str(REQUEST_DIGEST), repr(delivered))
+
+    def test_an_unapprovable_authorization_never_reaches_the_upstream(self):
+        registry = self._registry()
+        claimed = self._claimed(registry)
+        frame = lease_frame(operation_id=claimed["operation_id"],
+                            request_digest=claimed["request_digest"],
+                            auth_form="x_api_key")
+        calls = []
+        endpoint, _connection = self._operation_endpoint(
+            registry=registry, frame=frame,
+            adapter=self.broker.OfflineTestOperationAdapter(
+                lambda _request, _material: calls.append(1) or {"outcome": "refused",
+                                                                "code": "binding_unknown"},
+                offline_test=True,
+            ),
+        )
+        endpoint.start(); endpoint.open_admission(service_identity())
+        self.assertFalse(endpoint.receive_once()["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assert_refusal(registry.guest_result(CONNECTION), "binding_unknown")
+
     # --- kernel-derived guest observation ----------------------------------
 
     ROUTES = (
@@ -2289,6 +2463,57 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
             document = json.loads(stream.getvalue())
             self.assertFalse(document["ok"])
             self.assertEqual(document["code"], "broker_service_disabled")
+
+    def _config_file(self, directory, **overrides):
+        document = {
+            "enabled": True, "control_plane_uid": 501,
+            "service": service_identity(),
+            "controller": {
+                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+        }
+        document.update(overrides)
+        path = Path(directory) / "broker.json"
+        path.write_text(json.dumps(document))
+        return path
+
+    def test_an_enabled_config_builds_a_coordinator_that_still_fails_closed(self):
+        # The executable can now build its own adapter and observer, so an
+        # enabled config reaches the transport gates. Off a proof host those
+        # gates refuse, and the process exits non-zero with a bounded code.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config_file(directory)
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = self.broker.main(["--serve", "--config", str(path)])
+            self.assertNotEqual(code, 0)
+            document = json.loads(stream.getvalue())
+            self.assertFalse(document["ok"])
+            self.assertIn(document["code"], self.broker._SAFE_SUMMARIES)
+            self.assertNotIn("admission_open\": true", stream.getvalue())
+
+    def test_the_built_coordinator_owns_a_descriptor_backed_adapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.broker.read_service_config(self._config_file(directory))
+        coordinator = self.broker.build_coordinator(config)
+        self.assertIsInstance(coordinator, self.broker.BrokerCoordinator)
+        self.assertIsInstance(coordinator.lease._adapter,
+                              self.broker.CredentialOperationAdapter)
+        self.assertIsInstance(coordinator.guest.connection_observer,
+                              self.broker.LinuxGuestConnectionObserver)
+        self.assertFalse(coordinator.admission_open)
+        self.assertEqual(coordinator.status()["state"], "credential_pending")
+
+    def test_a_config_file_that_is_not_a_regular_owner_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "absent.json"
+            with self.assertRaises(ValueError):
+                self.broker.read_service_config(missing)
+            oversize = Path(directory) / "big.json"
+            oversize.write_text(" " * 9000)
+            with self.assertRaises(ValueError):
+                self.broker.read_service_config(oversize)
 
     def test_no_runtime_composition_selects_the_coordinator(self):
         surface = BROKER.read_text()

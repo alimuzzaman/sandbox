@@ -196,7 +196,11 @@ helper and supervisor own, connect to, receive, or inherit none of them.
 
 One binary frame binds protocol version, lease ID, broker epoch, machine ID,
 operation ID, request digest, binding ID/version, policy/egress/broker digests,
-expiry, and exact descriptor size. Exactly one `SCM_RIGHTS` descriptor is
+the authorized authentication profile, expiry, and exact descriptor size. The
+profile is one of the fixed FR-005 values (`authorization_bearer`, `x_api_key`)
+and is declared by the trusted controller; a guest can never supply or
+influence it. This field is a v1 protocol addition and needs the independent
+reviewer's acceptance under T031. Exactly one `SCM_RIGHTS` descriptor is
 allowed. The broker verifies the
 anonymous-file type, required seals, size, frame bounds, peer, epoch, identities,
 digests, and deadline. It atomically records the lease ID consumed before
@@ -306,12 +310,32 @@ unreadable, off-device, routed through a gateway, or on loopback is reported
 unverified, and the transport validator refuses it. A rotated broker epoch
 invalidates an older observation.
 
-One boundary is deliberately outside this executable and keeps the standalone
-`--serve` path a refusal: the credential adapter, whose binding loader, proof,
-and egress gates belong to the trusted control plane, not to this executable's
-argv or configuration. A trusted control-plane process that supplies one can
-run the coordinator cross-process. The executable alone starts nothing, opens
-no admission, and returns a bounded refusal.
+`controller_authorized_binding` rebuilds the authorization the controller
+already granted, using only validated lease-frame fields and the broker's own
+canonical request. `ControllerAuthorizedBindings` is the broker's binding
+loader on this path: it reads no registry, policy, or repository state, holds
+exactly one operation's binding, and clears it when the operation ends. Its
+proof gate requires the exact policy, egress, broker, and instance identities
+of this service, and its egress gate requires the fixed HTTPS/443 destination
+shape.
+
+Be precise about what this re-check is worth. The controller is the
+independent authority: it saw the CLAIMED scope projection and committed to the
+exact request through `request_digest` before dispatching a descriptor, and the
+descriptor endpoint rendezvouses that digest. The broker-side scope comparison
+is therefore not a second opinion on scope. What the broker still contributes
+independently is the digest match, expiry, auth-profile allowlist, concurrency
+ceiling, response redaction, and the verified upstream's DNS pinning,
+certificate validation, redirect refusal, and bounds.
+
+`build_operation_adapter` composes that authority, the descriptor-backed
+resolver, and the verified upstream, so `--serve` on an explicitly enabled
+configuration can now start the coordinator. It remains closed by default: it
+needs `--serve`, a strict secret-free configuration with `enabled` true, Linux,
+and a non-root UID, admission opens only after the identity recheck, and no
+Sandbox composition path writes such a configuration. A guest still cannot
+complete an operation without a trusted controller claiming it and dispatching
+a descriptor over the separate lease channel.
 
 ## Local verification boundary
 

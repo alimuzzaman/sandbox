@@ -16,10 +16,12 @@ from array import array
 import base64
 import fcntl
 import hashlib
+import datetime
 import ipaddress
 import json
 import os
 import re
+import signal
 import socket
 import stat
 import struct
@@ -89,9 +91,12 @@ _GUEST_REQUEST_FIELDS = frozenset((
 _FRAME_FIELDS = frozenset((
     "protocol_version", "lease_id", "broker_epoch", "machine_id",
     "binding_id", "binding_version", "policy_digest", "egress_digest",
-    "broker_digest", "operation_id", "request_digest", "expires_at",
-    "descriptor_size",
+    "broker_digest", "operation_id", "request_digest", "auth_form",
+    "expires_at", "descriptor_size",
 ))
+# The fixed FR-005 v1 profiles. The trusted controller declares which one this
+# operation was authorized for; a guest can never supply or influence it.
+AUTH_PROFILES = frozenset(("authorization_bearer", "x_api_key"))
 _CONTROLLER_IDENTITY_FIELDS = frozenset((
     "uid", "pid", "process_start_identity", "executable_digest",
 ))
@@ -176,6 +181,7 @@ _SAFE_SUMMARIES = {
     "broker_service_disabled": "broker service is disabled by configuration",
     "broker_service_config_invalid": "broker service configuration is invalid",
     "broker_service_unavailable": "broker service is unavailable",
+    "authorization_invalid": "controller authorization is invalid",
 }
 
 
@@ -474,6 +480,7 @@ def _validate_frame_identity(service: Any, frame: Any, *, now: int) -> dict[str,
         _digest(value["policy_digest"]),
         _digest(value["egress_digest"]),
         _digest(value["broker_digest"]),
+        value["auth_form"] in AUTH_PROFILES,
         _integer(value["expires_at"], minimum=1),
         _integer(value["descriptor_size"], minimum=1),
         _integer(now, minimum=0),
@@ -1593,6 +1600,146 @@ def _on_link(address: str, interface: str, routes: Any) -> bool:
     return False
 
 
+def controller_authorized_binding(service: Any, frame: Any, request: Any):
+    """Rebuild the authorization the trusted controller already granted.
+
+    Every field comes from the validated lease frame or the broker's own
+    canonical request; nothing here is guest-supplied. The controller is the
+    independent authority: it saw the CLAIMED scope projection and committed to
+    the exact request through `request_digest` before dispatching a descriptor.
+    This reconstruction exists so the ordinary request broker can still apply
+    its own version, state, expiry, owner, auth-profile, concurrency,
+    redaction, and verified-upstream gates on this path. The scope comparison
+    it performs is therefore not an independent second opinion -- the digest
+    rendezvous is what makes the scope binding.
+    """
+    from sandbox.isolation.credential_binding import CredentialBinding
+
+    value = _mapping(frame, _FRAME_FIELDS)
+    if not _validate_service_identity(service) or value is None \
+            or not isinstance(request, dict):
+        raise ValueError("controller authorization is invalid")
+    if value["auth_form"] not in AUTH_PROFILES \
+            or not _integer(value["expires_at"], minimum=1) \
+            or not _identity(value["binding_id"]) \
+            or not _integer(value["binding_version"], minimum=1):
+        raise ValueError("controller authorization is invalid")
+    try:
+        expires_at = datetime.datetime.fromtimestamp(
+            int(value["expires_at"]), datetime.timezone.utc,
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return CredentialBinding(
+            binding_id=value["binding_id"],
+            instance_id=service["machine_id"],
+            # The descriptor supplies the credential bytes; this reference is a
+            # non-resolvable identity so the model stays complete without ever
+            # naming a source this process could read.
+            source_reference=f"ref:descriptor:{value['binding_id']}",
+            policy_digest=value["policy_digest"],
+            egress_digest=value["egress_digest"],
+            broker_digest=value["broker_digest"],
+            scheme=request["scheme"], host=request["host"], port=request["port"],
+            method=request["method"], path=request["path"],
+            auth_form=value["auth_form"],
+            expires_at=expires_at,
+            owner=f"broker-{service['machine_id']}",
+            version=value["binding_version"],
+            state="ready",
+        )
+    except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("controller authorization is invalid") from exc
+
+
+class ControllerAuthorizedBindings:
+    """Hold one controller-authorized binding for exactly one operation.
+
+    This is the broker's binding loader on the descriptor path. It never reads
+    registry, policy, or repository state: the only binding it can return is
+    the one the trusted lease frame just authorized, and it is cleared as soon
+    as the operation ends.
+    """
+
+    def __init__(self, service: Any) -> None:
+        if not _validate_service_identity(service):
+            raise ValueError("controller authorization authority is invalid")
+        self.service = dict(service)
+        self._binding = None
+        self._lock = threading.Lock()
+
+    def install(self, binding: Any) -> None:
+        from sandbox.isolation.credential_binding import CredentialBinding
+
+        if not isinstance(binding, CredentialBinding):
+            raise ValueError("controller authorization is invalid")
+        with self._lock:
+            self._binding = binding
+
+    def clear(self) -> None:
+        with self._lock:
+            self._binding = None
+
+    def __call__(self, binding_id: str):
+        with self._lock:
+            binding = self._binding
+        if binding is None or binding.binding_id != binding_id:
+            return None
+        return binding
+
+    def proof(self, binding: Any) -> bool:
+        """Require the exact policy, egress, and broker digests of this service."""
+        return bool(
+            getattr(binding, "policy_digest", None) == self.service["policy_digest"]
+            and getattr(binding, "egress_digest", None) == self.service["egress_digest"]
+            and getattr(binding, "broker_digest", None) == self.service["broker_digest"]
+            and getattr(binding, "instance_id", None) == self.service["machine_id"]
+        )
+
+    def egress(self, binding: Any) -> bool:
+        """Require the fixed HTTPS/443 destination shape this release allows.
+
+        The authoritative default-deny grant intersection is the control
+        plane's; this is the broker-side floor, not a replacement for it.
+        """
+        host = getattr(binding, "host", None)
+        return bool(
+            getattr(binding, "scheme", None) == "https"
+            and getattr(binding, "port", None) == 443
+            and isinstance(host, str) and host
+            and getattr(binding, "egress_digest", None) == self.service["egress_digest"]
+        )
+
+
+def public_dns_resolver(host: str) -> tuple[str, ...]:
+    """Resolve one host to its public IPv4 addresses for the verified upstream."""
+    if not isinstance(host, str) or not host:
+        raise ValueError("upstream host is invalid")
+    records = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+    return tuple(dict.fromkeys(record[4][0] for record in records))
+
+
+def build_operation_adapter(service: Any, *, upstream=None, resolver=None,
+                            max_concurrent: int = MAX_ACTIVE_REQUESTS):
+    """Build the descriptor-backed adapter this service can run with.
+
+    The adapter is the only path credential application may cross. The request
+    broker keeps every existing gate, the resolver can surrender nothing but
+    the descriptor buffer, and the upstream is the verified HTTPS originator.
+    """
+    from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
+
+    if not _validate_service_identity(service):
+        raise ValueError("operation adapter service identity is invalid")
+    if upstream is None:
+        upstream = VerifiedHttpsUpstream(resolver=resolver or public_dns_resolver)
+    authority = ControllerAuthorizedBindings(service)
+    request_broker = descriptor_backed_request_broker(
+        machine_id=service["machine_id"], binding_loader=authority,
+        proof=authority.proof, egress=authority.egress, upstream=upstream,
+        owner=f"broker-{service['machine_id']}", max_concurrent=max_concurrent,
+    )
+    return CredentialOperationAdapter(request_broker, authority=authority)
+
+
 class LinuxGuestConnectionObserver:
     """Derive one guest connection's kernel state, failing closed on doubt.
 
@@ -2339,7 +2486,7 @@ class CredentialOperationAdapter:
     an ordinary source-backed broker cannot consume this service's descriptor.
     """
 
-    def __init__(self, target: Any, *, binding: Any = None) -> None:
+    def __init__(self, target: Any, *, binding: Any = None, authority=None) -> None:
         from sandbox.isolation.credential_request_broker import CredentialRequestBroker
         from sandbox.isolation.credential_upstream import VerifiedHttpsUpstream
 
@@ -2352,9 +2499,12 @@ class CredentialOperationAdapter:
             raise ValueError("descriptor-backed request broker adapter is required")
         if not isinstance(getattr(target, "upstream", None), VerifiedHttpsUpstream):
             raise ValueError("descriptor-backed request broker adapter is required")
+        if authority is not None and not isinstance(authority, ControllerAuthorizedBindings):
+            raise ValueError("controller authorization authority is invalid")
         self._broker = target
         self._resolver = resolver
         self._binding = binding
+        self._authority = authority
         self._lock = threading.Lock()
 
     @staticmethod
@@ -2368,7 +2518,8 @@ class CredentialOperationAdapter:
             else "upstream_failed"
         return {"outcome": "refused", "code": safe}
 
-    def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
+    def execute(self, request: Any, material: bytearray | None, *, machine_id: str,
+                authorization: Any = None):
         from sandbox.isolation.credential_request_broker import (
             BrokerResponse, CredentialBrokerError,
         )
@@ -2378,6 +2529,13 @@ class CredentialOperationAdapter:
             return {"outcome": "refused", "code": "adapter_invalid"}
         value = {key: item for key, item in request.items() if key != "machine_id"}
         with self._lock:
+            if self._authority is not None:
+                if authorization is None:
+                    return {"outcome": "refused", "code": "binding_unknown"}
+                try:
+                    self._authority.install(authorization)
+                except ValueError:
+                    return {"outcome": "refused", "code": "binding_unknown"}
             try:
                 self._resolver.bind(
                     value.get("binding_id"), value.get("binding_version"), material,
@@ -2393,6 +2551,8 @@ class CredentialOperationAdapter:
                 return self._outcome(None, used=self._resolver.used)
             finally:
                 self._resolver.clear()
+                if self._authority is not None:
+                    self._authority.clear()
         if not isinstance(response, BrokerResponse):
             return {"outcome": "indeterminate", "code": "operation_indeterminate"}
         return response
@@ -2406,7 +2566,8 @@ class OfflineTestOperationAdapter:
             raise ValueError("offline credential adapter is disabled")
         self._callback = callback
 
-    def execute(self, request: Any, material: bytearray | None, *, machine_id: str):
+    def execute(self, request: Any, material: bytearray | None, *, machine_id: str,
+                authorization: Any = None):
         return self._callback(dict(request), material)
 
 
@@ -3087,17 +3248,47 @@ class LinuxOperationLeaseEndpoint:
                 result = bounded_error("operation_not_pending")
                 self._send(connection, lease_acknowledgement(lease_id, "refused"))
                 return result
+            try:
+                authorization = controller_authorized_binding(
+                    self._service, frame, request,
+                )
+            except ValueError:
+                result = bounded_error("authorization_invalid")
+                self._registry.complete_refused(
+                    frame["operation_id"], frame["request_digest"],
+                    code="binding_not_ready",
+                )
+                self._send(connection, lease_acknowledgement(lease_id, "refused"))
+                return result
             outcome = "indeterminate"
             try:
                 material = self._descriptor_reader(descriptor, frame["descriptor_size"])
                 if not isinstance(material, bytearray) \
                         or len(material) != frame["descriptor_size"]:
                     raise ValueError("descriptor reader returned an invalid buffer")
-                adapted = self._adapter.execute(
-                    dict(request), material, machine_id=self._service["machine_id"],
-                )
             except Exception:
+                material = None
+            if material is None:
                 adapted = None
+            else:
+                try:
+                    adapted = self._adapter.execute(
+                        dict(request), material,
+                        machine_id=self._service["machine_id"],
+                        authorization=authorization,
+                    )
+                except TypeError:
+                    # An adapter without the authorization seam still runs; it
+                    # simply never receives the rebuilt binding.
+                    try:
+                        adapted = self._adapter.execute(
+                            dict(request), material,
+                            machine_id=self._service["machine_id"],
+                        )
+                    except Exception:
+                        adapted = None
+                except Exception:
+                    adapted = None
             outcome, delivered = self._deliver(frame, adapted)
             result = {"ok": outcome == "completed",
                       **lease_acknowledgement(lease_id, outcome)}
@@ -3547,16 +3738,17 @@ def read_service_config(path: Any) -> dict[str, Any]:
     return parse_service_config(payload)
 
 
-def build_coordinator(config: Any, *, adapter) -> BrokerCoordinator:
+def build_coordinator(config: Any, *, adapter=None, upstream=None) -> BrokerCoordinator:
     """Build the coordinator from a validated configuration and one adapter.
 
     The adapter is supplied by the caller because credential application must
     cross `CredentialOperationAdapter`; this function never builds an upstream,
     a resolver, or a binding loader implicitly.
     """
-    value = parse_service_config(config) if not isinstance(config, dict) \
-        or frozenset(config) != _CONFIG_FIELDS else parse_service_config(config)
+    value = parse_service_config(config)
     service = value["service"]
+    if adapter is None:
+        adapter = build_operation_adapter(service, upstream=upstream)
     return BrokerCoordinator(
         service, control_plane_uid=value["control_plane_uid"],
         controller_identity=value["controller"], adapter=adapter,
@@ -3610,11 +3802,41 @@ def main(argv: list[str] | None = None) -> int:
     if not config["enabled"]:
         print(json.dumps(bounded_error("broker_service_disabled"), sort_keys=True))
         return 3
-    # An enabled configuration still cannot start a credential path from here:
-    # the reviewed adapter, binding loader, proof, and egress gates are owned
-    # by the trusted control plane, not by this executable's argv.
-    print(json.dumps(bounded_error("broker_service_unavailable"), sort_keys=True))
-    return 4
+    try:
+        coordinator = build_coordinator(config)
+    except (ValueError, OSError):
+        print(json.dumps(bounded_error("broker_service_config_invalid"), sort_keys=True))
+        return 2
+    started = coordinator.start()
+    if not started.get("ok"):
+        print(json.dumps(_bounded_document(started), sort_keys=True))
+        return 4
+    # Admission stays closed until the identity recheck passes. Nothing here
+    # opens a credential path on an unproven host by itself: the guest cannot
+    # complete an operation without a trusted controller claiming it and
+    # dispatching a descriptor over the separate lease channel.
+    opened = coordinator.open_admission(config["service"])
+    if not opened.get("ok"):
+        coordinator.stop()
+        print(json.dumps(_bounded_document(opened), sort_keys=True))
+        return 4
+    stop = threading.Event()
+    for name in ("SIGTERM", "SIGINT"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                signal.signal(number, lambda *_args: stop.set())
+            except (OSError, ValueError):
+                pass
+    try:
+        result = coordinator.run(stop_event=stop)
+    finally:
+        coordinator.stop()
+    print(json.dumps(_bounded_document({
+        "ok": bool(result.get("ok")), "code": _safe_code(result.get("code")),
+        "admission_open": False,
+    }), sort_keys=True))
+    return 0 if result.get("ok") else 4
 
 
 if __name__ == "__main__":

@@ -77,6 +77,101 @@ must use exact interface binding where Linux supports it and must reject traffic
 arriving through loopback, forwarding, another interface, or another network
 namespace. The epoch is non-secret freshness metadata, not a bearer capability.
 
+## Internal operation claim and guest result boundary
+
+The broker, not the guest or controller, creates a fresh opaque
+`operation_id` after the complete `broker-request-v1` frame and transport have
+passed validation. It also computes `request_digest` over the exact canonical
+request frame. Both values remain broker-private or on the authenticated
+trusted controller/lease channels. They MUST NOT appear in guest responses,
+status, audit, retained output, logs, configuration, or durable binding state.
+
+The broker owns this bounded in-memory state machine:
+
+```text
+pending -> claimed -> lease_bound -> completed
+    |         |            |       -> refused
+    |         |            `------- > indeterminate
+    `---------`-------------------- > refused
+```
+
+`pending` means no trusted controller owns the operation. `claimed` means one
+authenticated controller connection owns it but no credential descriptor has
+been bound. `lease_bound` begins only after the exact operation ID, request
+digest, machine, broker epoch, binding/version, policy/egress/broker digests,
+expiry, and controller ownership all match. A deadline, revoke, or disconnect
+before `lease_bound` is a terminal refusal. Loss of controller or acknowledgement
+certainty after `lease_bound` is terminal `indeterminate`; it MUST NOT be
+retried. Terminal records are removed after the guest result is delivered or
+the guest disconnects. Retained terminal records remain strictly bounded so
+they cannot permanently consume the 16 active-operation slots.
+
+The controller boundary is a broker-owned abstract `AF_UNIX`
+`SOCK_SEQPACKET` endpoint separate from the guest and descriptor endpoints. Its
+canonical bounded messages are:
+
+```text
+CLAIM_NEXT  machine_id broker_epoch sequence
+CLAIMED     machine_id broker_epoch operation_id request_digest binding_id binding_version
+NO_PENDING
+REFUSE      machine_id broker_epoch sequence operation_id request_digest code
+```
+
+`CLAIMED` additionally carries the exact reviewed request-scope projection:
+HTTPS scheme, canonical host/port/method/path, total header bytes, body bytes,
+content type, bounded deadline, and correlation ID. It carries neither header
+values nor body bytes. The full `request_digest` still commits to the canonical
+request including those omitted values, so the controller can authorize exact
+scope and bounds before dispatch without receiving guest application content.
+
+Before parsing a controller frame, the broker authenticates the exact configured
+controller UID, PID/start identity, and executable identity from kernel-observed
+peer state. The broker requires the current machine and broker epoch, a strictly
+monotonic per-connection sequence, and exact claim ownership. Unknown message
+types, duplicate/out-of-order sequences, another connection's operation,
+stale epochs, and refusal codes outside the reviewed fixed allowlist fail
+closed. `CLAIM_NEXT` never accepts an operation ID from the controller.
+`CLAIMED` is trusted-channel metadata, not a bearer capability.
+
+The trusted lease frame includes the broker-created `operation_id` and
+`request_digest`. The descriptor endpoint MUST rendezvous them with the exact
+claimed operation and controller owner before descriptor inspection or
+credential use. A mismatch consumes/refuses that lease attempt and can never
+fall back to a binding-only lookup. Any isolated pre-controller registry used
+by local descriptor tests is explicitly legacy and MUST bind both fields; it is
+not the new operation flow and is not runtime wiring.
+
+The guest submits one canonical `broker-request-v1` frame and keeps that exact
+connection open until one terminal result is written. No `pending` response is
+part of the guest wire contract. Success is the exact bounded shape `ok`, HTTP
+status, reviewed response headers, base64-encoded binary body, and
+`correlation_id`. Failure is the exact bounded shape `ok=false`, reviewed safe
+code/message, retryability, and `correlation_id`. Neither shape contains an
+operation ID, lease ID, request digest, descriptor metadata, controller
+identity, credential, or raw upstream diagnostic. EOF is not required to
+finish request parsing; readily observable trailing bytes are refused.
+
+The exact v1 guest response-header allowlist is lowercase `cache-control`,
+`content-language`, `content-type`, `etag`, `last-modified`, and `retry-after`.
+All other response headers, including `set-cookie`, `authorization`, location,
+arbitrary `x-*` metadata, and differently cased duplicates, are refused rather
+than copied to the guest. This is an allowlist, not a sensitive-header denylist.
+
+Credential application crosses only `CredentialOperationAdapter`. Production
+construction requires a descriptor-backed, request-scoped
+`CredentialRequestBroker` configured with `VerifiedHttpsUpstream`, preserving
+its proof, egress, concurrency, error-normalization, and redaction gates. Direct
+`VerifiedHttpsUpstream` construction is forbidden. The ordinary broker API
+cannot consume this service's descriptor, so the adapter remains construction-
+closed until that reviewed entry point exists. It never accepts an arbitrary
+completion callback. An offline fake adapter requires an explicit test gate and
+injected fake socket seam. The adapter returns a reviewed broker response or an
+explicit reviewed refusal/indeterminate outcome. Exceptions or an invalid/
+missing terminal result are `indeterminate` once lease use may have occurred.
+A descriptor acknowledgement reports `completed` only after the terminal
+broker/upstream outcome is known, `refused` only when non-effect is known, and
+otherwise `indeterminate`.
+
 ## Trusted one-use lease channel
 
 The guest request transport and the trusted lease channel are separate. The
@@ -100,8 +195,9 @@ client and original `memfd` descriptors until the single send attempt. The root
 helper and supervisor own, connect to, receive, or inherit none of them.
 
 One binary frame binds protocol version, lease ID, broker epoch, machine ID,
-binding ID/version, policy/egress/broker digests, expiry, and exact descriptor
-size. Exactly one `SCM_RIGHTS` descriptor is allowed. The broker verifies the
+operation ID, request digest, binding ID/version, policy/egress/broker digests,
+expiry, and exact descriptor size. Exactly one `SCM_RIGHTS` descriptor is
+allowed. The broker verifies the
 anonymous-file type, required seals, size, frame bounds, peer, epoch, identities,
 digests, and deadline. It atomically records the lease ID consumed before
 reading the descriptor or contacting upstream. Missing/extra descriptors,

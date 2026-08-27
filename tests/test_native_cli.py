@@ -93,5 +93,61 @@ class TestNativeCli(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["reason"]["code"], "credential_acceptance_invalid")
 
+    def test_credential_acceptance_rejects_public_v1_or_unknown_protocol_tag(self):
+        from sandbox.commands.native import cmd_native
+        for protocol in ("credential-broker-controller-v1",
+                         "credential-broker-controller-v3"):
+            with self.subTest(protocol=protocol):
+                request = {"action": "revoke", "binding_id": "binding-0001",
+                           "version": 1, "machine_id": "sb-0123456789ab",
+                           "owner": "owner-0001", "protocol": protocol}
+                args = SimpleNamespace(
+                    action="credential-acceptance", json=True, project_dir=".",
+                    label="default", web_server="nginx",
+                    credential_request=json.dumps(request),
+                )
+                output = io.StringIO()
+                with mock.patch("sandbox.application.context.runtime_service") as runtime, \
+                        redirect_stdout(output):
+                    cmd_native({}, args)
+                runtime.assert_not_called()
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["reason"]["code"],
+                                 "credential_acceptance_invalid")
+
+    def test_credential_acceptance_preserves_indeterminate_without_retry(self):
+        from sandbox.commands.native import cmd_native
+        from sandbox.runtimes.base import OperationResult
+
+        request = {"action": "request", "binding_id": "binding-0001", "version": 4,
+                   "machine_id": "sb-0123456789ab", "owner": "owner-0001",
+                   "content_type": "application/json", "deadline_seconds": 5,
+                   "correlation_id": "correlation-0001"}
+        calls = []
+
+        def invoke(value):
+            calls.append(dict(value.arguments["request"]))
+            return OperationResult(
+                False, "credential_acceptance", value.project_root, "wordpress",
+                {"state": "blocked", "mutated": False, "proof_candidate": True,
+                 "adoptable": False,
+                 "reason": {"code": "credential_acceptance_indeterminate"}},
+            )
+
+        args = SimpleNamespace(
+            action="credential-acceptance", json=True, project_dir=".",
+            label="default", web_server="nginx",
+            credential_request=json.dumps(request),
+        )
+        output = io.StringIO()
+        with mock.patch("sandbox.application.context.runtime_service",
+                        return_value=SimpleNamespace(invoke=invoke)), redirect_stdout(output):
+            cmd_native({}, args)
+        self.assertEqual(calls, [request])
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["reason"]["code"],
+                         "credential_acceptance_indeterminate")
+        self.assertNotIn("retry", result)
+
 
 if __name__ == "__main__": unittest.main()

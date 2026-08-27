@@ -1,7 +1,8 @@
 # Native credential acceptance v1 (local contract)
 
-Status: implemented seams, unproven. This contract is not live evidence and
-does not make managed native credential mediation adoptable.
+Status: superseded and closed. The public operation accepts no v1 protocol or
+authority composition. See `native-credential-acceptance-v2.md`. This file is
+retained only to make downgrade refusal explicit.
 
 The only public operation is `native credential-acceptance`. It is routed as a
 runtime `OperationRequest`; it never reads registry or runtime state directly

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import threading
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -59,6 +60,7 @@ _FIXED_BOUNDS = {
     "max_active_operations": 16,
 }
 _QUIESCE_RECEIPT_ISSUER = object()
+_PUBLIC_ACCEPTANCE_RECEIPT_ISSUER = object()
 
 
 class LifecycleV2Error(RuntimeError):
@@ -94,6 +96,29 @@ class VerifiedQuiesceReceiptV2:
         if self._issuer is not _QUIESCE_RECEIPT_ISSUER or self._used:
             raise LifecycleV2Error("quiesce_incomplete")
         object.__setattr__(self, "_used", True)
+
+
+class _PublicAcceptanceLifecycleReceiptV2:
+    """Opaque one-attempt snapshot minted by the exact lifecycle authority."""
+
+    __slots__ = ("authority", "session", "action", "generation", "initial_state",
+                 "active_operation_count", "_issuer")
+
+    def __init__(self, issuer, *, authority, action, generation, initial_state,
+                 active_operation_count) -> None:
+        if issuer is not _PUBLIC_ACCEPTANCE_RECEIPT_ISSUER:
+            raise LifecycleV2Error("public_acceptance_refused")
+        object.__setattr__(self, "authority", authority)
+        object.__setattr__(self, "session", authority.session)
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "generation", generation)
+        object.__setattr__(self, "initial_state", initial_state)
+        object.__setattr__(self, "active_operation_count", active_operation_count)
+        object.__setattr__(self, "_issuer", issuer)
+
+    def __setattr__(self, name, value) -> None:
+        del name, value
+        raise LifecycleV2Error("public_acceptance_refused")
 
 
 def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
@@ -392,7 +417,9 @@ class ManagedCredentialLifecycleV2:
 class ControllerLifecycleAuthorityV2:
     """Exact controller-side ACTIVATE/QUIESCE sender and ACK verifier."""
 
-    __slots__ = ("session", "_pending", "_quiesced", "_active", "plan_identity")
+    __slots__ = ("session", "_pending", "_quiesced", "_active", "plan_identity",
+                 "_public_generation", "_public_receipts", "_last_quiesce_status",
+                 "_public_lock", "_public_transition")
 
     def __init__(self, session: ControllerBrokerSession, *, plan_identity: str) -> None:
         if (not isinstance(session, ControllerBrokerSession)
@@ -404,6 +431,120 @@ class ControllerLifecycleAuthorityV2:
         self._pending: dict[str, Any] | None = None
         self._quiesced = False
         self._active = False
+        self._public_generation = 0
+        self._public_receipts = {}
+        self._last_quiesce_status = None
+        self._public_lock = threading.RLock()
+        self._public_transition = None
+
+    def _rotate_public_generation(self, transition, *, preserve_revoke=False):
+        with self._public_lock:
+            self._public_generation += 1
+            self._public_transition = transition
+            if preserve_revoke:
+                self._public_receipts = {
+                    key: receipt for key, receipt in self._public_receipts.items()
+                    if receipt.action == "revoke"
+                }
+            else:
+                self._public_receipts.clear()
+
+    def public_acceptance_reservations(self) -> Mapping[str, int]:
+        """Return bounded non-secret reservation counts for status/tests."""
+
+        with self._public_lock:
+            requests = sum(receipt.action == "request"
+                           for receipt in self._public_receipts.values())
+            return MappingProxyType({
+                "request_receipts": requests,
+                "action_receipts": len(self._public_receipts) - requests,
+                "total": len(self._public_receipts),
+            })
+
+    def close_public_acceptance(self) -> None:
+        """Release all outstanding reservations during exact-owned cleanup."""
+
+        self._rotate_public_generation("cleanup")
+
+    def begin_public_acceptance(self, *, action: str, active_operation_count: int,
+                                lifecycle_state: str, admission_open: bool):
+        """Mint one current-state receipt for an exact public action attempt."""
+
+        with self._public_lock:
+            current_state = (
+                "quiescing" if self._public_transition is not None
+                or self._quiesced or self._pending is not None else
+                "active" if self._active else "closed"
+            )
+            request_reservations = sum(
+                receipt.action == "request"
+                for receipt in self._public_receipts.values()
+            )
+            nonrequest_reservations = len(self._public_receipts) - request_reservations
+            count_valid = type(active_operation_count) is int and (
+                (action == "bind" and active_operation_count == 0
+                 and not self._public_receipts)
+                or (action == "request"
+                    and nonrequest_reservations == 0
+                    and 0 <= active_operation_count
+                    and active_operation_count + request_reservations
+                    < _FIXED_BOUNDS["max_active_operations"])
+                or (action == "revoke"
+                    and nonrequest_reservations == 0
+                    and 0 <= active_operation_count
+                    <= _FIXED_BOUNDS["max_active_operations"])
+            )
+            state_valid = (
+                (action == "bind" and current_state == "closed")
+                or (action == "request" and current_state == "active")
+                or (action == "revoke" and current_state in {"closed", "active"})
+            )
+            if (action not in {"bind", "request", "revoke"} or not count_valid
+                    or not state_valid or lifecycle_state != current_state
+                    or admission_open != (current_state == "active")
+                    or not self.session.authenticated or self.session.broker_epoch is None):
+                raise LifecycleV2Error("public_acceptance_refused")
+            receipt = _PublicAcceptanceLifecycleReceiptV2(
+                _PUBLIC_ACCEPTANCE_RECEIPT_ISSUER, authority=self, action=action,
+                generation=self._public_generation, initial_state=current_state,
+                active_operation_count=active_operation_count,
+            )
+            self._public_receipts[id(receipt)] = receipt
+            return receipt
+
+    def finish_public_acceptance(self, receipt, *, accepted: bool) -> bool:
+        """Consume the receipt and recheck lifecycle state after the action."""
+
+        with self._public_lock:
+            if (type(receipt) is not _PublicAcceptanceLifecycleReceiptV2
+                    or receipt._issuer is not _PUBLIC_ACCEPTANCE_RECEIPT_ISSUER
+                    or receipt.authority is not self or receipt.session is not self.session
+                    or self._public_receipts.get(id(receipt)) is not receipt
+                    or type(accepted) is not bool):
+                raise LifecycleV2Error("public_acceptance_refused")
+            del self._public_receipts[id(receipt)]
+            if not accepted:
+                return True
+            if not self.session.authenticated or self.session.broker_epoch is None:
+                return False
+            if receipt.action == "bind":
+                return (receipt.initial_state == "closed" and not self._active
+                        and not self._quiesced and self._pending is None
+                        and self._public_transition is None
+                        and self._public_generation == receipt.generation)
+            if receipt.action == "request":
+                return (receipt.initial_state == "active" and self._active
+                        and not self._quiesced and self._pending is None
+                        and self._public_transition is None
+                        and self._public_generation == receipt.generation)
+            if receipt.initial_state == "closed":
+                return (not self._active and not self._quiesced and self._pending is None
+                        and self._public_transition is None
+                        and self._public_generation == receipt.generation)
+            return (not self._active and self._quiesced and self._pending is None
+                    and self._public_transition is None
+                    and self._last_quiesce_status == ("drained", 0, "drained")
+                    and self._public_generation > receipt.generation)
 
     def activate(self, *, now_ms: int, expires_at_unix_ms: int,
                  audit_authority: ControllerAuditAuthorityV2,
@@ -416,8 +557,7 @@ class ControllerLifecycleAuthorityV2:
                               "sealed_expectations_ready", "active_operation_count",
                               "drain_status", *self.session.config.configured_digests()}
         current = self.session.config.configured_digests()
-        if (self._quiesced or self._active or self._pending is not None
-                or not isinstance(audit_authority, ControllerAuditAuthorityV2)
+        if (not isinstance(audit_authority, ControllerAuditAuthorityV2)
                 or audit_authority.session is not self.session
                 or audit_authority.activation_ready is not True
                 or not callable(readiness_observer)
@@ -432,6 +572,14 @@ class ControllerLifecycleAuthorityV2:
                 or not now_ms < expires_at_unix_ms <= now_ms + 30000
                 or self.session.config.evidence_id is None):
             raise LifecycleV2Error("activation_refused")
+        with self._public_lock:
+            if (self._quiesced or self._active or self._pending is not None
+                    or self._public_transition is not None):
+                raise LifecycleV2Error("activation_refused")
+            self._public_generation += 1
+            self._public_transition = "activating"
+            self._public_receipts.clear()
+            self._last_quiesce_status = None
         sequence = self.session._next_outgoing
         values = {
             "protocol": PROTOCOL, "type": "ACTIVATE_V2",
@@ -451,7 +599,8 @@ class ControllerLifecycleAuthorityV2:
             }, now_ms=now_ms)
         except ControllerServiceV2Error as exc:
             raise LifecycleV2Error(exc.code) from None
-        self._pending = dict(sent)
+        with self._public_lock:
+            self._pending = dict(sent)
         return sent
 
     def acknowledge_activation(self, ack: Mapping[str, Any], *, now_ms: int) -> dict[str, Any]:
@@ -485,19 +634,32 @@ class ControllerLifecycleAuthorityV2:
                 or any(ack.get(name) != pending.get(name) for name in (
                     "machine_id", "broker_epoch", "controller_epoch"))):
             raise LifecycleV2Error("activation_ack_invalid")
-        self._pending = None
-        self._active = success[0] == "open"
+        with self._public_lock:
+            self._pending = None
+            self._active = success[0] == "open"
+            self._public_generation += 1
+            self._public_transition = None
         return {"ok": self._active, "code": ack["reason_code"],
                 "admission_open": self._active}
 
     def quiesce(self, *, now_ms: int, drain_deadline_unix_ms: int,
                 reason_code: str) -> dict[str, Any]:
-        if (self._quiesced or not self._active or self._pending is not None
-                or reason_code not in {"operator_stop", "restart", "revoke", "expiry",
+        if (reason_code not in {"operator_stop", "restart", "revoke", "expiry",
                                        "proof_drift", "egress_drift", "identity_drift", "cleanup"}
                 or type(now_ms) is not int or type(drain_deadline_unix_ms) is not int
                 or not now_ms < drain_deadline_unix_ms <= now_ms + 5000):
             raise LifecycleV2Error("quiesce_refused")
+        with self._public_lock:
+            if (self._quiesced or not self._active or self._pending is not None
+                    or self._public_transition is not None):
+                raise LifecycleV2Error("quiesce_refused")
+            self._public_generation += 1
+            self._public_transition = "quiescing"
+            self._public_receipts = {
+                key: receipt for key, receipt in self._public_receipts.items()
+                if receipt.action == "revoke"
+            }
+            self._last_quiesce_status = None
         sequence = self.session._next_outgoing
         digest = digest_document("quiesce_digest", {
             "protocol": PROTOCOL, "type": "QUIESCE_V2",
@@ -515,8 +677,9 @@ class ControllerLifecycleAuthorityV2:
             }, now_ms=now_ms)
         except ControllerServiceV2Error as exc:
             raise LifecycleV2Error(exc.code) from None
-        self._pending = dict(sent)
-        self._quiesced = True
+        with self._public_lock:
+            self._pending = dict(sent)
+            self._quiesced = True
         return sent
 
     def acknowledge_quiesce(self, ack: Mapping[str, Any], *, now_ms: int) -> VerifiedQuiesceReceiptV2:
@@ -544,8 +707,12 @@ class ControllerLifecycleAuthorityV2:
                 or any(ack.get(name) != pending.get(name) for name in (
                     "machine_id", "broker_epoch", "controller_epoch"))):
             raise LifecycleV2Error("quiesce_ack_invalid")
-        self._pending = None
-        self._active = False
+        with self._public_lock:
+            self._pending = None
+            self._active = False
+            self._public_generation += 1
+            self._last_quiesce_status = status
+            self._public_transition = None
         return VerifiedQuiesceReceiptV2(
             _QUIESCE_RECEIPT_ISSUER, machine_id=ack["machine_id"],
             broker_epoch=ack["broker_epoch"], controller_epoch=ack["controller_epoch"],

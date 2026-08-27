@@ -343,6 +343,14 @@ class ControllerOperationAuthorityV2:
             self.session.require_received_frame(ack, message_type="AUTHORIZED_V2")
         except ControllerServiceV2Error:
             raise ControllerAuthorityV2Error("authorization_ack_invalid") from None
+        try:
+            self.session.bind_lease_socket(
+                dispatcher, operation_id=authorization["operation_id"],
+                authorization_digest=authorization["authorization_digest"],
+                authorization_expires_at_unix_ms=(
+                    authorization["authorization_expires_at_unix_ms"]))
+        except ControllerServiceV2Error:
+            raise ControllerAuthorityV2Error("lease_dispatch_invalid") from None
         self._pending.pop(ack["operation_id"])
         self._tombstones.add(ack["operation_id"])
         material = None
@@ -420,7 +428,8 @@ class ControllerOperationAuthorityV2:
                     packet, descriptor, min(1000, lease_expiry - now_ms))
             except ControllerServiceV2Error as exc:
                 raise ControllerAuthorityV2Error(
-                    "lease_ack_invalid" if exc.code == "lease_ack_invalid"
+                    "lease_ack_invalid" if exc.code in {
+                        "lease_ack_invalid", "lease_ack_provenance_invalid"}
                     else "lease_dispatch_invalid") from None
             except Exception:
                 raise ControllerAuthorityV2Error("lease_dispatch_invalid") from None

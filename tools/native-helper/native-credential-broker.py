@@ -60,11 +60,10 @@ from sandbox.isolation.credential_controller_service_v2 import (
     _mint_authenticated_broker_composition_receipt_v2,
     _mint_bound_guest_submit_capability_v2,
     abstract_controller_address as abstract_controller_address_v2,
+    lease_endpoint_address_v2,
     receive_authenticated_packet as receive_authenticated_packet_v2,
     _peer_credentials as observe_socket_peer_credentials_v2,
 )
-
-
 PROTOCOL_VERSION = 1
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_FRAME_BYTES = 4096
@@ -3558,13 +3557,47 @@ class _V2AuthenticatedLeaseConnection:
 class _V2LeaseDeliveryEndpoint:
     """One exact authorization's one-attempt delivery endpoint."""
 
-    __slots__ = ("_connection", "operation_id", "_attempted", "_lock")
+    __slots__ = ("_connection", "operation_id", "address", "listener",
+                 "_attempted", "_lock", "_closed")
 
     def __init__(self, connection, operation_id: str) -> None:
         self._connection = connection
         self.operation_id = operation_id
+        self.address = None
+        self.listener = None
         self._attempted = False
         self._lock = threading.Lock()
+        self._closed = False
+
+    def arm(self, address: bytes, factory) -> None:
+        if (self._closed or self.listener is not None or type(address) is not bytes
+                or len(address) != 93 or not callable(factory)):
+            raise ControllerServiceV2Error("lease_endpoint_invalid")
+        self.address = address
+        try:
+            listener = factory(address, self)
+        except ControllerServiceV2Error:
+            self.address = None
+            raise
+        except OSError as exc:
+            self.address = None
+            if getattr(exc, "errno", None) == getattr(__import__("errno"), "EADDRINUSE"):
+                raise ControllerServiceV2Error("lease_endpoint_collision") from None
+            raise ControllerServiceV2Error("lease_endpoint_unavailable") from None
+        except Exception:
+            self.address = None
+            raise ControllerServiceV2Error("lease_endpoint_unavailable") from None
+        if (listener is None or not callable(getattr(listener, "close", None))):
+            self.address = None
+            raise ControllerServiceV2Error("lease_endpoint_unavailable")
+        self.listener = listener
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            listener, self.listener = self.listener, None
+            if listener is not None:
+                listener.close()
 
     def accept(self, packet: bytes, descriptors: Any, *, descriptor_observer,
                descriptor_closer, now_ms: int, accepted_socket_receipt) -> dict[str, Any]:
@@ -3595,6 +3628,230 @@ class _V2LeaseDeliveryEndpoint:
                     pass
 
 
+class LinuxLeaseOperationV2Listener:
+    """One armed per-authorization abstract listener; no address fallback."""
+
+    __slots__ = ("address", "endpoint", "listener", "_observer", "_now_ms",
+                 "_descriptor_observer", "_descriptor_closer", "_so_peercred",
+                 "_so_passcred", "_scm_credentials", "_scm_rights", "_closed",
+                 "_accepted", "_terminal_code", "_accepted_connection",
+                 "_ownership_lock", "_listener_closed")
+
+    def __init__(self, address: bytes, endpoint: _V2LeaseDeliveryEndpoint, *,
+                 observer, now_ms, descriptor_observer, descriptor_closer,
+                 socket_factory=socket.socket, so_peercred=None, so_passcred=None,
+                 scm_credentials=None, scm_rights=None) -> None:
+        so_peercred = getattr(socket, "SO_PEERCRED", None) if so_peercred is None else so_peercred
+        so_passcred = getattr(socket, "SO_PASSCRED", None) if so_passcred is None else so_passcred
+        scm_credentials = getattr(socket, "SCM_CREDENTIALS", None) \
+            if scm_credentials is None else scm_credentials
+        scm_rights = socket.SCM_RIGHTS if scm_rights is None else scm_rights
+        if (type(address) is not bytes or len(address) != 93 or address[:1] != b"\0"
+                or not isinstance(endpoint, _V2LeaseDeliveryEndpoint)
+                or endpoint.address != address
+                or not callable(observer) or not callable(now_ms)
+                or not callable(descriptor_observer) or not callable(descriptor_closer)
+                or not callable(socket_factory)
+                or any(type(value) is not int or value < 1 for value in (
+                    so_peercred, so_passcred, scm_credentials, scm_rights))):
+            raise ControllerServiceV2Error("lease_endpoint_invalid")
+        self.address = address
+        self.endpoint = endpoint
+        self._observer = observer
+        self._now_ms = now_ms
+        self._descriptor_observer = descriptor_observer
+        self._descriptor_closer = descriptor_closer
+        self._so_peercred = so_peercred
+        self._so_passcred = so_passcred
+        self._scm_credentials = scm_credentials
+        self._scm_rights = scm_rights
+        self._closed = False
+        self._accepted = False
+        self._terminal_code = None
+        self._accepted_connection = None
+        self._ownership_lock = threading.Lock()
+        self._listener_closed = False
+        listener = None
+        try:
+            listener = socket_factory(socket.AF_UNIX, socket.SOCK_SEQPACKET, 0)
+            listener.setsockopt(socket.SOL_SOCKET, so_passcred, 1)
+            listener.bind(address)
+            listener.listen(1)
+            setter = getattr(listener, "settimeout", None)
+            if not callable(setter):
+                raise ControllerServiceV2Error("lease_endpoint_unavailable")
+            setter(1.0)
+        except Exception as exc:
+            code = ("lease_endpoint_collision"
+                    if isinstance(exc, OSError)
+                    and getattr(exc, "errno", None) == getattr(__import__("errno"), "EADDRINUSE")
+                    else "lease_endpoint_unavailable")
+            cleanup_failed = False
+            if listener is not None:
+                try:
+                    listener.close()
+                except Exception:
+                    cleanup_failed = True
+            raise ControllerServiceV2Error(
+                "lease_endpoint_cleanup_failed" if cleanup_failed else code
+            ) from None
+        self.listener = listener
+
+    def _track_accepted(self, connection) -> bool:
+        with self._ownership_lock:
+            if self._closed or self._accepted_connection is not None:
+                return False
+            self._accepted_connection = connection
+            return True
+
+    def _release_accepted(self, connection):
+        with self._ownership_lock:
+            if self._accepted_connection is connection:
+                self._accepted_connection = None
+                return connection
+            return None
+
+    def _take_listener(self):
+        with self._ownership_lock:
+            if self._listener_closed:
+                return None
+            self._listener_closed = True
+            return self.listener
+
+    def receive_once(self) -> dict[str, Any]:
+        if self._closed or self._accepted:
+            raise ControllerServiceV2Error(
+                self._terminal_code or "lease_endpoint_consumed")
+        connection = None
+        descriptors = []
+        transferred = False
+        result = None
+        failure = None
+        cleanup_failure = None
+        self._accepted = True
+        try:
+            connection, _address = self.listener.accept()
+            if not self._track_accepted(connection):
+                try:
+                    connection.close()
+                except Exception:
+                    cleanup_failure = "lease_socket_cleanup_failed"
+                raise ControllerServiceV2Error("lease_endpoint_consumed")
+            setter = getattr(connection, "settimeout", None)
+            if not callable(setter):
+                raise ControllerServiceV2Error("lease_endpoint_unavailable")
+            setter(1.0)
+            peer = observe_socket_peer_credentials_v2(
+                connection, so_peercred=self._so_peercred)
+            observed = self._observer(*peer)
+            if observed != self.endpoint._connection.config.controller:
+                raise ControllerServiceV2Error("lease_ancillary_invalid")
+            ancillary_size = (socket.CMSG_SPACE(_PEER_CREDENTIALS.size)
+                              + socket.CMSG_SPACE(array("i", [0]).itemsize * 16))
+            packet, ancillary, flags, _source = connection.recvmsg(
+                732, ancillary_size, getattr(socket, "MSG_CMSG_CLOEXEC", 0))
+            credentials = []
+            malformed = False
+            for level, kind, payload in ancillary:
+                if level == socket.SOL_SOCKET and kind == self._scm_rights:
+                    values = array("i")
+                    aligned = len(payload) - (len(payload) % values.itemsize)
+                    if aligned:
+                        values.frombytes(payload[:aligned])
+                    descriptors.extend(values.tolist())
+                    malformed = malformed or aligned != len(payload)
+                elif level == socket.SOL_SOCKET and kind == self._scm_credentials:
+                    if len(payload) != _PEER_CREDENTIALS.size:
+                        malformed = True
+                    else:
+                        credentials.append(_PEER_CREDENTIALS.unpack(payload))
+                else:
+                    malformed = True
+            truncation = getattr(socket, "MSG_TRUNC", 0) | getattr(socket, "MSG_CTRUNC", 0)
+            if (malformed or flags & truncation or len(packet) != 732 or len(credentials) != 1
+                    or credentials[0] != peer
+                    or len(descriptors) != 1):
+                raise ControllerServiceV2Error("lease_ancillary_invalid")
+            receipt = self.endpoint._connection._authenticated_lease_socket_receipt_v2(
+                self.endpoint.operation_id, connection, observer=self._observer,
+                so_peercred=self._so_peercred)
+            self._release_accepted(connection)
+            transferred = True
+            result = self.endpoint.accept(
+                packet, descriptors,
+                descriptor_observer=self._descriptor_observer,
+                descriptor_closer=self._descriptor_closer,
+                now_ms=self._now_ms(), accepted_socket_receipt=receipt)
+            self.endpoint._connection._finish_lease_endpoint_attempt_v2(
+                self.endpoint.operation_id, self, failed=False)
+        except Exception as exc:
+            failure = (
+                exc.code if isinstance(exc, ControllerServiceV2Error)
+                else "lease_endpoint_unavailable")
+            try:
+                self.endpoint._connection._finish_lease_endpoint_attempt_v2(
+                    self.endpoint.operation_id, self, failed=True)
+            except Exception as cleanup_exc:
+                cleanup_failure = (
+                    cleanup_exc.code if isinstance(cleanup_exc, ControllerServiceV2Error)
+                    else "operation_cleanup_failed")
+        finally:
+            if not transferred:
+                for descriptor in descriptors:
+                    try:
+                        self._descriptor_closer(descriptor)
+                    except Exception:
+                        cleanup_failure = cleanup_failure or "descriptor_cleanup_failed"
+                owned_connection = (self._release_accepted(connection)
+                                    if connection is not None else None)
+                if owned_connection is not None:
+                    try:
+                        owned_connection.close()
+                    except Exception:
+                        cleanup_failure = cleanup_failure or "lease_socket_cleanup_failed"
+            listener = self._take_listener()
+            if listener is not None:
+                try:
+                    listener.close()
+                except Exception:
+                    cleanup_failure = cleanup_failure or "lease_endpoint_cleanup_failed"
+            with self._ownership_lock:
+                self._closed = True
+        self._terminal_code = cleanup_failure or failure
+        if cleanup_failure is not None:
+            self.endpoint._connection._record_lease_endpoint_cleanup_failure_v2(
+                cleanup_failure)
+        if self._terminal_code is not None:
+            raise ControllerServiceV2Error(self._terminal_code) from None
+        return result
+
+    def close(self) -> None:
+        with self._ownership_lock:
+            already_closed = self._closed
+            self._closed = True
+            accepted, self._accepted_connection = self._accepted_connection, None
+        if already_closed and accepted is None:
+            if self._terminal_code in {
+                    "descriptor_cleanup_failed", "lease_socket_cleanup_failed",
+                    "lease_endpoint_cleanup_failed"}:
+                raise ControllerServiceV2Error(self._terminal_code)
+            return
+        failure = None
+        if accepted is not None:
+            try:
+                accepted.close()
+            except Exception:
+                failure = "lease_socket_cleanup_failed"
+        listener = self._take_listener()
+        if listener is not None:
+            try:
+                listener.close()
+            except Exception:
+                failure = failure or "lease_endpoint_cleanup_failed"
+        if failure is not None:
+            self._terminal_code = failure
+            raise ControllerServiceV2Error(self._terminal_code) from None
+
 class BrokerControllerV2Connection:
     protocol = CONTROLLER_PROTOCOL_V2
     """One v2 controller connection with one permanently pinned registry.
@@ -3616,11 +3873,12 @@ class BrokerControllerV2Connection:
         "_audit_lock",
         "_composition_nonce", "_guest_submit_capability",
         "_guest_submit_validator", "_guest_submit_clock",
+        "_lease_endpoint_factory",
     )
 
     def __init__(self, connection: Any, config: ControllerServiceConfigV2,
                  broker_epoch: str, owner: str, *, registry_factory=AuthorizationRegistryV2,
-                 on_terminal=None) -> None:
+                 on_terminal=None, lease_endpoint_factory=None) -> None:
         try:
             connection_valid = all(callable(getattr(connection, name, None)) for name in (
                 "getsockopt", "recvmsg", "sendall", "close",
@@ -3634,7 +3892,9 @@ class BrokerControllerV2Connection:
                 or not isinstance(owner, str)
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", owner) is None
                 or not callable(registry_factory)
-                or (on_terminal is not None and not callable(on_terminal))):
+                or (on_terminal is not None and not callable(on_terminal))
+                or (lease_endpoint_factory is not None
+                    and not callable(lease_endpoint_factory))):
             raise ControllerServiceV2Error("broker_connection_invalid")
         self.connection = connection
         self.config = config
@@ -3664,6 +3924,7 @@ class BrokerControllerV2Connection:
         self._guest_submit_capability = None
         self._guest_submit_validator = None
         self._guest_submit_clock = None
+        self._lease_endpoint_factory = lease_endpoint_factory
 
     def mint_guest_bridge_receipt_v2(self):
         """Mint one exact-session, one-use guest bridge capability."""
@@ -4061,6 +4322,10 @@ class BrokerControllerV2Connection:
             except Exception:
                 failures.append("operation_cleanup_failed")
                 count = self.operations.active_count()
+            try:
+                self._close_armed_lease_endpoints_v2()
+            except ControllerServiceV2Error as exc:
+                failures.append(exc.code)
             if failures:
                 if self._terminal_code == "broker_controller_closed":
                     self._terminal_code = failures[0]
@@ -4090,6 +4355,11 @@ class BrokerControllerV2Connection:
                     self._terminal_code = "registry_disconnect_refused"
         try:
             self.operations.terminalize_all(code)
+        except ControllerServiceV2Error as exc:
+            if self._terminal_code == "broker_controller_closed":
+                self._terminal_code = exc.code
+        try:
+            self._close_armed_lease_endpoints_v2()
         except ControllerServiceV2Error as exc:
             if self._terminal_code == "broker_controller_closed":
                 self._terminal_code = exc.code
@@ -4240,7 +4510,10 @@ class BrokerControllerV2Connection:
                 valid = False
             if not valid:
                 self._authorization_mismatch_v2(operation_id)
+            endpoint = None
             try:
+                if self._lease_endpoint_factory is None:
+                    raise ControllerServiceV2Error("lease_endpoint_unavailable")
                 identity = AuthorizationIdentityV2(
                     owner=self.owner, machine_id=self.config.machine_id,
                     broker_epoch=self.broker_epoch, controller_epoch=self.controller_epoch,
@@ -4255,7 +4528,26 @@ class BrokerControllerV2Connection:
                 )
                 self.registry.insert(identity, now_ms=now_ms)
                 self.operations.authorize(message, identity=identity, now_ms=now_ms)
-            except Exception:
+                endpoint = _V2LeaseDeliveryEndpoint(self, operation_id)
+                address = lease_endpoint_address_v2(
+                    machine_id=self.config.machine_id,
+                    broker_epoch=self.broker_epoch,
+                    controller_epoch=self.controller_epoch,
+                    broker_digest=self.config.broker_digest,
+                    broker_config_digest=self.config.broker.config_digest,
+                    controller_config_digest=self.config.controller.config_digest,
+                    operation_id=operation_id,
+                    authorization_digest=message["authorization_digest"],
+                )
+                endpoint.arm(address, self._lease_endpoint_factory)
+                self._lease_endpoints[operation_id] = endpoint
+            except Exception as exc:
+                if endpoint is not None:
+                    try:
+                        endpoint.close()
+                    except Exception:
+                        if self._terminal_code == "broker_controller_closed":
+                            self._terminal_code = "lease_endpoint_cleanup_failed"
                 cleanup_failed = False
                 try:
                     self.registry.revoke(
@@ -4276,6 +4568,16 @@ class BrokerControllerV2Connection:
                     self.admission_open = False
                     self._terminalize_pre_effect_v2("revoked")
                     raise ControllerServiceV2Error(self._terminal_code) from None
+                if (isinstance(exc, ControllerServiceV2Error)
+                        and exc.code.startswith("lease_endpoint_")):
+                    self._terminal_code = (
+                        self._terminal_code if self._terminal_code != "broker_controller_closed"
+                        else exc.code
+                    )
+                    self._quiesced = True
+                    self.admission_open = False
+                    self._terminalize_pre_effect_v2("revoked")
+                    raise ControllerServiceV2Error(self._terminal_code) from None
                 self._authorization_mismatch_v2(operation_id)
             self._claim_anchor = None
             response = self._send({**base, "type": "AUTHORIZED_V2",
@@ -4287,7 +4589,6 @@ class BrokerControllerV2Connection:
             }, now_ms=now_ms, temporal_context={
                 "authorization_expires_at_unix_ms": message["authorization_expires_at_unix_ms"],
             })
-            self._lease_endpoints[operation_id] = _V2LeaseDeliveryEndpoint(self, operation_id)
             return response
 
     def lease_endpoint_v2(self, operation_id: str) -> _V2LeaseDeliveryEndpoint:
@@ -4299,6 +4600,53 @@ class BrokerControllerV2Connection:
             if endpoint is None:
                 raise ControllerServiceV2Error("lease_invalid")
             return endpoint
+
+    def _close_armed_lease_endpoints_v2(self, operation_ids=None) -> None:
+        selected = (set(self._lease_endpoints) if operation_ids is None
+                    else set(operation_ids))
+        failure = None
+        for operation_id in tuple(selected):
+            endpoint = self._lease_endpoints.pop(operation_id, None)
+            if endpoint is not None:
+                try:
+                    endpoint.close()
+                except Exception:
+                    failure = failure or "lease_endpoint_cleanup_failed"
+        if failure is not None:
+            raise ControllerServiceV2Error(failure)
+
+    def _finish_lease_endpoint_attempt_v2(self, operation_id: str, listener,
+                                          *, failed: bool) -> None:
+        with self._authority_lock:
+            endpoint = self._lease_endpoints.pop(operation_id, None)
+            if endpoint is not None and endpoint.listener is listener:
+                endpoint.listener = None
+                endpoint._closed = True
+            if failed and self.operations is not None:
+                self.operations.terminalize_known(operation_id, "lease_invalid")
+                try:
+                    self.registry.release_failed_delivery(
+                        machine_id=self.config.machine_id,
+                        broker_epoch=self.broker_epoch,
+                        controller_epoch=self.controller_epoch, owner=self.owner,
+                        operation_id=operation_id)
+                except Exception:
+                    if self._terminal_code == "broker_controller_closed":
+                        self._terminal_code = "registry_revoke_refused"
+                    self._quiesced = True
+                    self.admission_open = False
+                    raise ControllerServiceV2Error(self._terminal_code) from None
+
+    def _record_lease_endpoint_cleanup_failure_v2(self, code: str) -> None:
+        with self._authority_lock:
+            if self._terminal_code == "broker_controller_closed":
+                self._terminal_code = (code if code in {
+                    "descriptor_cleanup_failed", "lease_socket_cleanup_failed",
+                    "lease_endpoint_cleanup_failed", "operation_cleanup_failed",
+                } else "lease_endpoint_cleanup_failed")
+            self._quiesced = True
+            self.admission_open = False
+            self._terminalize_pre_effect_v2("revoked")
 
     def _authenticated_lease_socket_receipt_v2(
             self, operation_id: str, connection, *, observer, so_peercred: int):
@@ -4381,6 +4729,15 @@ class BrokerControllerV2Connection:
             except Exception as exc:
                 if first_attempt:
                     self.operations.terminalize_known(operation_id, "lease_invalid")
+                    try:
+                        self.registry.release_failed_delivery(
+                            machine_id=self.config.machine_id,
+                            broker_epoch=self.broker_epoch,
+                            controller_epoch=self.controller_epoch,
+                            owner=self.owner, operation_id=operation_id)
+                    except Exception:
+                        if self._terminal_code == "broker_controller_closed":
+                            self._terminal_code = "registry_revoke_refused"
                     if (self.operations.terminal_code is not None
                             and self._terminal_code == "broker_controller_closed"):
                         self._terminal_code = self.operations.terminal_code
@@ -4660,6 +5017,15 @@ class BrokerControllerV2Connection:
                 removed_ops = 0
                 if failure_code is None:
                     failure_code = "operation_cleanup_failed"
+            terminal_endpoints = tuple(
+                operation_id for operation_id in self._lease_endpoints
+                if self.operations.state(operation_id) in {
+                    "refused", "completed", "indeterminate"})
+            try:
+                self._close_armed_lease_endpoints_v2(terminal_endpoints)
+            except ControllerServiceV2Error as exc:
+                if failure_code is None:
+                    failure_code = exc.code
             if failure_code is not None:
                 if self._terminal_code == "broker_controller_closed":
                     self._terminal_code = failure_code
@@ -4675,6 +5041,13 @@ class BrokerControllerV2Connection:
             self._quiesced = True
             self.authenticated = False
             self.admission_open = False
+            for endpoint in tuple(self._lease_endpoints.values()):
+                try:
+                    endpoint.close()
+                except Exception:
+                    if self._terminal_code == "broker_controller_closed":
+                        self._terminal_code = "lease_endpoint_cleanup_failed"
+            self._lease_endpoints.clear()
             if self.registry is not None:
                 if not self._registry_disconnected:
                     self._registry_disconnected = True
@@ -4727,20 +5100,25 @@ class LinuxControllerV2Listener:
 
     __slots__ = (
         "config", "_epoch_factory", "_owner_factory", "_socket_factory",
+        "_lease_endpoint_factory",
         "broker_epoch", "listener", "session", "admission_open", "_started",
         "_stopped", "_authenticated_once", "_terminal_result",
     )
 
     def __init__(self, config: ControllerServiceConfigV2, *, epoch_factory,
-                 owner_factory, socket_factory=socket.socket) -> None:
+                 owner_factory, socket_factory=socket.socket,
+                 lease_endpoint_factory=None) -> None:
         if (type(config) is not ControllerServiceConfigV2
                 or not callable(epoch_factory) or not callable(owner_factory)
-                or not callable(socket_factory)):
+                or not callable(socket_factory)
+                or (lease_endpoint_factory is not None
+                    and not callable(lease_endpoint_factory))):
             raise ControllerServiceV2Error("controller_listener_invalid")
         self.config = config
         self._epoch_factory = epoch_factory
         self._owner_factory = owner_factory
         self._socket_factory = socket_factory
+        self._lease_endpoint_factory = lease_endpoint_factory
         self.broker_epoch = None
         self.listener = None
         self.session = None
@@ -4821,6 +5199,7 @@ class LinuxControllerV2Listener:
                 connection, self.config, self.broker_epoch, owner,
                 registry_factory=registry_factory,
                 on_terminal=lambda _reason: setattr(self, "admission_open", False),
+                lease_endpoint_factory=self._lease_endpoint_factory,
             )
             transferred = True
             result = session.handshake(

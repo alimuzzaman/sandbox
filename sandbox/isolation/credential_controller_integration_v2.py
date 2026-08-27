@@ -173,7 +173,12 @@ class _LeaseControllerEnd:
         self.close_count = 0
         self.timeout = 1.0
 
-    def getsockopt(self, *_args):
+    def setsockopt(self, *_args):
+        return None
+
+    def getsockopt(self, *args):
+        if args == (socket.SOL_SOCKET, 4):
+            return 1
         peer = self.broker_identity
         return _CREDS.pack(peer.pid, peer.uid, peer.gid)
 
@@ -189,11 +194,14 @@ class _LeaseControllerEnd:
         self.send_callback(packet, descriptor[0])
         return len(packet)
 
-    def recv(self, _size):
+    def recvmsg(self, _size, _ancillary_size, _flags=0):
         with self._condition:
             if not self._ack and not self._closed:
                 self._condition.wait(self.timeout)
-            return self._ack
+            peer = self.broker_identity
+            ancillary = [(socket.SOL_SOCKET, 2,
+                          _CREDS.pack(peer.pid, peer.uid, peer.gid))]
+            return self._ack, ancillary, 0, None
 
     def deliver_ack(self, packet: bytes) -> None:
         with self._condition:
@@ -226,6 +234,11 @@ class _LeaseBrokerEnd:
         if not self._closed:
             self._closed = True
             self.close_count += 1
+
+
+class _OfflineArmedLeaseListener:
+    def close(self):
+        return None
 
 
 class ConnectedOfflineCredentialV2:
@@ -272,6 +285,7 @@ class ConnectedOfflineCredentialV2:
         )
         self.broker_session = broker_connection_type(
             self.broker_transport, config, broker_epoch, "broker-owner-0123456789",
+            lease_endpoint_factory=lambda *_args: _OfflineArmedLeaseListener(),
         )
         self.guest_submit = None
         self.controller_session = None
@@ -450,7 +464,9 @@ class ConnectedOfflineCredentialV2:
         self.last_broker_lease_receipt = broker_receipt
         controller_receipt = self.controller_session.accept_lease_socket(
             controller_lease, observer=self._observer(self.config.broker),
-            so_peercred=1, scm_rights=socket.SCM_RIGHTS,
+            so_peercred=1, so_passcred=4, scm_credentials=2,
+            scm_rights=socket.SCM_RIGHTS,
+            closer=lambda fd: self.controller_fd_closed.append(fd),
         )
 
         audit_errors = []

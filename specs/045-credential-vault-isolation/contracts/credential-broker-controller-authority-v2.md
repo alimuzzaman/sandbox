@@ -735,6 +735,48 @@ clears all not-yet-effectful state and makes effect-possible state
 
 ## Lease protocol v2
 
+Each authorization owns one broker-created Linux abstract `AF_UNIX`
+`SOCK_SEQPACKET` listener. Its address is exactly 93 bytes:
+
+```text
+NUL || "sandbox-credential-lease-v2-" || lowercase_hex_sha256(
+  "credential-broker-lease-address-v2" || NUL || canonical_ascii_json(fields)
+)
+```
+
+`fields` has exactly `protocol`, `purpose=lease_delivery`,
+`endpoint_identity=v2-lease.sock`, `machine_id`, `broker_epoch`,
+`controller_epoch`, `broker_digest`, `broker_config_digest`,
+`controller_config_digest`, `operation_id`, and `authorization_digest`.
+The broker arms this listener before sending `AUTHORIZED_V2`; address collision
+is terminal. The controller derives the same address independently and makes
+one connection attempt within 1,000 ms. Neither side accepts a caller-chosen
+address, filesystem socket, TCP socket, unlink/reuse, alternate name, or v1
+fallback. `LEASE_ENDPOINT_V2_REGISTRY` and its canonical digest pin these
+rules in the shared service contract and reciprocal derived configs.
+
+The accepted socket requires exact `SO_PEERCRED` plus one matching
+`SCM_CREDENTIALS` record on the single 732-byte packet. All ancillary records
+are scanned and every received right is closed before any malformed,
+truncation, credential, or cardinality refusal. Exactly one right transfers to
+one idempotent owner. The 444-byte acknowledgement returns on the same socket
+with no rights; every terminal path closes listener, accepted/client socket,
+and descriptor exactly once. The controller receives that ACK with `recvmsg`,
+requires `SO_PASSCRED`, exactly one `SCM_CREDENTIALS` record matching the same
+exact broker process, zero `SCM_RIGHTS`, no unknown ancillary records, and the
+receipt's exact operation and authorization binding.
+The controller enables `SO_PASSCRED` and requires exact successful readback
+before transfer. Connect and ACK deadlines are the lesser of 1,000 ms and the
+remaining authorization lifetime; an expired authorization creates no socket.
+The receipt also pins the derived 93-byte address and authorization expiry.
+
+An armed listener owns no accepted socket. After `accept`, it tracks that
+socket until effect ownership transfers; quiesce or terminal cleanup closes a
+socket blocked in `recvmsg` exactly once, and the returning worker cannot close
+it again. Every failed first delivery removes its authorization-registry entry
+after the operation registry records the epoch-lifetime replay tombstone, so
+failed deliveries do not consume the separate 16-entry authorization capacity.
+
 After `AUTHORIZED_V2`, the controller may resolve the registered source and
 make exactly one send attempt to the broker-owned lease endpoint. It creates
 one close-on-exec sealed anonymous `memfd`, writes only the bounded credential

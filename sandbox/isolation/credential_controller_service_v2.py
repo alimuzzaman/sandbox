@@ -17,9 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from array import array
 import hashlib
+import json
 import re
 import socket
 import struct
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from sandbox.isolation.credential_controller_protocol_v2 import (
@@ -36,10 +38,89 @@ from sandbox.isolation.credential_controller_protocol_v2 import (
 
 HANDSHAKE_TIMEOUT_SECONDS = 1.0
 MAX_CONTROLLER_FRAME_BYTES = 16 * 1024
+LEASE_ENDPOINT_IDENTITY_V2 = "v2-lease.sock"
+LEASE_ENDPOINT_PURPOSE_V2 = "lease_delivery"
+LEASE_ENDPOINT_PREFIX_V2 = b"\0sandbox-credential-lease-v2-"
+LEASE_ENDPOINT_ADDRESS_BYTES_V2 = 93
 _CREDENTIALS = struct.Struct("3i")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _EPOCH = re.compile(r"^[0-9a-f]{32}$")
 _MACHINE = re.compile(r"^[a-z0-9][a-z0-9-]{6,61}[a-z0-9]$")
+_OPERATION = re.compile(r"^operation-[a-z0-9]{6,53}$")
+
+_LEASE_ADDRESS_KEYS = (
+    "protocol", "purpose", "endpoint_identity", "machine_id", "broker_epoch",
+    "controller_epoch", "broker_digest", "broker_config_digest",
+    "controller_config_digest", "operation_id", "authorization_digest",
+)
+LEASE_ENDPOINT_V2_REGISTRY = MappingProxyType({
+    "protocol": PROTOCOL,
+    "purpose": LEASE_ENDPOINT_PURPOSE_V2,
+    "endpoint_identity": LEASE_ENDPOINT_IDENTITY_V2,
+    "family": "AF_UNIX",
+    "socket_type": "SOCK_SEQPACKET",
+    "namespace": "linux_abstract",
+    "address_prefix": "sandbox-credential-lease-v2-",
+    "address_bytes": LEASE_ENDPOINT_ADDRESS_BYTES_V2,
+    "digest_domain_ascii": "credential-broker-lease-address-v2",
+    "digest_separator_byte": 0,
+    "digest_fields": _LEASE_ADDRESS_KEYS,
+    "connect_timeout_ms": 1000,
+    "lease_frame_bytes": 732,
+    "lease_ack_bytes": 444,
+    "packets_per_endpoint": 1,
+    "descriptors_per_packet": 1,
+    "reuse": False,
+    "fallback": False,
+})
+
+
+def _canonical_plain(value: Mapping[str, Any]) -> bytes:
+    try:
+        return json.dumps(dict(value), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False).encode("ascii")
+    except Exception:
+        raise ControllerServiceV2Error("lease_endpoint_invalid") from None
+
+
+def lease_endpoint_registry_digest_v2() -> str:
+    return hashlib.sha256(_canonical_plain(LEASE_ENDPOINT_V2_REGISTRY)).hexdigest()
+
+
+def lease_endpoint_address_v2(*, machine_id: str, broker_epoch: str,
+                              controller_epoch: str, broker_digest: str,
+                              broker_config_digest: str,
+                              controller_config_digest: str,
+                              operation_id: str,
+                              authorization_digest: str) -> bytes:
+    values = {
+        "protocol": PROTOCOL,
+        "purpose": LEASE_ENDPOINT_PURPOSE_V2,
+        "endpoint_identity": LEASE_ENDPOINT_IDENTITY_V2,
+        "machine_id": machine_id,
+        "broker_epoch": broker_epoch,
+        "controller_epoch": controller_epoch,
+        "broker_digest": broker_digest,
+        "broker_config_digest": broker_config_digest,
+        "controller_config_digest": controller_config_digest,
+        "operation_id": operation_id,
+        "authorization_digest": authorization_digest,
+    }
+    if (not isinstance(machine_id, str) or _MACHINE.fullmatch(machine_id) is None
+            or not isinstance(broker_epoch, str) or _EPOCH.fullmatch(broker_epoch) is None
+            or not isinstance(controller_epoch, str) or _EPOCH.fullmatch(controller_epoch) is None
+            or not isinstance(operation_id, str) or _OPERATION.fullmatch(operation_id) is None
+            or any(not isinstance(values[name], str) or _DIGEST.fullmatch(values[name]) is None
+                   for name in ("broker_digest", "broker_config_digest",
+                                "controller_config_digest", "authorization_digest"))):
+        raise ControllerServiceV2Error("lease_endpoint_invalid")
+    digest = hashlib.sha256(
+        b"credential-broker-lease-address-v2\0" + _canonical_plain(values)
+    ).hexdigest().encode("ascii")
+    address = LEASE_ENDPOINT_PREFIX_V2 + digest
+    if len(address) != LEASE_ENDPOINT_ADDRESS_BYTES_V2:
+        raise ControllerServiceV2Error("lease_endpoint_invalid")
+    return address
 
 
 class ControllerServiceV2Error(RuntimeError):
@@ -289,6 +370,8 @@ def _packet_credentials(ancillary: Any, *, scm_credentials: int,
             if not isinstance(payload, bytes) or len(payload) != _CREDENTIALS.size:
                 raise ControllerServiceV2Error("packet_credentials_invalid")
             credentials.append(_CREDENTIALS.unpack(payload))
+        else:
+            raise ControllerServiceV2Error("packet_credentials_invalid")
     if len(credentials) != 1 or any(value < 1 for value in credentials[0]):
         raise ControllerServiceV2Error("packet_credentials_invalid")
     return credentials[0]
@@ -345,26 +428,46 @@ _SESSION_LEASE_ISSUER = object()
 class _SessionLeaseSocket:
     """Opaque session-registered socket; only ControllerBrokerSession can mint it."""
 
-    __slots__ = ("_session", "_connection", "_scm_rights", "machine_id",
-                 "broker_epoch", "controller_epoch", "owner", "_used", "_closed")
+    __slots__ = ("_session", "_connection", "_observer", "_so_peercred",
+                 "_scm_credentials", "_scm_rights", "_closer", "machine_id",
+                 "broker_epoch", "controller_epoch", "owner", "operation_id",
+                 "authorization_digest", "authorization_expires_at_unix_ms",
+                 "lease_address", "_connect_timeout_ms", "_used", "_closed")
 
-    def __init__(self, issuer, session, connection, scm_rights) -> None:
+    def __init__(self, issuer, session, connection, *, observer, so_peercred,
+                 scm_credentials, scm_rights, closer, operation_id=None,
+                 authorization_digest=None, authorization_expires_at_unix_ms=None,
+                 lease_address=None, connect_timeout_ms=None) -> None:
         if issuer is not _SESSION_LEASE_ISSUER:
             raise ControllerServiceV2Error("lease_transport_invalid")
         self._session = session
         self._connection = connection
+        self._observer = observer
+        self._so_peercred = so_peercred
+        self._scm_credentials = scm_credentials
         self._scm_rights = scm_rights
+        self._closer = closer
         self.machine_id = session.config.machine_id
         self.broker_epoch = session.broker_epoch
         self.controller_epoch = session.controller_epoch
         self.owner = session.owner
+        self.operation_id = operation_id
+        self.authorization_digest = authorization_digest
+        self.authorization_expires_at_unix_ms = authorization_expires_at_unix_ms
+        self.lease_address = lease_address
+        self._connect_timeout_ms = connect_timeout_ms
         self._used = False
         self._closed = False
 
     def exchange(self, packet: bytes, descriptor: int, timeout_ms: int) -> bytes:
         self._session.consume_lease_socket(self)
         if (type(packet) is not bytes or type(descriptor) is not int or descriptor < 0
-                or type(timeout_ms) is not int or not 1 <= timeout_ms <= 1000):
+                or type(timeout_ms) is not int or not 1 <= timeout_ms <= 1000
+                or self.operation_id is None or self.authorization_digest is None
+                or self.authorization_expires_at_unix_ms is None
+                or self.lease_address is None
+                or (self._connect_timeout_ms is not None
+                    and timeout_ms > self._connect_timeout_ms)):
             raise ControllerServiceV2Error("lease_transport_invalid")
         self._used = True
         setter = getattr(self._connection, "settimeout", None)
@@ -375,7 +478,29 @@ class _SessionLeaseSocket:
             [packet], [(socket.SOL_SOCKET, self._scm_rights, rights)])
         if sent != len(packet):
             raise ControllerServiceV2Error("lease_transport_invalid")
-        acknowledgement = self._connection.recv(445)
+        try:
+            acknowledgement, observed = receive_authenticated_packet(
+                self._connection, expected=self._session.config.broker,
+                observer=self._observer, so_peercred=self._so_peercred,
+                scm_credentials=self._scm_credentials, scm_rights=self._scm_rights,
+                closer=self._closer,
+            )
+        except ControllerServiceV2Error as exc:
+            if exc.code == "packet_rights_cleanup_failed":
+                if self._session._terminal_code == "controller_session_closed":
+                    self._session._terminal_code = "packet_rights_cleanup_failed"
+                self._session.admission_open = False
+                self._session.close("lease_ack_cleanup_failed")
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                raise ControllerServiceV2Error(exc.code) from None
+            code = ("lease_ack_invalid" if exc.code == "packet_size_invalid"
+                    else "lease_ack_provenance_invalid")
+            raise ControllerServiceV2Error(code) from None
+        if observed != self._session.config.broker:
+            raise ControllerServiceV2Error("lease_ack_provenance_invalid")
         if type(acknowledgement) is not bytes or len(acknowledgement) != 444:
             raise ControllerServiceV2Error("lease_ack_invalid")
         return acknowledgement
@@ -557,17 +682,34 @@ class ControllerBrokerSession:
         self._lease_sockets: dict[int, _SessionLeaseSocket] = {}
 
     def accept_lease_socket(self, connection: Any, *, observer, so_peercred: int,
-                            scm_rights: int):
+                            so_passcred: int, scm_credentials: int,
+                            scm_rights: int, closer, operation_id=None,
+                            authorization_digest=None,
+                            authorization_expires_at_unix_ms=None,
+                            lease_address=None, connect_timeout_ms=None):
         """Authenticate and register one outbound lease socket for this session."""
 
         if (self._closed or not self.authenticated or self.broker_epoch is None
                 or len(self._lease_sockets) >= 16
-                or not callable(observer) or type(so_peercred) is not int
-                or type(scm_rights) is not int or so_peercred < 1 or scm_rights < 1
+                or not callable(observer) or not callable(closer)
+                or type(so_peercred) is not int or type(so_passcred) is not int
+                or type(scm_credentials) is not int
+                or type(scm_rights) is not int or min(
+                    so_peercred, so_passcred, scm_credentials, scm_rights) < 1
+                or not callable(getattr(connection, "setsockopt", None))
                 or not callable(getattr(connection, "sendmsg", None))
-                or not callable(getattr(connection, "recv", None))
+                or not callable(getattr(connection, "recvmsg", None))
                 or not callable(getattr(connection, "close", None))):
             raise ControllerServiceV2Error("lease_transport_invalid")
+        try:
+            connection.setsockopt(socket.SOL_SOCKET, so_passcred, 1)
+            passcred_value = connection.getsockopt(socket.SOL_SOCKET, so_passcred)
+            if type(passcred_value) is not int or passcred_value != 1:
+                raise ControllerServiceV2Error("lease_passcred_unavailable")
+        except ControllerServiceV2Error:
+            raise
+        except Exception:
+            raise ControllerServiceV2Error("lease_passcred_unavailable") from None
         peer = _peer_credentials(connection, so_peercred=so_peercred)
         try:
             observed = observer(*peer)
@@ -576,9 +718,107 @@ class ControllerBrokerSession:
         if observed != self.config.broker:
             raise ControllerServiceV2Error("peer_identity_mismatch")
         receipt = _SessionLeaseSocket(
-            _SESSION_LEASE_ISSUER, self, connection, scm_rights)
+            _SESSION_LEASE_ISSUER, self, connection, observer=observer,
+            so_peercred=so_peercred, scm_credentials=scm_credentials,
+            scm_rights=scm_rights, closer=closer, operation_id=operation_id,
+            authorization_digest=authorization_digest,
+            authorization_expires_at_unix_ms=authorization_expires_at_unix_ms,
+            lease_address=lease_address, connect_timeout_ms=connect_timeout_ms)
         self._lease_sockets[id(receipt)] = receipt
         return receipt
+
+    def connect_lease_endpoint_v2(self, *, operation_id: str,
+                                  authorization_digest: str,
+                                  authorization_expires_at_unix_ms: int,
+                                  now_ms: int, connector, observer,
+                                  so_peercred: int, so_passcred: int,
+                                  scm_credentials: int, scm_rights: int, closer):
+        """Independently derive and connect once to one operation endpoint."""
+
+        if (self._closed or not self.authenticated or self.broker_epoch is None
+                or not callable(connector) or not callable(observer) or not callable(closer)
+                or type(so_peercred) is not int or so_peercred < 1
+                or type(so_passcred) is not int or so_passcred < 1
+                or type(scm_credentials) is not int or scm_credentials < 1
+                or type(scm_rights) is not int or scm_rights < 1
+                or type(now_ms) is not int
+                or type(authorization_expires_at_unix_ms) is not int
+                or authorization_expires_at_unix_ms <= now_ms):
+            raise ControllerServiceV2Error("lease_transport_invalid")
+        address = lease_endpoint_address_v2(
+            machine_id=self.config.machine_id,
+            broker_epoch=self.broker_epoch,
+            controller_epoch=self.controller_epoch,
+            broker_digest=self.config.broker_digest,
+            broker_config_digest=self.config.broker.config_digest,
+            controller_config_digest=self.config.controller.config_digest,
+            operation_id=operation_id,
+            authorization_digest=authorization_digest,
+        )
+        connection = None
+        transferred = False
+        timeout_ms = min(1000, authorization_expires_at_unix_ms - now_ms)
+        try:
+            connection = connector(socket.AF_UNIX, socket.SOCK_SEQPACKET, 0)
+            setter = getattr(connection, "settimeout", None)
+            if (not callable(setter)
+                    or not callable(getattr(connection, "connect", None))
+                    or not callable(getattr(connection, "getsockopt", None))
+                    or not callable(getattr(connection, "sendmsg", None))
+                    or not callable(getattr(connection, "recvmsg", None))
+                    or not callable(getattr(connection, "close", None))):
+                raise ControllerServiceV2Error("lease_transport_invalid")
+            setter(timeout_ms / 1000)
+            connection.connect(address)
+            receipt = self.accept_lease_socket(
+                connection, observer=observer, so_peercred=so_peercred,
+                so_passcred=so_passcred,
+                scm_credentials=scm_credentials, scm_rights=scm_rights,
+                closer=closer, operation_id=operation_id,
+                authorization_digest=authorization_digest,
+                authorization_expires_at_unix_ms=authorization_expires_at_unix_ms,
+                lease_address=address, connect_timeout_ms=timeout_ms)
+            transferred = True
+            return receipt
+        except Exception:
+            if connection is not None and not transferred:
+                try:
+                    connection.close()
+                except Exception:
+                    self._terminal_code = "lease_socket_cleanup_failed"
+                    self._closed = True
+                    raise ControllerServiceV2Error(self._terminal_code) from None
+            raise ControllerServiceV2Error("lease_transport_invalid") from None
+
+    def bind_lease_socket(self, receipt, *, operation_id: str,
+                          authorization_digest: str,
+                          authorization_expires_at_unix_ms: int) -> None:
+        expected_address = lease_endpoint_address_v2(
+            machine_id=self.config.machine_id, broker_epoch=self.broker_epoch,
+            controller_epoch=self.controller_epoch,
+            broker_digest=self.config.broker_digest,
+            broker_config_digest=self.config.broker.config_digest,
+            controller_config_digest=self.config.controller.config_digest,
+            operation_id=operation_id,
+            authorization_digest=authorization_digest)
+        if (not self.owns_lease_socket(receipt)
+                or not isinstance(operation_id, str) or _OPERATION.fullmatch(operation_id) is None
+                or not isinstance(authorization_digest, str)
+                or _DIGEST.fullmatch(authorization_digest) is None
+                or type(authorization_expires_at_unix_ms) is not int
+                or (receipt.operation_id is not None and receipt.operation_id != operation_id)
+                or (receipt.authorization_digest is not None
+                    and receipt.authorization_digest != authorization_digest)
+                or (receipt.authorization_expires_at_unix_ms is not None
+                    and receipt.authorization_expires_at_unix_ms
+                    != authorization_expires_at_unix_ms)
+                or (receipt.lease_address is not None
+                    and receipt.lease_address != expected_address)):
+            raise ControllerServiceV2Error("lease_transport_invalid")
+        receipt.operation_id = operation_id
+        receipt.authorization_digest = authorization_digest
+        receipt.authorization_expires_at_unix_ms = authorization_expires_at_unix_ms
+        receipt.lease_address = expected_address
 
     def mint_composition_receipt(self, purpose: str):
         """Mint one opaque, purpose-bound receipt from this live handshake."""
@@ -688,7 +928,8 @@ class ControllerBrokerSession:
             try:
                 self.connection.close()
             except Exception:
-                self._terminal_code = "controller_socket_cleanup_failed"
+                if self._terminal_code == "controller_session_closed":
+                    self._terminal_code = "controller_socket_cleanup_failed"
             try:
                 self._on_terminal(
                     reason if isinstance(reason, str) else "controller_disconnected"
@@ -938,7 +1179,9 @@ __all__ = [
     "AuthenticatedBrokerCompositionReceiptV2", "AuthenticatedCompositionReceiptV2",
     "ControllerBrokerSession", "ControllerServiceConfig", "ControllerServiceV2Error",
     "ExactBrokerSelfObserver", "ExactProcessIdentityObserver",
-    "HANDSHAKE_TIMEOUT_SECONDS", "ProcessIdentity",
+    "HANDSHAKE_TIMEOUT_SECONDS", "LEASE_ENDPOINT_ADDRESS_BYTES_V2",
+    "LEASE_ENDPOINT_IDENTITY_V2", "LEASE_ENDPOINT_V2_REGISTRY", "ProcessIdentity",
     "PersistentControllerService", "abstract_controller_address",
+    "lease_endpoint_address_v2", "lease_endpoint_registry_digest_v2",
     "receive_authenticated_packet",
 ]

@@ -14,6 +14,9 @@ from sandbox.isolation.credential_controller_lifecycle_v2 import (
     derived_config_document,
     verify_owned_config,
 )
+from sandbox.isolation.credential_controller_service_v2 import (
+    lease_endpoint_registry_digest_v2,
+)
 from sandbox.runtimes.managed.services import compile_credential_service_plans_v2
 from sandbox.isolation.models import EgressGrant, EgressGrantSet
 from tests import test_credential_controller_audit_v2 as audit_fixtures
@@ -149,6 +152,8 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
         self.assertEqual(plan.canonical_bytes, canonical_config_bytes(plan.document))
         self.assertEqual(plan.config_digest,
                          hashlib.sha256(plan.canonical_bytes).hexdigest())
+        self.assertEqual(plan.document["lease_endpoint_registry_digest"],
+                         lease_endpoint_registry_digest_v2())
         forbidden = (b"operation_id", b"lease_id", b"audit_root_id",
                      b"request_digest", b"source_reference", b"auth_form")
         self.assertTrue(all(item not in plan.canonical_bytes for item in forbidden))
@@ -156,6 +161,9 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
             plan.document["service_uid"] = 9
         with self.assertRaises(TypeError):
             plan.document["bounds"]["drain_timeout_ms"] = 1
+        with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
+            DerivedServiceConfigV2.derive(document(
+                lease_endpoint_registry_digest="0" * 64))
         with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
             DerivedServiceConfigV2(
                 document=MappingProxyType(dict(plan.document)),

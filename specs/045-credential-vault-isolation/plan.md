@@ -182,9 +182,11 @@ task IDs were established:
    one-use descriptor rendezvous, existing typed-broker execution, terminal
    SBRS delivery, and bounded cleanup. T035 remains open for the local
    production-shaped, closed and uninstalled
-   controller AF_UNIX/SOCK_SEQPACKET listener/event loop, recvmsg/SCM_RIGHTS
-   endpoint, kernel peer observer, cross-process config/entrypoint, guest
-   disconnect/deadline loop, and lifecycle/audit observer. T035 completion may
+   controller AF_UNIX/SOCK_SEQPACKET listener/event loop. The exact per-operation
+   93-byte abstract recvmsg/SCM_RIGHTS endpoint, independent controller
+   derivation, collision refusal, peer/ancillary gates, and reciprocal registry
+   digest/bounds now exist locally. Cross-process config/entrypoint, guest
+   disconnect/deadline loop, and lifecycle/audit observation remain. T035 completion may
    establish that local code shape only. Authorized Ubuntu/systemd/kernel proof
    belongs to T022/T029 and human evidence review to T031.
    T036 adds secret-free helper supervision, broker-first cleanup, and inert

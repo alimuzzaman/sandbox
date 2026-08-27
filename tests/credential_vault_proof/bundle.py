@@ -166,6 +166,19 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     if record["provenance"] != "live_authorized_host":
         raise _refuse("provenance_not_live", "run.json")
 
+    # The manifest digest binds the plan, but nothing binds the record's own
+    # check set to it. Without this comparison a bundle could claim
+    # `passed_live` while simply omitting most required checks: they would be
+    # neither failed nor blocked, just absent.
+    planned = frozenset(item["check_id"] for item in accepted["checks"])
+    recorded = frozenset(record["checks"])
+    missing = tuple(sorted(planned - recorded))
+    if missing:
+        raise _refuse("check_missing", missing[0])
+    unplanned = tuple(sorted(recorded - planned))
+    if unplanned:
+        raise _refuse("check_unplanned", unplanned[0])
+
     events_raw = _read(path / "events.json", limit=1024 * 1024)
     events = validate_events(_json(events_raw, "events.json"),
                              checks=tuple(record["checks"]))
@@ -201,11 +214,18 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
         if recorded != observed:
             raise _refuse("artifact_digest_mismatch", name)
 
-    unexpected = tuple(sorted(
-        member.name for member in path.iterdir()
-        if member.is_file() and member.name not in expectations
-        and member.name not in {"run.json", "events.json"}
-    ))
+    # Walk the whole tree, not just the top level: a nested directory was an
+    # unwatched place to park an artifact nobody planned.
+    reserved = {"run.json", "events.json"}
+    unexpected = []
+    for member in sorted(path.rglob("*")):
+        relative = str(member.relative_to(path))
+        if member.is_dir():
+            unexpected.append(relative)
+            continue
+        if relative in expectations or relative in reserved:
+            continue
+        unexpected.append(relative)
     if unexpected:
         raise _refuse("artifact_unplanned", unexpected[0])
 

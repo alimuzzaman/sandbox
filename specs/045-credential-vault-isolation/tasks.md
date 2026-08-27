@@ -118,6 +118,18 @@ release decision without staging unrelated user work.
 - [ ] T030 Update the managed-native capability, isolation, and operator documentation with the explicit refusal boundaries and at-rest residual risk in `docs/native-runtime-isolation.md`, `docs/sandbox-config-reference.md`, and `docs/credential-vault.md`
 - [ ] T031 Complete an independent security/source/evidence review of the implementation against `specs/045-credential-vault-isolation/contracts/`, update the evidence ID and support tier only if every predecessor and feature gate passes, and record the decision in `specs/045-credential-vault-isolation/quickstart.md`
 
+## Phase 9: Authorized-proof harness preparation
+
+**Goal**: Make the future authorized Ubuntu 24.04 run for T022 and T029
+deterministic, replay-safe, bounded, secret-safe, and independently reviewable.
+These IDs are append-only. Nothing in this phase executes a live check, and no
+item here changes `implemented_unproven`, `adoptable=false`, or the null
+evidence identity.
+
+- [x] T038 Add the versioned acceptance manifest, canonical encoding, plan digest, revision gate, and no-leak scanner in `tests/credential_vault_proof/manifest.py` and `tests/credential_vault_proof/scanner.py`. **DONE:** exact-key schema, bounded strings/lists/files, forbidden-key and secret-shape refusal, digest-stable canonical JSON, and a revision mismatch that refuses before any test action.
+- [x] T039 Add the replay-safe proof-run ledger, live probe command model, evidence bundle validator, and cleanup verifier in `tests/credential_vault_proof/ledger.py`, `probes.py`, `bundle.py`, and `cleanup.py`. **DONE:** one request identity per run, ledger-first retry, `acceptance_unknown` for empty/malformed acceptance, cleanup overriding success, allowlisted argv-only probes with bounded redacted parsing, and a bundle validator that refuses stale, copied, mixed-revision, contradictory, incomplete, or fake-marked evidence.
+- [x] T040 Add the offline runner, deterministic report, runbook, and local test suites in `tests/credential_vault_proof/cli.py`, `report.py`, `docs/credential-vault-proof-harness.md`, and `tests/test_credential_vault_*.py`. **DONE:** seven fixed verbs with bounded error codes and no execution path, a report that separates local harness behaviour from live evidence, and 100 offline tests that need no Linux, root, systemd, socket, or network access.
+
 ## Parallel execution examples
 
 ### After foundational work

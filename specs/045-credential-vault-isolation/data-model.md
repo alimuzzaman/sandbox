@@ -42,10 +42,41 @@ existing source policy or an explicitly registered adapter.
 
 ### `BrokerLease`
 
-An in-memory, short-lived authorization for one broker process and one binding
-version. It includes only the minimum resolved material and deadline needed for
-one operation. It is invalidated on revoke, expiry, process replacement,
+An in-memory, short-lived authorization for one broker process, broker epoch,
+binding version, and operation. It has a unique non-secret lease ID, absolute
+deadline, exact machine/binding/digest identities, and one sealed anonymous
+credential descriptor containing only the minimum resolved material. The
+descriptor is transferred once over the authenticated trusted lease channel;
+it is never named by a filesystem path or stored in a durable record. The lease
+is invalidated on first transfer attempt, revoke, expiry, process replacement,
 policy/broker digest drift, or instance shutdown.
+
+### Broker lease transport
+
+The accepted v1 transport is one sealed Linux anonymous memory descriptor
+created by the trusted control-plane lease dispatcher and transferred with
+exactly one `SCM_RIGHTS` entry in one bounded `AF_UNIX` `SOCK_SEQPACKET` frame.
+The broker owns the abstract-namespace listening and accepted socket
+descriptors; the dispatcher owns the client socket and original anonymous
+descriptor until the single transfer attempt. The root helper and service
+supervisor own or inherit none of those descriptors.
+
+Before transfer, the dispatcher verifies the connected peer against the exact
+broker PID, service UID, process start identity, unit/cgroup identity, and
+executable/config digest reported through bounded secret-free lifecycle state.
+The broker verifies the dispatcher peer as the configured single control-plane
+owner UID before receiving a descriptor. This is a single-host,
+single-control-plane trust boundary: root and other processes running as that
+trusted owner are outside the hostile-workload threat model.
+
+The non-secret frame binds protocol version, lease ID, broker epoch,
+`machine_id`, binding ID/version, required digests, expiry, and descriptor size.
+The broker rejects a wrong peer, extra/missing descriptor, wrong anonymous-file
+type or seals, stale epoch, identity/digest mismatch, expiry, oversize, duplicate
+lease ID, truncation, or trailing data before use. It atomically records the
+lease ID as consumed before reading/applying the credential. Transfer or
+acknowledgement failure is terminal and never retried. The acknowledgement
+contains only lease ID and a bounded outcome code.
 
 ### `BrokerRequest`
 
@@ -105,16 +136,19 @@ broker -> bounded response/error -> guest client
 durable state/audit <- IDs, digests, state, reason codes only
 ```
 
-The fixed root helper remains responsible for fixed network/machine operations
-only. It does not parse HTTP, receive credential bytes, or expose a control
-socket to the workload.
+The one-use broker launch channel is the sealed anonymous descriptor transfer
+defined above. The fixed root helper remains responsible for fixed
+network/machine and digest-bound broker lifecycle operations only. It does not
+parse HTTP, resolve or receive credential bytes, own a lease descriptor/socket,
+or expose a control socket to the workload.
 
 ## Persistence and recovery
 
 Persist: binding metadata, opaque source reference, policy/egress/broker digests,
 CAS version, state, expiry, owner, and audit-safe timestamps. Do not persist:
 resolved bytes, bearer/API-key headers, request bodies containing credentials,
-or a plaintext lease.
+or a plaintext lease. The abstract socket, broker epoch, consumed-lease set,
+anonymous descriptor, and transfer frame are process-lifetime state only.
 
 After broker or machine restart, all bindings enter `credential_pending`. Recovery
 must recreate a fresh process-bound lease and re-check the effective isolation

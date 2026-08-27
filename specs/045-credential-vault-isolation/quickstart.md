@@ -57,21 +57,23 @@ consumer uses `ExplicitCredentialConsumer`; lifecycle uses
 
 The pre-implementation service and transport invariants are recorded in
 [`contracts/credential-broker-service-v1.md`](./contracts/credential-broker-service-v1.md).
-T032 is complete as a planning artifact only. It defines one unprivileged broker
+T032 is complete as a planning artifact only. T033 is also complete as a local
+security design review: it selects one sealed anonymous `memfd` transferred
+once with `SCM_RIGHTS` over a broker-owned abstract `AF_UNIX` `SOCK_SEQPACKET`
+socket, with kernel peer authentication and exact broker-process verification.
+The contract defines one unprivileged broker
 per managed-native instance, a dedicated instance-bound guest transport, a
 separate trusted one-use lease boundary, fixed secret-free helper verbs,
-broker-first cleanup, and explicit refusal/evidence rules. It does not select an
-unreviewed credential-transfer mechanism, start a service, or enable the feature.
+broker-first cleanup, and explicit refusal/evidence rules. This does not start a
+service or enable the feature.
 
 The remaining local preparatory chain is still open:
 
-1. T033: independently review and select the concrete trusted lease mechanism,
-   clarifying the FR-008/SC-002 control-channel boundary if required.
-2. T034: add failing-first standalone service/transport contract tests.
-3. T035: implement the reviewed unprivileged standalone broker executable.
-4. T036: add secret-free fixed helper supervision, cleanup observation/order,
+1. T034: add failing-first standalone service/transport contract tests.
+2. T035: implement the reviewed unprivileged standalone broker executable.
+3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
-5. T037: add the proof-gated public `./sb` acceptance seam and offline harness
+4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
    coverage using only opaque references and non-secret request metadata.
 
 These tasks are preparation, not live proof. T022 remains blocked until the
@@ -129,7 +131,8 @@ include commands, host/runtime identity, evidence ID, elapsed bounds, and cleanu
 result. It must not substitute local Compose tests for managed-native proof.
 
 T032 records the standalone credential-broker service/transport planning
-contract. T033-T037 remain open preparatory work. The helper/service lifecycle
+contract and T033 records the accepted local security design. T034-T037 remain
+open preparatory work. The helper/service lifecycle
 (T022), authorized live extension (T029), and independent release review (T031)
 remain blocked. No support tier or evidence ID may be promoted from this local
 result.

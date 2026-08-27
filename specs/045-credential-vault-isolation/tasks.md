@@ -20,7 +20,7 @@ T003-T007 (foundational; T003 is a hard predecessor gate)
    |
  US3 T019-T023
 
-T032 -> T033 -> T034 -> T035 -> T036
+T032 -> T033 [complete] -> T034 -> T035 -> T036
                                   |  \
                                   |   -> T037
                                   v
@@ -133,7 +133,7 @@ public acceptance seams locally without enabling credential use or claiming live
 proof. These IDs are append-only to preserve references to T022/T029/T031.
 
 - [x] T032 [US3] Define the pre-implementation standalone service, instance-bound guest transport, trusted one-use lease channel, fixed helper verbs, and cleanup invariants in `specs/045-credential-vault-isolation/contracts/credential-broker-service-v1.md`. **DONE:** the contract records required boundaries and explicit refusals; it does not select an unreviewed lease mechanism, enable a runtime path, or change evidence/support state.
-- [ ] T033 [US3] Complete an independent security design review that selects one concrete trusted one-use lease mechanism, reconciles the FR-008/SC-002 control-channel wording through `specs/045-credential-vault-isolation/spec.md` clarification if required, and records accepted peer authentication, descriptor/socket ownership, replay refusal, and no-secret surfaces in `specs/045-credential-vault-isolation/contracts/credential-broker-service-v1.md` (LOCAL ONLY: must finish before service implementation; does not satisfy T031)
+- [x] T033 [US3] Complete an independent security design review that selects one concrete trusted one-use lease mechanism, reconciles the FR-008/SC-002 control-channel wording through `specs/045-credential-vault-isolation/spec.md` clarification if required, and records accepted peer authentication, descriptor/socket ownership, replay refusal, and no-secret surfaces in `specs/045-credential-vault-isolation/contracts/credential-broker-service-v1.md`. **DONE:** selected one sealed anonymous `memfd` transferred once with `SCM_RIGHTS` over a broker-owned abstract `AF_UNIX` `SOCK_SEQPACKET` socket; kernel peer checks, exact broker-process verification, terminal consumption, cleanup, residual trusted-owner assumption, and all no-secret surfaces are explicit. This design review is local only and does not satisfy T031.
 - [ ] T034 [US3] Add failing-first standalone service and transport contract tests, including cross-instance denial, transport-capability rotation, lease one-use, bounded status, and argv/environment/unit/config/output no-leak checks, in `tests/test_credential_broker_service_contract.py` (LOCAL ONLY: no helper or runtime mutation)
 - [ ] T035 [US3] Implement the reviewed unprivileged standalone broker executable and its instance-bound request/trusted-lease endpoints in `tools/native-helper/native-credential-broker.py`, then satisfy `tests/test_credential_broker_service_contract.py` without adding a default or adoptable runtime path (LOCAL ONLY: code presence is not T022 proof)
 - [ ] T036 [US3] Add secret-free digest-bound broker plans, fixed helper lifecycle verbs, broker-first cleanup observation/order, and inert dependency wiring in `sandbox/runtimes/managed/services.py`, `tools/native-helper/native-helper.py`, `sandbox/runtimes/managed/adapter.py`, and `sandbox/application/context.py`, with local coverage in `tests/test_managed_services.py`, `tests/test_native_cleanup_observation.py`, and `tests/test_credential_wiring.py` (LOCAL ONLY: keep T022 blocked until authorized host proof)
@@ -183,7 +183,7 @@ T027 (report tests) can proceed alongside T025 after T024 is stable.
 
 ```text
 T032 (service/transport invariants; complete)
-  -> T033 (independent lease-channel design review)
+  -> T033 (independent lease-channel design review; complete)
   -> T034 (failing-first local service/transport contracts)
   -> T035 (standalone unprivileged service)
   -> T036 (fixed helper supervision, cleanup, inert wiring)

@@ -2,14 +2,29 @@
 
 ## Status
 
-This is a pre-implementation security contract. It defines the minimum service,
-transport, lifecycle, and cleanup invariants needed to prepare T022 locally. It
-does not select or enable a credential-bearing runtime path, close T003, prove
-T022 or T029, or authorize an evidence/support-tier promotion under T031.
+This is a security-reviewed pre-implementation contract. It defines the minimum
+service, transport, lifecycle, and cleanup invariants needed to prepare T022
+locally. T033 accepts the concrete v1 transport design for failing-first T034
+contract tests only. It does not enable a credential-bearing runtime path,
+close T003, prove T022 or T029, or authorize an evidence/support-tier promotion
+under T031.
 
 The capability remains `implemented_unproven` with `adoptable=false` and no
-evidence ID. A separate security design review must accept the concrete trusted
-lease channel before service code may be treated as implementation-ready.
+evidence ID. T034 and later implementation remain open.
+
+## T033 security review decision
+
+The selected v1 lease mechanism is one sealed Linux anonymous `memfd` transferred
+once with `SCM_RIGHTS` in one bounded frame over a broker-created abstract
+`AF_UNIX` `SOCK_SEQPACKET` socket. This is permitted only by the clarified
+FR-008/SC-002 trusted-boundary exception. No guest, helper, supervisor, durable,
+status, audit, or retained channel may carry or inherit the descriptor or bytes.
+
+This design assumes the documented single trusted control-plane owner UID. Root
+and another process running as that trusted owner can subvert local processes
+and are outside the hostile-workload threat model; the feature makes no
+multi-tenant host claim. The guest, sibling instances, broker service UID, and
+upstream response remain untrusted.
 
 ## Components and ownership
 
@@ -38,13 +53,15 @@ The guest transport MUST be dedicated to one managed-native instance. A shared
 host listener, generic forward proxy, root-helper control socket, or endpoint
 reachable from another instance is forbidden.
 
-The concrete transport must prove all of the following before request parsing:
+The v1 guest transport is an exact private-veth TCP listener bound to the
+instance's verified host-side interface/address and fixed plan-derived port. It
+must prove all of the following before request parsing:
 
 - the listener is bound only to the intended instance boundary;
 - the peer belongs to the exact `machine_id` and cannot arrive through another
   host, sibling instance, loopback alias, or forwarded route;
-- a short-lived opaque transport capability matches the supervised broker
-  process and is rotated on broker replacement or restart;
+- the broker epoch matches the supervised broker process and rotates on broker
+  replacement or restart;
 - the request binding ID/version, instance ID, and transport identity agree;
 - network reconciliation adds only the exact guest-to-broker reachability and
   does not widen the existing upstream default-deny grant; and
@@ -52,10 +69,12 @@ The concrete transport must prove all of the following before request parsing:
   the upstream, and is excluded from status, audit, retained output, and durable
   binding state.
 
-Source-address filtering alone is not sufficient transport authentication. The
-implementation may use a dedicated guest-visible Unix socket or an exact private
-veth listener only after its ownership, peer authentication, namespace exposure,
-and cleanup behavior are contract-tested and independently reviewed.
+Source address alone is not identity. Admission requires the exact verified
+host veth, exact local/peer tuple, helper-owned per-instance network rule and
+digests, request machine/binding/version, and current broker epoch. The listener
+must use exact interface binding where Linux supports it and must reject traffic
+arriving through loopback, forwarding, another interface, or another network
+namespace. The epoch is non-secret freshness metadata, not a bearer capability.
 
 ## Trusted one-use lease channel
 
@@ -64,33 +83,58 @@ trusted channel connects only the control-plane resolver to the exact supervised
 broker process after request scope, proof, egress, binding version, expiry, and
 transport checks pass.
 
-FR-008 and SC-002 prohibit credential bytes in workload/process-control
-channels, while `data-model.md` describes a trusted one-use broker launch
-channel. This note does not silently reinterpret that boundary. T033 must decide
-whether the selected anonymous descriptor or private IPC mechanism is wholly
-inside the trusted control-plane-to-broker boundary. If it is not, the feature
-spec must be clarified before implementation; T022 remains blocked.
+The trusted control-plane lease dispatcher creates a `memfd` with close-on-exec
+and sealing enabled, writes the bounded credential bytes, and applies write,
+grow, shrink, and further-seal prohibitions. It then connects to the abstract
+socket created and owned by the broker. The abstract address is a non-secret,
+plan-derived endpoint identity; address squatting only causes refusal.
 
-Before implementation, T033 must select and document one concrete mechanism,
-such as an inherited one-use descriptor or an owner-authenticated private Unix
-socket with peer-credential checks. The accepted mechanism MUST satisfy all of
-these rules:
+Before `sendmsg`, the dispatcher uses kernel peer credentials plus bounded
+helper status to verify the exact broker PID, service UID, process start
+identity, owned unit/cgroup identity, and executable/config digest. The broker
+uses kernel peer credentials to require the configured control-plane owner UID
+before accepting ancillary data. It rejects the peer before reading a frame.
+The broker owns the listening and accepted descriptors. The dispatcher owns the
+client and original `memfd` descriptors until the single send attempt. The root
+helper and supervisor own, connect to, receive, or inherit none of them.
+
+One binary frame binds protocol version, lease ID, broker epoch, machine ID,
+binding ID/version, policy/egress/broker digests, expiry, and exact descriptor
+size. Exactly one `SCM_RIGHTS` descriptor is allowed. The broker verifies the
+anonymous-file type, required seals, size, frame bounds, peer, epoch, identities,
+digests, and deadline. It atomically records the lease ID consumed before
+reading the descriptor or contacting upstream. Missing/extra descriptors,
+truncation, trailing data, stale/duplicate IDs, or any mismatch are terminal.
+
+The accepted mechanism satisfies these rules:
 
 - credential bytes never enter root-helper argv, stdin, environment, protocol,
   unit text, service properties, configuration files, staging paths, durable
   sockets, journals, status, audit, exceptions, or retained output;
-- the helper cannot connect to, impersonate, or replay the trusted lease;
+- the helper protocol has no endpoint or descriptor verb and cannot receive or
+  replay a lease through an authorized operation;
 - the guest and sibling instances cannot discover or connect to the channel;
 - the lease is process-bound, binding-version-bound, expires before or with the
   binding, and can be consumed at most once;
-- the broker acknowledges only non-secret lease identity and outcome metadata;
+- the broker acknowledges only non-secret lease ID and bounded outcome metadata;
 - failure or indeterminate acknowledgement closes the lease and is not retried
   as a credential-bearing request; and
 - buffers and descriptors are closed promptly with best-effort cleanup, without
   claiming universal memory zeroization.
 
-Until this mechanism passes T033, an in-process callback remains a local model
-only and no standalone service path may be enabled.
+The dispatcher closes its descriptor and socket immediately after the one send
+attempt. The broker closes the accepted socket and descriptor after one bounded
+read/use. Restart destroys the abstract listener, rotates the epoch, and drops
+the in-memory consumed-ID set; old frames fail the epoch/process checks. Revoke,
+expiry, drift, or cleanup closes admission before descriptor/session draining.
+Best-effort buffer cleanup is required, but neither `memfd` close nor process
+exit is represented as universal memory zeroization.
+
+All no-secret surfaces include argv, environment, unit text/properties,
+helper stdin/stdout/stderr/protocol, guest request transport, plan/config and
+runtime directories, filesystem paths, `/proc`-reported command/environment,
+registry/policy/snapshot state, logs/journal/exceptions, status/audit/telemetry,
+test failure output, retained job output, and cleanup/recovery records.
 
 ## Fixed helper protocol
 
@@ -121,7 +165,7 @@ The required lifecycle order is:
 ```text
 predecessor/effective proof
   -> start broker closed
-  -> establish reviewed trusted lease channel
+  -> establish the reviewed broker-owned seqpacket lease endpoint
   -> recheck policy/egress/broker/source/binding digests
   -> open admission
   -> close admission on revoke, expiry, drift, restart, or cleanup
@@ -137,8 +181,8 @@ stopped. Broker cleanup must precede network or machine removal, be idempotent,
 and retain a recovery item when ownership or absence cannot be proved.
 
 After a broker or machine restart, durable bindings enter
-`credential_pending`; no old transport capability, lease, descriptor, or process
-identity can reopen admission.
+`credential_pending`; no old epoch, lease, descriptor, socket connection, or
+process identity can reopen admission.
 
 ## Local verification boundary
 

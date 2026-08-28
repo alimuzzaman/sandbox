@@ -10,8 +10,10 @@
   `{ ok, job_id, status:"running" }`; it never waits for the WP command's
   completion. The CLI equivalent is `./sb wp --async <args>`.
 - No PID is returned to callers. The per-job `.pid` artifact is an internal
-  cancellation handle; on Herd it is written immediately from the spawned
-  wrapper PID to avoid an immediate-poll/cancel race.
+  cancellation handle. Herd records the wrapper group. Docker records
+  `launch:<supervisor-pid>` before return, then atomically changes it to
+  `container` after named-container acceptance. Both states support immediate
+  poll/cancel without minting another job ID.
 
 ### `wp_cli_job(job_id, offset=0, limit=1048576, *, project_dir)`
 - Validates `job_id`; returns `{ ok, job_id, status, exit_code?, stdout, bytes_read, truncated }`.
@@ -61,7 +63,11 @@ orphaned. `.sb-jobs/` is the same directory on host
 and container via the bind-mount (gotcha #3 — same absolute path inside the
 container), so the host reader and the wrapper resolve identical files (F7).
 
-- **Docker**: `compose run -d --name <job-name> --entrypoint sh wpcli -c 'echo $$ > …pid; wp <args> > …log 2>&1; echo $? > …status'`. The container itself is the cancellation boundary.
+- **Docker**: an isolated host supervisor is the acceptance/cancellation
+  boundary while it runs `compose run -d --name <job-name> --entrypoint sh
+  wpcli -c 'wp <args> > …log 2>&1; echo $? > …status'`. It traps cancellation,
+  cleans the exact named container, and records launch failure. After successful
+  creation, the named container becomes the cancellation boundary.
 - **Herd**: Python spawns `sh -c '<same wrapper>'` from `<wp_root>` with
   `start_new_session=True` and records the returned wrapper PID immediately.
 - Args shell-quoted per token (`shlex.quote`).

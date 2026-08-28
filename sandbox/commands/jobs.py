@@ -15,6 +15,8 @@ from sandbox.registry import register
 _JOB_RE = re.compile(r"^[a-f0-9]{16}$")
 _JOB_MAX_AGE = 24 * 3600  # prune jobs older than 24h (spec FR-007)
 _JOB_ORPHAN_EXIT = 1
+_JOB_LAUNCH_POLL_SECONDS = 0.05
+_JOB_LAUNCH_STOP_SECONDS = 2.0
 
 
 def _job_dir(instance: str, *, create: bool = True) -> Path:
@@ -55,6 +57,32 @@ def _read_group_pid(pid_file: Path) -> int | None:
     return pid if pid > 1 else None
 
 
+def _read_docker_launcher_pid(pid_file: Path) -> int | None:
+    try:
+        marker = pid_file.read_text().strip()
+        prefix, raw = marker.split(":", 1)
+        pid = int(raw)
+    except (OSError, ValueError):
+        return None
+    return pid if prefix == "launch" and pid > 1 else None
+
+
+def _write_new_artifact(path: Path, value: str) -> None:
+    """Create one durable marker without replacing another job's evidence."""
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _remove_launch_artifacts(paths: tuple[Path, Path, Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _herd_group_running(pid: int) -> bool:
     """Whether a Herd wrapper's process group still exists.
 
@@ -71,7 +99,7 @@ def _herd_group_running(pid: int) -> bool:
     return True
 
 
-def _docker_job_running(instance: str, jid: str) -> bool | None:
+def _docker_container_running(instance: str, jid: str) -> bool | None:
     """Return True/False for a known job container, or None if unobservable.
 
     A Docker daemon/transport failure is deliberately not treated as a dead
@@ -80,9 +108,9 @@ def _docker_job_running(instance: str, jid: str) -> bool | None:
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{.State.Running}}", _job_name(instance, jid)],
-            check=False, capture_output=True, text=True,
+            check=False, capture_output=True, text=True, timeout=2,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode == 0:
         return result.stdout.strip().lower() == "true"
@@ -92,11 +120,46 @@ def _docker_job_running(instance: str, jid: str) -> bool | None:
     return None
 
 
+def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool:
+    """Verify the exact host supervisor before treating its PGID as a handle."""
+    pid = _read_docker_launcher_pid(pid_file)
+    if pid is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
+            check=False, capture_output=True, text=True, timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    fields = (result.stdout or "").strip().split(maxsplit=2)
+    if result.returncode != 0 or len(fields) != 3:
+        return False
+    try:
+        observed_pid, observed_pgid = int(fields[0]), int(fields[1])
+    except ValueError:
+        return False
+    return (
+        observed_pid == pid
+        and observed_pgid == pid
+        and _job_name(instance, jid) in fields[2]
+    )
+
+
+def _docker_job_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    container = _docker_container_running(instance, jid)
+    if container is True:
+        return True
+    if _docker_launcher_running(instance, jid, pid_file):
+        return True
+    return container
+
+
 def _job_process_running(instance: str, jid: str, pid_file: Path) -> bool | None:
     if _is_herd_instance(instance):
         pid = _read_group_pid(pid_file)
         return _herd_group_running(pid) if pid is not None else None
-    return _docker_job_running(instance, jid)
+    return _docker_job_running(instance, jid, pid_file)
 
 
 def _record_terminal(status_file: Path, exit_code: int) -> None:
@@ -128,36 +191,98 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
     runtime/wp-<instance>/.sb-jobs/job_<id>.{pid,log,status}."""
     jid = secrets.token_hex(8)
     _job_dir(instance)  # ensure exists
+    paths = _job_paths(instance, jid)
+    log_file, status_file, pid_file = paths
     quoted = " ".join(shlex.quote(a) for a in wp_args)
     if _is_herd_instance(instance):
         root = wp_dir(instance)
         wp = (" ".join(shlex.quote(x) for x in _herd_wp_cmd(instance))
               + f" --path={shlex.quote(str(root))}")
         wrapper = (
-            f"echo $$ > .sb-jobs/job_{jid}.pid; "
             f"{wp} {quoted} > .sb-jobs/job_{jid}.log 2>&1; "
             f"echo $? > .sb-jobs/job_{jid}.status"
         )
-        process = subprocess.Popen(["sh", "-c", wrapper], cwd=str(root),
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   start_new_session=True)
-        # The wrapper writes the same value as ``$$`` once scheduled.  Write it
-        # here too so an immediate poll/cancel has a process handle instead of
-        # racing the shell's first instruction.
-        _job_paths(instance, jid)[2].write_text(str(process.pid))
+        try:
+            _write_new_artifact(log_file, "")
+            process = subprocess.Popen(
+                ["sh", "-c", wrapper], cwd=str(root),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                _write_new_artifact(pid_file, str(process.pid))
+            except Exception:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                raise
+        except Exception:
+            _remove_launch_artifacts(paths)
+            raise
     else:
         wrapper = (
-            f"echo $$ > /var/www/html/.sb-jobs/job_{jid}.pid; "
             f"wp {quoted} > /var/www/html/.sb-jobs/job_{jid}.log 2>&1; "
             f"echo $? > /var/www/html/.sb-jobs/job_{jid}.status"
         )
-        # wpcli is a run-style service; entrypoint is `wp`, override to sh (gotcha #6).
-        compose("run", "-d", "--name", _job_name(instance, jid),
-                "--entrypoint", "sh", "wpcli", "-c", wrapper, instance=instance)
-        # ``compose run -d`` has accepted the detached container by this point.
-        # The empty log is the durable running marker until the wrapper writes
-        # its PID and first output.
-        _job_paths(instance, jid)[0].touch(exist_ok=True)
+        name = _job_name(instance, jid)
+        temporary_handle = str(pid_file) + ".container"
+        supervisor = """
+container_name=$1
+status_file=$2
+handle_file=$3
+temporary_handle=$4
+shift 4
+while [ ! -s "$handle_file" ]; do sleep 0.01; done
+cancel_launch() {
+  docker rm -f -- "$container_name" >/dev/null 2>&1 || :
+  printf '143' > "$status_file"
+  rm -f -- "$temporary_handle"
+  exit 143
+}
+trap cancel_launch TERM INT HUP
+"$@" >/dev/null 2>&1
+code=$?
+if [ "$code" -eq 0 ]; then
+  printf 'container' > "$temporary_handle" && mv -f -- "$temporary_handle" "$handle_file"
+else
+  docker rm -f -- "$container_name" >/dev/null 2>&1 || :
+  printf '%s' "$code" > "$status_file"
+  rm -f -- "$temporary_handle"
+fi
+""".strip()
+        compose_argv = [
+            "docker", "compose", "-p", project_name(instance),
+            "-f", str(compose_file(instance)),
+            "--project-directory", str(ROOT),
+            "run", "-d", "--name", name,
+            "--entrypoint", "sh", "wpcli", "-c", wrapper,
+        ]
+        try:
+            _write_new_artifact(log_file, "")
+            process = subprocess.Popen(
+                ["sh", "-c", supervisor, name, name, str(status_file),
+                 str(pid_file), temporary_handle, *compose_argv],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                _write_new_artifact(pid_file, f"launch:{process.pid}")
+            except Exception:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                raise
+        except Exception:
+            _remove_launch_artifacts(paths)
+            try:
+                Path(temporary_handle).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     return jid
 
 
@@ -219,12 +344,32 @@ def kill_job(instance: str, jid: str) -> dict:
             time.sleep(0.05)
         terminated = not _herd_group_running(pid)
     else:
-        result = subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
-                                check=False, capture_output=True, text=True)
+        launcher_pid = _read_docker_launcher_pid(pid_file)
+        if launcher_pid is not None and _docker_launcher_running(
+            instance, jid, pid_file,
+        ):
+            try:
+                os.killpg(launcher_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            deadline = time.monotonic() + _JOB_LAUNCH_STOP_SECONDS
+            while (_docker_launcher_running(instance, jid, pid_file)
+                   and time.monotonic() < deadline):
+                time.sleep(_JOB_LAUNCH_POLL_SECONDS)
+        try:
+            subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
+                           check=False, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            # The subsequent observations remain authoritative.  A failed or
+            # timed-out removal can never manufacture a successful kill.
+            pass
         # Do not create a successful cancellation record solely because the
         # removal command returned.  The follow-up inspect is the proof that
         # no child process remains in the detached container.
-        terminated = result.returncode == 0 and _docker_job_running(instance, jid) is False
+        terminated = (
+            not _docker_launcher_running(instance, jid, pid_file)
+            and _docker_job_running(instance, jid, pid_file) is False
+        )
     if not terminated:
         return {"job_id": jid, "status": "running", "killed": False,
                 "error": "job termination could not be verified"}

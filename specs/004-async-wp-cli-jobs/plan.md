@@ -10,8 +10,11 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 `./sb wp --async` start a command detached, returning a 16-hex `job_id` immediately;
 `wp_cli_job` / `./sb job` poll incremental output + status; `wp_cli_job_kill` /
 `./sb job --kill` cancel. State is file-based under each instance's bind-mounted
-`.sb-jobs/` (log + status + self-reported pid). Works on Docker (detached
-`compose exec -d`) and herd (host `nohup`). Auto-pruned by age.
+`.sb-jobs/` (log + status + process handle). Docker acceptance starts an
+isolated host supervisor immediately; it owns the slower named `compose run -d`
+transition and every failure/cancel cleanup. Herd keeps its isolated host
+wrapper. Both paths return only after a durable running handle exists and are
+auto-pruned by age.
 
 ## Technical Context
 
@@ -27,7 +30,7 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 
 **Project Type**: host CLI/MCP extension (single-entry `sb` + `sandbox/` package + `mcp/wp-server/`).
 
-**Performance Goals**: async start returns in <~2s; poll is O(slice) via byte offset.
+**Performance Goals**: async acceptance returns in <2s; poll is O(slice) via byte offset.
 
 **Constraints**: async is only an execution mode for `wp` (no widened command set); job_id strictly validated (`^[a-f0-9]{16}$`) before any path use; artifacts gitignored.
 

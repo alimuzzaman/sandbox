@@ -6,7 +6,7 @@ description: "Task list for Async / Background WP-CLI Jobs"
 
 **Input**: Design documents from `specs/004-async-wp-cli-jobs/`
 
-**Status**: In progress. Implemented + live-verified on Docker (templately-rebuild2). Implementation
+**Status**: Locally complete. Implemented + live-verified on Docker and Herd. Implementation
 landed in `sandbox/commands/jobs.py` (core + CLI) and `mcp/wp-server/tools/wp.py` (MCP
 tools), not all in `tools/wp.py` as the original plan guessed.
 
@@ -64,9 +64,14 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 - MCP tools (`wp_cli_async`, `wp_cli_job`, `wp_cli_job_kill`) become callable after a
   Claude Code restart (gotcha #4); the CLI path + the shared `job_status`/`kill_job`
   logic they call are live-verified.
-- The async-start latency is the docker `compose run` container-create cost (~7s, fixed)
-  — it does NOT scale with command duration, which is the property that matters.
+- Docker acceptance is the live host supervisor plus durable `launch:<pid>`
+  marker; the named container transition continues asynchronously under that
+  supervisor's cleanup ownership.
 
 ## Phase 9: Convergence
 
-- [ ] T021 Reduce or otherwise redesign Docker async-job acceptance so it meets SC-001's under-2-second target; the recorded ~7-second `compose run -d` acceptance is a partial implementation of SC-001 (partial).
+- [x] T021 Redesign Docker async-job acceptance around a live isolated supervisor
+  with durable running evidence and exact named-container cleanup. On 2026-08-28,
+  real `xspeed-released` Docker runs accepted 30-second and 2-second WP-CLI jobs
+  in 1.25s and 1.27s respectively; immediate poll/kill returned running then
+  durable exit 143, and the completion run retained output with exit 0.

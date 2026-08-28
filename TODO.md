@@ -90,8 +90,10 @@ not close the external or human gates listed below.
 
 ### Remote/runtime and migration evidence
 
-- [ ] **Async WP-CLI acceptance under 2 seconds** — redesign or document the
-  Docker start path to satisfy `specs/004-async-wp-cli-jobs/tasks.md:T021`.
+- [x] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021 now uses a
+  live isolated Docker launch supervisor with durable acceptance, immediate
+  poll/kill safety, and exact named-container cleanup. Local Docker evidence on
+  2026-08-28 measured 1.25s and 1.27s acceptance; no remote claim is implied.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and

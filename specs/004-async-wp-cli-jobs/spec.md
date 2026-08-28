@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: In progress
+**Status**: Locally complete
 
 **Input**: User description: "Steal from Novamira #2 — WP-CLI runs synchronously today and
 long migrations/imports time out or block the agent; add background jobs with a job id and
@@ -27,6 +27,10 @@ log-slice mechanics) is deferred to `plan.md`.
 ### Session 2026-06-22
 
 - Q: Include background-job cancellation in v1? → A: Yes — support cancel/kill. The launched job self-reports its process id so a later call can terminate it; killing a finished/unknown job is a safe no-op.
+
+### Session 2026-08-28
+
+- Q: Does Docker acceptance require the job container itself to finish creating before return? → A: No. Acceptance requires one live, isolated supervisor with a durable running handle that owns the named-container transition and cleanup. It is not a passive queue entry. Poll and kill must work during either launch or container execution, and launch failure must leave no orphan.
 
 ## User Scenarios & Testing *(mandatory)*
 

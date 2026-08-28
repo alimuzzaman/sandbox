@@ -15,6 +15,9 @@ Expect: prints a 16-hex `job_id` in <~2s; the command keeps running.
 (MCP: `wp_cli(command="eval 'sleep(30);'", background=true, project_dir=…)` —
 the param is `background`, not the reserved word `async`.)
 
+Docker returns after a live isolated launch supervisor and durable running
+handle exist; it does not wait for the slower named WP-CLI container creation.
+
 ## 2. Poll to completion (incremental)
 
 - `wp_cli_job(job_id, project_dir=…)` → `status:"running"` with partial `stdout`.

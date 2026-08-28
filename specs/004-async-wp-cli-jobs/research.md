@@ -1,15 +1,27 @@
 # Research: Async / Background WP-CLI Jobs
 
-## Decision: detached launch per driver
+## Decision: accepted supervisor per driver
 
-- **Docker**: `docker compose exec -d -w <ABSPATH> wpcli sh -c '<wrapper>'` — `-d` backgrounds inside the container and returns immediately.
-- **Herd (host)**: `cd <wp_root> && nohup sh -c '<wrapper>' >/dev/null 2>&1 & echo $!` using the instance's pinned `php<MM>` + `wp` shims.
-- **Rationale**: both reuse the existing driver helpers; neither blocks the caller.
-- **Alternatives**: a long-poll sync call with a big timeout (still blocks, still caps); a daemon/queue (overkill for dev).
+- **Docker**: start one `start_new_session=True` host supervisor, durably record
+  `launch:<pid>`, then let that live supervisor run the existing named
+  `docker compose run -d` operation. On success it atomically changes the
+  handle to `container`; on failure or signal it records a terminal outcome and
+  removes the exact named container.
+- **Herd (host)**: start the pinned-PHP WP wrapper in a new session and durably
+  record its process-group leader before returning.
+- **Rationale**: Docker container creation was a fixed ~7-second acceptance
+  barrier. The supervisor is real running work, not a queued descriptor, and
+  gives immediate poll/kill a stable ownership boundary while preserving the
+  already-proven named WP-CLI container path.
+- **Alternatives**: wait for `compose run -d` (misses SC-001); return a passive
+  queued record (not accepted work); execute inside the web container (not all
+  server images carry the WP-CLI/database client parity of the wpcli service).
 
 ## Decision: wrapper self-reports its PID (enables cancel)
 
-- The launch wrapper is started with **`setsid`** so its `$$` is the process-**group** leader; it writes `echo $$ > .sb-jobs/job_<id>.pid` first, runs `wp …`, then `echo $? > .sb-jobs/job_<id>.status` on exit.
+- The Herd wrapper and Docker launch supervisor are process-group leaders. The
+  host durably writes their exact handle before returning. Docker changes that
+  handle to the literal `container` only after the named container is accepted.
 - **Cancel** sends `kill -TERM -$(cat …pid)` (negative PID = the whole group), so the child `wp`/`php` processes are terminated too — no orphans (analysis F6). Container: via `compose exec`; herd: directly.
 - **Rationale**: detached `compose exec -d` doesn't cleanly surface the inner PID, so the start response returns **no `pid`** (analysis F5); the self-reported group-leader `$$` in `.pid` is the reliable cancel handle. `setsid` guarantees `$$` == PGID.
 - **Alternatives**: `exec wp` (makes `$$`==wp but then can't capture the exit code); parse `docker top` (brittle); no-cancel (rejected — clarification put cancel in v1).

@@ -15,7 +15,7 @@ No database. A Job is three files under `runtime/wp-<instance>/.sb-jobs/`.
 | File | Meaning |
 |------|---------|
 | `job_<id>.log` | combined stdout+stderr, appended as it runs |
-| `job_<id>.pid` | wrapper PID, written (`echo $$`) before exec — the cancel handle |
+| `job_<id>.pid` | internal cancel handle: Herd wrapper PID, Docker `launch:<pid>`, or Docker `container` |
 | `job_<id>.status` | absent ⇒ running; present ⇒ done, contents = exit code (`143` if killed) |
 
 Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
@@ -23,8 +23,9 @@ Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
 (no files / pruned). A **cancelled** job is just `completed` with `exit_code:143` —
 not a distinct query status (analysis F2); "cancelled" is the human interpretation.
 
-Transitions: start → running; process exit → completed; `kill` → SIGTERM to the
-wrapper's process **group** → completed(`143`). Age-prune removes terminal jobs' files.
+Transitions: start → accepted/running; Docker launch supervisor → named container;
+process exit → completed; `kill` → verified process group and/or exact named
+container removal → completed(`143`). Age-prune removes terminal jobs' files.
 
 ## Query result (`wp_cli_job`)
 

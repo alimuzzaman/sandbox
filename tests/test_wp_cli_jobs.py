@@ -15,7 +15,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +52,109 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertNotIn("setsid", popen.call_args.args[0])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(self._paths(jid)[2].read_text(), "4242")
+
+    def test_docker_launch_returns_after_durable_supervisor_acceptance(self):
+        process = SimpleNamespace(pid=5252)
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs.secrets, "token_hex", return_value="2" * 16), \
+                patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                patch.object(jobs, "compose_file", return_value=self.root / "unit.yml"), \
+                patch.object(jobs.subprocess, "Popen", return_value=process) as popen:
+            jid = jobs.launch_job(self.instance, ["eval", "sleep(30);"])
+
+        log, status, handle = self._paths(jid)
+        self.assertEqual(jid, "2" * 16)
+        self.assertTrue(log.exists())
+        self.assertFalse(status.exists())
+        self.assertEqual(handle.read_text(), "launch:5252")
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        launched = popen.call_args.args[0]
+        self.assertEqual(launched[:3], ["sh", "-c", ANY])
+        self.assertIn("sandbox-unit", launched)
+        self.assertIn("sb-job-unit-" + jid, launched)
+        self.assertIn("run", launched)
+        self.assertIn("wpcli", launched)
+
+    def test_docker_launch_failure_leaves_no_known_job_or_artifacts(self):
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs.secrets, "token_hex", return_value="3" * 16), \
+                patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                patch.object(jobs, "compose_file", return_value=self.root / "unit.yml"), \
+                patch.object(jobs.subprocess, "Popen", side_effect=OSError("closed")):
+            with self.assertRaises(OSError):
+                jobs.launch_job(self.instance, ["option", "get", "siteurl"])
+
+        self.assertFalse(any(path.exists() for path in self._paths("3" * 16)))
+
+    def test_docker_marker_failure_stops_supervisor_and_removes_partial_artifacts(self):
+        real_write = jobs._write_new_artifact
+        process = SimpleNamespace(pid=5353, wait=lambda timeout: 143)
+
+        def fail_handle(path, value):
+            if path.suffix == ".pid":
+                raise OSError("marker unavailable")
+            return real_write(path, value)
+
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs.secrets, "token_hex", return_value="6" * 16), \
+                patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                patch.object(jobs, "compose_file", return_value=self.root / "unit.yml"), \
+                patch.object(jobs.subprocess, "Popen", return_value=process), \
+                patch.object(jobs, "_write_new_artifact", side_effect=fail_handle), \
+                patch.object(jobs.os, "killpg") as killpg:
+            with self.assertRaises(OSError):
+                jobs.launch_job(self.instance, ["option", "get", "siteurl"])
+
+        killpg.assert_called_once_with(5353, jobs.signal.SIGTERM)
+        self.assertFalse(any(path.exists() for path in self._paths("6" * 16)))
+
+    def test_immediate_poll_treats_verified_docker_supervisor_as_running(self):
+        jid = "4" * 16
+        log, _, handle = self._paths(jid)
+        log.touch()
+        handle.write_text("launch:4242")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_container_running", return_value=False), \
+                patch.object(jobs, "_docker_launcher_running", return_value=True):
+            result = jobs.job_status(self.instance, jid)
+
+        self.assertEqual(result["status"], "running")
+
+    def test_timed_out_docker_observation_is_unknown_not_completed(self):
+        with patch.object(
+            jobs.subprocess, "run", side_effect=jobs.subprocess.TimeoutExpired("inspect", 2),
+        ):
+            self.assertIsNone(jobs._docker_container_running(self.instance, "4" * 16))
+
+    def test_timed_out_supervisor_probe_is_not_an_authorized_handle(self):
+        jid = "7" * 16
+        _, _, handle = self._paths(jid)
+        handle.write_text("launch:4242")
+        with patch.object(
+            jobs.subprocess, "run", side_effect=jobs.subprocess.TimeoutExpired("ps", 1),
+        ):
+            self.assertFalse(jobs._docker_launcher_running(self.instance, jid, handle))
+
+    def test_immediate_docker_kill_reaps_supervisor_then_container_boundary(self):
+        jid = "5" * 16
+        log, status, handle = self._paths(jid)
+        log.touch()
+        handle.write_text("launch:4242")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_job_running", side_effect=[True, False]), \
+                patch.object(jobs, "_docker_launcher_running", side_effect=[True, False, False]), \
+                patch.object(jobs.os, "killpg") as killpg, \
+                patch.object(jobs.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+            result = jobs.kill_job(self.instance, jid)
+
+        killpg.assert_called_once_with(4242, jobs.signal.SIGTERM)
+        self.assertTrue(result["killed"])
+        self.assertEqual(status.read_text(), "143")
 
     def test_unknown_kill_is_a_noop_without_creating_artifacts(self):
         jid = "b" * 16

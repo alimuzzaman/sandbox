@@ -66,7 +66,7 @@ def build_report(*, manifest: Any, record: Any, bundle: Any = None,
     review_pending = (
         "t031_independent_review",
         *(("t022_helper_service_proof",) if not live else ()),
-        *(("t029_live_feature_matrix",) if classification != "passed_live" else ()),
+        *(("t029_live_feature_matrix",) if not live else ()),
     )
     return {
         "version": 1,

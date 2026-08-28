@@ -164,7 +164,7 @@ class TestOfflineRunner(RunnerTestCase):
         self.assertEqual(code, cli.EXIT_REFUSED)
         self.assertEqual(document["code"], "artifact_ancestor_symlink")
 
-    def test_finalize_reports_the_classification_and_exit_code(self):
+    def test_finalize_records_classification_but_requires_bundle_validation(self):
         store = ledger_module.ProofRunLedger(self.ledger_path)
         store.open_run(request_id=REQUEST, manifest=self.manifest, started_at=START)
         store.record_acceptance(REQUEST, fixtures.acceptance())
@@ -175,8 +175,10 @@ class TestOfflineRunner(RunnerTestCase):
             "finalize", "--manifest", str(self.manifest_path),
             "--ledger", str(self.ledger_path), "--request-id", REQUEST, "--at", END,
         )
-        self.assertEqual(code, cli.EXIT_OK)
-        self.assertEqual(document["code"], "passed_live")
+        self.assertEqual(code, cli.EXIT_BLOCKED)
+        self.assertFalse(document["ok"])
+        self.assertEqual(document["code"], "bundle_validation_required")
+        self.assertEqual(document["classification"], "passed_live")
 
     def test_every_failure_prints_a_bounded_code_and_no_exception_text(self):
         cases = (
@@ -260,6 +262,10 @@ class TestReportRendering(RunnerTestCase):
         self.assertFalse(built["adoptable"])
         self.assertIsNone(built["evidence_id"])
         self.assertIn("t031_independent_review", built["independent_review_pending"])
+        self.assertNotIn("t022_helper_service_proof",
+                         built["independent_review_pending"])
+        self.assertNotIn("t029_live_feature_matrix",
+                         built["independent_review_pending"])
 
     def test_a_live_label_without_a_verified_bundle_is_not_live_evidence(self):
         store, _record = self._record()
@@ -277,6 +283,8 @@ class TestReportRendering(RunnerTestCase):
         self.assertIsNone(built["manifest_digest"])
         self.assertIn("t022_helper_service_proof",
                       built["independent_review_pending"])
+        self.assertIn("t029_live_feature_matrix",
+                      built["independent_review_pending"])
 
     def test_render_report_without_a_bundle_is_blocked_for_a_live_label(self):
         store, _record = self._record()
@@ -293,6 +301,8 @@ class TestReportRendering(RunnerTestCase):
         )
         self.assertEqual(code, cli.EXIT_BLOCKED)
         self.assertIn("live_checks_passed: 0", output)
+        self.assertIn("t022_helper_service_proof", output)
+        self.assertIn("t029_live_feature_matrix", output)
 
     def test_a_local_fake_run_reports_no_live_checks_at_all(self):
         store, _record = self._record(provenance="local_injected_fake")

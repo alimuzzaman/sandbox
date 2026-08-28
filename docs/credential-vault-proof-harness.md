@@ -99,7 +99,10 @@ and independent review are still required.
    the operator's memory, decides whether anything may start.
 5. **collect** — `record-artifact` for each planned artifact, using the same
    manifest. Recording uses the declared byte ceiling and validates the typed
-   artifact before its digest enters the ledger; then `finalize`.
+   artifact before its digest enters the ledger; then `finalize`. Finalization
+   records a provisional classification but returns
+   `bundle_validation_required`; it is never proof or a successful exit by
+   itself.
 6. **validate** — `validate-bundle --now <UTC timestamp>` against the same
    manifest. The explicit clock is required so the evidence-age bound is
    deterministic. This is where copied, stale, mixed-revision, or

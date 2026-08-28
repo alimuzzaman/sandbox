@@ -158,10 +158,11 @@ def run(argv: Any = None) -> int:
                 required=manifest_module.required_check_ids(document),
                 terminal_at=_require(args.at, "timestamp_required"),
             )
-            _emit({"ok": record["classification"] == "passed_live",
-                   "code": record["classification"],
+            _emit({"ok": False,
+                   "code": "bundle_validation_required",
+                   "classification": record["classification"],
                    "request_id": record["request_id"]})
-            return EXIT_OK if record["classification"] == "passed_live" else EXIT_BLOCKED
+            return EXIT_BLOCKED
         if args.verb == "validate-bundle":
             document = _load(_require(args.manifest, "manifest_required"))
             result = bundle_module.validate_bundle(

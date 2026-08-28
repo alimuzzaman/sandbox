@@ -68,10 +68,11 @@ With no flags: renders the plan and **installs nothing**.
 resources schedule: planned (scaleway-sandbox)
   enabled: false
   platform: launchd
-  cadence: hourly (randomized delay 5min, timeout 30min)
+  cadence: hourly (randomized delay unavailable)
+  timeout: unenforceable on this platform; activation refused
   command: sb resources monitor --scheduled --json --remote scaleway-sandbox
   would write: ~/Library/LaunchAgents/com.wpdeveloper.sandbox.storage-monitor.<digest>.plist
-  activate:   sb resources schedule --remote scaleway-sandbox --activate --confirm
+  activate:   unsupported on this platform
   deactivate: sb resources schedule --remote scaleway-sandbox --deactivate --confirm
   units:
     com.wpdeveloper.sandbox.storage-monitor.<digest>.plist:
@@ -85,9 +86,18 @@ resources schedule: refused (scaleway-sandbox)
   protected_operation: activating a storage-monitor timer is a protected operation; re-run with --confirm
 ```
 
-`--activate --confirm` writes the unit(s), enables them, and reports every path written plus
-the deactivate command. Activating an identical existing schedule reports
-`status=unchanged` and writes nothing. `--deactivate --confirm` disables and removes them;
+On systemd, `--activate --confirm` writes the units plus an owner-only installed-plan
+receipt, enables them, and reports every path written plus the deactivate command. Matching
+files do not prove activation: every retry invokes the idempotent scheduler transition
+again before reporting `status=unchanged`. Launchd activation refuses with
+`schedule_timeout_unenforced`. `--deactivate --confirm` reads the installed receipt rather
+than current remote policy, disables the known schedule, and removes its units and receipt;
+missing or invalid evidence refuses with `schedule_evidence_unknown`.
+The lifecycle refuses `unsafe_schedule_path` before following any symlinked, wrong-owner,
+non-directory, or mode-unsafe scheduler ancestor. A pre-transition update write failure
+restores the complete prior unit and receipt set.
+Unit and receipt reads are capped at 256 KiB; invalid UTF-8, oversized, or malformed bytes
+refuse before the enable/disable command runs.
 `--deactivate` without `--confirm` is refused the same way.
 
 `--activate` and `--deactivate` together is refused with `invalid_mode`.

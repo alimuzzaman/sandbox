@@ -141,8 +141,9 @@ host-facing service is constructed. Normal/warning/skipped runs exit zero;
 critical, unknown, refusal, or action failure exits one.
 
 `sb resources schedule` renders a disabled local systemd user service/timer or
-launchd plist for the fixed monitor argv. Rendering writes nothing. Installing
-or removing it is protected: use `--activate --confirm` or
+review-only launchd plist for the fixed monitor argv. Rendering writes nothing. Launchd
+activation refuses because it cannot enforce the configured timeout. Installing systemd
+or removing a receipt-bound installation is protected: use `--activate --confirm` or
 `--deactivate --confirm` only after reviewing the target policy and live
 read-only evidence. The target remote is reached by the monitor command, not by
 installing a timer on that host.

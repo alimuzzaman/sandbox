@@ -42,21 +42,28 @@ on the monitored remote. Render it first:
 
 The plan is always `enabled: false` and contains the exact command, unit
 contents, paths, and reverse commands. Linux renders a systemd user service and
-timer; macOS renders a launchd user plist. Both use the fixed command
+timer; macOS renders a review-only launchd user plist. Both use the fixed command
 `sb resources monitor --scheduled --json` (plus `--remote NAME` for a named
-target). Systemd wraps the service with non-blocking `flock`; launchd reports
-that it has no native randomized-delay primitive.
+target). The monitor runner owns overlap and returns
+`status=skipped, reason=lock_held`, so systemd does not hide that result behind an outer
+`flock`. Launchd reports missing native jitter and refuses activation because it cannot
+enforce `schedule_timeout`.
 
 Installing or removing a timer is a protected local operation. It requires an
 explicit confirmation and is never part of a render-only plan:
 
 ```sh
-./sb resources schedule --remote scaleway-sandbox --activate --confirm
+./sb resources schedule --remote scaleway-sandbox --activate --confirm  # systemd only
 ./sb resources schedule --remote scaleway-sandbox --deactivate --confirm
 ```
 
-Activation is idempotent for an identical unit, writes owner-safe files only in
-the user scheduler directory, and runs a bounded init-system transition. Do
+Systemd activation writes owner-safe units plus an owner-only installed-plan receipt and
+runs the bounded transition on every request, even when files match. Deactivation uses that
+receipt rather than current policy, so a removed remote can still be cleaned up. A failed
+write before the scheduler transition restores the complete prior unit and receipt set.
+Activation, receipt reads, rollback, and removal refuse symlinked or owner/mode-unsafe
+scheduler-directory ancestors instead of following them. Unit and receipt reads are capped
+at 256 KiB and malformed bytes refuse before any scheduler transition. Do
 not activate a schedule until its target policy and live read-only monitor
 evidence have been reviewed. Automatic reclamation and real reaping remain off
 unless their separate policy switches are explicitly enabled.

@@ -41,9 +41,11 @@ contact the monitored target:
 
 The plan reports the exact `sb resources monitor --scheduled --json` argv, the
 systemd or launchd unit, install path, and reverse command. It always says
-`enabled: false`. Activation and removal are protected local operations and
-require `--activate --confirm` or `--deactivate --confirm`; do not run those
-commands until the target policy and the live read-only gate in T023 are reviewed.
+`enabled: false`. Systemd can enforce the configured timeout; launchd is render-only and
+activation refuses with `schedule_timeout_unenforced`. Systemd activation and removal are
+protected local operations and require `--activate --confirm` or `--deactivate --confirm`;
+do not run them until the target policy and the still-unrun live gate in T023 are reviewed.
+No `scaleway-sandbox` command has been run as evidence for this quickstart.
 
 ## 4. Opt a target in (only when you mean it)
 

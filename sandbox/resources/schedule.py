@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import hashlib
+import json
 import os
 from pathlib import Path
 import plistlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,7 @@ _POLICY_FIELDS = (
     "schedule_timeout",
 )
 _UNIT_MODE = {"systemd": 0o644, "launchd": 0o600}
+_MAX_SCHEDULE_FILE_BYTES = 256 * 1024
 _LAUNCHD_CALENDARS = {
     "hourly": {"Minute": 0},
     "daily": {"Hour": 0, "Minute": 0},
@@ -138,7 +141,6 @@ def _systemd_units(policy: Mapping[str, Any], target: Mapping[str, str], digest:
         # calendar/target values.
         shlex.quote(item) for item in command
     )
-    lock_name = f"sandbox-storage-monitor-{digest}.lock"
     service = "\n".join((
         "[Unit]",
         f"Description=Sandbox storage pressure monitor ({target['name']})",
@@ -148,7 +150,7 @@ def _systemd_units(policy: Mapping[str, Any], target: Mapping[str, str], digest:
         "Type=oneshot",
         "UMask=0077",
         f"TimeoutStartSec={policy['schedule_timeout']}",
-        f"ExecStart=/usr/bin/flock -n %t/{lock_name} /usr/bin/env {shell_command}",
+        f"ExecStart=/usr/bin/env {shell_command}",
         "",
     ))
     timer = "\n".join((
@@ -245,9 +247,14 @@ def build_schedule_plan(
         "paths": file_paths,
         "activate_command": activate_command,
         "deactivate_command": deactivate_command,
+        "activation_supported": platform_value == "systemd",
+        "timeout_enforced": platform_value == "systemd",
     }
     if platform_value == "launchd":
-        plan["limitations"] = ["launchd has no native randomized-delay primitive"]
+        plan["limitations"] = [
+            "launchd has no native randomized-delay primitive",
+            "activation is refused because launchd cannot enforce schedule_timeout",
+        ]
     return plan
 
 
@@ -316,29 +323,162 @@ def _protected(plan: Mapping[str, Any], operation: str) -> dict[str, Any]:
     )
 
 
-def _safe_unit_path(path: str, platform: str) -> Path:
-    candidate = Path(path)
-    digest_root = (
-        Path.home() / ".config" / "systemd" / "user"
-        if platform == "systemd" else Path.home() / "Library" / "LaunchAgents"
+def _scheduler_root(platform: str, *, create: bool) -> Path:
+    home = Path.home()
+    parts = (
+        (".config", "systemd", "user")
+        if platform == "systemd" else ("Library", "LaunchAgents")
     )
+    try:
+        home_state = home.lstat()
+    except OSError as exc:
+        raise ScheduleError("scheduler home is unavailable", "unsafe_schedule_path") from exc
+    if (not stat.S_ISDIR(home_state.st_mode) or stat.S_ISLNK(home_state.st_mode)
+            or home_state.st_uid != os.getuid()
+            or stat.S_IMODE(home_state.st_mode) & 0o022):
+        raise ScheduleError("scheduler home ownership or mode is unsafe", "unsafe_schedule_path")
+
+    current = home
+    for part in parts:
+        current = current / part
+        try:
+            state = current.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise ScheduleError(
+                    "installed schedule identity evidence is unavailable",
+                    "schedule_evidence_unknown",
+                ) from None
+            try:
+                current.mkdir(mode=0o700)
+                state = current.lstat()
+            except OSError as exc:
+                raise ScheduleError(
+                    "scheduler directory could not be created",
+                    "schedule_write_failed",
+                    retryable=True,
+                ) from exc
+        except OSError as exc:
+            raise ScheduleError("scheduler directory is unsafe", "unsafe_schedule_path") from exc
+        if (not stat.S_ISDIR(state.st_mode) or stat.S_ISLNK(state.st_mode)
+                or state.st_uid != os.getuid()
+                or stat.S_IMODE(state.st_mode) != 0o700):
+            raise ScheduleError(
+                "scheduler directory ownership or mode is unsafe",
+                "unsafe_schedule_path",
+            )
+    return current
+
+
+def _safe_unit_path(path: str, platform: str, *, create_root: bool = False) -> Path:
+    candidate = Path(path)
+    digest_root = _scheduler_root(platform, create=create_root)
     if candidate.parent != digest_root or candidate.name in {"", ".", ".."}:
         raise ScheduleError("schedule unit path is outside the user scheduler directory", "unsafe_schedule_path")
     return candidate
 
 
-def _write_unit(path: Path, content: str, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+def _receipt_path(target: Mapping[str, str], platform: str) -> Path:
+    digest = _digest(target)
+    root = (
+        Path.home() / ".config" / "systemd" / "user"
+        if platform == "systemd" else Path.home() / "Library" / "LaunchAgents"
+    )
+    return root / f"sandbox-storage-monitor-{digest}.installed.json"
+
+
+def _safe_receipt_path(
+    target: Mapping[str, str], platform: str, *, create_root: bool = False,
+) -> Path:
+    return _safe_unit_path(
+        str(_receipt_path(target, platform)), platform, create_root=create_root,
+    )
+
+
+def _existing_file_state(path: Path, expected_mode: int) -> os.stat_result | None:
     try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
+        state = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ScheduleError("schedule path could not be inspected", "unsafe_schedule_path") from exc
+    if (not stat.S_ISREG(state.st_mode) or stat.S_ISLNK(state.st_mode)
+            or state.st_uid != os.getuid()
+            or stat.S_IMODE(state.st_mode) != expected_mode):
+        raise ScheduleError(
+            "schedule file ownership, type, or mode is unsafe",
+            "unsafe_schedule_path",
+        )
+    return state
+
+
+def _bounded_file_bytes(path: Path, expected_mode: int) -> bytes | None:
+    """Read one scheduler file without an unbounded allocation or decode leak."""
+    state = _existing_file_state(path, expected_mode)
+    if state is None:
+        return None
+    if state.st_size > _MAX_SCHEDULE_FILE_BYTES:
+        raise ScheduleError(
+            "schedule file content is invalid",
+            "schedule_content_mismatch",
+        )
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(_MAX_SCHEDULE_FILE_BYTES + 1)
+    except OSError as exc:
+        raise ScheduleError("schedule file could not be read", "unsafe_schedule_path") from exc
+    if len(content) > _MAX_SCHEDULE_FILE_BYTES:
+        raise ScheduleError(
+            "schedule file content is invalid",
+            "schedule_content_mismatch",
+        )
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ScheduleError(
+            "schedule file content is invalid",
+            "schedule_content_mismatch",
+        ) from None
+    return content
+
+
+def _receipt_content(plan: Mapping[str, Any]) -> str:
+    return json.dumps(dict(plan), sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _load_receipt(target: Mapping[str, str], platform: str) -> tuple[dict[str, Any], Path]:
+    path = _safe_receipt_path(target, platform)
+    try:
+        content = _bounded_file_bytes(path, 0o600)
+        if content is None:
+            raise OSError
+        raw = json.loads(content.decode("utf-8"))
+        canonical = _canonical_plan(raw)
+    except Exception:
+        raise ScheduleError(
+            "installed schedule identity evidence is unavailable or invalid",
+            "schedule_evidence_unknown",
+        ) from None
+    if canonical["target"] != dict(target) or canonical["platform"] != platform:
+        raise ScheduleError(
+            "installed schedule identity does not match the requested target",
+            "schedule_evidence_unknown",
+        )
+    return canonical, path
+
+
+def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+    platform = "systemd" if path.parent == Path.home() / ".config" / "systemd" / "user" else "launchd"
+    root = _scheduler_root(platform, create=True)
+    if path.parent != root or path.name in {"", ".", ".."}:
+        raise ScheduleError("schedule unit path is outside the user scheduler directory", "unsafe_schedule_path")
+    _existing_file_state(path, mode)
     descriptor = -1
     temporary: str | None = None
     try:
         descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
         os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
             handle.write(content)
             handle.flush()
@@ -359,6 +499,58 @@ def _write_unit(path: Path, content: str, mode: int) -> None:
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def _write_unit(path: Path, content: str, mode: int) -> None:
+    _atomic_write(path, content.encode("utf-8"), mode)
+
+
+def _snapshot_installation(
+    paths: Mapping[Path, int],
+) -> dict[Path, tuple[bytes, int] | None]:
+    """Capture the complete pre-write state for transactional restoration."""
+    snapshot: dict[Path, tuple[bytes, int] | None] = {}
+    for path, expected_mode in paths.items():
+        try:
+            content = _bounded_file_bytes(path, expected_mode)
+            if content is None:
+                snapshot[path] = None
+                continue
+            snapshot[path] = (content, expected_mode)
+        except ScheduleError:
+            raise
+        except OSError as exc:
+            raise ScheduleError(
+                "schedule installation could not be captured",
+                "schedule_write_failed",
+                retryable=True,
+            ) from exc
+    return snapshot
+
+
+def _restore_installation(snapshot: Mapping[Path, tuple[bytes, int] | None]) -> None:
+    """Restore all paths after a failed pre-transition write."""
+    try:
+        for path, prior in snapshot.items():
+            if prior is None:
+                platform = "systemd" if path.parent == Path.home() / ".config" / "systemd" / "user" else "launchd"
+                root = _scheduler_root(platform, create=False)
+                if path.parent != root:
+                    raise OSError
+                _existing_file_state(path, _UNIT_MODE[platform] if path.suffix != ".json" else 0o600)
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                content, mode = prior
+                _atomic_write(path, content, mode)
+    except (OSError, ScheduleError) as exc:
+        raise ScheduleError(
+            "schedule installation rollback did not complete",
+            "schedule_rollback_failed",
+            retryable=True,
+        ) from exc
 
 
 def _run_bounded(command: Sequence[str]) -> None:
@@ -382,63 +574,158 @@ def activate(plan: Mapping[str, Any], confirm: bool = False) -> dict[str, Any]:
         return _protected(plan, "activating")
     try:
         canonical = _canonical_plan(plan)
-        paths = {key: _safe_unit_path(value, canonical["platform"]) for key, value in canonical["paths"].items()}
+        if not canonical["activation_supported"]:
+            raise ScheduleError(
+                "schedule activation cannot enforce the configured timeout on this platform",
+                "schedule_timeout_unenforced",
+            )
+        paths = {
+            key: _safe_unit_path(value, canonical["platform"], create_root=True)
+            for key, value in canonical["paths"].items()
+        }
+        receipt_path = _safe_receipt_path(
+            canonical["target"], canonical["platform"], create_root=True,
+        )
         mode = _UNIT_MODE[canonical["platform"]]
         all_match = True
         for key, path in paths.items():
-            if path.is_symlink():
-                raise ScheduleError("schedule unit path is a symlink", "unsafe_schedule_path")
+            content = _bounded_file_bytes(path, mode)
+            all_match = (
+                all_match and content is not None
+                and content == canonical["units"][key].encode("utf-8")
+            )
+        receipt = _receipt_content(canonical)
+        receipt_bytes = _bounded_file_bytes(receipt_path, 0o600)
+        all_match = (
+            all_match and receipt_bytes is not None
+            and receipt_bytes == receipt.encode("utf-8")
+        )
+        paths_written = []
+        if not all_match:
+            prior = _snapshot_installation({
+                **{path: mode for path in paths.values()},
+                receipt_path: 0o600,
+            })
             try:
-                all_match = all_match and path.is_file() and (path.stat().st_mode & 0o777) == mode and path.read_text(encoding="utf-8") == canonical["units"][key]
-            except OSError:
-                all_match = False
-        if all_match:
-            return _result(canonical, ok=True, status="unchanged", enabled=True, paths_written=[])
-        for key, path in paths.items():
-            if path.is_symlink():
-                raise ScheduleError("schedule unit path is a symlink", "unsafe_schedule_path")
-            _write_unit(path, canonical["units"][key], mode)
+                for key, path in paths.items():
+                    _write_unit(path, canonical["units"][key], mode)
+                    paths_written.append(str(path))
+                _write_unit(receipt_path, receipt, 0o600)
+                paths_written.append(str(receipt_path))
+            except Exception as exc:
+                _restore_installation(prior)
+                if isinstance(exc, ScheduleError):
+                    raise
+                raise ScheduleError(
+                    "schedule unit could not be written",
+                    "schedule_write_failed",
+                    retryable=True,
+                ) from None
+        # Matching files and a receipt prove only intended bytes, not active
+        # scheduler state.  Re-run the idempotent transition every time.
         _run_bounded(canonical["activate_command"])
-        return _result(canonical, ok=True, status="activated", enabled=True, paths_written=[str(path) for path in paths.values()])
+        return _result(
+            canonical, ok=True,
+            status="unchanged" if all_match else "activated",
+            enabled=True, paths_written=paths_written,
+        )
     except ScheduleError as exc:
         fallback = plan if isinstance(plan, Mapping) else {}
         return _result(fallback, ok=False, status="failed", error=exc)
 
 
 def deactivate(plan: Mapping[str, Any], confirm: bool = False) -> dict[str, Any]:
-    """Disable and remove only the canonical schedule units."""
+    """Disable from persisted installed identity, not current policy."""
     if not confirm:
         return _protected(plan, "deactivating")
     try:
         canonical = _canonical_plan(plan)
-        paths = {key: _safe_unit_path(value, canonical["platform"]) for key, value in canonical["paths"].items()}
-        present = []
-        for path in paths.values():
-            if path.is_symlink():
-                raise ScheduleError("schedule unit path is a symlink", "unsafe_schedule_path")
-            if path.exists():
-                if not path.is_file():
-                    raise ScheduleError("schedule unit path is not a regular file", "unsafe_schedule_path")
-                key = next(key for key, candidate in paths.items() if candidate == path)
-                try:
-                    content = path.read_text(encoding="utf-8")
-                except OSError as exc:
-                    raise ScheduleError("schedule unit could not be read", "unsafe_schedule_path") from exc
-                if content != canonical["units"].get(key):
-                    raise ScheduleError("schedule unit content does not match the reviewed plan", "schedule_content_mismatch")
-                present.append(path)
-        if not present:
-            return _result(canonical, ok=True, status="unchanged", enabled=False, paths_removed=[])
-        _run_bounded(canonical["deactivate_command"])
-        for path in present:
-            try:
-                path.unlink()
-            except OSError as exc:
-                raise ScheduleError("schedule unit could not be removed", "schedule_remove_failed", retryable=True) from exc
-        return _result(canonical, ok=True, status="deactivated", enabled=False, paths_removed=[str(path) for path in present])
+        installed, _receipt = _load_receipt(
+            canonical["target"], canonical["platform"])
+        if installed != canonical:
+            raise ScheduleError(
+                "installed schedule differs from the supplied plan",
+                "schedule_evidence_unknown",
+            )
+        return _deactivate_canonical(installed)
     except ScheduleError as exc:
         fallback = plan if isinstance(plan, Mapping) else {}
         return _result(fallback, ok=False, status="failed", error=exc)
+
+
+def _deactivate_canonical(canonical: Mapping[str, Any]) -> dict[str, Any]:
+    paths = {
+        key: _safe_unit_path(value, canonical["platform"])
+        for key, value in canonical["paths"].items()
+    }
+    receipt_path = _safe_receipt_path(canonical["target"], canonical["platform"])
+    present = []
+    for key, path in paths.items():
+        content = _bounded_file_bytes(path, _UNIT_MODE[canonical["platform"]])
+        if content is not None:
+            if content != canonical["units"].get(key, "").encode("utf-8"):
+                raise ScheduleError(
+                    "schedule unit content does not match installed evidence",
+                    "schedule_content_mismatch",
+                )
+            present.append(path)
+    _run_bounded(canonical["deactivate_command"])
+    removed = []
+    removals = [
+        *((path, _UNIT_MODE[canonical["platform"]]) for path in present),
+        (receipt_path, 0o600),
+    ]
+    for path, expected_mode in removals:
+        try:
+            _scheduler_root(canonical["platform"], create=False)
+            if _existing_file_state(path, expected_mode) is None:
+                continue
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ScheduleError(
+                "schedule unit could not be removed",
+                "schedule_remove_failed", retryable=True,
+            ) from exc
+    return _result(
+        canonical, ok=True, status="deactivated", enabled=False,
+        paths_removed=removed,
+    )
+
+
+def deactivate_installed(
+    target: Mapping[str, str] | Any,
+    platform: str | None = None,
+    *,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Disable using canonical installed evidence even after policy removal."""
+    if not confirm:
+        return _protected({}, "deactivating")
+    display: dict[str, Any] = {}
+    try:
+        try:
+            target_value = _target(target)
+        except ScheduleError:
+            raise
+        except Exception:
+            raise ScheduleError("schedule target is invalid", "invalid_target") from None
+        try:
+            platform_value = normalize_platform(platform)
+        except ScheduleError:
+            raise
+        except Exception:
+            raise ScheduleError(
+                "storage-monitor scheduling is unsupported on this platform",
+                "unsupported_platform",
+            ) from None
+        display = {"target": target_value, "platform": platform_value}
+        canonical, _receipt = _load_receipt(target_value, platform_value)
+        return _deactivate_canonical(canonical)
+    except ScheduleError as exc:
+        return _result(display, ok=False, status="failed", error=exc)
 
 
 __all__ = [
@@ -446,5 +733,6 @@ __all__ = [
     "activate",
     "build_schedule_plan",
     "deactivate",
+    "deactivate_installed",
     "normalize_platform",
 ]

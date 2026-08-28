@@ -1,3 +1,4 @@
+import json
 import unittest
 
 
@@ -18,6 +19,214 @@ class Policy:
 
 
 class TestManagedServices(unittest.TestCase):
+    def test_v2_lifecycle_executor_pins_plans_and_fixed_secret_free_argv(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import (
+            DerivedServiceConfigV2, LifecycleV2Error,
+        )
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class LifecycleProcess:
+            def __init__(self): self.calls = []
+            def run(self, argv, **kwargs):
+                self.calls.append((argv, kwargs))
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": json.dumps({"ok": True, "code": "completed"}),
+                })()
+
+        process = LifecycleProcess()
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=process, helper="/fixed/native-helper",
+            controller=controller, broker=broker,
+        )
+        self.assertEqual(executor.execute(
+            "credential-controller-configure-v2", controller),
+            {"ok": True, "code": "completed"})
+        argv, kwargs = process.calls[0]
+        self.assertEqual(argv, (
+            "sudo", "-n", "/fixed/native-helper",
+            "credential-controller-configure-v2", controller.machine_id,
+            controller.config_digest, executor.plan_identity,
+        ))
+        self.assertEqual(kwargs, {"timeout": 30})
+        self.assertNotIn(controller.canonical_bytes.decode(), repr(argv))
+        with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_action_invalid"):
+            executor.execute("credential-broker-start-v2", controller)
+        forged = DerivedServiceConfigV2.derive(document("controller"))
+        with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
+            executor.execute("credential-controller-start-v2", forged)
+        self.assertEqual(len(process.calls), 1)
+
+    def test_v2_lifecycle_executor_requires_exact_ownership_absence_status(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import (
+            DerivedServiceConfigV2, LifecycleV2Error,
+        )
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class LifecycleProcess:
+            value = None
+            def run(self, _argv, **_kwargs):
+                return type("Result", (), {
+                    "returncode": 0, "stdout": json.dumps(self.value),
+                })()
+
+        process = LifecycleProcess()
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=process, helper="/fixed/native-helper",
+            controller=controller, broker=broker,
+        )
+        process.value = {
+            "ok": True, "code": "completed", "machine_id": broker.machine_id,
+            "component": "broker", "config_digest": broker.config_digest,
+            "plan_identity": executor.plan_identity,
+            "unit_identity": broker.document["unit_identity"],
+            "unit_digest": broker.document["unit_digest"],
+            "service_uid": broker.document["service_uid"],
+            "service_gid": broker.document["service_gid"],
+            "executable_digest": broker.document["executable_digest"],
+            "process_identity_authority": broker.document["process_identity_authority"],
+            "observed": True, "owned": True, "unit_absent": True,
+            "process_absent": True, "socket_absent": True,
+            "cgroup_absent": True, "descriptor_absent": True,
+        }
+        self.assertTrue(all(executor.observe_absence(broker).values()))
+        process.value["config_digest"] = "0" * 64
+        with self.assertRaisesRegex(LifecycleV2Error, "observation_unavailable"):
+            executor.observe_absence(broker)
+
+    def test_v2_lifecycle_executor_maps_helper_refusal_to_bounded_closed_result(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import DerivedServiceConfigV2
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class RefusingProcess:
+            def run(self, _argv, **_kwargs):
+                return type("Result", (), {"returncode": 69, "stdout": "secret=no"})()
+
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=RefusingProcess(), helper="/fixed/native-helper",
+            controller=controller, broker=broker,
+        )
+        self.assertEqual(executor.execute(
+            "credential-controller-start-v2", controller),
+            {"ok": False, "code": "lifecycle_unavailable"})
+
+    def test_v2_lifecycle_executor_rejects_duplicate_secret_and_surrogate_output(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import DerivedServiceConfigV2
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class OutputProcess:
+            stdout = ""
+            def run(self, _argv, **_kwargs):
+                return type("Result", (), {"returncode": 0, "stdout": self.stdout})()
+
+        process = OutputProcess()
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=process, helper="/fixed/native-helper",
+            controller=controller, broker=broker,
+        )
+        for value in (
+            '{"ok":true,"code":"completed","ok":false}',
+            '{"ok":true,"code":"completed","source_ref":"opaque"}',
+            '[{"ok":true,"code":"completed"}]',
+            '{"ok":true,"code":"completed"',
+            '\ud800',
+        ):
+            with self.subTest(stdout=repr(value)):
+                process.stdout = value
+                self.assertEqual(executor.execute(
+                    "credential-controller-start-v2", controller),
+                    {"ok": False, "code": "lifecycle_unavailable"})
+
+    def test_v2_lifecycle_executor_bounds_hostile_result_properties(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import DerivedServiceConfigV2
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class HostileResult:
+            def __init__(self, selected): self.selected = selected
+            @property
+            def returncode(self):
+                if self.selected == "returncode": raise RuntimeError("raw secret")
+                return 0
+            @property
+            def stdout(self): raise UnicodeError("raw secret")
+
+        class Process:
+            selected = "returncode"
+            def run(self, *_args, **_kwargs): return HostileResult(self.selected)
+
+        process = Process()
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=process, helper="/fixed/native-helper",
+            controller=controller, broker=broker)
+        for selected in ("returncode", "stdout"):
+            process.selected = selected
+            self.assertEqual(executor.execute(
+                "credential-controller-start-v2", controller),
+                {"ok": False, "code": "lifecycle_unavailable"})
+
+    def test_v2_lifecycle_executor_rejects_contradictory_ownership_status(self):
+        from sandbox.isolation.credential_controller_lifecycle_v2 import (
+            DerivedServiceConfigV2, LifecycleV2Error,
+        )
+        from sandbox.runtimes.managed.services import NativeCredentialLifecycleExecutorV2
+        from tests.test_credential_controller_lifecycle_v2 import document
+
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
+
+        class OutputProcess:
+            value = None
+            def run(self, _argv, **_kwargs):
+                return type("Result", (), {
+                    "returncode": 0, "stdout": json.dumps(self.value),
+                })()
+
+        process = OutputProcess()
+        executor = NativeCredentialLifecycleExecutorV2(
+            process=process, helper="/fixed/native-helper",
+            controller=controller, broker=broker,
+        )
+        base = {
+            "ok": True, "code": "completed", "machine_id": broker.machine_id,
+            "component": "broker", "config_digest": broker.config_digest,
+            "plan_identity": executor.plan_identity,
+            "unit_identity": broker.document["unit_identity"],
+            "unit_digest": broker.document["unit_digest"],
+            "service_uid": broker.document["service_uid"],
+            "service_gid": broker.document["service_gid"],
+            "executable_digest": broker.document["executable_digest"],
+            "process_identity_authority": broker.document["process_identity_authority"],
+            "observed": True, "owned": True, "unit_absent": True,
+            "process_absent": True, "socket_absent": True,
+            "cgroup_absent": True, "descriptor_absent": True,
+        }
+        for mutation in ({"observed": False}, {"owned": False}):
+            with self.subTest(mutation=mutation):
+                process.value = {**base, **mutation}
+                with self.assertRaisesRegex(
+                        LifecycleV2Error, "observation_unavailable"):
+                    executor.observe_absence(broker)
+
     def test_extension_contract_is_rendered_inside_digest_bound_service_files(self):
         from sandbox.php_extensions.catalog import DEFAULT_CATALOG
         from sandbox.runtimes.managed.models import ManagedPhpExtensionPlan, PhpExtensionPackage

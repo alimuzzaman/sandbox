@@ -52,6 +52,46 @@ class TestCredentialWiring(unittest.TestCase):
                          "credential_broker", "credential_acceptance"):
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     managed_native_dependencies({}, **common, **{name: SimpleNamespace()})
+
+    def test_exact_v2_lifecycle_override_is_retained_but_not_started_or_legacy_cleaned(self):
+        from sandbox.application.context import managed_native_dependencies
+        from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+        from sandbox.runtimes.managed.repository import NativeRepository
+        from tests.test_credential_controller_lifecycle_v2 import (
+            TestCredentialControllerLifecycleV2,
+        )
+
+        fixture = TestCredentialControllerLifecycleV2(
+            methodName="test_exact_fixed_verbs_and_controller_first_start_broker_first_stop")
+        lifecycle, executor = fixture.plans()
+
+        class Process:
+            def __init__(self): self.calls = []
+            def run(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                raise AssertionError("inert lifecycle composition ran a process")
+
+        with tempfile.TemporaryDirectory() as directory:
+            process = Process()
+            repository = NativeRepository(Path(directory) / "state.json")
+            registry = SimpleNamespace(
+                sandbox_base=lambda: Path(directory),
+                load_project_config=lambda *_args, **_kwargs: {},
+            )
+            dependencies = managed_native_dependencies(
+                {}, registry=registry, allowed_roots=(directory,), process=process,
+                native_repository=repository, credential_supervisor=lifecycle,
+            )
+            adapter = ManagedNativeAdapter(
+                preflight=SimpleNamespace(), repository=repository,
+                dependencies=dependencies,
+            )
+        self.assertIs(dependencies.credential_supervisor, lifecycle)
+        self.assertIs(adapter.credential_supervisor, lifecycle)
+        self.assertIsNone(dependencies.cleanup.credential_broker)
+        self.assertEqual(process.calls, [])
+        self.assertEqual(executor.calls, [])
+
     def test_context_v1_factory_is_permanently_closed_without_dependency_access(self):
         from sandbox.application.context import managed_native_credential_broker
         import inspect

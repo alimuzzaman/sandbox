@@ -721,9 +721,11 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
             raise ValueError("credential broker v2 composition is required")
     credential_supervisor = overrides.pop("credential_supervisor", None)
     if credential_supervisor is not None:
-        # Installed lifecycle observation is still a T022 live-proof blocker;
-        # never fall back to the historical v1 supervisor.
-        raise ValueError("credential v2 lifecycle composition is unavailable")
+        from sandbox.isolation.credential_controller_lifecycle_v2 import (
+            ManagedCredentialLifecycleV2,
+        )
+        if type(credential_supervisor) is not ManagedCredentialLifecycleV2:
+            raise ValueError("credential v2 lifecycle composition is required")
     credential_health = overrides.pop("credential_health", None)
     credential_recovery = overrides.pop("credential_recovery", None)
     credential_acceptance = overrides.pop("credential_acceptance", None)
@@ -739,11 +741,9 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
             repository=native_repository, services=services, database=database,
             network=network, machine=machine, image=image, policy=policy,
             observe=ManagedCleanupObserver(
-                process=process, helper=helper,
-                credential_status=(credential_supervisor.status
-                                   if credential_supervisor is not None else None),
+                process=process, helper=helper, credential_status=None,
             ),
-            credential_broker=credential_supervisor,
+            credential_broker=None,
         )
     return ManagedRuntimeDependencies(
         process=process,
@@ -1029,6 +1029,21 @@ def managed_native_credential_broker(
     del (instance_id, credential_repository, resolver, proof, egress, upstream,
          owner, max_concurrent, clock, drain_seconds)
     raise ValueError("credential_broker_v1_disabled")
+
+
+def managed_native_credential_controller_authority_provider_v2(machine_id):
+    """Fixed controller-process provider factory; absent review stays closed.
+
+    No default application graph owns the registered-source, proof, audit, and
+    egress authorities required by the standalone controller service yet.
+    Returning ``None`` is an explicit closed result, not a provider registry or
+    a v1 fallback.
+    """
+
+    if (not isinstance(machine_id, str)
+            or __import__("re").fullmatch(r"sb-[a-f0-9]{12,32}", machine_id) is None):
+        raise ValueError("credential_controller_v2_machine_invalid")
+    return None
 
 
 def wordpress_runtime_service(cfg):

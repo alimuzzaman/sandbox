@@ -203,8 +203,10 @@ task IDs were established:
    complete and independently accepted by Sol High for production-shaped closed
    and uninstalled code only. Authorized Ubuntu/systemd/kernel proof
    belongs to T022/T029 and human evidence review to T031.
-   T036 adds secret-free helper supervision, broker-first cleanup, and inert
-   composition wiring.
+   T036 is locally complete and independently accepted by Sol High for its
+   secret-free helper supervision, broker-first cleanup, and inert composition
+   wiring. It remains closed and uninstalled; T022/T029/T031 live-proof and
+   human-review gates remain open.
 4. T037 adds a proof-gated public `./sb` acceptance seam and offline harness
    coverage using only opaque references and non-secret metadata.
 

@@ -340,8 +340,7 @@ class ControllerAuthorityV2ContractTests(unittest.TestCase):
         self.assertIn("evidence_id=null", self.v2)
         for task_id in (22, 29, 31):
             self.assertIn(f"- [ ] T{task_id:03d}", self.tasks)
-        for task_id in (36,):
-            self.assertIn(f"- [ ] T{task_id:03d}", self.tasks)
+        self.assertIn("- [x] T036", self.tasks)
         self.assertIn("- [x] T035", self.tasks)
         for task_id in (37, 38, 43):
             self.assertIn(f"- [x] T{task_id:03d}", self.tasks)

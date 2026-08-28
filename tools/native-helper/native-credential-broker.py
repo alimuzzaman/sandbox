@@ -91,6 +91,11 @@ from sandbox.isolation.credential_controller_service_v2 import (
     receive_authenticated_packet as receive_authenticated_packet_v2,
     _peer_credentials as observe_socket_peer_credentials_v2,
 )
+from sandbox.isolation.credential_service_runtime_v2 import (
+    load_runtime_config_v2 as _shared_load_runtime_config_v2,
+    prepare_reciprocal_service_runtime_v2,
+    runtime_config_path_v2 as _shared_runtime_config_path_v2,
+)
 PROTOCOL_VERSION = 1
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_FRAME_BYTES = 4096
@@ -488,9 +493,10 @@ def runtime_config_path(machine_id: str) -> str:
 
 
 def runtime_config_path_v2(machine_id: str, component: str = "broker") -> str:
-    if not _machine(machine_id) or component not in {"controller", "broker"}:
-        raise ValueError("credential broker machine identity is invalid")
-    return f"/etc/sandbox/credential-v2/{component}/{machine_id}.json"
+    try:
+        return _shared_runtime_config_path_v2(machine_id, component)
+    except Exception:
+        raise ValueError("credential broker machine identity is invalid") from None
 
 
 class _ConfigKernel:
@@ -546,46 +552,14 @@ def load_runtime_config(
 def load_runtime_config_v2(path: str, *, machine_id: str, component: str,
                            expected_group_gid: int,
                            kernel=None) -> DerivedServiceConfigV2:
-    """Load only the exact canonical derived v2 broker config."""
-    if (path != runtime_config_path_v2(machine_id, component)
-            or component not in {"controller", "broker"}
-            or not _integer(expected_group_gid, minimum=1, maximum=2**31 - 1)
-            ):
-        raise ValueError("credential broker v2 config authority is invalid")
-    kernel = kernel or _ConfigKernel()
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = kernel.open(path, flags)
     try:
-        observed = kernel.fstat(descriptor)
-        if (not stat.S_ISREG(observed.st_mode) or observed.st_uid != 0
-                or observed.st_gid != expected_group_gid
-                or stat.S_IMODE(observed.st_mode) != 0o640
-                or not 1 <= observed.st_size <= MAX_CONFIG_BYTES):
-            raise ValueError("credential broker v2 config metadata is invalid")
-        raw = bytearray()
-        while len(raw) <= MAX_CONFIG_BYTES:
-            chunk = kernel.read(descriptor, min(4096, MAX_CONFIG_BYTES + 1 - len(raw)))
-            if not isinstance(chunk, bytes):
-                raise ValueError("credential broker v2 config read is invalid")
-            if not chunk:
-                break
-            raw.extend(chunk)
-        payload = bytes(raw)
-        if len(payload) != observed.st_size:
-            raise ValueError("credential broker v2 config digest is invalid")
-        try:
-            document = json.loads(payload.decode("ascii"))
-            plan = DerivedServiceConfigV2.derive(document)
-        except Exception:
-            raise ValueError("credential broker v2 config is invalid") from None
-        if (plan.component != component or plan.machine_id != machine_id
-                or plan.service_gid != expected_group_gid
-                or plan.canonical_bytes != payload
-                or plan.config_digest != hashlib.sha256(payload).hexdigest()):
-            raise ValueError("credential broker v2 config identity is invalid")
-        return plan
-    finally:
-        kernel.close(descriptor)
+        return _shared_load_runtime_config_v2(
+            path, machine_id=machine_id, component=component,
+            expected_group_gid=expected_group_gid, kernel=kernel)
+    except OSError:
+        raise
+    except Exception:
+        raise ValueError("credential broker v2 config is invalid") from None
 
 
 def _canonical_guest_request(value: Any) -> dict[str, Any]:
@@ -7408,42 +7382,12 @@ class CredentialBrokerServiceLoopV2:
 def prepare_standalone_authority_v2(machine_id: str, *, service_gid: int,
                                     plan_loader=load_runtime_config_v2,
                                     identity_pinner=pin_reciprocal_process_identities_v2):
-    """Load both plans, validate reciprocity, then pin both runtime processes."""
-
-    if (not _machine(machine_id) or not _integer(service_gid, minimum=1)
-            or not callable(plan_loader) or not callable(identity_pinner)):
-        raise ControllerServiceV2Error("runtime_config_invalid")
     try:
-        controller_plan = plan_loader(
-            runtime_config_path_v2(machine_id, "controller"),
-            machine_id=machine_id, component="controller",
-            expected_group_gid=service_gid)
-        broker_plan = plan_loader(
-            runtime_config_path_v2(machine_id, "broker"),
-            machine_id=machine_id, component="broker",
-            expected_group_gid=service_gid)
-        validate_reciprocal_service_plans_v2(controller_plan, broker_plan)
-        controller_identity, broker_identity = identity_pinner(
-            controller_plan, broker_plan)
-        config = ControllerServiceConfigV2(
-            machine_id=machine_id, controller=controller_identity,
-            broker=broker_identity,
-            policy_digest=broker_plan.document["policy_digest"],
-            egress_digest=broker_plan.document["egress_digest"],
-            broker_digest=broker_plan.document["broker_digest"],
-            proof_digest=broker_plan.document["proof_digest"],
-            effective_isolation_digest=broker_plan.document[
-                "effective_isolation_digest"],
-            evidence_id=broker_plan.document["evidence_id"])
+        return prepare_reciprocal_service_runtime_v2(
+            machine_id, service_gid=service_gid, plan_loader=plan_loader,
+            identity_pinner=identity_pinner)
     except Exception:
         raise ControllerServiceV2Error("runtime_config_invalid") from None
-    return MappingProxyType({
-        "controller_plan": controller_plan, "broker_plan": broker_plan,
-        "config": config,
-        "controller_observer": pinned_process_identity_observer_v2(
-            controller_identity),
-        "broker_observer": pinned_process_identity_observer_v2(broker_identity),
-    })
 
 
 def compose_standalone_service_v2(prepared) -> dict[str, Any]:

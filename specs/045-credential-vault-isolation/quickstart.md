@@ -121,8 +121,9 @@ complete and must converge on v2 before any production completion claim:
    production-shaped but closed and uninstalled. This satisfies local T035;
    proving its real Ubuntu 24.04 systemd/kernel behavior is separately T022/T029,
    followed by T031 human review.
-3. T036: add secret-free fixed helper supervision, cleanup observation/order,
-   and inert application wiring with local tests.
+3. T036 is locally complete and independently accepted by Sol High for
+   secret-free fixed helper supervision, cleanup observation/order, and inert
+   application wiring with local tests only.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness
    coverage using only opaque references and non-secret request metadata.
 5. T038 is complete after independent Sol High acceptance of the revised exact
@@ -245,14 +246,27 @@ result. It must not substitute local Compose tests for managed-native proof.
 
 T032 records the historical v1 standalone credential-broker service/transport
 planning contract, T033 records the accepted local security design, and T034 records
-the passing fake/local contract suite. T035 has a fake-driven retained-guest,
-claim, descriptor, typed-broker, and terminal-result coordinator, but remains
-open for the closed/uninstalled cross-process service entrypoint, real
-controller/lease/guest listeners, guest disconnect/deadline processing, and
-lifecycle/audit observation. Its strict v2 guest, topology, egress-projection,
-and one-shot effect foundations are local code only. Authorized Ubuntu proof
-remains under T022/T029 and human review under T031; T036 remains open preparatory
-work. T037 is locally complete and independently accepted by Sol High (local
+the passing fake/local contract suite. T035 is locally complete and independently
+accepted by Sol High (local only): its closed/uninstalled cross-process service
+entrypoint, real controller/lease/guest listener composition, guest disconnect/
+deadline processing, lifecycle/audit observation, strict v2 guest topology,
+egress projection, and one-shot effect foundations are implemented with local
+injected tests. Missing Linux authority still refuses before guest bytes or
+credential resolution. Authorized Ubuntu proof remains under T022/T029 and
+human review under T031. T036 now has a reciprocal
+plan-bound fixed-verb executor, exact bounded ownership/absence status parsing,
+broker-first exhaustive cleanup, and exact-type inert dependency wiring. It
+now also has a distinct fixed non-root controller entrypoint and shared no-follow
+config/process runtime. The controller validates reciprocal plans, pins itself,
+boundedly waits for the broker-owned listening abstract seqpacket row, pins the
+broker, verifies SO_PASSCRED on its one outgoing socket, and makes one HELLO
+attempt. It then remains persistently closed until signal or broker EOF when
+application authority or evidence is absent; connect is never retried and
+cleanup is sticky and exact-once.
+This closed and uninstalled local code is independently accepted by Sol High
+for local-only behavior; the eight helper verbs still return code 69 and Ubuntu
+unit/ownership proof remains T022. T037 is
+locally complete and independently accepted by Sol High (local
 only): its authenticated public
 projector consumes the existing T040 receipt, pins same-session T041/T042
 authorities, validates exact secret-free status/binding/egress projections, and

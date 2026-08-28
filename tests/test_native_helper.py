@@ -1495,5 +1495,18 @@ class TestNativeHelper(unittest.TestCase):
                 "1" * 64, "2" * 64, "source-or-secret",
             ])
 
+    def test_credential_v2_fixed_dispatch_carries_only_validated_identities(self):
+        helper = module()
+        with mock.patch.object(helper, "require_root"), \
+                mock.patch.object(helper, "credential_v2_lifecycle_action") as action:
+            helper.main([
+                "credential-broker-status-v2", "sb-0123456789ab",
+                "1" * 64, "2" * 64,
+            ])
+        action.assert_called_once_with(
+            "credential-broker-status-v2", "sb-0123456789ab",
+            "1" * 64, "2" * 64,
+        )
+
 
 if __name__ == "__main__": unittest.main()

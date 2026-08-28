@@ -108,3 +108,7 @@ workflow for every resulting action.
 Feedback submission is an append-only local mutation and does not require destructive
 confirmation. It does not create cleanup, deploy, publication, release, or production
 authority. Invalid/corrupt records are withheld and counted rather than rendered.
+Persisted records with malformed identity or timestamp fields are classified through
+stable typed reader errors internally, then withheld like invalid JSON. Paginated and
+date-filtered CLI/MCP responses remain valid JSON and report the complete
+`invalid_record_count`; malformed stored values never escape as raw exceptions.

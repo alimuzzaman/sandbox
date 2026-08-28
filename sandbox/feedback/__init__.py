@@ -4,11 +4,12 @@ from .service import (
     REVIEW_CONFIDENCES,
     REVIEW_STATUSES,
     FeedbackError,
+    FeedbackRecordError,
     FeedbackService,
     FeedbackStore,
 )
 
 __all__ = [
-    "FeedbackError", "FeedbackService", "FeedbackStore",
+    "FeedbackError", "FeedbackRecordError", "FeedbackService", "FeedbackStore",
     "REVIEW_CONFIDENCES", "REVIEW_STATUSES",
 ]

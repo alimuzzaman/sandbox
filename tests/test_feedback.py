@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from sandbox.feedback.service import FeedbackService, FeedbackStore
+from sandbox.feedback.service import (
+    FeedbackRecordError, FeedbackService, FeedbackStore,
+)
 
 
 ROOT = Path(__file__).parent.parent
@@ -458,6 +460,35 @@ class TestFeedbackService(unittest.TestCase):
         self.assertEqual(payload["data"]["filters"]["since"], "2026-08-12T08:00:00Z")
         self.assertEqual(payload["data"]["filters"]["until"], "2026-08-12T09:00:00Z")
         self.assertEqual(json.loads(json.dumps(payload)), payload)
+
+    def test_malformed_typed_record_is_withheld_from_since_page_as_valid_json(self):
+        malformed = self._write_feedback_record(
+            "f" * 32, stamp="20260812T083100Z", summary="malformed",
+        )
+        document = json.loads(malformed.read_text(encoding="utf-8"))
+        document["feedback_id"] = []
+        malformed.write_text(json.dumps(document), encoding="utf-8")
+
+        payload = self.service.list(1, since="2026-08-12T08:00:00Z")
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["feedback"], [])
+        self.assertEqual(payload["data"]["invalid_record_count"], 1)
+        self.assertEqual(json.loads(json.dumps(payload)), payload)
+
+    def test_malformed_record_reader_raises_stable_typed_error(self):
+        malformed = self._write_feedback_record(
+            "e" * 32, stamp="20260812T083100Z", summary="malformed",
+        )
+        document = json.loads(malformed.read_text(encoding="utf-8"))
+        document["created_at"] = {"hostile": True}
+        malformed.write_text(json.dumps(document), encoding="utf-8")
+
+        with self.assertRaises(FeedbackRecordError) as caught:
+            self.service.store._read(malformed)
+
+        self.assertEqual(caught.exception.code, "feedback_record_field_invalid")
+        self.assertEqual(caught.exception.field, "created_at")
 
     def test_regression_retention_and_prune_never_delete_without_confirmation(self):
         old_service = FeedbackService(

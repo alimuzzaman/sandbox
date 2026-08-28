@@ -34,9 +34,11 @@ resource_status(
 the prior response shape. `cancelled=true` is the matching MCP cancellation
 test seam; a pre-cancelled supporting provider returns structured cancelled
 status/evidence, while a legacy provider returns `request_cancelled` without
-starting collection. The MCP adapter translates this reviewed boolean seam
-once into the same typed signal used by CLI, service, adapters, and collectors;
-the public MCP schema is unchanged.
+starting collection. The MCP adapter translates this reviewed boolean test seam
+once into the typed signal used below it. It is not evidence of real MCP request
+cancellation or transport-disconnect propagation: the current registered tool
+has no reviewed request-lifecycle context. Adding one requires contract and
+revision review; the public MCP schema remains unchanged in this batch.
 
 ## Additive status data
 

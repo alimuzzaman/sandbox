@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Draft
+**Status**: Complete
 
 **Input**: User description: "Steal from Novamira #4 — skills are read-only today; add
 in-product skill authoring plus a skill that teaches the agent to write skills, with

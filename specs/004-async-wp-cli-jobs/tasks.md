@@ -6,7 +6,7 @@ description: "Task list for Async / Background WP-CLI Jobs"
 
 **Input**: Design documents from `specs/004-async-wp-cli-jobs/`
 
-**Status**: Implemented + live-verified on Docker (templately-rebuild2). Implementation
+**Status**: In progress. Implemented + live-verified on Docker (templately-rebuild2). Implementation
 landed in `sandbox/commands/jobs.py` (core + CLI) and `mcp/wp-server/tools/wp.py` (MCP
 tools), not all in `tools/wp.py` as the original plan guessed.
 

@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-21
 
-**Status**: Draft
+**Status**: Complete
 
 **Input**: User description: "Per-project-first instance model and modular sb package: remove the legacy main/DEFAULT_INSTANCE model and split the sb monolith into a sandbox package with one module per feature"
 

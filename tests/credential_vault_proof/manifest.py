@@ -57,6 +57,8 @@ _SECTIONS = {
     "service": frozenset({
         "units", "service_uid", "service_gid", "controller_uid", "controller_gid",
         "executable", "executable_digest", "config_digest", "cgroup",
+        "controller_unit", "controller_executable", "controller_executable_digest",
+        "controller_config_digest", "controller_cgroup",
     }),
     "transport": frozenset({
         "guest_interface", "host_address", "guest_address", "guest_port",
@@ -204,6 +206,20 @@ def validate_manifest(document: Any) -> dict[str, Any]:
     _text(service["executable_digest"], _DIGEST, "service.executable_digest")
     _text(service["config_digest"], _DIGEST, "service.config_digest")
     _text(service["cgroup"], _CGROUP, "service.cgroup")
+    _text(service["controller_unit"], _UNIT, "service.controller_unit")
+    _text(service["controller_executable"], _ABSOLUTE_PATH,
+          "service.controller_executable")
+    _text(service["controller_executable_digest"], _DIGEST,
+          "service.controller_executable_digest")
+    _text(service["controller_config_digest"], _DIGEST,
+          "service.controller_config_digest")
+    _text(service["controller_cgroup"], _CGROUP, "service.controller_cgroup")
+    if service["controller_unit"] in service["units"]:
+        raise _refuse("controller_unit_shared", "service.controller_unit")
+    if service["controller_executable"] == service["executable"]:
+        raise _refuse("controller_executable_shared", "service.controller_executable")
+    if service["controller_cgroup"] == service["cgroup"]:
+        raise _refuse("controller_cgroup_shared", "service.controller_cgroup")
 
     transport = _section(document, "transport")
     _text(transport["guest_interface"], _INTERFACE, "transport.guest_interface")

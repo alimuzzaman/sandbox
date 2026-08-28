@@ -47,6 +47,11 @@ def manifest(**overrides: Any) -> dict[str, Any]:
             "executable": "/usr/libexec/sandbox/native-credential-broker",
             "executable_digest": "d" * 64, "config_digest": "e" * 64,
             "cgroup": "/sandbox.slice/credential-broker/sb-0123456789ab",
+            "controller_unit": "sandbox-credential-controller.service",
+            "controller_executable": "/usr/libexec/sandbox/sandbox-credential-controller",
+            "controller_executable_digest": "a" * 64,
+            "controller_config_digest": "b" * 64,
+            "controller_cgroup": "/sandbox.slice/credential-controller",
         },
         "transport": {
             "guest_interface": "ve-sb01234567", "host_address": "10.203.0.1",
@@ -182,10 +187,19 @@ def execution_artifact(manifest_document: Any, check_states: Any
                 "4242 991 Mon Sep 1 10:00:00 2026 "
                 f"{manifest_document['service']['executable']} --fixture\n"
             ),
+            "controller_process_identity": (
+                "5252 501 Mon Sep 1 10:00:00 2026 "
+                f"{manifest_document['service']['controller_executable']} --fixture\n"
+            ),
             "lease_socket_owned": (
                 "u_str LISTEN 0 16 "
                 f"{manifest_document['transport']['lease_socket']} 123 * 0 uid:991 "
                 'users:(("native-credenti",pid=4242,fd=7))\n'
+            ),
+            "controller_socket_owned": (
+                "u_str LISTEN 0 16 "
+                f"{manifest_document['transport']['controller_socket']} 124 * 0 uid:501 "
+                'users:(("sandbox-credent",pid=5252,fd=8))\n'
             ),
             "unit_absent_after_cleanup": "LoadState=not-found\n",
             "route_table_expected": (

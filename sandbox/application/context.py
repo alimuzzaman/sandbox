@@ -347,6 +347,20 @@ def ingress_service(cfg, **overrides):
         except Exception:
             return False
 
+    health_context = overrides.pop("caddy_health_context", None)
+
+    def caddy_health():
+        from sandbox.core._domains import sandbox_caddy_health
+
+        if isinstance(health_context, Mapping) and not health_context.get("ok"):
+            return {"ok": False, "state": "degraded", "mutated": False,
+                    "reason": {"code": "project_route_context_unavailable",
+                               "message": "The project route context is unavailable."},
+                    "routes": (), "scope": "project"}
+        domains = (health_context.get("domains")
+                   if isinstance(health_context, Mapping) else None)
+        return sandbox_caddy_health(cfg or {}, domains=domains)
+
     return IngressService(
         detector=detector, registry=registry, repository=repository,
         transaction_runner=transaction_runner,
@@ -354,6 +368,7 @@ def ingress_service(cfg, **overrides):
         bind_probe=overrides.pop("bind_probe", SocketBindProbe()),
         consent_decider=overrides.pop("consent_decider", interactive_consent),
         sandbox_owner=overrides.pop("sandbox_owner", sandbox_owns),
+        caddy_health=overrides.pop("caddy_health", caddy_health),
         clock=overrides.pop("clock", None), **overrides,
     )
 

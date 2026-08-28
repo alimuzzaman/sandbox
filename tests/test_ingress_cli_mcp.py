@@ -27,6 +27,47 @@ class Service:
 
 
 class TestIngressCliMcp(unittest.TestCase):
+    def test_registry_failure_is_passed_as_fail_closed_route_context(self):
+        from sandbox.commands.domains import cmd_domains
+
+        failed = {"ok": False, "domains": (), "mutated": False,
+                  "reason": {"code": "project_route_context_unavailable"}}
+        domain = mock.Mock()
+        domain.route_context.return_value = failed
+        captured = {}
+
+        def build_ingress(_cfg, **kwargs):
+            captured.update(kwargs)
+            return Service()
+
+        args = SimpleNamespace(action="ingress", tld="status", json=True,
+                               project_dir="/tmp/project", label="default",
+                               resolver=None)
+        with mock.patch("sandbox.application.context.domain_service",
+                        return_value=domain), \
+             mock.patch("sandbox.application.context.ingress_service",
+                        side_effect=build_ingress), redirect_stdout(io.StringIO()):
+            cmd_domains({}, args)
+        self.assertIs(captured["caddy_health_context"], failed)
+        self.assertNotIn("caddy_health_domains", captured)
+
+    def test_human_and_json_status_emit_the_same_reason_code(self):
+        from sandbox.commands.domains import _emit
+
+        payload = {"ok": False, "operation": "ingress_status",
+                   "state": "degraded", "mutated": False,
+                   "reason": {"code": "sandbox_caddy_route_unreachable",
+                              "message": "route probe failed"}}
+        human = io.StringIO()
+        machine = io.StringIO()
+        with redirect_stdout(human):
+            _emit(payload, False)
+        with redirect_stdout(machine):
+            _emit(payload, True)
+        self.assertIn(payload["reason"]["code"], human.getvalue())
+        self.assertEqual(json.loads(machine.getvalue())["reason"]["code"],
+                         payload["reason"]["code"])
+
     def test_concrete_domain_and_ingress_composition_roots_are_distinct_services(self):
         from sandbox.application.context import domain_service, ingress_service
         from unittest import mock

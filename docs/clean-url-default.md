@@ -52,7 +52,8 @@ answer was to move the privileged target out of the checkout, not to remove clea
 
 ## Diagnosing a dead clean URL
 
-`./sb doctor` and a non-ready `./sb domains status` report whether the proxy's
+`./sb doctor`, a non-ready `./sb domains status`, and
+`./sb domains ingress status --json` report whether the proxy's
 published endpoints actually accept connections, not merely that Docker reports a
 mapping. A container runtime can widen a published
 `127.0.0.77:80` bind to a wildcard one and then lose that port to whatever already owns it
@@ -64,6 +65,13 @@ arbitrary service. It first checks the `127.0.0.77` loopback alias without chang
 missing alias is a host prerequisite and points to `./sb domains setup`; when the alias is
 present, it points to the supported `./sb domains up` proxy recovery. The per-port fallback
 remains available in either case.
+
+Ingress status also probes the current project's exact Caddy hostname and generated
+route. When Sandbox owns the published sockets but that route is missing or does not
+reach Sandbox Caddy, status is `degraded` and returns the same reason code used by
+ensure. Unrelated stale hostnames do not fail an ensure for a newly created route.
+Wildcard or probable listener evidence is reported as overlap; `listener_conflict`
+requires an exact bind plus proven ownership evidence.
 
 If Caddy logs `forward_auth host.docker.internal:8766` with a connection refusal,
 the activation authority is down while an older wake-route Caddyfile is still loaded.

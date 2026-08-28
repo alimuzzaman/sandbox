@@ -322,7 +322,94 @@ def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
         response.close()
 
 
-def _proxy_transport_serving(cfg: dict) -> bool:
+def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
+    """Return one bounded, secret-free observation of Sandbox Caddy routes.
+
+    ``domains`` narrows the observation to the route the caller is acting on.
+    This matters during ensure: an unrelated stale route must not make a newly
+    ensured hostname look broken.  With no explicit scope every managed route
+    is observed, which remains useful to doctor and machine-wide diagnostics.
+    """
+    def unavailable(code="sandbox_caddy_health_unavailable",
+                    message="Sandbox Caddy health could not be observed."):
+        return {"ok": False, "state": "degraded", "mutated": False,
+                "reason": {"code": code, "message": message},
+                "container_running": None, "config_readable": None,
+                "routes": (), "scope": "explicit" if domains is not None else "managed"}
+
+    try:
+        requested = None
+        if domains is not None:
+            requested = set()
+            for item in domains:
+                normalized = _valid_alias(item if isinstance(item, str) else "")
+                if normalized is None:
+                    return unavailable(
+                        "sandbox_caddy_route_invalid",
+                        "Sandbox Caddy route scope contains an invalid hostname.",
+                    )
+                requested.add(normalized)
+        routes = []
+        for ic in resolve_instances(cfg).values():
+            dom = _valid_alias(ic.get("domain") if isinstance(ic, dict) else "")
+            tld = str(_tld(ic) or "").strip().lower()
+            if (dom and len(tld) <= 63
+                    and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", tld)
+                    and dom.endswith(f".{tld}")
+                    and (requested is None or dom in requested)):
+                routes.append((dom, _domain_is_secure(dom, ic)))
+        for entry in _generic_proxy_entries():
+            dom = _valid_alias(entry.get("domain") if isinstance(entry, dict) else "")
+            tld = str(_generic_tld(entry) or "").strip().lower()
+            if (dom and len(tld) <= 63
+                    and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", tld)
+                    and dom.endswith(f".{tld}")
+                    and (requested is None or dom in requested)):
+                routes.append((dom, _is_https_url(entry.get("url"))))
+
+        text = PROXY_CADDYFILE.read_text() if PROXY_CADDYFILE.exists() else ""
+        running = _proxy_container_running()
+        readable = _caddyfile_readable_in_container() if running else None
+    except Exception:
+        return unavailable()
+    observed = []
+    for dom, secure in dict.fromkeys(routes):
+        try:
+            configured = _caddyfile_has_route(dom, text)
+            serving = bool(running and readable is not False and configured and
+                           _sandbox_proxy_route_serving(dom, secure=secure, timeout=0.5))
+        except Exception:
+            return unavailable()
+        observed.append({"hostname": dom, "secure": bool(secure),
+                         "configured": configured, "serving": serving})
+
+    missing = sorted((requested or set()).difference(item[0] for item in routes))
+    failed = [item for item in observed if not item["serving"]]
+    if missing:
+        reason = {"code": "sandbox_caddy_route_unconfigured",
+                  "message": f"Sandbox Caddy has no configured route for {missing[0]}."}
+    elif not running and observed:
+        reason = {"code": "proxy_not_running",
+                  "message": "Sandbox Caddy is not running."}
+    elif failed:
+        route = failed[0]
+        code = ("sandbox_caddy_config_unreadable" if readable is False else
+                "sandbox_caddy_route_unconfigured" if not route["configured"] else
+                "sandbox_caddy_route_unreachable")
+        reason = {"code": code,
+                  "message": f"Sandbox Caddy route probe failed for {route['hostname']}."}
+    else:
+        reason = {"code": "sandbox_caddy_ready",
+                  "message": "Sandbox Caddy route health is ready."}
+    ready = not missing and not failed and (running or not observed)
+    return {"ok": ready, "state": "ready" if ready else "degraded",
+            "reason": reason, "container_running": running,
+            "config_readable": readable, "routes": observed,
+            "scope": "explicit" if requested is not None else "managed",
+            "mutated": False}
+
+
+def _proxy_transport_serving(cfg: dict, *, domains=None) -> bool:
     """Check one representative managed hostname reaches Sandbox Caddy.
 
     A representative route detects many host-level wildcard failures, but a
@@ -330,49 +417,25 @@ def _proxy_transport_serving(cfg: dict) -> bool:
     ones at the foreign listener. Probe the managed set with a short timeout so
     startup cannot claim a globally healthy provider while one tenant is dead.
     """
-    for ic in resolve_instances(cfg).values():
-        dom = ic.get("domain")
-        if dom and dom.endswith(f".{_tld(ic)}"):
-            if not _sandbox_proxy_route_serving(
-                    dom, secure=_domain_is_secure(dom, ic), timeout=0.5):
-                return False
-    for entry in _generic_proxy_entries():
-        dom = entry.get("domain")
-        if dom and dom.endswith(f".{_generic_tld(entry)}"):
-            if not _sandbox_proxy_route_serving(
-                    dom, secure=_is_https_url(entry.get("url")), timeout=0.5):
-                return False
-    return True
+    return bool(sandbox_caddy_health(cfg, domains=domains)["ok"])
 
 
-def _proxy_transport_failure_detail(cfg: dict) -> str:
+def _proxy_transport_failure_detail(cfg: dict, *, domains=None, health=None) -> str:
     """Explain which managed hostname failed to reach Sandbox Caddy."""
     fallback_hint = (
         "inspect `./sb domains ingress status --json` and "
         "`./sb doctor --instance <name>`."
     )
-    for ic in resolve_instances(cfg).values():
-        dom = ic.get("domain")
-        if dom and dom.endswith(f".{_tld(ic)}"):
-            if not _sandbox_proxy_route_serving(
-                    dom, secure=_domain_is_secure(dom, ic), timeout=0.5):
-                listener = _published_listener_check()
-                return (
-                    f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
-                    f"{listener.get('label') or 'published listener evidence unavailable'}. "
-                    f"{listener.get('hint') or fallback_hint}"
-                )
-    for entry in _generic_proxy_entries():
-        dom = entry.get("domain")
-        if dom and dom.endswith(f".{_generic_tld(entry)}"):
-            if not _sandbox_proxy_route_serving(
-                    dom, secure=_is_https_url(entry.get("url")), timeout=0.5):
-                listener = _published_listener_check()
-                return (
-                    f"clean hostname probe for {dom} did not reach Sandbox Caddy; "
-                    f"{listener.get('label') or 'published listener evidence unavailable'}. "
-                    f"{listener.get('hint') or fallback_hint}"
-                )
+    health = health or sandbox_caddy_health(cfg, domains=domains)
+    if not health["ok"]:
+        listener = _published_listener_check()
+        reason = health.get("reason") or {}
+        return (
+            f"{reason.get('code', 'sandbox_caddy_route_unreachable')}: "
+            f"{reason.get('message', 'Sandbox Caddy route probe failed')} "
+            f"{listener.get('label') or 'published listener evidence unavailable'}. "
+            f"{listener.get('hint') or fallback_hint}"
+        )
     return (
         "clean hostname probe did not reach Sandbox Caddy; inspect "
         f"{fallback_hint} for listener and resolver evidence"
@@ -1405,7 +1468,7 @@ def clean_url_setup(cfg: dict, *, tld=None, interactive: bool = False) -> dict:
 
 
 def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
-                      interactive: bool | None = None):
+                      interactive: bool | None = None, domains=None):
     """Ensure the DEFAULT clean-URL stack is up: the scoped NOPASSWD rule for
     the root-owned helper, the lo0 alias, dnsmasq/resolver for each configured
     TLD, the boot LaunchDaemon, and the running Caddy container. Plain
@@ -1477,12 +1540,18 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
     # provider lifecycle without declaring any managed routes.  There is no
     # hostname claim to validate in that case; real CLI callers pass the loaded
     # config and therefore take the transport-health gate below.
-    if up and cfg and not _proxy_transport_serving(cfg):
-        up = False
-        detail = _proxy_transport_failure_detail(cfg)
+    health = None
+    if up and cfg:
+        health = sandbox_caddy_health(cfg, domains=domains)
+        if not health["ok"]:
+            up = False
+            detail = _proxy_transport_failure_detail(
+                cfg, domains=domains, health=health,
+            )
     if not up:
         if _proxy_container_running():
-            info(f"proxy is running but the config reload failed: "
+            issue = "route health is degraded" if health else "config apply failed"
+            info(f"proxy is running but {issue}: "
                  f"{detail or 'no output'}")
         else:
             availability = proxy_availability(running=False)
@@ -1641,7 +1710,7 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     _write_local_yaml(local)
     cfg = load_config()
     # 2. Proxy + DNS for this tld (passwordless once the sudoers rule exists).
-    up, cfg = _ensure_url_proxy(cfg, quiet=True, tld=tld)
+    up, cfg = _ensure_url_proxy(cfg, quiet=True, tld=tld, domains=(domain,))
     if not up:
         # Roll the domain back so the instance installs cleanly at localhost.
         # Pop BOTH keys written at step 1 — a half rollback (domain gone, tld
@@ -1808,9 +1877,11 @@ def proxy_up(cfg: dict) -> bool:
     up, detail = (res.returncode == 0), _run_detail(res)
     if up:
         up, detail = proxy_apply()
-    if up and cfg and not _proxy_transport_serving(cfg):
-        up = False
-        detail = _proxy_transport_failure_detail(cfg)
+    if up and cfg:
+        health = sandbox_caddy_health(cfg)
+        if not health["ok"]:
+            up = False
+            detail = _proxy_transport_failure_detail(cfg, health=health)
     if not up:
         info(f"clean URL ingress did not start{': ' + detail if detail else '.'}")
     return up

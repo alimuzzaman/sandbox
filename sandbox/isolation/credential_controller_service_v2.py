@@ -66,6 +66,9 @@ LEASE_ENDPOINT_V2_REGISTRY = MappingProxyType({
     "digest_separator_byte": 0,
     "digest_fields": _LEASE_ADDRESS_KEYS,
     "connect_timeout_ms": 1000,
+    "audit_ack_timeout_ms": 1000,
+    "lease_ack_timeout_ms": 1000,
+    "lease_terminal_grace_ms": 2000,
     "lease_frame_bytes": 732,
     "lease_ack_bytes": 444,
     "packets_per_endpoint": 1,
@@ -432,11 +435,13 @@ class _SessionLeaseSocket:
                  "_scm_credentials", "_scm_rights", "_closer", "machine_id",
                  "broker_epoch", "controller_epoch", "owner", "operation_id",
                  "authorization_digest", "authorization_expires_at_unix_ms",
-                 "lease_address", "_connect_timeout_ms", "_used", "_closed")
+                 "request_deadline_unix_ms", "lease_address", "_connect_timeout_ms",
+                 "_used", "_closed")
 
     def __init__(self, issuer, session, connection, *, observer, so_peercred,
                  scm_credentials, scm_rights, closer, operation_id=None,
                  authorization_digest=None, authorization_expires_at_unix_ms=None,
+                 request_deadline_unix_ms=None,
                  lease_address=None, connect_timeout_ms=None) -> None:
         if issuer is not _SESSION_LEASE_ISSUER:
             raise ControllerServiceV2Error("lease_transport_invalid")
@@ -454,6 +459,7 @@ class _SessionLeaseSocket:
         self.operation_id = operation_id
         self.authorization_digest = authorization_digest
         self.authorization_expires_at_unix_ms = authorization_expires_at_unix_ms
+        self.request_deadline_unix_ms = request_deadline_unix_ms
         self.lease_address = lease_address
         self._connect_timeout_ms = connect_timeout_ms
         self._used = False
@@ -462,12 +468,12 @@ class _SessionLeaseSocket:
     def exchange(self, packet: bytes, descriptor: int, timeout_ms: int) -> bytes:
         self._session.consume_lease_socket(self)
         if (type(packet) is not bytes or type(descriptor) is not int or descriptor < 0
-                or type(timeout_ms) is not int or not 1 <= timeout_ms <= 1000
+                or type(timeout_ms) is not int or not 0 <= timeout_ms <= 32000
                 or self.operation_id is None or self.authorization_digest is None
                 or self.authorization_expires_at_unix_ms is None
+                or self.request_deadline_unix_ms is None
                 or self.lease_address is None
-                or (self._connect_timeout_ms is not None
-                    and timeout_ms > self._connect_timeout_ms)):
+                ):
             raise ControllerServiceV2Error("lease_transport_invalid")
         self._used = True
         setter = getattr(self._connection, "settimeout", None)
@@ -686,6 +692,7 @@ class ControllerBrokerSession:
                             scm_rights: int, closer, operation_id=None,
                             authorization_digest=None,
                             authorization_expires_at_unix_ms=None,
+                            request_deadline_unix_ms=None,
                             lease_address=None, connect_timeout_ms=None):
         """Authenticate and register one outbound lease socket for this session."""
 
@@ -723,6 +730,7 @@ class ControllerBrokerSession:
             scm_rights=scm_rights, closer=closer, operation_id=operation_id,
             authorization_digest=authorization_digest,
             authorization_expires_at_unix_ms=authorization_expires_at_unix_ms,
+            request_deadline_unix_ms=request_deadline_unix_ms,
             lease_address=lease_address, connect_timeout_ms=connect_timeout_ms)
         self._lease_sockets[id(receipt)] = receipt
         return receipt
@@ -792,7 +800,8 @@ class ControllerBrokerSession:
 
     def bind_lease_socket(self, receipt, *, operation_id: str,
                           authorization_digest: str,
-                          authorization_expires_at_unix_ms: int) -> None:
+                          authorization_expires_at_unix_ms: int,
+                          request_deadline_unix_ms: int) -> None:
         expected_address = lease_endpoint_address_v2(
             machine_id=self.config.machine_id, broker_epoch=self.broker_epoch,
             controller_epoch=self.controller_epoch,
@@ -806,18 +815,22 @@ class ControllerBrokerSession:
                 or not isinstance(authorization_digest, str)
                 or _DIGEST.fullmatch(authorization_digest) is None
                 or type(authorization_expires_at_unix_ms) is not int
+                or type(request_deadline_unix_ms) is not int
                 or (receipt.operation_id is not None and receipt.operation_id != operation_id)
                 or (receipt.authorization_digest is not None
                     and receipt.authorization_digest != authorization_digest)
                 or (receipt.authorization_expires_at_unix_ms is not None
                     and receipt.authorization_expires_at_unix_ms
                     != authorization_expires_at_unix_ms)
+                or (receipt.request_deadline_unix_ms is not None
+                    and receipt.request_deadline_unix_ms != request_deadline_unix_ms)
                 or (receipt.lease_address is not None
                     and receipt.lease_address != expected_address)):
             raise ControllerServiceV2Error("lease_transport_invalid")
         receipt.operation_id = operation_id
         receipt.authorization_digest = authorization_digest
         receipt.authorization_expires_at_unix_ms = authorization_expires_at_unix_ms
+        receipt.request_deadline_unix_ms = request_deadline_unix_ms
         receipt.lease_address = expected_address
 
     def mint_composition_receipt(self, purpose: str):

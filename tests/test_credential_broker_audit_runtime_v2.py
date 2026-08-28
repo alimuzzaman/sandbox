@@ -1,15 +1,17 @@
 import json
 import threading
+import time
 import unittest
 from unittest import mock
 
-from sandbox.isolation.credential_controller_audit_v2 import (
-    CredentialEffectExecutorV2,
-    EffectResultV2,
+from sandbox.isolation.credential_guest_protocol_v2 import (
+    AuthorizedEgressDecisionV2, EffectExecutionResultV2, EffectExecutionV2,
+    GuestResultV2,
 )
 from sandbox.isolation.credential_controller_protocol_v2 import (
     PROTOCOL,
     decode_lease_ack,
+    decode_controller_frame,
     digest_document,
     encode_controller_frame,
 )
@@ -25,19 +27,21 @@ NOW = fixtures.NOW
 broker = fixtures.broker
 
 
-class Executor(CredentialEffectExecutorV2):
+class Executor(EffectExecutionV2):
     def __init__(self, result=None, *, raises=False):
         self.calls = []
-        self.result = result or EffectResultV2(
-            "completed", "completed", "upstream_completed",
-        )
+        super().__init__()
+        self.result = result
         self.raises = raises
 
-    def execute(self, request, descriptor):
-        self.calls.append((request["binding_id"], descriptor))
+    def execute_authorized(self, context, descriptor):
+        self.calls.append((context.request.binding_id, descriptor))
         if self.raises:
             raise RuntimeError("host detail")
-        return self.result
+        return self.result or EffectExecutionResultV2(
+            GuestResultV2.success(
+                200, (), b"", context.request.correlation_id),
+            "effect_entered", "completed", "completed", "upstream_completed")
 
 
 class LeaseConnection:
@@ -119,16 +123,41 @@ class TestCredentialBrokerAuditRuntimeV2(unittest.TestCase):
     @staticmethod
     def run_effect(connection, operation_id, executor, receiver, **changes):
         values = dict(
-            audit_id_factory=audit_ids, executor=executor,
-            observer=lambda *_args: CONFIG.controller,
-            so_peercred=1, scm_credentials=2, scm_rights=3,
-            closer=lambda _value: None, monotonic=lambda: 0.0,
+            egress_decision=AuthorizedEgressDecisionV2(
+                "api.example.test", "api.example.test", 443,
+                ("8.8.8.8",), CONFIG.egress_digest),
+            audit_id_factory=audit_ids, executor=executor, monotonic=lambda: 0.0,
             wall_clock=lambda: NOW + 1,
         )
         values.update(changes)
-        with mock.patch.object(broker, "receive_authenticated_packet_v2",
-                               side_effect=receiver):
+        stopped = threading.Event()
+        seen = len(connection.connection.sent)
+
+        def route():
+            nonlocal seen
+            while not stopped.is_set():
+                if len(connection.connection.sent) > seen:
+                    seen += 1
+                    try:
+                        packet, _peer = receiver(connection.connection)
+                    except TimeoutError:
+                        continue
+                    value = decode_controller_frame(
+                        packet, direction="controller_to_broker", now_ms=NOW + 1)
+                    try:
+                        connection.route_audit_ack_v2(value)
+                    except ControllerServiceV2Error:
+                        return
+                else:
+                    time.sleep(0.001)
+
+        owner = threading.Thread(target=route)
+        owner.start()
+        try:
             return connection.execute_effect_v2(operation_id, **values)
+        finally:
+            stopped.set()
+            owner.join(2)
 
     def test_pre_effect_post_ack_order_exact_same_socket_and_cleanup(self):
         connection, operation_id, closed, lease = fixture()
@@ -211,13 +240,17 @@ class TestCredentialBrokerAuditRuntimeV2(unittest.TestCase):
         connection, operation_id, _closed, lease = fixture()
         entered, release = threading.Event(), threading.Event()
 
-        class BlockingExecutor(CredentialEffectExecutorV2):
-            def execute(self, request, descriptor):
-                del request, descriptor
+        class BlockingExecutor(EffectExecutionV2):
+            def execute_authorized(self, context, descriptor):
+                del descriptor
                 entered.set()
                 if not release.wait(2):
                     raise RuntimeError("test timeout")
-                return EffectResultV2("completed", "completed", "upstream_completed")
+                return EffectExecutionResultV2(
+                    GuestResultV2.success(
+                        200, (), b"", context.request.correlation_id),
+                    "effect_entered", "completed", "completed",
+                    "upstream_completed")
 
         receiver = AuthenticatedAuditReceiver()
         result, errors = [], []
@@ -232,6 +265,8 @@ class TestCredentialBrokerAuditRuntimeV2(unittest.TestCase):
         worker = threading.Thread(target=run)
         worker.start()
         self.assertTrue(entered.wait(2))
+        self.assertEqual(connection.operations.expire(NOW + 100_000), 0)
+        self.assertEqual(connection.operations.state(operation_id), "effect_possible")
         quiesce = {
             "protocol": PROTOCOL, "type": "QUIESCE_V2", "machine_id": MACHINE,
             "broker_epoch": BROKER_EPOCH, "controller_epoch": CONTROLLER_EPOCH,

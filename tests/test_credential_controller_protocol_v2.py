@@ -28,6 +28,9 @@ from sandbox.isolation.credential_controller_protocol_v2 import (
     encode_lease_frame,
     registry_digest,
     validate_digest,
+    post_ack_deadline_v2,
+    lease_ack_deadline_v2,
+    broker_ack_send_deadline_v2,
 )
 
 
@@ -216,6 +219,32 @@ def ack_values():
 
 
 class RegistryAndJsonTests(unittest.TestCase):
+    def test_terminal_grace_registry_and_overflow_checked_deadlines(self):
+        bounds = REVIEWED_REGISTRY["bounds"]
+        self.assertEqual(bounds["lease_terminal_grace_ms"], 2000)
+        self.assertEqual(
+            bounds["lease_terminal_grace_ms"],
+            bounds["audit_ack_timeout_ms"] + bounds["lease_ack_timeout_ms"])
+        request_deadline = NOW + 10_000
+        self.assertEqual(lease_ack_deadline_v2(request_deadline),
+                         request_deadline + 2000)
+        self.assertEqual(post_ack_deadline_v2(NOW + 9_500, request_deadline),
+                         request_deadline + 500)
+        self.assertEqual(
+            broker_ack_send_deadline_v2(request_deadline + 500, request_deadline),
+            request_deadline + 1500)
+        for value in (None, True, 1.5, -1, 0, 10 ** 100,
+                      4_102_444_800_000):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ProtocolV2Error, "terminal_deadline_invalid"):
+                lease_ack_deadline_v2(value)
+
+    def test_terminal_grace_boundary_accepts_r_plus_2000_only(self):
+        request_deadline = NOW
+        deadline = lease_ack_deadline_v2(request_deadline)
+        self.assertLessEqual(request_deadline + 2000, deadline)
+        self.assertGreater(request_deadline + 2001, deadline)
+
     def test_frozen_registry_has_reviewed_digest_without_markdown_parse(self):
         self.assertEqual(registry_digest(), REVIEWED_REGISTRY_DIGEST)
         self.assertEqual(len(REVIEWED_REGISTRY["messages"]), 16)
@@ -485,6 +514,14 @@ class BinaryCodecTests(unittest.TestCase):
         invalid = dict(ack_values(), outcome_class="completed", effect_certainty="none")
         with self.assertRaisesRegex(ProtocolV2Error, "lease_ack_invalid"):
             encode_lease_ack(invalid)
+        egress = dict(ack_values(), outcome_class="refused",
+                      effect_certainty="none", reason_code="egress_denied")
+        egress_packet = encode_lease_ack(egress)
+        self.assertEqual(egress_packet[404:407], bytes((2, 0, 9)))
+        self.assertEqual(decode_lease_ack(egress_packet), egress)
+        upstream = dict(ack_values(), outcome_class="indeterminate",
+                        effect_certainty="completed", reason_code="upstream_refused")
+        self.assertEqual(decode_lease_ack(encode_lease_ack(upstream)), upstream)
 
     def test_property_style_malformed_inputs_never_escape_protocol_error(self):
         malformed = (None, True, False, -1, 0, 1, 1.5, "", "x" * 20000,

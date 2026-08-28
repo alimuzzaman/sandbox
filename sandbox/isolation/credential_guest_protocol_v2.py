@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import ipaddress
 import json
@@ -34,6 +34,7 @@ MAX_OPERATION_MILLISECONDS = 30_000
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
 MAX_RESULT_BODY_BYTES = 4 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
+MAX_DNS_ADDRESSES = 16
 MAX_SEQUENCE = 9_007_199_254_740_991
 _HEADER = struct.Struct("!4sBI")
 _REQUEST_MAGIC = b"SBG2"
@@ -67,7 +68,7 @@ _INDETERMINATE_CODES = frozenset((
 ))
 _RESULT_STATE_CODES = MappingProxyType({
     "refused": _FAILURE_CODES - (_INDETERMINATE_CODES - {"deadline_exceeded"}),
-    "indeterminate": _INDETERMINATE_CODES,
+    "indeterminate": _INDETERMINATE_CODES | {"upstream_refused"},
 })
 _FORBIDDEN_HEADERS = frozenset((
     "authorization", "proxy-authorization", "x-api-key", "connection",
@@ -94,6 +95,7 @@ _PHASE_POST_COMBINATIONS = frozenset((
     ("pre_effect", "refused", "none", "deadline_exceeded"),
     ("pre_effect", "refused", "none", "revoked"),
     ("pre_effect", "refused", "none", "lease_invalid"),
+    ("pre_effect", "refused", "none", "egress_denied"),
     ("effect_entered", "completed", "completed", "upstream_completed"),
     ("effect_entered", "indeterminate", "possible", "guest_disconnected"),
     ("effect_entered", "indeterminate", "possible", "deadline_exceeded"),
@@ -101,6 +103,7 @@ _PHASE_POST_COMBINATIONS = frozenset((
     ("effect_entered", "indeterminate", "possible", "internal_indeterminate"),
     ("effect_entered", "indeterminate", "completed", "audit_unavailable"),
     ("effect_entered", "indeterminate", "completed", "internal_indeterminate"),
+    ("effect_entered", "indeterminate", "completed", "upstream_refused"),
 ))
 GUEST_PROTOCOL_REGISTRY = MappingProxyType({
     "protocol": PROTOCOL, "version": _VERSION,
@@ -133,11 +136,13 @@ GUEST_PROTOCOL_REGISTRY = MappingProxyType({
             "machine_id", "family", "socket_type", "interface",
             "bind_to_device_readback", "subnet", "local_address", "local_port",
             "peer_address", "forwarded", "loopback", "route_interface",
-            "route_source", "network_namespace_isolated"),
+            "route_source", "network_namespace_isolated",
+            "default_egress_denied", "default_route_absent"),
         "observation_fixed": MappingProxyType({
             "family": "AF_INET", "socket_type": "SOCK_STREAM",
             "forwarded": False, "loopback": False,
             "network_namespace_isolated": True,
+            "default_egress_denied": True, "default_route_absent": True,
         }),
     }),
     "bounds": MappingProxyType({
@@ -148,6 +153,7 @@ GUEST_PROTOCOL_REGISTRY = MappingProxyType({
         "correlation_id_characters": 64, "descriptor_bytes": 16384,
         "sequence_min": 1, "sequence_max": MAX_SEQUENCE,
         "active_effect_identities": 16,
+        "dns_addresses": MAX_DNS_ADDRESSES,
         "timestamp_min_unix_ms": 1_700_000_000_000,
         "timestamp_max_unix_ms": 4_102_444_800_000,
     }),
@@ -212,6 +218,9 @@ GUEST_PROTOCOL_REGISTRY = MappingProxyType({
         "hostname_and_full_address_intersection": True,
         "projection_digest_required": True, "reresolve_after_authorization": False,
         "nft_set_source": "authorized_decision.resolved_addresses",
+        "dns_authority": "typed_cancellable_non_daemon_process",
+        "dns_deadline": "absolute_monotonic",
+        "dns_calls": 1, "dns_cleanup": "terminate_join_or_retain",
     }),
     "effect": MappingProxyType({
         "context": "immutable", "entry_before_executor": True,
@@ -523,7 +532,7 @@ class GuestTransportProjectionV2:
     subnet: str
     broker_address: str
     guest_address: str
-    port: int = GUEST_PORT
+    port: int = field(default=GUEST_PORT, init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,6 +551,8 @@ class GuestTransportObservationV2:
     route_interface: str
     route_source: str
     network_namespace_isolated: bool
+    default_egress_denied: bool
+    default_route_absent: bool
 
 
 def _rfc1918_address(value: ipaddress.IPv4Address) -> bool:
@@ -585,6 +596,20 @@ def build_guest_transport_projection_v2(policy: ManagedIsolationPolicy) -> Guest
         policy.machine_id, interface, str(broker.network), str(broker.ip), str(guest.ip))
 
 
+def sealed_guest_transport_projection_v2(policy: ManagedIsolationPolicy) -> Mapping[str, str]:
+    """Project the reviewed listener tuple into one secret-free sealed config value."""
+
+    projection = build_guest_transport_projection_v2(policy)
+    return MappingProxyType({
+        "machine_id": projection.machine_id,
+        "base_policy_digest": policy.digest,
+        "interface": projection.interface,
+        "subnet": projection.subnet,
+        "broker_address": projection.broker_address,
+        "guest_address": projection.guest_address,
+    })
+
+
 def verify_guest_transport_v2(projection: GuestTransportProjectionV2,
                               observed: GuestTransportObservationV2) -> bool:
     return bool(
@@ -602,6 +627,8 @@ def verify_guest_transport_v2(projection: GuestTransportProjectionV2,
         and observed.route_interface == projection.interface
         and observed.route_source == projection.guest_address
         and observed.network_namespace_isolated is True
+        and observed.default_egress_denied is True
+        and observed.default_route_absent is True
     )
 
 
@@ -913,6 +940,7 @@ class EffectExecutionV2(ABC):
         try:
             result = self.execute_authorized(context, descriptor)
             if (type(result) is not EffectExecutionResultV2
+                    or result.effect_phase != "effect_entered"
                     or result.guest_result.correlation_id != context.request.correlation_id):
                 raise GuestProtocolV2Error("effect_indeterminate")
         except Exception:
@@ -931,7 +959,7 @@ __all__ = [
     "GUEST_PORT", "GUEST_PROTOCOL_REGISTRY", "GuestProtocolV2Error",
     "GuestRequestV2", "GuestResultV2",
     "GuestTransportObservationV2", "GuestTransportProjectionV2",
-    "INACTIVITY_TIMEOUT_SECONDS", "MAX_HEADER_BYTES", "MAX_OPERATION_MILLISECONDS",
+    "INACTIVITY_TIMEOUT_SECONDS", "MAX_DNS_ADDRESSES", "MAX_HEADER_BYTES", "MAX_OPERATION_MILLISECONDS",
     "MAX_REQUEST_BODY_BYTES", "MAX_RESULT_BODY_BYTES", "MAX_SEQUENCE", "PROTOCOL",
     "authorize_egress_decision_v2", "build_egress_projection_v2",
     "build_guest_transport_projection_v2",
@@ -939,5 +967,6 @@ __all__ = [
     "decode_guest_request_v2", "decode_guest_result_v2", "encode_guest_request_v2",
     "encode_guest_result_v2", "guest_request_digest_v2",
     "guest_protocol_registry_digest_v2",
+    "sealed_guest_transport_projection_v2",
     "verify_guest_transport_v2",
 ]

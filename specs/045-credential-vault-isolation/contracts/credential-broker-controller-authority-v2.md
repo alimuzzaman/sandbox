@@ -109,6 +109,7 @@ set for that variant. No optional keys exist.
     "handshake_timeout_ms": 1000,
     "lease_ack_bytes": 444,
     "lease_ack_timeout_ms": 1000,
+    "lease_terminal_grace_ms": 2000,
     "lease_bytes": 16384,
     "lease_frame_bytes": 732,
     "lease_ttl_ms": 5000,
@@ -316,6 +317,46 @@ lease is terminally refused. There is no negotiation or downgrade response.
 
 ## Normative guest protocol v2 registry
 
+Reciprocal `DerivedServiceConfigV2` documents pin
+`guest_protocol_registry_digest` and a byte-equal, deeply immutable
+`guest_transport_projection` containing exactly `machine_id`,
+`base_policy_digest`, `interface`, `subnet`, `broker_address`, and
+`guest_address`. The base digest equals `policy_digest`; the control plane
+derives the tuple from validated `ManagedIsolationPolicy`. The logical endpoint
+identity is exactly `credential-broker-guest-v2`. No config path, policy
+repository read, guest field, or runtime address selection is an authority.
+
+Each derived config also pins `unit_digest` and `peer_unit_digest`. The unit
+digest is SHA-256 of canonical ASCII JSON containing exactly schema version 2,
+this protocol, purpose `process_unit_identity`, machine, component, fixed
+service UID, service GID, fixed unit name, and the fixed
+`/system.slice/<unit-name>` cgroup. Controller and broker peer-unit digests are
+reciprocal and bind the T040 process identities before configure, listener,
+handshake, or start. Older or incomplete configs are refused and regenerated;
+there is no compatibility fallback.
+
+Each role additionally pins the reciprocal `peer_unit_identity`,
+`peer_service_uid`, and `peer_config_identity`, plus the exact
+`process_identity_authority=sealed_systemd_cgroup_v2`. Neither caller supplies
+an own or peer process-config digest. The compiler hashes canonical ASCII JSON
+of every plan field except `own_config_digest` and `peer_config_digest`, writes
+that as `own_config_digest`, and cross-fills the independently derived peer
+value. The outer plan digest remains SHA-256 of the complete canonical plan and
+is intentionally distinct. Both role plans are loaded from fixed root-owned,
+group-readable, `0640`, no-follow paths and reciprocally validated before any
+cgroup or `/proc` observation. Runtime identity pins exactly one PID from the
+fixed systemd cgroup with start/observe/start sampling; later socket credential
+checks only compare the pinned PID/UID/GID tuple.
+
+The executable composes the fixed controller, guest, DNS, nft, typed effect,
+and service-loop graph after reciprocal plan and process pinning. Listeners bind
+closed and admission cannot open before authenticated handshake and ACTIVATE.
+The kernel topology observer never treats a TCP peer tuple as namespace or
+default-deny proof, and the nft authority refuses without exact evidence, so an
+unavailable Linux facility fails before guest bytes or credential resolution.
+This production-shaped closed behavior is not T022/T029 live proof and does not
+promote support or create a fallback.
+
 The guest channel is distinct from the controller and lease channels. It is one
 private-veth `AF_INET`/`SOCK_STREAM` listener for exactly one managed-native
 machine. The derived tuple is exact: one Linux interface of at most 15 ASCII
@@ -387,10 +428,11 @@ authorization, source, credential, descriptor, digest, exception, path, PID,
 upstream body, and diagnostic fields are forbidden from failure results.
 The registry owns the exact state/code partition consumed by validation:
 `indeterminate` permits only `audit_unavailable`, `deadline_exceeded`,
-`guest_disconnected`, and `internal_indeterminate`; `refused` permits the
-remaining fixed failure codes plus `deadline_exceeded`. Deadline is the sole
-code valid in both states because its state depends on whether effect entry
-already occurred.
+`guest_disconnected`, `internal_indeterminate`, and the reviewed
+post-entry/completed `upstream_refused`; `refused` permits the remaining fixed
+failure codes plus `deadline_exceeded` and pre-entry `upstream_refused`.
+Deadline and upstream refusal are the only codes valid in both states because
+their state depends on effect entry/certainty.
 
 `sandbox.isolation.credential_guest_protocol_v2` is the sole registry/codec for
 this channel. Its immutable machine-readable registry includes every envelope,
@@ -766,9 +808,18 @@ requires `SO_PASSCRED`, exactly one `SCM_CREDENTIALS` record matching the same
 exact broker process, zero `SCM_RIGHTS`, no unknown ancillary records, and the
 receipt's exact operation and authorization binding.
 The controller enables `SO_PASSCRED` and requires exact successful readback
-before transfer. Connect and ACK deadlines are the lesser of 1,000 ms and the
-remaining authorization lifetime; an expired authorization creates no socket.
-The receipt also pins the derived 93-byte address and authorization expiry.
+before transfer. Entry, connect, and lease transfer remain bounded by the
+remaining authorization, lease, activation, and request lifetimes. Terminal
+completion has a separate fixed 2,000-ms grace, exactly audit-ACK 1,000 ms plus
+lease-ACK 1,000 ms. With request deadline `R`, POST start `P`, and POST-ACK
+receipt `Q`, the absolute deadlines are `min(P+1000,R+1000)` for POST ACK,
+`R+2000` for controller lease ACK, and `min(Q+1000,R+2000)` for broker ACK
+send. Arithmetic is overflow-checked. `R+2000` is accepted; `R+2001` is
+refused. After effect entry, lifecycle expiry cannot truncate this terminal
+window; `R` still stops upstream work. PRE and POST each permit one
+semantic-only transport retry. Effect, lease, guest request/result, and final
+ACK are never retried. The receipt pins the derived address, authorization,
+request deadline, and terminal deadline.
 
 An armed listener owns no accepted socket. After `accept`, it tracks that
 socket until effect ownership transfers; quiesce or terminal cleanup closes a
@@ -912,9 +963,9 @@ reason. Exact valid combinations are:
 | Outcome | Effect certainty | Allowed reason codes |
 |---|---|---|
 | `completed` | `completed` | `upstream_completed` |
-| `refused` | `none` | `upstream_refused`, `deadline_exceeded`, `revoked`, `lease_invalid` |
+| `refused` | `none` | `upstream_refused`, `deadline_exceeded`, `revoked`, `lease_invalid`, `egress_denied` |
 | `indeterminate` | `possible` | `guest_disconnected`, `deadline_exceeded`, `audit_unavailable`, `internal_indeterminate` |
-| `indeterminate` | `completed` | `audit_unavailable`, `internal_indeterminate` |
+| `indeterminate` | `completed` | `audit_unavailable`, `internal_indeterminate`, `upstream_refused` |
 
 No other pair or reason is valid. POST acknowledgement uses `AUDIT_ACK_V2` with
 `phase=post` and `disposition=committed`. The controller commits POST before
@@ -988,8 +1039,9 @@ identifier rules plus one NUL and zero padding.
 1=`completed`, 2=`refused`, 3=`indeterminate`. Effect tags are 0=`none`,
 1=`possible`, 2=`completed`. Reason tags are 1=`upstream_completed`,
 2=`upstream_refused`, 3=`guest_disconnected`, 4=`deadline_exceeded`,
-5=`revoked`, 6=`lease_invalid`, 7=`audit_unavailable`, and
-8=`internal_indeterminate`. The outcome/effect/reason combination must match the
+5=`revoked`, 6=`lease_invalid`, 7=`audit_unavailable`,
+8=`internal_indeterminate`, and 9=`egress_denied`. Existing tags retain their
+exact values. The outcome/effect/reason combination must match the
 exact POST table above. `ack_frame_digest` is SHA-256 over bytes 0 through 411.
 
 Both epochs, lease ID/sequence, and authorization digest must exactly match the
@@ -1000,10 +1052,10 @@ canonical lease rejected before descriptor-byte read still uses PRE then POST
 `refused`/`none` with `lease_invalid` before its lease ACK. Once effect is
 possible, the ACK carries only the audited completed or indeterminate outcome.
 
-The broker makes one bounded send within 1,000 ms after receiving the POST audit
-acknowledgement and before the operation request deadline plus 1,000 ms. The
-controller sets that absolute same-socket receive deadline when dispatching the
-lease. EOF, timeout, short/trailing ACK data, mismatch, or invalid tag/digest is
+The broker makes one bounded send no later than
+`min(post_ack_received+L,R+A+L)`, where `A=1000 ms` is the audit-ACK bound and
+`L=1000 ms` is the lease-ACK bound. The controller accepts the same-socket ACK
+through `R+A+L` inclusive. EOF, timeout, short/trailing ACK data, mismatch, or invalid tag/digest is
 terminal: the controller closes the socket, does not retry the lease or ACK,
 and never replays or creates a replacement identity for the credential-bearing
 request. The ACK and its timeout do not change the already durable POST record.

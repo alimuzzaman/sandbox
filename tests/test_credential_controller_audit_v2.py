@@ -262,6 +262,11 @@ class TestCredentialControllerAuditV2(unittest.TestCase):
     def test_typed_effect_results_refuse_invalid_certainty_pairs(self):
         self.assertEqual(EffectResultV2("completed", "completed", "upstream_completed").reason_code,
                          "upstream_completed")
+        self.assertEqual(EffectResultV2("refused", "none", "egress_denied").reason_code,
+                         "egress_denied")
+        self.assertEqual(EffectResultV2(
+            "indeterminate", "completed", "upstream_refused").reason_code,
+            "upstream_refused")
         with self.assertRaisesRegex(AuditV2Error, "effect_result_invalid"):
             EffectResultV2("completed", "possible", "upstream_completed")
         with self.assertRaisesRegex(TypeError, "abstract"):

@@ -2,9 +2,8 @@ import unittest
 import socket
 import dataclasses
 
-from sandbox.isolation.credential_controller_audit_v2 import (
-    CredentialEffectExecutorV2,
-    EffectResultV2,
+from sandbox.isolation.credential_guest_protocol_v2 import (
+    EffectExecutionResultV2, EffectExecutionV2, GuestResultV2,
 )
 from sandbox.isolation.credential_controller_authority_v2 import ControllerAuthorityV2Error
 from sandbox.isolation.credential_controller_integration_v2 import (
@@ -12,26 +11,82 @@ from sandbox.isolation.credential_controller_integration_v2 import (
     MemoryAuditRepositoryV2,
     OfflineV2Error,
 )
+from sandbox.isolation.credential_controller_lifecycle_v2 import (
+    derived_config_document, process_unit_digest_v2,
+)
 from sandbox.isolation.credential_controller_protocol_v2 import encode_controller_frame
 from sandbox.isolation.credential_controller_service_v2 import ControllerServiceV2Error
 from sandbox.isolation.models import EgressGrantSet
 from tests import test_credential_controller_authority_v2 as fixtures
 
 
-class OneShotExecutor(CredentialEffectExecutorV2):
+class OneShotExecutor(EffectExecutionV2):
     def __init__(self):
+        super().__init__()
         self.calls = []
 
-    def execute(self, request, descriptor):
-        self.calls.append((request["binding_id"], descriptor))
-        return EffectResultV2("completed", "completed", "upstream_completed")
+    def execute_authorized(self, context, descriptor):
+        self.calls.append((context.request.binding_id, descriptor))
+        return EffectExecutionResultV2(
+            GuestResultV2.success(
+                200, (), b"", context.request.correlation_id),
+            "effect_entered", "completed", "completed", "upstream_completed")
 
 
 def valid_config():
+    service_gid = fixtures.CONFIG.broker.gid
+    selected_egress = EgressGrantSet(
+        fixtures.MACHINE, fixtures.CONFIG.policy_digest).digest
+    common = dict(
+        machine_id=fixtures.MACHINE, service_gid=service_gid,
+        policy_digest=fixtures.CONFIG.policy_digest,
+        egress_digest=selected_egress,
+        broker_digest=fixtures.CONFIG.broker_digest,
+        proof_digest=fixtures.CONFIG.proof_digest,
+        effective_isolation_digest=fixtures.CONFIG.effective_isolation_digest,
+        evidence_id=fixtures.CONFIG.evidence_id,
+        egress_projection={
+            "machine_id": fixtures.MACHINE,
+            "base_policy_digest": fixtures.CONFIG.policy_digest,
+            "egress_digest": selected_egress, "version": 1,
+            "grant_authority": "staged-v1", "grants": []},
+        guest_transport_projection={
+            "machine_id": fixtures.MACHINE,
+            "base_policy_digest": fixtures.CONFIG.policy_digest,
+            "interface": "veth-sb0", "subnet": "10.73.0.0/30",
+            "broker_address": "10.73.0.1", "guest_address": "10.73.0.2"},
+        controller_endpoint_identity="v2-controller.sock",
+        lease_endpoint_identity="v2-lease.sock",
+        guest_endpoint_identity="credential-broker-guest-v2")
+    controller_plan = derived_config_document(
+        component="controller", service_uid=992,
+        unit_identity=(f"sandbox-credential-controller-v2@{fixtures.MACHINE}.service"),
+        executable_digest=fixtures.CONFIG.controller.executable_digest,
+        config_identity="sandbox-v2-controller-config",
+        peer_executable_digest=fixtures.CONFIG.broker.executable_digest, **common)
+    broker_plan = derived_config_document(
+        component="broker", service_uid=993,
+        unit_identity=(f"sandbox-credential-broker-v2@{fixtures.MACHINE}.service"),
+        executable_digest=fixtures.CONFIG.broker.executable_digest,
+        config_identity="sandbox-v2-broker-config",
+        peer_executable_digest=fixtures.CONFIG.controller.executable_digest, **common)
+    controller = dataclasses.replace(
+        fixtures.CONFIG.controller, uid=992, gid=service_gid,
+        unit_digest=process_unit_digest_v2(
+            machine_id=fixtures.MACHINE, component="controller", service_uid=992,
+            service_gid=service_gid,
+            unit_identity=f"sandbox-credential-controller-v2@{fixtures.MACHINE}.service"),
+        config_digest=controller_plan["own_config_digest"])
+    broker_identity = dataclasses.replace(
+        fixtures.CONFIG.broker, uid=993, gid=service_gid,
+        unit_digest=process_unit_digest_v2(
+            machine_id=fixtures.MACHINE, component="broker", service_uid=993,
+            service_gid=service_gid,
+            unit_identity=f"sandbox-credential-broker-v2@{fixtures.MACHINE}.service"),
+        config_digest=broker_plan["own_config_digest"])
     return dataclasses.replace(
-        fixtures.CONFIG,
-        egress_digest=EgressGrantSet(
-            fixtures.MACHINE, fixtures.CONFIG.policy_digest).digest,
+        fixtures.CONFIG, controller=controller, broker=broker_identity,
+        egress_digest=selected_egress,
     )
 
 
@@ -266,12 +321,30 @@ class TestConnectedCredentialControllerIntegrationV2(unittest.TestCase):
         operation_id, ack = runner.authorize(
             fixtures.guest_request(), connection_identity="guest-audit-retry")
         runner.broker_transport.drop_next_sends = 1
-        runner.broker_transport.timeout_next_receives = 1
         result = runner.dispatch_and_execute(operation_id, ack)
         self.assertEqual(result["code"], "upstream_completed")
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual([item["phase"] for item in runner.repository.committed],
                          ["pre", "post"])
+
+    def test_egress_denial_is_pre_post_ack_then_guest_result_without_effect(self):
+        executor = OneShotExecutor()
+        runner, _events = self.activated(executor=executor)
+        operation_id, ack = runner.authorize(
+            fixtures.guest_request(), connection_identity="guest-egress-denied")
+        dispatch = runner.dispatch_and_execute(
+            operation_id, ack, pre_effect_refusal="egress_denied")
+        self.assertEqual(executor.calls, [])
+        self.assertEqual([item["phase"] for item in runner.repository.committed],
+                         ["pre", "post"])
+        post = runner.repository.committed[-1]
+        self.assertEqual((post["outcome_class"], post["effect_certainty"],
+                          post["reason_code"]),
+                         ("refused", "none", "egress_denied"))
+        self.assertEqual(dispatch["code"], "egress_denied")
+        self.assertEqual(runner.effect_result["effect_phase"], "pre_effect")
+        self.assertEqual(runner.broker_session.guest_result_v2(
+            "guest-egress-denied")["code"], "egress_denied")
 
     def test_new_authenticated_epoch_recovers_crash_after_durable_pre(self):
         def pre_only(record):

@@ -114,10 +114,13 @@ class TestLeaseEndpointAddressV2(unittest.TestCase):
     def test_registry_digest_is_pinned_and_security_rules_are_covered(self):
         self.assertEqual(
             lease_endpoint_registry_digest_v2(),
-            "8739c8d09c1baf95d36995038dc4fb59d6c015aedfaffcedf2e8b9dfcd47aa87",
+            "07a6570d317d943bd4af6f7ac3cfe29934987cdd1b5cdfa54801bf02cc5dc616",
         )
         self.assertEqual(LEASE_ENDPOINT_V2_REGISTRY["address_bytes"], 93)
         self.assertEqual(LEASE_ENDPOINT_V2_REGISTRY["packets_per_endpoint"], 1)
+        self.assertEqual(LEASE_ENDPOINT_V2_REGISTRY["lease_terminal_grace_ms"],
+                         LEASE_ENDPOINT_V2_REGISTRY["audit_ack_timeout_ms"] +
+                         LEASE_ENDPOINT_V2_REGISTRY["lease_ack_timeout_ms"])
         self.assertFalse(LEASE_ENDPOINT_V2_REGISTRY["fallback"])
         changed = dict(LEASE_ENDPOINT_V2_REGISTRY)
         changed["connect_timeout_ms"] = 1001
@@ -202,9 +205,10 @@ class TestLeaseEndpointAddressV2(unittest.TestCase):
         with self.assertRaisesRegex(ControllerServiceV2Error,
                                     "lease_transport_invalid"):
             session.bind_lease_socket(
-                receipt, operation_id="operation-012345",
-                authorization_digest=AUTHORIZATION_DIGEST,
-                authorization_expires_at_unix_ms=1_800_000_001_000)
+            receipt, operation_id="operation-012345",
+            authorization_digest=AUTHORIZATION_DIGEST,
+            authorization_expires_at_unix_ms=1_800_000_001_000,
+            request_deadline_unix_ms=1_800_000_010_000)
         receipt.close()
 
     def test_connect_failure_closes_exactly_once_and_never_falls_back(self):

@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import multiprocessing
 import os
 import re
 import selectors
@@ -27,7 +28,12 @@ import sys
 import threading
 import time
 import uuid
+from types import MappingProxyType
 from typing import Any, Mapping
+from sandbox.isolation.credential_upstream import (
+    CredentialUpstreamError,
+    VerifiedHttpsUpstream,
+)
 
 from sandbox.isolation.credential_controller_protocol_v2 import (
     AuthorizationIdentity as AuthorizationIdentityV2,
@@ -42,14 +48,35 @@ from sandbox.isolation.credential_controller_protocol_v2 import (
     digest_document as digest_document_v2,
     encode_lease_ack as encode_lease_ack_v2,
     encode_controller_frame as encode_controller_frame_v2,
+    post_ack_deadline_v2,
+    broker_ack_send_deadline_v2,
+    lease_ack_deadline_v2,
     validate_controller_message as validate_controller_message_v2,
-)
-from sandbox.isolation.credential_controller_audit_v2 import (
-    CredentialEffectExecutorV2,
-    EffectResultV2,
 )
 from sandbox.isolation.credential_controller_lifecycle_v2 import (
     DerivedServiceConfigV2,
+    validate_reciprocal_service_plans_v2,
+)
+from sandbox.isolation.credential_guest_protocol_v2 import (
+    AuthorizedEffectContextV2,
+    AuthorizedEgressDecisionV2,
+    EffectExecutionResultV2,
+    EffectExecutionV2,
+    GuestProtocolV2Error,
+    GuestRequestV2,
+    GuestResultV2,
+    GuestTransportObservationV2,
+    GuestTransportProjectionV2,
+    INACTIVITY_TIMEOUT_SECONDS as GUEST_V2_INACTIVITY_SECONDS,
+    MAX_DNS_ADDRESSES as GUEST_V2_MAX_DNS_ADDRESSES,
+    MAX_OPERATION_MILLISECONDS as GUEST_V2_MAX_OPERATION_MS,
+    authorize_egress_decision_v2,
+    canonical_egress_projection_v2,
+    decode_guest_request_v2,
+    encode_guest_result_v2,
+    guest_request_digest_v2,
+    guest_protocol_registry_digest_v2,
+    verify_guest_transport_v2,
 )
 from sandbox.isolation.credential_controller_service_v2 import (
     BoundGuestSubmitCapabilityV2,
@@ -85,6 +112,184 @@ HELPER_VERBS = (
     "credential-broker-stop",
 )
 REQUIRED_SEALS = frozenset(("write", "grow", "shrink", "seal"))
+_GUEST_V2_RESULT_HEADERS = frozenset((
+    "cache-control", "content-language", "content-type", "etag", "expires",
+    "last-modified", "retry-after", "vary",
+))
+
+
+def _authorized_dns_worker_v2(host: str, sender) -> None:
+    """Isolated cancellable DNS worker; parent receives at most 17 values."""
+    try:
+        values = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+        selected = []
+        for item in values:
+            address = item[4][0]
+            if address not in selected:
+                selected.append(address)
+            if len(selected) > GUEST_V2_MAX_DNS_ADDRESSES:
+                break
+        sender.send((True, tuple(selected)))
+    except Exception:
+        try:
+            sender.send((False, ()))
+        except Exception:
+            pass
+    finally:
+        try:
+            sender.close()
+        except Exception:
+            pass
+
+
+class AuthorizedDnsResolverV2:
+    """One-call deadline-bound DNS authority with owned process cancellation."""
+
+    __slots__ = ("_context", "_monotonic", "_active", "_lock", "_closed")
+
+    def __init__(self, *, context=None, monotonic=time.monotonic) -> None:
+        selected = context or multiprocessing.get_context("spawn")
+        if (not callable(monotonic) or not hasattr(selected, "Pipe")
+                or not hasattr(selected, "Process")):
+            raise ControllerServiceV2Error("dns_authority_invalid")
+        self._context = selected
+        self._monotonic = monotonic
+        self._active = set()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def resolve_until(self, host: str, absolute_monotonic_deadline: float) -> tuple[str, ...]:
+        if (self._closed or not isinstance(host, str)
+                or isinstance(absolute_monotonic_deadline, bool)
+                or not isinstance(absolute_monotonic_deadline, (int, float))):
+            raise ControllerServiceV2Error("egress_denied")
+        try:
+            started = self._monotonic()
+            if (isinstance(started, bool) or not isinstance(started, (int, float))
+                    or started >= absolute_monotonic_deadline):
+                raise ValueError
+            receiver, sender = self._context.Pipe(duplex=False)
+            process = self._context.Process(
+                target=_authorized_dns_worker_v2, args=(host, sender),
+                name="credential-dns-v2", daemon=False)
+            with self._lock:
+                if self._closed:
+                    raise ValueError
+                self._active.add(process)
+            process.start()
+            sender.close()
+            remaining = absolute_monotonic_deadline - self._monotonic()
+            if remaining <= 0 or not receiver.poll(remaining):
+                raise TimeoutError
+            ok, values = receiver.recv()
+            if (ok is not True or type(values) is not tuple
+                    or not 1 <= len(values) <= GUEST_V2_MAX_DNS_ADDRESSES
+                    or any(not isinstance(value, str) for value in values)):
+                raise ValueError
+            process.join(max(0.0, absolute_monotonic_deadline - self._monotonic()))
+            if process.is_alive():
+                raise TimeoutError
+            return values
+        except Exception:
+            if "process" in locals() and process.is_alive():
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                try:
+                    process.join(1.0)
+                except Exception:
+                    pass
+            if "process" in locals() and process.is_alive():
+                raise ControllerServiceV2Error("dns_cleanup_incomplete") from None
+            raise ControllerServiceV2Error("egress_denied") from None
+        finally:
+            if "receiver" in locals():
+                try:
+                    receiver.close()
+                except Exception:
+                    pass
+            if "sender" in locals():
+                try:
+                    sender.close()
+                except Exception:
+                    pass
+            if "process" in locals() and not process.is_alive():
+                with self._lock:
+                    self._active.discard(process)
+
+    def close(self) -> dict[str, Any]:
+        self._closed = True
+        incomplete = False
+        with self._lock:
+            active = tuple(self._active)
+        for process in active:
+            try:
+                if process.is_alive():
+                    process.terminate()
+                process.join(1.0)
+            except Exception:
+                incomplete = True
+            if process.is_alive():
+                incomplete = True
+            else:
+                with self._lock:
+                    self._active.discard(process)
+        return {"ok": not incomplete,
+                "code": "dns_authority_closed" if not incomplete
+                        else "dns_cleanup_incomplete"}
+
+
+def resolve_authorized_guest_egress_v2(plan: DerivedServiceConfigV2,
+                                        request: GuestRequestV2,
+                                        upstream: VerifiedHttpsUpstream,
+                                        dns_authority: AuthorizedDnsResolverV2, *,
+                                        now: str, deadline_unix_ms: int,
+                                        wall_clock_ms) -> AuthorizedEgressDecisionV2:
+    """Resolve once, then authorize the complete pinned answer from sealed grants."""
+
+    if (not isinstance(plan, DerivedServiceConfigV2) or plan.component != "broker"
+            or type(request) is not GuestRequestV2
+            or not isinstance(upstream, VerifiedHttpsUpstream)
+            or type(dns_authority) is not AuthorizedDnsResolverV2
+            or not isinstance(now, str)
+            or type(deadline_unix_ms) is not int
+            or not callable(wall_clock_ms)):
+        raise ControllerServiceV2Error("egress_denied")
+    try:
+        started_wall = wall_clock_ms()
+        started_elapsed = upstream.clock()
+        if (type(started_wall) is not int or started_wall >= deadline_unix_ms
+                or isinstance(started_elapsed, bool)
+                or not isinstance(started_elapsed, (int, float))):
+            raise ValueError
+        absolute_elapsed_deadline = started_elapsed + min(
+            upstream.total_seconds,
+            (deadline_unix_ms - started_wall) / 1000.0)
+        addresses = dns_authority.resolve_until(
+            request.host, absolute_elapsed_deadline)
+        finished_elapsed = upstream.clock()
+        finished_wall = wall_clock_ms()
+        remaining_seconds = (deadline_unix_ms - started_wall) / 1000.0
+        if (type(finished_wall) is not int or finished_wall < started_wall
+                or finished_wall >= deadline_unix_ms
+                or isinstance(finished_elapsed, bool)
+                or not isinstance(finished_elapsed, (int, float))
+                or finished_elapsed < started_elapsed
+                or finished_elapsed - started_elapsed >= min(
+                    upstream.total_seconds, remaining_seconds)):
+            raise ValueError
+        return authorize_egress_decision_v2(
+            canonical_egress_projection_v2(plan.document["egress_projection"]),
+            host=request.host, sni_hostname=request.host, port=request.port,
+            resolved_addresses=addresses, now=now,
+        )
+    except ControllerServiceV2Error as exc:
+        if exc.code == "dns_cleanup_incomplete":
+            raise ControllerServiceV2Error("dns_cleanup_incomplete") from None
+        raise ControllerServiceV2Error("egress_denied") from None
+    except Exception:
+        raise ControllerServiceV2Error("egress_denied") from None
 # Guarded library seams exist.  This does not mean a runnable service, live
 # proof, or an adoptable/default runtime path exists.
 LIVE_TRANSPORT_IMPLEMENTED = True
@@ -282,10 +487,10 @@ def runtime_config_path(machine_id: str) -> str:
     return f"{FIXED_CONFIG_ROOT}/{machine_id}.json"
 
 
-def runtime_config_path_v2(machine_id: str) -> str:
-    if not _machine(machine_id):
+def runtime_config_path_v2(machine_id: str, component: str = "broker") -> str:
+    if not _machine(machine_id) or component not in {"controller", "broker"}:
         raise ValueError("credential broker machine identity is invalid")
-    return f"/etc/sandbox/credential-v2/broker/{machine_id}.json"
+    return f"/etc/sandbox/credential-v2/{component}/{machine_id}.json"
 
 
 class _ConfigKernel:
@@ -338,13 +543,14 @@ def load_runtime_config(
         kernel.close(descriptor)
 
 
-def load_runtime_config_v2(path: str, *, machine_id: str,
-                           expected_group_gid: int, expected_digest: str,
+def load_runtime_config_v2(path: str, *, machine_id: str, component: str,
+                           expected_group_gid: int,
                            kernel=None) -> DerivedServiceConfigV2:
     """Load only the exact canonical derived v2 broker config."""
-    if (path != runtime_config_path_v2(machine_id)
+    if (path != runtime_config_path_v2(machine_id, component)
+            or component not in {"controller", "broker"}
             or not _integer(expected_group_gid, minimum=1, maximum=2**31 - 1)
-            or not _digest(expected_digest)):
+            ):
         raise ValueError("credential broker v2 config authority is invalid")
     kernel = kernel or _ConfigKernel()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -365,18 +571,17 @@ def load_runtime_config_v2(path: str, *, machine_id: str,
                 break
             raw.extend(chunk)
         payload = bytes(raw)
-        if (len(payload) != observed.st_size
-                or hashlib.sha256(payload).hexdigest() != expected_digest):
+        if len(payload) != observed.st_size:
             raise ValueError("credential broker v2 config digest is invalid")
         try:
             document = json.loads(payload.decode("ascii"))
             plan = DerivedServiceConfigV2.derive(document)
         except Exception:
             raise ValueError("credential broker v2 config is invalid") from None
-        if (plan.component != "broker" or plan.machine_id != machine_id
+        if (plan.component != component or plan.machine_id != machine_id
                 or plan.service_gid != expected_group_gid
                 or plan.canonical_bytes != payload
-                or plan.config_digest != expected_digest):
+                or plan.config_digest != hashlib.sha256(payload).hexdigest()):
             raise ValueError("credential broker v2 config identity is invalid")
         return plan
     finally:
@@ -2842,6 +3047,157 @@ def _linux_executable_digest(pid: int) -> str:
     return digest.hexdigest()
 
 
+def process_cgroup_identity_v2(plan: DerivedServiceConfigV2) -> str:
+    if not isinstance(plan, DerivedServiceConfigV2):
+        raise ControllerServiceV2Error("peer_identity_unavailable")
+    return f"/system.slice/{plan.document['unit_identity']}"
+
+
+def _linux_start_ticks_v2(pid: int) -> int:
+    value = _linux_process_start_identity(pid)
+    try:
+        selected = int(value.rsplit(":", 1)[1])
+    except Exception:
+        raise ControllerServiceV2Error("peer_identity_unavailable") from None
+    if selected < 1:
+        raise ControllerServiceV2Error("peer_identity_unavailable")
+    return selected
+
+
+def _linux_cgroup_pid_v2(plan: DerivedServiceConfigV2) -> int:
+    path = f"/sys/fs/cgroup{process_cgroup_identity_v2(plan)}/cgroup.procs"
+    try:
+        with open(path, "r", encoding="ascii") as stream:
+            values = stream.read(128).splitlines()
+        if len(values) != 1 or not values[0].isdigit():
+            raise ValueError
+        pid = int(values[0])
+    except Exception:
+        raise ControllerServiceV2Error("peer_identity_unavailable") from None
+    if not 1 <= pid <= 2**31 - 1:
+        raise ControllerServiceV2Error("peer_identity_unavailable")
+    return pid
+
+
+def _linux_process_details_v2(pid: int, plan: DerivedServiceConfigV2) -> Mapping[str, Any]:
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="ascii") as stream:
+            status = stream.read(16384).splitlines()
+        uid_line = next(line for line in status if line.startswith("Uid:"))
+        gid_line = next(line for line in status if line.startswith("Gid:"))
+        uids = uid_line.split()[1:]
+        gids = gid_line.split()[1:]
+        if len(uids) != 4 or len(gids) != 4 or len(set(uids)) != 1 or len(set(gids)) != 1:
+            raise ValueError
+        with open(f"/proc/{pid}/cgroup", "r", encoding="ascii") as stream:
+            cgroup = stream.read(4096).splitlines()
+        if cgroup != [f"0::{process_cgroup_identity_v2(plan)}"]:
+            raise ValueError
+        return {
+            "uid": int(uids[0]), "gid": int(gids[0]),
+            "executable_digest": _linux_executable_digest(pid),
+            "unit_digest": plan.document["unit_digest"],
+            "config_digest": plan.document["own_config_digest"],
+        }
+    except Exception:
+        raise ControllerServiceV2Error("peer_identity_unavailable") from None
+
+
+def pin_process_identity_v2(plan: DerivedServiceConfigV2, *,
+                            cgroup_pid_reader=_linux_cgroup_pid_v2,
+                            start_reader=_linux_start_ticks_v2,
+                            detail_reader=_linux_process_details_v2) -> ProcessIdentityV2:
+    """Pin one exact systemd-cgroup process using start/observe/start."""
+
+    if (not isinstance(plan, DerivedServiceConfigV2)
+            or not callable(cgroup_pid_reader) or not callable(start_reader)
+            or not callable(detail_reader)
+            or plan.document["process_identity_authority"] !=
+               "sealed_systemd_cgroup_v2"):
+        raise ControllerServiceV2Error("peer_identity_unavailable")
+    try:
+        pid = cgroup_pid_reader(plan)
+        first = start_reader(pid)
+        details = detail_reader(pid, plan)
+        second = start_reader(pid)
+        identity = ProcessIdentityV2(
+            uid=details["uid"], gid=details["gid"], pid=pid,
+            start_ticks=first,
+            executable_digest=details["executable_digest"],
+            unit_digest=details["unit_digest"],
+            config_digest=details["config_digest"])
+    except Exception:
+        raise ControllerServiceV2Error("peer_identity_unavailable") from None
+    if (first != second
+            or identity.uid != plan.document["service_uid"]
+            or identity.gid != plan.document["service_gid"]
+            or identity.executable_digest != plan.document["executable_digest"]
+            or identity.unit_digest != plan.document["unit_digest"]
+            or identity.config_digest != plan.document["own_config_digest"]):
+        raise ControllerServiceV2Error("peer_identity_mismatch")
+    return identity
+
+
+def pin_reciprocal_process_identities_v2(controller: DerivedServiceConfigV2,
+                                         broker_plan: DerivedServiceConfigV2,
+                                         **readers):
+    """Validate both plans before the first cgroup or proc observation."""
+
+    validate_reciprocal_service_plans_v2(controller, broker_plan)
+    return (
+        pin_process_identity_v2(controller, **readers),
+        pin_process_identity_v2(broker_plan, **readers),
+    )
+
+
+def pinned_process_identity_observer_v2(expected: ProcessIdentityV2):
+    if type(expected) is not ProcessIdentityV2:
+        raise ControllerServiceV2Error("identity_observer_invalid")
+    def observe(pid: int, uid: int, gid: int) -> ProcessIdentityV2:
+        if (pid, uid, gid) != (expected.pid, expected.uid, expected.gid):
+            raise ControllerServiceV2Error("peer_identity_mismatch")
+        return expected
+    return observe
+
+
+class LinuxKernelTopologyObserverV2:
+    """Observe socket-owned facts and refuse facts unavailable without authority."""
+
+    __slots__ = ()
+
+    def __call__(self, connection, projection: GuestTransportProjectionV2, peer):
+        if (type(projection) is not GuestTransportProjectionV2
+                or not isinstance(peer, tuple) or len(peer) < 2):
+            raise ControllerServiceV2Error("guest_transport_denied")
+        try:
+            local = connection.getsockname()
+            device = connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 32)
+            interface = device.rstrip(b"\0").decode("ascii")
+            # A TCP peer tuple cannot prove the peer namespace or the nft
+            # default-deny ruleset. Never synthesize those authority facts.
+            return GuestTransportObservationV2(
+                machine_id=projection.machine_id, family="AF_INET",
+                socket_type="SOCK_STREAM", interface=interface,
+                bind_to_device_readback=interface, subnet=projection.subnet,
+                local_address=local[0], local_port=local[1],
+                peer_address=peer[0], forwarded=False, loopback=False,
+                route_interface=interface, route_source=peer[0],
+                network_namespace_isolated=False,
+                default_egress_denied=False, default_route_absent=False)
+        except Exception:
+            raise ControllerServiceV2Error("guest_transport_denied") from None
+
+
+class LinuxNftDestinationSetObserverV2:
+    """Closed production observer until T022 supplies reviewed nft evidence."""
+
+    __slots__ = ()
+
+    def __call__(self, _decision):
+        raise ControllerServiceV2Error("egress_denied")
+
+
 class LinuxPeerIdentityObserver:
     """Recheck PID-start and executable digest after kernel peer authentication."""
 
@@ -3035,12 +3391,31 @@ class _V2OperationRegistry:
             canonical = _canonical_guest_request(request)
             if canonical["machine_id"] != self._machine_id:
                 raise ControllerServiceV2Error("request_invalid")
-            request_digest = guest_request_digest(canonical)
+            header_items = tuple(sorted(
+                (name, value) for name, value in canonical["headers"].items()
+                if name != "content-type"
+            ))
+            if ("content-type" in canonical["headers"]
+                    and canonical["headers"]["content-type"] != canonical["content_type"]):
+                raise ControllerServiceV2Error("request_invalid")
+            typed = GuestRequestV2(
+                machine_id=canonical["machine_id"],
+                binding_id=canonical["binding_id"],
+                binding_version=canonical["binding_version"],
+                scheme=canonical["scheme"], host=canonical["host"],
+                port=canonical["port"], method=canonical["method"],
+                path=canonical["path"],
+                headers=header_items,
+                body=canonical["body"], content_type=canonical["content_type"],
+                deadline_ms=canonical["deadline_ms"],
+                correlation_id=canonical["correlation_id"],
+            )
+            request_digest = guest_request_digest_v2(typed)
         except ControllerServiceV2Error:
             raise
         except Exception:
             raise ControllerServiceV2Error("request_invalid") from None
-        deadline = now_ms + min(canonical["deadline_ms"], 30000)
+        deadline = now_ms + min(typed.deadline_ms, GUEST_V2_MAX_OPERATION_MS)
         with self._lock:
             if (self._closed or len(self._items) >= 16
                     or any(item["connection_identity"] == connection_identity
@@ -3057,7 +3432,7 @@ class _V2OperationRegistry:
                 raise ControllerServiceV2Error("capacity_exceeded")
             self._items[operation_id] = {
                 "operation_id": operation_id, "request_digest": request_digest,
-                "request": canonical, "connection_identity": connection_identity,
+                "request": typed, "connection_identity": connection_identity,
                 "request_received_at_unix_ms": now_ms,
                 "request_deadline_unix_ms": deadline, "state": "pending",
                 "claim_owner": None, "authorization": None, "identity": None,
@@ -3066,7 +3441,44 @@ class _V2OperationRegistry:
                 "terminal_code": None, "result": None,
             }
         return {"ok": True, "code": "credential_pending",
-                "correlation_id": canonical["correlation_id"]}
+                "correlation_id": typed.correlation_id}
+
+    def submit_typed_v2(self, request: GuestRequestV2, *, connection_identity: str,
+                        now_ms: int) -> dict[str, Any]:
+        """Admit only the canonical v2 guest type; never reconstruct BrokerRequest."""
+
+        if (type(request) is not GuestRequestV2 or not _identity(connection_identity)
+                or type(now_ms) is not int or request.machine_id != self._machine_id):
+            raise ControllerServiceV2Error("request_invalid")
+        deadline = now_ms + min(request.deadline_ms, GUEST_V2_MAX_OPERATION_MS)
+        with self._lock:
+            if (self._closed or len(self._items) >= MAX_ACTIVE_REQUESTS
+                    or any(item["connection_identity"] == connection_identity
+                           for item in self._items.values())):
+                raise ControllerServiceV2Error("capacity_exceeded")
+            try:
+                operation_id = self._id_factory()
+            except Exception:
+                raise ControllerServiceV2Error("request_invalid") from None
+            if (not isinstance(operation_id, str) or re.fullmatch(
+                    r"operation-[a-z0-9]{6,53}", operation_id) is None
+                    or operation_id in self._items or operation_id in self._tombstones):
+                raise ControllerServiceV2Error("capacity_exceeded")
+            self._items[operation_id] = {
+                "operation_id": operation_id,
+                "request_digest": guest_request_digest_v2(request),
+                "request": request,
+                "connection_identity": connection_identity,
+                "request_received_at_unix_ms": now_ms,
+                "request_deadline_unix_ms": deadline, "state": "pending",
+                "claim_owner": None, "authorization": None, "identity": None,
+                "descriptor": None, "descriptor_closer": None,
+                "lease": None, "lease_connection": None,
+                "terminal_code": None, "result": None,
+            }
+        return {"ok": True, "code": "credential_pending",
+                "correlation_id": request.correlation_id,
+                "operation_id": operation_id}
 
     def claim_next(self, *, owner: str, reply_to: int, sequence: int,
                    now_ms: int) -> dict[str, Any]:
@@ -3083,7 +3495,7 @@ class _V2OperationRegistry:
                 item["claim_owner"] = owner
                 request = item["request"]
                 header_bytes = sum(len(name.encode("ascii")) + len(value.encode("utf-8")) + 4
-                                   for name, value in request["headers"].items())
+                                   for name, value in request.headers)
                 return {
                     "protocol": CONTROLLER_PROTOCOL_V2, "type": "CLAIMED_V2",
                     "machine_id": self._machine_id, "broker_epoch": self._broker_epoch,
@@ -3091,14 +3503,14 @@ class _V2OperationRegistry:
                     "reply_to": reply_to, "claim_state": "claimed",
                     "operation_id": item["operation_id"],
                     "request_digest": item["request_digest"],
-                    "binding_id": request["binding_id"],
-                    "binding_version": request["binding_version"],
-                    "scheme": request["scheme"], "host": request["host"],
-                    "port": request["port"], "method": request["method"],
-                    "path": request["path"], "content_type": request["content_type"],
-                    "header_bytes": header_bytes, "body_bytes": len(request["body"]),
+                    "binding_id": request.binding_id,
+                    "binding_version": request.binding_version,
+                    "scheme": request.scheme, "host": request.host,
+                    "port": request.port, "method": request.method,
+                    "path": request.path, "content_type": request.content_type,
+                    "header_bytes": header_bytes, "body_bytes": len(request.body),
                     "request_deadline_unix_ms": item["request_deadline_unix_ms"],
-                    "correlation_id": request["correlation_id"],
+                    "correlation_id": request.correlation_id,
                 }
         return {
             "protocol": CONTROLLER_PROTOCOL_V2, "type": "CLAIMED_V2",
@@ -3114,8 +3526,8 @@ class _V2OperationRegistry:
             if (item is None or item["state"] != "claimed"
                     or item["claim_owner"] != self._owner
                     or item["request_digest"] != message["request_digest"]
-                    or item["request"]["binding_id"] != message["binding_id"]
-                    or item["request"]["binding_version"] != message["binding_version"]
+                    or item["request"].binding_id != message["binding_id"]
+                    or item["request"].binding_version != message["binding_version"]
                     or item["request_deadline_unix_ms"] <= now_ms):
                 if item is not None:
                     self._terminalize_locked(item, "binding_mismatch")
@@ -3129,7 +3541,7 @@ class _V2OperationRegistry:
             item = self._items.get(operation_id)
             if item is None or item["state"] != "claimed":
                 raise ControllerServiceV2Error("authorization_mismatch")
-            return item["request_deadline_unix_ms"], item["request"]["binding_version"]
+            return item["request_deadline_unix_ms"], item["request"].binding_version
 
     def claim_temporal_context(self, operation_id: str) -> dict[str, int]:
         with self._lock:
@@ -3148,8 +3560,8 @@ class _V2OperationRegistry:
             if (item is None or item["state"] != "claimed"
                     or item["claim_owner"] != self._owner
                     or item["request_digest"] != message["request_digest"]
-                    or item["request"]["binding_id"] != message["binding_id"]
-                    or item["request"]["binding_version"] != message["binding_version"]):
+                    or item["request"].binding_id != message["binding_id"]
+                    or item["request"].binding_version != message["binding_version"]):
                 raise ControllerServiceV2Error("refusal_mismatch")
             self._terminalize_locked(item, message["reason_code"])
 
@@ -3271,7 +3683,7 @@ class _V2OperationRegistry:
         item["result"] = {
             "ok": False, "state": item["state"],
             "code": item["terminal_code"],
-            "correlation_id": item["request"]["correlation_id"],
+            "correlation_id": item["request"].correlation_id,
         }
         self._tombstones.add(item["operation_id"])
         first_failure = None
@@ -3309,7 +3721,7 @@ class _V2OperationRegistry:
     def revoke(self, binding_id: str) -> int:
         with self._lock:
             selected = [item for item in self._items.values()
-                        if item["request"]["binding_id"] == binding_id
+                        if item["request"].binding_id == binding_id
                         and item["state"] not in {"refused", "completed"}]
             for item in selected:
                 self._terminalize_locked(item, "revoked")
@@ -3320,7 +3732,9 @@ class _V2OperationRegistry:
     def expire(self, now_ms: int) -> int:
         with self._lock:
             selected = [item for item in self._items.values()
-                        if item["state"] not in {"refused", "completed"}
+                        if item["state"] in {"pending", "claimed", "authorized",
+                                             "lease_attempted", "lease_bound",
+                                             "pre_audited"}
                         and (item["request_deadline_unix_ms"] <= now_ms
                              or (item["authorization"] is not None and
                                  item["authorization"]["authorization_expires_at_unix_ms"] <= now_ms))]
@@ -3339,6 +3753,13 @@ class _V2OperationRegistry:
         with self._lock:
             return sum(item["state"] not in {"refused", "completed", "indeterminate"}
                        for item in self._items.values())
+
+    def connection_identity(self, operation_id: str) -> str:
+        with self._lock:
+            item = self._items.get(operation_id)
+            if item is None:
+                raise ControllerServiceV2Error("request_invalid")
+            return item["connection_identity"]
 
     def quiesce_pre_effect(self, code: str) -> int:
         """Close operations that cannot have an effect; retain possible effects to drain."""
@@ -3368,7 +3789,8 @@ class _V2OperationRegistry:
                     self._terminalize_locked(item, "deadline_exceeded")
                 raise ControllerServiceV2Error("lease_invalid")
             return {
-                "request": dict(item["request"]), "descriptor": item["descriptor"],
+                "request": item["request"],
+                "descriptor": item["descriptor"],
                 "authorization": dict(item["authorization"]),
                 "lease": dict(item["lease"]),
                 "lease_connection": item["lease_connection"],
@@ -3426,7 +3848,7 @@ class _V2OperationRegistry:
             item["result"] = {
                 "ok": target == "completed", "state": target,
                 "code": item["terminal_code"],
-                "correlation_id": item["request"]["correlation_id"],
+                "correlation_id": item["request"].correlation_id,
             }
             self._tombstones.add(operation_id)
         try:
@@ -3452,7 +3874,7 @@ class _V2OperationRegistry:
             if result is None:
                 result = {"ok": True, "state": "credential_pending",
                           "code": "credential_pending",
-                          "correlation_id": item["request"]["correlation_id"]}
+                          "correlation_id": item["request"].correlation_id}
             public = dict(result)
             if consume and item["state"] in {"refused", "completed", "indeterminate"}:
                 self._items.pop(item["operation_id"], None)
@@ -3473,7 +3895,7 @@ class _V2OperationRegistry:
             item["result"] = {
                 "ok": False, "state": "indeterminate",
                 "code": item["terminal_code"],
-                "correlation_id": item["request"]["correlation_id"],
+                "correlation_id": item["request"].correlation_id,
             }
             self._tombstones.add(operation_id)
         if descriptor is not None and callable(closer):
@@ -3493,6 +3915,185 @@ class _V2OperationRegistry:
     @property
     def terminal_code(self) -> str | None:
         return self._terminal_code
+
+
+class PinnedHTTPSCredentialEffectV2(EffectExecutionV2):
+    """One no-retry HTTPS effect over an already authorized DNS/IP decision."""
+
+    def __init__(self, upstream: VerifiedHttpsUpstream, *, destination_authority,
+                 descriptor_reader=os.pread, wall_clock_ms=None) -> None:
+        if (not isinstance(upstream, VerifiedHttpsUpstream) or not callable(descriptor_reader)
+                or type(destination_authority) is not ExactNftDestinationSetAuthorityV2
+                or (wall_clock_ms is not None and not callable(wall_clock_ms))):
+            raise ControllerServiceV2Error("effect_executor_invalid")
+        super().__init__()
+        self._upstream = upstream
+        self._descriptor_reader = descriptor_reader
+        self._destination_authority = destination_authority
+        self._wall_clock_ms = wall_clock_ms or (lambda: int(time.time() * 1000))
+
+    def execute_authorized(self, context: AuthorizedEffectContextV2,
+                           descriptor: int) -> EffectExecutionResultV2:
+        material = bytearray()
+        transport = None
+        headers = {}
+        reflected = bytearray()
+        raw = b""
+        credential = None
+        result = None
+        response_headers = None
+        try:
+            raw = self._descriptor_reader(descriptor, context.descriptor_size, 0)
+            if type(raw) is not bytes or len(raw) != context.descriptor_size:
+                raise GuestProtocolV2Error("effect_indeterminate")
+            material.extend(raw)
+            raw = b""
+            try:
+                credential = material.decode("ascii")
+            except UnicodeDecodeError:
+                raise GuestProtocolV2Error("effect_indeterminate") from None
+            if (not credential or any(ord(character) < 33 or ord(character) > 126
+                                      for character in credential)):
+                raise GuestProtocolV2Error("effect_indeterminate")
+            request = context.request
+            current = self._wall_clock_ms()
+            deadline = min(
+                context.request_deadline_unix_ms,
+                context.binding_expires_at_unix_ms,
+                context.authorization_expires_at_unix_ms,
+                context.lease_expires_at_unix_ms,
+                context.activation_expires_at_unix_ms,
+            )
+            if type(current) is not int or current >= deadline:
+                return EffectExecutionResultV2(
+                    GuestResultV2.failure(
+                        state="indeterminate", code="deadline_exceeded",
+                        retryable=False, correlation_id=request.correlation_id),
+                    "effect_entered", "indeterminate", "possible",
+                    "deadline_exceeded")
+            remaining_seconds = (deadline - current) / 1000.0
+            headers = dict(request.headers)
+            headers["host"] = context.egress_decision.hostname
+            headers["content-length"] = str(len(request.body))
+            if request.content_type is not None:
+                headers["content-type"] = request.content_type
+            if context.auth_form == "authorization_bearer":
+                headers["authorization"] = "Bearer " + credential
+            else:
+                headers["x-api-key"] = credential
+            try:
+                header_bytes = sum(
+                    len(name.encode("ascii")) + len(value.encode("latin-1")) + 4
+                    for name, value in headers.items())
+            except Exception:
+                raise GuestProtocolV2Error("effect_indeterminate") from None
+            if header_bytes > 64 * 1024:
+                raise GuestProtocolV2Error("effect_indeterminate")
+            timeout = min(
+                self._upstream.connect_seconds, self._upstream.idle_seconds,
+                request.deadline_ms / 1000.0, remaining_seconds,
+            )
+            address = self._destination_authority.consume(context.egress_decision)
+            transport = self._upstream.connector(
+                address, context.egress_decision.sni_hostname,
+                context.egress_decision.port, timeout, self._upstream.ssl_context,
+            )
+            after_connect = self._wall_clock_ms()
+            if type(after_connect) is not int or after_connect < current or after_connect >= deadline:
+                raise GuestProtocolV2Error("effect_indeterminate")
+            remaining_seconds = (deadline - after_connect) / 1000.0
+            result = transport.request(
+                request.method, request.path, headers, request.body,
+                min(self._upstream.idle_seconds, request.deadline_ms / 1000.0,
+                    remaining_seconds),
+            )
+            if not isinstance(result, Mapping):
+                raise GuestProtocolV2Error("effect_indeterminate")
+            status, body = result.get("status"), result.get("body", b"")
+            response_headers = result.get("headers", {})
+            if (type(status) is not int or type(body) is not bytes
+                    or not isinstance(response_headers, Mapping)
+                    or len(body) > MAX_GUEST_RESULT_BODY_BYTES):
+                raise GuestProtocolV2Error("effect_indeterminate")
+            if not 200 <= status <= 299:
+                guest = GuestResultV2.failure(
+                    state="indeterminate", code="upstream_refused", retryable=False,
+                    correlation_id=request.correlation_id,
+                )
+                return EffectExecutionResultV2(
+                    guest, "effect_entered", "indeterminate", "completed",
+                    "upstream_refused")
+            # The credential boundary never reflects upstream-controlled fields.
+            # Status is the only successful upstream datum delivered to the guest;
+            # all body/header/ETag fields are consumed and wiped below.
+            reflected.extend(body)
+            guest = GuestResultV2.success(
+                status, (), b"", request.correlation_id)
+            return EffectExecutionResultV2(
+                guest, "effect_entered", "completed", "completed",
+                "upstream_completed")
+        except GuestProtocolV2Error:
+            raise
+        except Exception:
+            raise GuestProtocolV2Error("effect_indeterminate") from None
+        finally:
+            close = getattr(transport, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            for index in range(len(material)):
+                material[index] = 0
+            for index in range(len(reflected)):
+                reflected[index] = 0
+            headers.clear()
+            raw = b""
+            credential = None
+            transport = None
+            response_headers = None
+            result = None
+
+
+class ExactNftDestinationSetReceiptV2:
+    __slots__ = ("projection_digest", "addresses", "selected_address", "_sealed")
+
+    def __init__(self, projection_digest: str, addresses: tuple[str, ...],
+                 selected_address: str) -> None:
+        object.__setattr__(self, "projection_digest", projection_digest)
+        object.__setattr__(self, "addresses", addresses)
+        object.__setattr__(self, "selected_address", selected_address)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, _name, _value):
+        if getattr(self, "_sealed", False):
+            raise AttributeError("immutable receipt")
+        object.__setattr__(self, _name, _value)
+
+
+class ExactNftDestinationSetAuthorityV2:
+    """Consume one kernel-observed exact nft set and return its pinned peer."""
+
+    __slots__ = ("_observer",)
+
+    def __init__(self, observer) -> None:
+        if not callable(observer):
+            raise ControllerServiceV2Error("egress_authority_invalid")
+        self._observer = observer
+
+    def consume(self, decision: AuthorizedEgressDecisionV2) -> str:
+        if type(decision) is not AuthorizedEgressDecisionV2:
+            raise ControllerServiceV2Error("egress_authority_invalid")
+        try:
+            receipt = self._observer(decision)
+        except Exception:
+            raise ControllerServiceV2Error("egress_authority_unavailable") from None
+        if (type(receipt) is not ExactNftDestinationSetReceiptV2
+                or receipt.projection_digest != decision.projection_digest
+                or receipt.addresses != decision.nft_destination_set
+                or receipt.selected_address not in receipt.addresses):
+            raise ControllerServiceV2Error("egress_authority_denied")
+        return receipt.selected_address
 
 
 _ACCEPTED_LEASE_SOCKET_ISSUER = object()
@@ -3871,6 +4472,7 @@ class BrokerControllerV2Connection:
         "_next_outgoing", "_lease_sequences", "_activation_expires_at",
         "_authority_lock", "_lease_endpoints", "_quiesced", "_claim_anchor",
         "_audit_lock",
+        "_audit_condition", "_audit_acks",
         "_composition_nonce", "_guest_submit_capability",
         "_guest_submit_validator", "_guest_submit_clock",
         "_lease_endpoint_factory",
@@ -3920,6 +4522,8 @@ class BrokerControllerV2Connection:
         self._quiesced = False
         self._claim_anchor = None
         self._audit_lock = threading.Lock()
+        self._audit_condition = threading.Condition()
+        self._audit_acks = {}
         self._composition_nonce = object()
         self._guest_submit_capability = None
         self._guest_submit_validator = None
@@ -4102,6 +4706,33 @@ class BrokerControllerV2Connection:
             raise ControllerServiceV2Error(
                 closed["code"] if not closed["ok"] else "broker_send_failed"
             ) from None
+
+    def route_audit_ack_v2(self, value: Mapping[str, Any]) -> None:
+        """Route one authenticated ACK from the sole controller reader."""
+
+        if (not isinstance(value, Mapping) or value.get("type") != "AUDIT_ACK_V2"
+                or type(value.get("reply_to")) is not int):
+            raise ControllerServiceV2Error("audit_ack_invalid")
+        with self._audit_condition:
+            reply_to = value["reply_to"]
+            if reply_to in self._audit_acks:
+                raise ControllerServiceV2Error("audit_ack_invalid")
+            self._audit_acks[reply_to] = dict(value)
+            self._audit_condition.notify_all()
+
+    def wait_audit_ack_v2(self, reply_to: int, timeout_seconds: float) -> dict[str, Any] | None:
+        if (type(reply_to) is not int or isinstance(timeout_seconds, bool)
+                or not isinstance(timeout_seconds, (int, float))
+                or not 0 <= timeout_seconds <= 1.0):
+            raise ControllerServiceV2Error("audit_ack_invalid")
+        deadline = time.monotonic() + timeout_seconds
+        with self._audit_condition:
+            while reply_to not in self._audit_acks and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining < 0:
+                    return None
+                self._audit_condition.wait(remaining)
+            return self._audit_acks.pop(reply_to, None)
 
     def _submit_bound_guest_v2(self, capability, request: Any, *,
                                connection_identity: str) -> dict[str, Any]:
@@ -4771,17 +5402,45 @@ class BrokerControllerV2Connection:
             self._terminalize_pre_effect_v2("revoked")
         self.close(code)
 
-    def execute_effect_v2(self, operation_id: str, *, audit_id_factory,
-                          executor: CredentialEffectExecutorV2, observer,
-                          so_peercred: int, scm_credentials: int, scm_rights: int,
-                          closer, monotonic, wall_clock) -> dict[str, Any]:
+    def execute_effect_v2(self, operation_id: str, *,
+                          egress_decision: AuthorizedEgressDecisionV2,
+                          audit_id_factory, executor: EffectExecutionV2,
+                          monotonic, wall_clock) -> dict[str, Any]:
         """Run one connection-owned PRE/effect/POST/ACK flow without effect replay."""
 
-        if (not callable(audit_id_factory) or not isinstance(executor, CredentialEffectExecutorV2)
-                or not callable(observer) or not callable(closer)
-                or not callable(monotonic) or not callable(wall_clock)
-                or any(type(value) is not int for value in (
-                    so_peercred, scm_credentials, scm_rights))):
+        return self._execute_effect_flow_v2(
+            operation_id, egress_decision=egress_decision,
+            audit_id_factory=audit_id_factory, executor=executor,
+            monotonic=monotonic, wall_clock=wall_clock,
+            pre_effect_refusal=None)
+
+    def refuse_effect_v2(self, operation_id: str, *, reason_code: str,
+                         audit_id_factory, monotonic, wall_clock) -> dict[str, Any]:
+        """Durably refuse after PRE without entering or replaying an effect."""
+
+        if reason_code != "egress_denied":
+            raise ControllerServiceV2Error("effect_executor_invalid")
+        return self._execute_effect_flow_v2(
+            operation_id, egress_decision=None,
+            audit_id_factory=audit_id_factory, executor=None,
+            monotonic=monotonic, wall_clock=wall_clock,
+            pre_effect_refusal=reason_code)
+
+    def _execute_effect_flow_v2(self, operation_id: str, *,
+                                egress_decision,
+                                audit_id_factory, executor,
+                                monotonic, wall_clock,
+                                pre_effect_refusal: str | None) -> dict[str, Any]:
+
+        typed_effect = pre_effect_refusal is None
+        if (((typed_effect and (type(egress_decision) is not AuthorizedEgressDecisionV2
+                                or type(executor) is EffectExecutionV2
+                                or not isinstance(executor, EffectExecutionV2)))
+                or (not typed_effect and (pre_effect_refusal != "egress_denied"
+                                           or egress_decision is not None
+                                           or executor is not None)))
+                or not callable(audit_id_factory)
+                or not callable(monotonic) or not callable(wall_clock)):
             raise ControllerServiceV2Error("effect_executor_invalid")
 
         def fresh_now() -> int:
@@ -4791,33 +5450,8 @@ class BrokerControllerV2Connection:
             except Exception:
                 raise ControllerServiceV2Error("clock_uncertain") from None
 
-        def receive_ack(timeout_seconds: float, now_ms: int) -> dict[str, Any]:
-            setter = getattr(self.connection, "settimeout", None)
-            if callable(setter):
-                setter(timeout_seconds)
-            packet, observed = receive_authenticated_packet_v2(
-                self.connection, expected=self.config.controller, observer=observer,
-                so_peercred=so_peercred, scm_credentials=scm_credentials,
-                scm_rights=scm_rights, closer=closer,
-            )
-            if observed != self.config.controller:
-                raise ControllerServiceV2Error("audit_ack_provenance_invalid")
-            ack = decode_controller_frame_v2(
-                packet, direction="controller_to_broker", now_ms=now_ms,
-                observation=self._observation,
-            )
-            if (ack.get("machine_id") != self.config.machine_id
-                    or ack.get("broker_epoch") != self.broker_epoch
-                    or ack.get("controller_epoch") != self.controller_epoch):
-                raise ControllerServiceV2Error("audit_ack_provenance_invalid")
-            if ack.get("type") == "AUDIT_ACK_V2":
-                self.sequences.accept_audit_retry(
-                    "controller_to_broker", ack["sequence"])
-            else:
-                self.sequences.accept("controller_to_broker", ack["sequence"])
-            return ack
-
-        def exchange_semantic(message, *, phase, phase_id, fingerprint):
+        def exchange_semantic(message, *, phase, phase_id, fingerprint,
+                              absolute_wall_deadline: int):
             started = monotonic()
             if not isinstance(started, (int, float)):
                 raise ControllerServiceV2Error("clock_uncertain")
@@ -4827,14 +5461,28 @@ class BrokerControllerV2Connection:
                         or current - started >= 1.0):
                     return None
                 sent_at = fresh_now()
+                if sent_at > absolute_wall_deadline:
+                    return None
                 sent = self._send(message, now_ms=sent_at)
                 before_receive = monotonic()
                 if (not isinstance(before_receive, (int, float))
                         or before_receive < current or before_receive - started >= 1.0):
                     return None
-                remaining = 1.0 - (before_receive - started)
+                wall_now = fresh_now()
+                if wall_now > absolute_wall_deadline:
+                    return None
+                remaining = min(
+                    1.0 - (before_receive - started),
+                    (absolute_wall_deadline - wall_now) / 1000.0,
+                )
+                if remaining <= 0:
+                    return None
                 try:
-                    ack = receive_ack(remaining, fresh_now())
+                    ack = self.wait_audit_ack_v2(sent["sequence"], remaining)
+                    if ack is None:
+                        if attempt == 0:
+                            continue
+                        return None
                 except (TimeoutError, socket.timeout):
                     if attempt == 0:
                         continue
@@ -4860,6 +5508,30 @@ class BrokerControllerV2Connection:
                 self._require_admission_v2(start_now)
                 context = self.operations.effect_context(operation_id, now_ms=start_now)
             authorization, lease = context["authorization"], context["lease"]
+            request = context["request"]
+            try:
+                effect_context = None if not typed_effect else AuthorizedEffectContextV2(
+                    request=request, egress_decision=egress_decision,
+                    egress_digest=authorization["egress_digest"],
+                    machine_id=self.config.machine_id, broker_epoch=self.broker_epoch,
+                    controller_epoch=self.controller_epoch, operation_id=operation_id,
+                    request_digest=authorization["request_digest"],
+                    binding_id=authorization["binding_id"],
+                    binding_version=authorization["binding_version"],
+                    decision_id=authorization["decision_id"],
+                    authorization_digest=authorization["authorization_digest"],
+                    auth_form=authorization["auth_form"], lease_id=lease["lease_id"],
+                    lease_sequence=lease["lease_sequence"],
+                    descriptor_size=lease["descriptor_size"],
+                    request_deadline_unix_ms=context["request_deadline_unix_ms"],
+                    binding_expires_at_unix_ms=authorization["binding_expires_at_unix_ms"],
+                    authorization_expires_at_unix_ms=authorization[
+                        "authorization_expires_at_unix_ms"],
+                    lease_expires_at_unix_ms=lease["lease_expires_at_unix_ms"],
+                    activation_expires_at_unix_ms=self._activation_expires_at)
+            except Exception:
+                self.operations.terminalize_known(operation_id, "internal_refusal")
+                raise ControllerServiceV2Error("effect_context_invalid") from None
             lease_connection = context["lease_connection"]
             if (not isinstance(lease_connection, _V2AuthenticatedLeaseConnection)
                     or lease_connection.machine_id != self.config.machine_id
@@ -4899,9 +5571,12 @@ class BrokerControllerV2Connection:
                            "audit_fingerprint": pre_fingerprint,
                            "event_code": "credential_effect_pre"}
             try:
+                pre_deadline = min(
+                    start_now + 1000, context["request_deadline_unix_ms"])
                 pre_ack = exchange_semantic(pre_message, phase="pre",
                                             phase_id=pre_phase_id,
-                                            fingerprint=pre_fingerprint)
+                                            fingerprint=pre_fingerprint,
+                                            absolute_wall_deadline=pre_deadline)
             except Exception as exc:
                 self._indeterminate_disconnect_v2(operation_id, "audit_unavailable")
                 raise ControllerServiceV2Error("audit_unavailable") from None
@@ -4918,20 +5593,36 @@ class BrokerControllerV2Connection:
                        or before_effect >= lease["lease_expires_at_unix_ms"]
                        or self._activation_expires_at is None
                        or before_effect >= self._activation_expires_at)
-            if expired:
-                result = EffectResultV2(
-                    "refused", "none", "revoked" if self._quiesced else "deadline_exceeded")
+            if pre_effect_refusal is not None:
+                guest = GuestResultV2.failure(
+                    state="refused", code=pre_effect_refusal,
+                    retryable=False, correlation_id=request.correlation_id)
+                result = EffectExecutionResultV2(
+                    guest, "pre_effect", "refused", "none", pre_effect_refusal)
+                prior_state = "pre_audited"
+            elif expired:
+                guest = GuestResultV2.failure(
+                    state="refused",
+                    code="revoked" if self._quiesced else "deadline_exceeded",
+                    retryable=False, correlation_id=request.correlation_id)
+                result = EffectExecutionResultV2(
+                    guest, "pre_effect", "refused", "none", guest.outcome_code)
                 prior_state = "pre_audited"
             else:
                 self.operations.transition_effect(operation_id, "pre_audited", "effect_possible")
                 prior_state = "effect_possible"
                 try:
-                    result = executor.execute(context["request"], context["descriptor"])
-                    if not isinstance(result, EffectResultV2):
-                        raise RuntimeError("invalid typed result")
+                    result = executor.execute(effect_context, context["descriptor"])
+                    if (type(result) is not EffectExecutionResultV2
+                            or result.effect_phase != "effect_entered"):
+                        raise GuestProtocolV2Error("effect_indeterminate")
                 except Exception:
-                    result = EffectResultV2(
-                        "indeterminate", "possible", "internal_indeterminate")
+                    result = EffectExecutionResultV2(
+                        GuestResultV2.failure(
+                            state="indeterminate", code="internal_indeterminate",
+                            retryable=False, correlation_id=request.correlation_id),
+                        "effect_entered", "indeterminate", "possible",
+                        "internal_indeterminate")
 
             post_values = {**base, "phase_id": post_phase_id,
                            "pre_commit_id": pre_ack["commit_id"],
@@ -4950,9 +5641,13 @@ class BrokerControllerV2Connection:
                             "effect_certainty": result.effect_certainty,
                             "reason_code": result.reason_code}
             try:
+                post_started = fresh_now()
+                post_deadline = post_ack_deadline_v2(
+                    post_started, context["request_deadline_unix_ms"])
                 post_ack = exchange_semantic(post_message, phase="post",
                                              phase_id=post_phase_id,
-                                             fingerprint=post_fingerprint)
+                                             fingerprint=post_fingerprint,
+                                             absolute_wall_deadline=post_deadline)
             except Exception:
                 post_ack = None
             if post_ack is None:
@@ -4960,8 +5655,11 @@ class BrokerControllerV2Connection:
                 raise ControllerServiceV2Error("effect_indeterminate")
             self.operations.transition_effect(operation_id, prior_state, "post_audited")
             try:
+                post_ack_received = fresh_now()
+                ack_send_deadline = broker_ack_send_deadline_v2(
+                    post_ack_received, context["request_deadline_unix_ms"])
                 ack_now = fresh_now()
-                if ack_now > context["request_deadline_unix_ms"] + 1000:
+                if ack_now > ack_send_deadline:
                     raise ControllerServiceV2Error("lease_ack_failed")
                 acknowledgement = encode_lease_ack_v2({
                     "type": "LEASE_ACK_V2", "machine_id": self.config.machine_id,
@@ -4987,6 +5685,8 @@ class BrokerControllerV2Connection:
             return {"ok": result.outcome_class == "completed", "code": result.reason_code,
                     "outcome_class": result.outcome_class,
                     "effect_certainty": result.effect_certainty,
+                    "effect_phase": result.effect_phase,
+                    "guest_result": result.guest_result,
                     "audit_root_id": audit_root_id, "post_phase_id": post_phase_id,
                     "post_commit_id": post_ack["commit_id"]}
 
@@ -5080,6 +5780,8 @@ class BrokerControllerV2Connection:
             except Exception:
                 if self._terminal_code == "broker_controller_closed":
                     self._terminal_code = "controller_socket_cleanup_failed"
+            with self._audit_condition:
+                self._audit_condition.notify_all()
             try:
                 self._on_terminal(
                     reason if isinstance(reason, str) else "controller_disconnected"
@@ -5912,28 +6614,950 @@ def live_transport_status() -> dict[str, Any]:
     return bounded_error("live_transport_unproven")
 
 
+class _GuestV2Connection:
+    """Exactly one canonical request and one terminal result send attempt."""
+
+    __slots__ = ("raw", "identity", "request", "received_at_unix_ms",
+                 "deadline_unix_ms", "_closed", "_result_attempted")
+
+    def __init__(self, raw, identity: str, request: GuestRequestV2,
+                 received_at_unix_ms: int) -> None:
+        self.raw = raw
+        self.identity = identity
+        self.request = request
+        self.received_at_unix_ms = received_at_unix_ms
+        self.deadline_unix_ms = received_at_unix_ms + request.deadline_ms
+        self._closed = False
+        self._result_attempted = False
+
+    def deliver(self, result: GuestResultV2) -> None:
+        if (self._closed or self._result_attempted or type(result) is not GuestResultV2
+                or result.correlation_id != self.request.correlation_id):
+            raise ControllerServiceV2Error("guest_result_invalid")
+        self._result_attempted = True
+        try:
+            self.raw.sendall(encode_guest_result_v2(result))
+        except Exception:
+            raise ControllerServiceV2Error("guest_disconnected") from None
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if not self._closed:
+            self.raw.close()
+            self._closed = True
+
+
+class LinuxGuestV2Listener:
+    """Closed-first SBG2 listener over one sealed private-veth tuple."""
+
+    __slots__ = ("plan", "projection", "_topology_observer", "_socket_factory",
+                 "_clock", "_so_bindtodevice", "listener", "admission_open", "_closed",
+                 "_active", "_terminal_code", "_capacity_lock", "_reservations")
+
+    def __init__(self, plan: DerivedServiceConfigV2, *, topology_observer,
+                 socket_factory=socket.socket, clock=None, so_bindtodevice=None) -> None:
+        so_bindtodevice = getattr(socket, "SO_BINDTODEVICE", None) \
+            if so_bindtodevice is None else so_bindtodevice
+        if (not isinstance(plan, DerivedServiceConfigV2) or plan.component != "broker"
+                or plan.document["guest_endpoint_identity"] != "credential-broker-guest-v2"
+                or not callable(topology_observer) or not callable(socket_factory)
+                or (clock is not None and not callable(clock))
+                or type(so_bindtodevice) is not int or so_bindtodevice < 1):
+            raise ControllerServiceV2Error("guest_listener_invalid")
+        item = plan.document["guest_transport_projection"]
+        self.plan = plan
+        self.projection = GuestTransportProjectionV2(
+            item["machine_id"], item["interface"], item["subnet"],
+            item["broker_address"], item["guest_address"])
+        self._topology_observer = topology_observer
+        self._socket_factory = socket_factory
+        self._clock = clock or (lambda: int(time.time() * 1000))
+        self._so_bindtodevice = so_bindtodevice
+        self.listener = None
+        self.admission_open = False
+        self._closed = False
+        self._active = {}
+        self._capacity_lock = threading.Lock()
+        self._reservations = set()
+        self._terminal_code = None
+
+    def _reserve(self) -> str:
+        with self._capacity_lock:
+            if (self._closed or self.listener is None or not self.admission_open
+                    or len(self._reservations) >= MAX_ACTIVE_REQUESTS):
+                raise ControllerServiceV2Error("admission_closed")
+            identity = "guest-v2-" + uuid.uuid4().hex
+            self._reservations.add(identity)
+            return identity
+
+    def release_reservation(self, identity: str) -> None:
+        with self._capacity_lock:
+            self._reservations.discard(identity)
+
+    def start(self, *, platform: str, effective_uid: int) -> dict[str, Any]:
+        if (self._closed or self.listener is not None or platform != "linux"
+                or type(effective_uid) is not int or effective_uid < 1
+                or effective_uid != self.plan.document["service_uid"]):
+            raise ControllerServiceV2Error("guest_listener_start_refused")
+        listener = None
+        try:
+            listener = self._socket_factory(socket.AF_INET, socket.SOCK_STREAM, 0)
+            interface = self.projection.interface.encode("ascii") + b"\0"
+            listener.setsockopt(socket.SOL_SOCKET, self._so_bindtodevice, interface)
+            readback = listener.getsockopt(
+                socket.SOL_SOCKET, self._so_bindtodevice, len(interface) + 16)
+            if (type(readback) is not bytes
+                    or readback.rstrip(b"\0") != interface.rstrip(b"\0")):
+                raise ControllerServiceV2Error("guest_listener_start_refused")
+            listener.bind((self.projection.broker_address, self.projection.port))
+            listener.listen(MAX_ACTIVE_REQUESTS)
+        except Exception:
+            cleanup_failed = False
+            if listener is not None:
+                try:
+                    listener.close()
+                except Exception:
+                    cleanup_failed = True
+            raise ControllerServiceV2Error(
+                "guest_listener_cleanup_failed" if cleanup_failed
+                else "guest_listener_start_refused") from None
+        self.listener = listener
+        return {"ok": True, "code": "guest_listener_started",
+                "admission_open": False}
+
+    def set_admission(self, value: bool) -> None:
+        with self._capacity_lock:
+            if type(value) is not bool or self._closed or self.listener is None:
+                raise ControllerServiceV2Error("guest_listener_closed")
+            self.admission_open = value
+
+    @staticmethod
+    def _receive_packet(connection) -> bytes:
+        connection.settimeout(GUEST_V2_INACTIVITY_SECONDS)
+        header = _recv_exact(connection, 9)
+        try:
+            magic, version, size = struct.unpack("!4sBI", header)
+        except Exception:
+            raise ControllerServiceV2Error("request_invalid") from None
+        if (magic != b"SBG2" or version != 2
+                or size > MAX_GUEST_FRAME_BYTES - 9):
+            raise ControllerServiceV2Error("request_invalid")
+        packet = header + _recv_exact(connection, size)
+        try:
+            trailing = connection.recv(
+                1, getattr(socket, "MSG_PEEK", 0) | getattr(socket, "MSG_DONTWAIT", 0))
+        except (BlockingIOError, InterruptedError):
+            trailing = b""
+        if trailing:
+            raise ControllerServiceV2Error("request_invalid")
+        return packet
+
+    @staticmethod
+    def receive_packet_bounded(connection, *, accepted_at: float, monotonic) -> bytes:
+        """Read one frame with progress inactivity and one absolute bound."""
+
+        if (not callable(monotonic) or isinstance(accepted_at, bool)
+                or not isinstance(accepted_at, (int, float))):
+            raise ControllerServiceV2Error("clock_uncertain")
+        absolute = accepted_at + (GUEST_V2_MAX_OPERATION_MS / 1000.0)
+        idle = accepted_at + GUEST_V2_INACTIVITY_SECONDS
+        data = bytearray()
+        target = 9
+        while len(data) < target:
+            try:
+                current = monotonic()
+                if (isinstance(current, bool) or not isinstance(current, (int, float))
+                        or current < accepted_at or current >= min(idle, absolute)):
+                    raise ControllerServiceV2Error("deadline_exceeded")
+                connection.settimeout(min(idle, absolute) - current)
+                chunk = connection.recv(target - len(data))
+            except ControllerServiceV2Error:
+                raise
+            except (TimeoutError, socket.timeout):
+                raise ControllerServiceV2Error("deadline_exceeded") from None
+            except Exception:
+                raise ControllerServiceV2Error("request_invalid") from None
+            if type(chunk) is not bytes or not chunk:
+                raise ControllerServiceV2Error("request_invalid")
+            data.extend(chunk)
+            try:
+                progressed = monotonic()
+            except Exception:
+                raise ControllerServiceV2Error("clock_uncertain") from None
+            if (isinstance(progressed, bool) or not isinstance(progressed, (int, float))
+                    or progressed < current or progressed >= absolute):
+                raise ControllerServiceV2Error("deadline_exceeded")
+            idle = min(absolute, progressed + GUEST_V2_INACTIVITY_SECONDS)
+            if len(data) == 9:
+                try:
+                    magic, version, size = struct.unpack("!4sBI", data)
+                except Exception:
+                    raise ControllerServiceV2Error("request_invalid") from None
+                if magic != b"SBG2" or version != 2 or size > MAX_GUEST_FRAME_BYTES - 9:
+                    raise ControllerServiceV2Error("request_invalid")
+                target = 9 + size
+        return bytes(data)
+
+    def accept_transport_once(self):
+        """Accept and prove transport only; a service-owned worker reads bytes."""
+
+        identity = self._reserve()
+        connection = None
+        try:
+            connection, peer = self.listener.accept()
+            observed = self._topology_observer(connection, self.projection, peer)
+            if not verify_guest_transport_v2(self.projection, observed):
+                raise ControllerServiceV2Error("guest_transport_denied")
+            received = self._clock()
+            if type(received) is not int:
+                raise ControllerServiceV2Error("clock_uncertain")
+            return connection, identity, received
+        except Exception as exc:
+            self.release_reservation(identity)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    self._terminal_code = self._terminal_code or "guest_socket_cleanup_failed"
+            code = exc.code if isinstance(exc, ControllerServiceV2Error) else "request_invalid"
+            raise ControllerServiceV2Error(self._terminal_code or code) from None
+
+    def retain_request(self, connection, identity: str, received: int,
+                       request: GuestRequestV2) -> _GuestV2Connection:
+        with self._capacity_lock:
+            if (type(request) is not GuestRequestV2
+                    or request.machine_id != self.plan.machine_id
+                    or identity not in self._reservations
+                    or identity in self._active):
+                raise ControllerServiceV2Error("request_invalid")
+            owned = _GuestV2Connection(connection, identity, request, received)
+            self._active[identity] = owned
+        return owned
+
+    def accept_once(self) -> _GuestV2Connection:
+        identity = self._reserve()
+        connection = None
+        try:
+            connection, peer = self.listener.accept()
+            observed = self._topology_observer(connection, self.projection, peer)
+            if not verify_guest_transport_v2(self.projection, observed):
+                raise ControllerServiceV2Error("guest_transport_denied")
+            received = self._clock()
+            if type(received) is not int:
+                raise ControllerServiceV2Error("clock_uncertain")
+            request = decode_guest_request_v2(self._receive_packet(connection))
+            if request.machine_id != self.plan.machine_id:
+                raise ControllerServiceV2Error("request_invalid")
+            owned = _GuestV2Connection(connection, identity, request, received)
+            with self._capacity_lock:
+                if identity not in self._reservations or identity in self._active:
+                    raise ControllerServiceV2Error("request_invalid")
+                self._active[identity] = owned
+            return owned
+        except Exception as exc:
+            self.release_reservation(identity)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    if self._terminal_code is None:
+                        self._terminal_code = "guest_socket_cleanup_failed"
+            code = exc.code if isinstance(exc, ControllerServiceV2Error) else "request_invalid"
+            raise ControllerServiceV2Error(self._terminal_code or code) from None
+
+    def release(self, identity: str) -> bool:
+        with self._capacity_lock:
+            connection = self._active.get(identity)
+        if connection is not None:
+            connection.close()
+            with self._capacity_lock:
+                if self._active.get(identity) is connection:
+                    self._active.pop(identity, None)
+                    self._reservations.discard(identity)
+            return True
+        with self._capacity_lock:
+            self._reservations.discard(identity)
+        return False
+
+    def expire(self, now_ms: int) -> int:
+        with self._capacity_lock:
+            selected = [identity for identity, connection in self._active.items()
+                        if connection.deadline_unix_ms <= now_ms]
+        for identity in selected:
+            self.release(identity)
+        return len(selected)
+
+    def close(self) -> dict[str, Any]:
+        if not self._closed:
+            with self._capacity_lock:
+                self._closed = True
+                self.admission_open = False
+                active = tuple(self._active)
+            for identity in active:
+                try:
+                    self.release(identity)
+                except Exception:
+                    self._terminal_code = self._terminal_code or "guest_socket_cleanup_failed"
+            listener, self.listener = self.listener, None
+            if listener is not None:
+                try:
+                    listener.close()
+                except Exception:
+                    self._terminal_code = self._terminal_code or "guest_listener_cleanup_failed"
+        return {"ok": self._terminal_code is None,
+                "code": self._terminal_code or "guest_listener_closed",
+                "admission_open": False}
+
+
+class CredentialBrokerServiceLoopV2:
+    """Own controller, lease, guest and effect work for one broker epoch."""
+
+    __slots__ = ("plan", "controller", "guest", "upstream", "dns_authority", "executor",
+                 "_clock", "_now_text", "_lease_listeners", "_guests",
+                 "_guest_operations", "_workers", "_closed", "_terminal_code", "_observer",
+                 "_descriptor_observer", "_descriptor_closer", "_closer",
+                 "_monotonic", "_audit_id_factory", "_so_peercred",
+                 "_so_passcred", "_scm_credentials", "_scm_rights", "_selector_factory",
+                 "_lease_socket_factory", "_reader_workers", "_pending_guest_sockets",
+                 "_worker_lock")
+
+    def __init__(self, plan: DerivedServiceConfigV2,
+                 controller: LinuxControllerV2Listener,
+                 guest: LinuxGuestV2Listener, upstream: VerifiedHttpsUpstream,
+                 dns_authority: AuthorizedDnsResolverV2,
+                 executor: EffectExecutionV2, *, clock, now_text, observer,
+                 descriptor_observer, descriptor_closer, closer,
+                 audit_id_factory, monotonic,
+                 so_peercred: int, so_passcred: int, scm_credentials: int, scm_rights: int,
+                 selector_factory=selectors.DefaultSelector,
+                 lease_socket_factory=socket.socket) -> None:
+        document = plan.document if isinstance(plan, DerivedServiceConfigV2) else {}
+        configured = controller.config if isinstance(controller, LinuxControllerV2Listener) else None
+        composition_valid = bool(
+            configured is not None
+            and all(document.get(name) == getattr(configured, name, None) for name in (
+                "policy_digest", "egress_digest", "broker_digest", "proof_digest",
+                "effective_isolation_digest", "evidence_id"))
+            and configured.broker.uid == document.get("service_uid")
+            and configured.broker.gid == document.get("service_gid")
+            and configured.broker.executable_digest == document.get("executable_digest")
+            and configured.broker.unit_digest == document.get("unit_digest")
+            and configured.broker.config_digest == document.get("own_config_digest")
+            and configured.controller.executable_digest == document.get("peer_executable_digest")
+            and configured.controller.unit_digest == document.get("peer_unit_digest")
+            and configured.controller.config_digest == document.get("peer_config_digest")
+            and document.get("guest_protocol_registry_digest") == guest_protocol_registry_digest_v2()
+            and document.get("guest_transport_projection") == dict(
+                plan.document["guest_transport_projection"])
+        )
+        if (not isinstance(plan, DerivedServiceConfigV2) or plan.component != "broker"
+                or not isinstance(controller, LinuxControllerV2Listener)
+                or not isinstance(guest, LinuxGuestV2Listener) or guest.plan != plan
+                or controller.config.machine_id != plan.machine_id
+                or not composition_valid
+                or not isinstance(upstream, VerifiedHttpsUpstream)
+                or type(dns_authority) is not AuthorizedDnsResolverV2
+                or not isinstance(executor, EffectExecutionV2)
+                or any(not callable(value) for value in (
+                    clock, now_text, observer, descriptor_observer,
+                    descriptor_closer, closer, audit_id_factory, monotonic,
+                    selector_factory, lease_socket_factory))
+                or any(type(value) is not int or value < 1 for value in (
+                    so_peercred, so_passcred, scm_credentials, scm_rights))):
+            raise ControllerServiceV2Error("service_loop_invalid")
+        self.plan, self.controller, self.guest = plan, controller, guest
+        self.upstream, self.dns_authority, self.executor = (
+            upstream, dns_authority, executor)
+        self._clock, self._now_text = clock, now_text
+        self._observer, self._descriptor_observer = observer, descriptor_observer
+        self._descriptor_closer, self._closer = descriptor_closer, closer
+        self._audit_id_factory, self._monotonic = audit_id_factory, monotonic
+        self._so_peercred, self._scm_credentials = so_peercred, scm_credentials
+        self._so_passcred = so_passcred
+        self._scm_rights, self._selector_factory = scm_rights, selector_factory
+        self._lease_socket_factory = lease_socket_factory
+        self._lease_listeners = {}
+        self._guests = {}
+        self._guest_operations = {}
+        self._workers = {}
+        self._reader_workers = {}
+        self._pending_guest_sockets = {}
+        self._worker_lock = threading.Lock()
+        self._closed = False
+        self._terminal_code = None
+        if self.controller._lease_endpoint_factory is not None:
+            raise ControllerServiceV2Error("service_loop_invalid")
+        self.controller._lease_endpoint_factory = self._lease_listener_factory
+
+    def _lease_listener_factory(self, address, endpoint):
+        listener = LinuxLeaseOperationV2Listener(
+            address, endpoint, observer=self._observer, now_ms=self._clock,
+            descriptor_observer=self._descriptor_observer,
+            descriptor_closer=self._descriptor_closer,
+            so_peercred=self._so_peercred,
+            so_passcred=self._so_passcred,
+            scm_credentials=self._scm_credentials,
+            scm_rights=self._scm_rights,
+            socket_factory=self._lease_socket_factory,
+        )
+        self._lease_listeners[endpoint.operation_id] = listener
+        return listener
+
+    def accept_guest_once(self) -> dict[str, Any]:
+        session = self.controller.session
+        if (self._closed or session is None or not session.admission_open):
+            raise ControllerServiceV2Error("admission_closed")
+        owned = self.guest.accept_once()
+        try:
+            admitted = session.operations.submit_typed_v2(
+                owned.request, connection_identity=owned.identity,
+                now_ms=owned.received_at_unix_ms)
+            self._guests[owned.identity] = owned
+            self._guest_operations[owned.identity] = admitted["operation_id"]
+            return admitted
+        except Exception:
+            self.guest.release(owned.identity)
+            raise
+
+    def _read_guest_request(self, identity: str, connection, received: int,
+                            accepted_at: float) -> None:
+        try:
+            packet = self.guest.receive_packet_bounded(
+                connection, accepted_at=accepted_at, monotonic=self._monotonic)
+            request = decode_guest_request_v2(packet)
+            owned = self.guest.retain_request(connection, identity, received, request)
+            session = self.controller.session
+            if self._closed or session is None or not session.admission_open:
+                raise ControllerServiceV2Error("admission_closed")
+            admitted = session.operations.submit_typed_v2(
+                owned.request, connection_identity=owned.identity,
+                now_ms=owned.received_at_unix_ms)
+            with self._worker_lock:
+                if self._closed:
+                    raise ControllerServiceV2Error("service_loop_closed")
+                self._pending_guest_sockets.pop(identity, None)
+                self._guests[identity] = owned
+                self._guest_operations[identity] = admitted["operation_id"]
+        except Exception:
+            self._close_pending_guest_v2(identity, connection)
+        finally:
+            with self._worker_lock:
+                self._reader_workers.pop(identity, None)
+
+    def _close_pending_guest_v2(self, identity: str, connection) -> bool:
+        with self._worker_lock:
+            if self._pending_guest_sockets.get(identity) is not connection:
+                return True
+        try:
+            with self.guest._capacity_lock:
+                retained = self.guest._active.get(identity)
+            if retained is None:
+                connection.close()
+            else:
+                self.guest.release(identity)
+        except Exception:
+            self._terminal_code = self._terminal_code or "guest_socket_cleanup_failed"
+            return False
+        with self._worker_lock:
+            if self._pending_guest_sockets.get(identity) is connection:
+                self._pending_guest_sockets.pop(identity, None)
+        self.guest.release_reservation(identity)
+        return True
+
+    def accept_guest_async(self) -> dict[str, Any]:
+        if self._closed:
+            raise ControllerServiceV2Error("service_loop_closed")
+        connection, identity, received = self.guest.accept_transport_once()
+        with self._worker_lock:
+            self._pending_guest_sockets[identity] = connection
+        try:
+            accepted_at = self._monotonic()
+            if (isinstance(accepted_at, bool)
+                    or not isinstance(accepted_at, (int, float))):
+                raise ControllerServiceV2Error("clock_uncertain")
+            worker = threading.Thread(
+                target=self._read_guest_request,
+                args=(identity, connection, received, accepted_at),
+                name="credential-guest-reader-v2")
+            with self._worker_lock:
+                if self._closed:
+                    raise ControllerServiceV2Error("service_loop_closed")
+                self._reader_workers[identity] = worker
+            worker.start()
+        except Exception as exc:
+            with self._worker_lock:
+                self._reader_workers.pop(identity, None)
+            cleaned = self._close_pending_guest_v2(identity, connection)
+            code = (exc.code if isinstance(exc, ControllerServiceV2Error)
+                    else "guest_reader_unavailable")
+            if not cleaned:
+                code = self._terminal_code or "guest_socket_cleanup_failed"
+                self.close()
+            raise ControllerServiceV2Error(code) from None
+        return {"ok": True, "code": "guest_read_pending"}
+
+    def guest_disconnected(self, identity: str) -> None:
+        owned = self._guests.pop(identity, None)
+        operation_id = self._guest_operations.pop(identity, None)
+        if owned is None or operation_id is None:
+            return
+        self.guest.release(identity)
+        session = self.controller.session
+        if session is None:
+            return
+        state = session.operations.state(operation_id)
+        if state in {"pre_audited", "effect_possible", "post_audited"}:
+            session._indeterminate_disconnect_v2(operation_id, "guest_disconnected")
+        else:
+            session.operations.terminalize_known(operation_id, "guest_disconnected")
+
+    def process_controller_once(self, *, now_ms: int) -> dict[str, Any]:
+        session = self.controller.session
+        if self._closed or session is None:
+            raise ControllerServiceV2Error("controller_connection_refused")
+        temporal_context = None
+        if session._claim_anchor is not None:
+            request_deadline, _version = session.operations.authorization_deadlines(
+                session._claim_anchor["operation_id"])
+            temporal_context = {
+                "activation_expires_at_unix_ms": session._activation_expires_at,
+                "request_deadline_unix_ms": request_deadline,
+            }
+        message = session.receive_frame(
+            observer=self._observer, now_ms=now_ms,
+            so_peercred=self._so_peercred,
+            scm_credentials=self._scm_credentials, scm_rights=self._scm_rights,
+            closer=self._closer, temporal_context=temporal_context,
+        )
+        kind = message.get("type")
+        if kind == "AUDIT_ACK_V2":
+            session.route_audit_ack_v2(message)
+            result = {"ok": True, "code": "audit_ack_routed"}
+        elif kind in {"ACTIVATE_V2", "QUIESCE_V2"}:
+            result = session.handle_lifecycle_v2(message, now_ms=now_ms)
+            self.guest.set_admission(bool(session.admission_open))
+        elif kind in {"CLAIM_NEXT_V2", "AUTHORIZE_V2", "REFUSE_V2"}:
+            result = session.handle_authority_v2(message, now_ms=now_ms)
+        else:
+            session.close("controller_frame_refused")
+            raise ControllerServiceV2Error("controller_frame_refused")
+        self.synchronize()
+        return result
+
+    def _execute_operation(self, operation_id: str) -> None:
+        session = self.controller.session
+        try:
+            raw = session.operations.effect_context(
+                operation_id, now_ms=self._clock())
+            request = raw["request"]
+            common = dict(
+                audit_id_factory=self._audit_id_factory,
+                monotonic=self._monotonic, wall_clock=self._clock)
+            try:
+                request_deadline, _binding_version = (
+                    session.operations.authorization_deadlines(operation_id))
+                decision = resolve_authorized_guest_egress_v2(
+                    self.plan, request, self.upstream, self.dns_authority,
+                    now=self._now_text(),
+                    deadline_unix_ms=request_deadline,
+                    wall_clock_ms=self._clock)
+            except ControllerServiceV2Error as exc:
+                if exc.code == "dns_cleanup_incomplete":
+                    raise
+                result = session.refuse_effect_v2(
+                    operation_id, reason_code="egress_denied", **common)
+            else:
+                result = session.execute_effect_v2(
+                    operation_id, egress_decision=decision, executor=self.executor,
+                    **common)
+            identity = session.operations.connection_identity(operation_id)
+            owned = self._guests.get(identity)
+            if owned is None:
+                raise ControllerServiceV2Error("guest_disconnected")
+            owned.deliver(result["guest_result"])
+            self._guests.pop(identity, None)
+            self._guest_operations.pop(identity, None)
+            self.guest.release(identity)
+            session.guest_result_v2(identity, consume=True)
+        except Exception as exc:
+            code = exc.code if isinstance(exc, ControllerServiceV2Error) else "internal_indeterminate"
+            try:
+                session.operations.terminalize_known(operation_id, code)
+            except Exception:
+                pass
+            self._terminal_code = self._terminal_code or (
+                code if code in {"audit_unavailable", "effect_indeterminate",
+                                 "lease_ack_failed", "guest_disconnected",
+                                 "dns_cleanup_incomplete"}
+                else None)
+            if code == "dns_cleanup_incomplete":
+                try:
+                    self.guest.set_admission(False)
+                except ControllerServiceV2Error:
+                    pass
+                try:
+                    self.close()
+                except Exception:
+                    pass
+        finally:
+            self._workers.pop(operation_id, None)
+            self._lease_listeners.pop(operation_id, None)
+            try:
+                self.synchronize()
+            except Exception:
+                self._terminal_code = self._terminal_code or "guest_result_delivery_failed"
+
+    def process_lease_once(self, operation_id: str) -> dict[str, Any]:
+        if self._closed or operation_id in self._workers:
+            raise ControllerServiceV2Error("lease_endpoint_consumed")
+        listener = self._lease_listeners.get(operation_id)
+        if listener is None:
+            raise ControllerServiceV2Error("lease_endpoint_invalid")
+        result = listener.receive_once()
+        worker = threading.Thread(
+            target=self._execute_operation, args=(operation_id,),
+            name="credential-effect-v2")
+        self._workers[operation_id] = worker
+        worker.start()
+        return result
+
+    def run_once(self, *, timeout: float = 1.0) -> dict[str, Any]:
+        """Select one bounded event; all readiness remains closed on uncertainty."""
+
+        if (self._closed or isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float)) or not 0 <= timeout <= 1):
+            raise ControllerServiceV2Error("service_loop_closed")
+        selector = self._selector_factory()
+        try:
+            if self.controller.session is None:
+                if self.controller.listener is not None:
+                    selector.register(self.controller.listener, selectors.EVENT_READ,
+                                      ("controller_accept", None))
+            else:
+                selector.register(self.controller.session.connection, selectors.EVENT_READ,
+                                  ("controller", None))
+            if self.guest.listener is not None and self.guest.admission_open:
+                selector.register(self.guest.listener, selectors.EVENT_READ, ("guest", None))
+            for identity, owned in tuple(self._guests.items()):
+                selector.register(owned.raw, selectors.EVENT_READ,
+                                  ("guest_disconnect", identity))
+            for operation_id, listener in tuple(self._lease_listeners.items()):
+                if listener.listener is not None:
+                    selector.register(listener.listener, selectors.EVENT_READ,
+                                      ("lease", operation_id))
+            events = selector.select(timeout)
+            for key, _mask in events[:1]:
+                kind, operation_id = key.data
+                now_ms = self._clock()
+                if kind == "controller":
+                    self.process_controller_once(now_ms=now_ms)
+                elif kind == "guest":
+                    self.accept_guest_async()
+                elif kind == "lease":
+                    self.process_lease_once(operation_id)
+                elif kind == "guest_disconnect":
+                    self.guest_disconnected(operation_id)
+                else:
+                    self.controller.accept_once(
+                        observer=self._observer, now_ms=now_ms,
+                        monotonic=self._monotonic,
+                        so_peercred=self._so_peercred,
+                        scm_credentials=self._scm_credentials,
+                        scm_rights=self._scm_rights, closer=self._closer,
+                    )
+            return self.tick(self._clock())
+        except Exception as exc:
+            code = exc.code if isinstance(exc, ControllerServiceV2Error) \
+                else "service_loop_failed"
+            self._terminal_code = self._terminal_code or code
+            self.close()
+            raise ControllerServiceV2Error(self._terminal_code) from None
+        finally:
+            try:
+                selector.close()
+            except Exception:
+                self._terminal_code = self._terminal_code or "selector_cleanup_failed"
+                self.close()
+                raise ControllerServiceV2Error(self._terminal_code) from None
+
+    def run_forever(self) -> dict[str, Any]:
+        while not self._closed:
+            self.run_once(timeout=1.0)
+        return self.close()
+
+    def synchronize(self) -> int:
+        """Deliver each terminal registry result once; pending guests remain owned."""
+
+        session = self.controller.session
+        if session is None:
+            return 0
+        delivered = 0
+        for identity, owned in tuple(self._guests.items()):
+            try:
+                value = session.guest_result_v2(identity)
+            except Exception:
+                continue
+            if value["state"] == "credential_pending":
+                continue
+            try:
+                result = GuestResultV2.failure(
+                    state="indeterminate" if value["state"] == "indeterminate" else "refused",
+                    code=value["code"], retryable=False,
+                    correlation_id=value["correlation_id"],
+                ) if not value["ok"] else None
+                if result is not None:
+                    owned.deliver(result)
+                self._guests.pop(identity, None)
+                self._guest_operations.pop(identity, None)
+                self.guest.release(identity)
+                session.guest_result_v2(identity, consume=True)
+                delivered += 1
+            except Exception:
+                self._terminal_code = self._terminal_code or "guest_result_delivery_failed"
+                self.guest.release(identity)
+                self._guests.pop(identity, None)
+                self._guest_operations.pop(identity, None)
+        return delivered
+
+    def tick(self, now_ms: int) -> dict[str, Any]:
+        if self._closed or type(now_ms) is not int:
+            raise ControllerServiceV2Error("service_loop_closed")
+        session = self.controller.session
+        if session is None:
+            self.guest.set_admission(False)
+            return {"ok": True, "code": "controller_pending", "admission_open": False}
+        self.guest.set_admission(bool(session.admission_open))
+        for operation_id, listener in tuple(self._lease_listeners.items()):
+            if listener._closed:
+                self._lease_listeners.pop(operation_id, None)
+        try:
+            session.operations.expire(now_ms)
+            self.synchronize()
+            self.guest.expire(now_ms)
+        except ControllerServiceV2Error as exc:
+            self._terminal_code = self._terminal_code or exc.code
+            self.close()
+            raise ControllerServiceV2Error(self._terminal_code) from None
+        return {"ok": True, "code": "service_loop_ready",
+                "admission_open": self.guest.admission_open}
+
+    def close(self) -> dict[str, Any]:
+        effect_session = self.controller.session
+        first_close = not self._closed
+        if first_close:
+            self._closed = True
+        with self._worker_lock:
+            pending = tuple(self._pending_guest_sockets.items())
+            readers = tuple(self._reader_workers.values())
+        for identity, connection in pending:
+            self._close_pending_guest_v2(identity, connection)
+        if first_close:
+            guest_result = self.guest.close()
+            self._guests.clear()
+            self._guest_operations.clear()
+            controller_result = self.controller.close()
+            dns_result = self.dns_authority.close()
+            for result in (guest_result, controller_result, dns_result):
+                if not result["ok"] and self._terminal_code is None:
+                    self._terminal_code = result["code"]
+            current = threading.current_thread()
+            for worker in readers:
+                if worker is current:
+                    continue
+                worker.join(GUEST_V2_INACTIVITY_SECONDS + 1.0)
+                if worker.is_alive():
+                    self._terminal_code = self._terminal_code or "worker_cleanup_failed"
+            with self._worker_lock:
+                self._reader_workers = {
+                    key: worker for key, worker in self._reader_workers.items()
+                    if worker.is_alive()}
+        with self._worker_lock:
+            if self._pending_guest_sockets:
+                self._terminal_code = self._terminal_code or (
+                    "guest_socket_cleanup_failed")
+        current = threading.current_thread()
+        with self._worker_lock:
+            effects = tuple(self._workers.items())
+        session = effect_session
+        for operation_id, worker in effects:
+            if worker is current:
+                continue
+            try:
+                request_deadline, _version = (
+                    session.operations.authorization_deadlines(operation_id))
+                terminal_deadline = lease_ack_deadline_v2(request_deadline)
+                observed_now = self._clock()
+                if type(observed_now) is not int:
+                    raise ValueError
+                remaining = max(0.0, (terminal_deadline - observed_now) / 1000.0)
+            except Exception:
+                remaining = 0.0
+            worker.join(remaining)
+            if worker.is_alive():
+                self._terminal_code = self._terminal_code or "cleanup_incomplete"
+            else:
+                with self._worker_lock:
+                    if self._workers.get(operation_id) is worker:
+                        self._workers.pop(operation_id, None)
+        return {"ok": self._terminal_code is None,
+                "code": self._terminal_code or "service_loop_closed",
+                "admission_open": False}
+
+
+def prepare_standalone_authority_v2(machine_id: str, *, service_gid: int,
+                                    plan_loader=load_runtime_config_v2,
+                                    identity_pinner=pin_reciprocal_process_identities_v2):
+    """Load both plans, validate reciprocity, then pin both runtime processes."""
+
+    if (not _machine(machine_id) or not _integer(service_gid, minimum=1)
+            or not callable(plan_loader) or not callable(identity_pinner)):
+        raise ControllerServiceV2Error("runtime_config_invalid")
+    try:
+        controller_plan = plan_loader(
+            runtime_config_path_v2(machine_id, "controller"),
+            machine_id=machine_id, component="controller",
+            expected_group_gid=service_gid)
+        broker_plan = plan_loader(
+            runtime_config_path_v2(machine_id, "broker"),
+            machine_id=machine_id, component="broker",
+            expected_group_gid=service_gid)
+        validate_reciprocal_service_plans_v2(controller_plan, broker_plan)
+        controller_identity, broker_identity = identity_pinner(
+            controller_plan, broker_plan)
+        config = ControllerServiceConfigV2(
+            machine_id=machine_id, controller=controller_identity,
+            broker=broker_identity,
+            policy_digest=broker_plan.document["policy_digest"],
+            egress_digest=broker_plan.document["egress_digest"],
+            broker_digest=broker_plan.document["broker_digest"],
+            proof_digest=broker_plan.document["proof_digest"],
+            effective_isolation_digest=broker_plan.document[
+                "effective_isolation_digest"],
+            evidence_id=broker_plan.document["evidence_id"])
+    except Exception:
+        raise ControllerServiceV2Error("runtime_config_invalid") from None
+    return MappingProxyType({
+        "controller_plan": controller_plan, "broker_plan": broker_plan,
+        "config": config,
+        "controller_observer": pinned_process_identity_observer_v2(
+            controller_identity),
+        "broker_observer": pinned_process_identity_observer_v2(broker_identity),
+    })
+
+
+def compose_standalone_service_v2(prepared) -> dict[str, Any]:
+    """Construct and run the fixed closed-first standalone graph."""
+
+    if (type(prepared) is not MappingProxyType
+            or set(prepared) != {"controller_plan", "broker_plan", "config",
+                                 "controller_observer", "broker_observer"}
+            or not isinstance(prepared["controller_plan"], DerivedServiceConfigV2)
+            or not isinstance(prepared["broker_plan"], DerivedServiceConfigV2)
+            or type(prepared["config"]) is not ControllerServiceConfigV2
+            or not callable(prepared["controller_observer"])
+            or not callable(prepared["broker_observer"])):
+        raise ControllerServiceV2Error("service_composition_invalid")
+    validate_reciprocal_service_plans_v2(
+        prepared["controller_plan"], prepared["broker_plan"])
+    config = prepared["config"]
+    if (not sys.platform.startswith("linux") or _running_as_root()
+            or os.geteuid() != config.broker.uid
+            or os.getegid() != config.broker.gid
+            or not all(type(getattr(socket, name, None)) is int for name in (
+                "SO_PEERCRED", "SO_PASSCRED", "SCM_CREDENTIALS",
+                "SCM_RIGHTS", "SO_BINDTODEVICE"))
+            or not hasattr(socket, "SOCK_SEQPACKET")):
+        raise ControllerServiceV2Error("live_transport_unproven")
+    controller = guest = loop = dns = None
+    terminal_error = None
+    run_result = None
+    try:
+        topology = LinuxKernelTopologyObserverV2()
+        dns = AuthorizedDnsResolverV2()
+        upstream = VerifiedHttpsUpstream(
+            resolver=lambda _host: (_ for _ in ()).throw(
+                ControllerServiceV2Error("egress_denied")))
+        destination_authority = ExactNftDestinationSetAuthorityV2(
+            LinuxNftDestinationSetObserverV2())
+        executor = PinnedHTTPSCredentialEffectV2(
+            upstream, destination_authority=destination_authority)
+        controller = LinuxControllerV2Listener(
+            config, epoch_factory=lambda: uuid.uuid4().hex,
+            owner_factory=lambda: "broker-owner-" + uuid.uuid4().hex[:16])
+        guest = LinuxGuestV2Listener(
+            prepared["broker_plan"], topology_observer=topology)
+
+        def self_observer():
+            prepared["broker_observer"](os.getpid(), os.geteuid(), os.getegid())
+            return config
+
+        controller.start(
+            platform="linux", enabled=True, effective_uid=os.geteuid(),
+            self_observer=self_observer)
+        guest.start(platform="linux", effective_uid=os.geteuid())
+        loop = CredentialBrokerServiceLoopV2(
+            prepared["broker_plan"], controller, guest, upstream, dns, executor,
+            clock=lambda: int(time.time() * 1000),
+            now_text=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            observer=prepared["controller_observer"],
+            descriptor_observer=_linux_descriptor_observation,
+            descriptor_closer=os.close, closer=os.close,
+            audit_id_factory=lambda kind: f"audit-{kind}{uuid.uuid4().hex[:16]}",
+            monotonic=time.monotonic, so_peercred=socket.SO_PEERCRED,
+            so_passcred=socket.SO_PASSCRED,
+            scm_credentials=socket.SCM_CREDENTIALS,
+            scm_rights=socket.SCM_RIGHTS)
+        if (controller.admission_open or guest.admission_open
+                or controller.session is not None):
+            raise ControllerServiceV2Error("admission_closed")
+        run_result = loop.run_forever()
+    except Exception as exc:
+        terminal_error = (exc.code if isinstance(exc, ControllerServiceV2Error)
+                          else "live_transport_unproven")
+    finally:
+        for owned in (loop, guest, controller, dns):
+            if owned is None:
+                continue
+            try:
+                close_result = owned.close()
+                if (type(close_result) is dict
+                        and close_result.get("ok") is False
+                        and terminal_error is None):
+                    terminal_error = "live_transport_unproven"
+            except Exception:
+                if terminal_error is None:
+                    terminal_error = "live_transport_unproven"
+    if terminal_error is not None:
+        raise ControllerServiceV2Error(terminal_error) from None
+    if type(run_result) is not dict:
+        raise ControllerServiceV2Error("live_transport_unproven")
+    return run_result
+
+
 def main(_argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if _argv is None else _argv)
-    result = live_transport_status()
-    if argv:
-        if len(argv) != 8 or argv[0:2] != ["--protocol", CONTROLLER_PROTOCOL_V2] \
-                or argv[2] != "--machine-id" or not _machine(argv[3]) \
-                or argv[4] != "--config" or argv[5] != runtime_config_path_v2(argv[3]) \
-                or argv[6] != "--config-digest" or not _digest(argv[7]) \
-                or _running_as_root():
+    result = bounded_error("runtime_config_invalid")
+    if (len(argv) == 4
+            and argv[0:2] == ["--protocol", CONTROLLER_PROTOCOL_V2]
+            and argv[2] == "--machine-id" and _machine(argv[3])
+            and sys.platform.startswith("linux") and not _running_as_root()):
+        try:
+            prepared = prepare_standalone_authority_v2(
+                argv[3], service_gid=os.getegid())
+            plan = prepared["broker_plan"]
+            if (os.geteuid() != plan.document["service_uid"]
+                    or os.getegid() != plan.document["service_gid"]):
+                raise ControllerServiceV2Error("runtime_config_invalid")
+        except Exception:
             result = bounded_error("runtime_config_invalid")
         else:
             try:
-                config = load_runtime_config_v2(
-                    argv[5], machine_id=argv[3], expected_group_gid=os.getegid(),
-                    expected_digest=argv[7],
-                )
-            except (AttributeError, OSError, TypeError, ValueError):
-                result = bounded_error("runtime_config_invalid")
+                compose_standalone_service_v2(prepared)
+            except Exception:
+                result = bounded_error("live_transport_unproven")
             else:
-                # Loading proves only inert local configuration. No endpoint is
-                # constructed and admission remains closed.
-                result = live_transport_status()
+                result = bounded_error("live_transport_unproven")
     print(json.dumps(result, sort_keys=True))
     return 4
 

@@ -99,6 +99,10 @@ largest findings as JSON. The cancellation command is a non-mutating test seam;
 the MCP equivalent is `resource_status(deep=true, cancelled=true)`. `./sb
 status` must continue to report the current instance normally.
 
+That MCP boolean is only a deterministic pre-cancellation seam. Do not treat it
+as proof that client cancellation or transport loss reaches an in-flight tool;
+T040 remains open until a reviewed MCP request-lifecycle authority is wired.
+
 For an in-flight CLI request, `SIGINT` sets the request-owned signal instead of
 discarding already completed evidence. A remote transport that loses delivery
 uses `disconnected`; a delivered valid partial payload remains usable, while

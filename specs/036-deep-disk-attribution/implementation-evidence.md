@@ -43,20 +43,29 @@ exact cleanup identity, human/JSON parity, and redaction.
   non-material.
 - Pre-cancelled local and remote requests returned structured `cancelled`
   results without starting provider commands or remote transport.
-- Deterministic T040 coverage now uses one thread-safe request signal from the
-  CLI/MCP adapters through the service, local/remote adapters, deep collector,
+- Deterministic cancellation coverage now uses one thread-safe request signal
+  from the CLI and synthetic MCP boolean adapters through the service,
+  local/remote adapters, deep collector,
   and bounded process runner. Mid-run cancellation stops new provider commands,
   terminates and reaps the owned child, retains completed output/capacity, and
   distinguishes `cancelled` from `disconnected` without changing the public
   CLI or MCP schema.
+- This does not complete T040. The registered MCP tool still lacks a reviewed
+  real request cancellation/disconnect context, so only its synthetic boolean
+  seam is proven. Contract/revision review is required before adding that
+  lifecycle authority.
 - This local coverage does not add fresh named-remote live evidence. T045 stays
   open pending a current read-only live run with the required zero-mutation and
   budget-plus-five observations.
-- Local verification on 2026-08-28: 150 focused model, service, adapter,
+- Local verification on 2026-08-28: 154 focused model, service, adapter,
   attribution, process-runner, CLI/MCP interface, and bounded remote transport
-  tests passed in 0.612 seconds. The changed Python files compiled and
+  tests passed. The changed Python files compiled and
   `git diff --check` passed. The generated live-probe portion of the broad
   remote module was not used as new live acceptance evidence.
+- Follow-up adversarial coverage proves invalid/pre-terminal signals are handled
+  before `Popen`, later probe failure terminates/drains/reaps the owned group,
+  and cancellation after completed Docker inspection retains the typed Docker
+  observation while skipping path and later collection phases.
 - Resource status bypasses mutable instance-registry resolution and the legacy
   Compose/`.env` writers. Collectors use only read operations; cleanup behavior
   remains behind the existing confirmed plan path.

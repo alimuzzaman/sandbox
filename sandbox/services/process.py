@@ -206,6 +206,23 @@ class BoundedProcessRunner:
                 raise ValueError("env must contain NUL-free string keys and values")
         command = tuple(argv)
         deadline = None if timeout is None else time.monotonic() + timeout
+        terminal_status = None
+        initial_state = None
+        if cancellation is not None:
+            terminal_status = getattr(cancellation, "terminal_status", None)
+            if not callable(terminal_status):
+                raise ValueError("cancellation must expose terminal_status")
+            try:
+                initial_state = terminal_status()
+            except Exception as exc:
+                raise ValueError("cancellation probe failed before process start") from exc
+            if initial_state is not None and (
+                type(initial_state) is not str
+                or initial_state not in {"cancelled", "disconnected"}
+            ):
+                raise ValueError("cancellation returned an invalid terminal state")
+            if initial_state is not None:
+                return ProcessResult(command, 130, "", "process cancelled")
         process = subprocess.Popen(
             command, cwd=cwd, env={**os.environ, **dict(env or {})},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
@@ -234,6 +251,7 @@ class BoundedProcessRunner:
             reader.start()
         timed_out = False
         cancelled = False
+        cancellation_probe_failed = False
         leader_reaped = False
         if cancellation is None:
             try:
@@ -243,13 +261,19 @@ class BoundedProcessRunner:
                 timed_out = True
         else:
             while True:
-                terminal_status = getattr(cancellation, "terminal_status", None)
-                if not callable(terminal_status):
-                    raise ValueError("cancellation must expose terminal_status")
                 try:
                     state = terminal_status()
                 except Exception:
-                    state = None
+                    cancellation_probe_failed = True
+                    cancelled = True
+                    break
+                if state is not None and (
+                    type(state) is not str
+                    or state not in {"cancelled", "disconnected"}
+                ):
+                    cancellation_probe_failed = True
+                    cancelled = True
+                    break
                 if type(state) is str and state in {"cancelled", "disconnected"}:
                     cancelled = True
                     break
@@ -291,7 +315,12 @@ class BoundedProcessRunner:
                 self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
                 self._redact(
                     _decode_bounded_output(output["stderr"].render(), self.max_output)
-                    + ("\nprocess cancelled" if cancelled else "\nprocess timed out")
+                    + (
+                        "\ncancellation probe failed"
+                        if cancellation_probe_failed else
+                        "\nprocess cancelled" if cancelled else
+                        "\nprocess timed out"
+                    )
                 ),
             )
         process.stdout.close()

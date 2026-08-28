@@ -75,6 +75,8 @@ def resource_status(
         "budget_seconds": budget_seconds,
         "deep": deep or fast or refresh,
     }
+    # This is only the reviewed public boolean test seam. The MCP framework
+    # registration currently supplies no request lifecycle/disconnect context.
     kwargs["cancelled"] = resource_cancellation_signal(cancelled)
     if fast or refresh:
         kwargs["directory_cache"] = "cache_only" if fast else "refresh"

@@ -772,6 +772,12 @@ class LocalResourceAdapter:
             (self.deploy_root, "deploy_worktrees"),
             (self.runtime_root, "sandbox_runtime"),
         ):
+            if cancellation is not None and cancellation.terminal_status() is not None:
+                outcomes.append({
+                    "category": category,
+                    "status": cancellation.terminal_status(),
+                })
+                break
             if not root.is_dir():
                 outcomes.append({"category": category, "status": "complete"})
                 continue
@@ -782,6 +788,9 @@ class LocalResourceAdapter:
                 continue
             category_state = "complete"
             for path in entries:
+                if cancellation is not None and cancellation.terminal_status() is not None:
+                    category_state = cancellation.terminal_status()
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     category_state = "timed_out"
@@ -1235,6 +1244,9 @@ class LocalResourceAdapter:
             "succeeded", "failed", "timed_out", "cancelled", "interrupted",
         }
         for artifact in records.get("artifacts", ()):
+            if cancellation is not None and cancellation.terminal_status() is not None:
+                state = cancellation.terminal_status()
+                break
             if time.monotonic() >= deadline:
                 state = "timed_out"
                 break
@@ -1344,13 +1356,26 @@ class LocalResourceAdapter:
         inventory, docker_outcomes = self._docker_inventory(
             deadline, request.cancellation,
         )
-        if request.is_terminal():
+
+        def terminal_snapshot(resources, outcomes, reason):
             terminal = request.terminal_status() or "cancelled"
             return ProviderSnapshot(
-                self.target(), capacity, (), tuple((*docker_outcomes, {
+                self.target(), capacity, tuple(resources), tuple((*outcomes, {
                     "category": "resource_measurement", "status": terminal,
-                    "reason": "request_ended_after_docker_inventory",
+                    "reason": reason,
                 })),
+            )
+
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                completed_docker, docker_outcomes,
+                "request_ended_after_docker_inventory",
             )
         active_sources = {
             str(mount.get("Source"))
@@ -1376,10 +1401,34 @@ class LocalResourceAdapter:
             workspace_ownership=workspace_ownership,
             cancellation=request.cancellation,
         )
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                (*path_resources, *completed_docker),
+                (*docker_outcomes, *path_outcomes),
+                "request_ended_after_path_inventory",
+            )
         job_resources, job_outcome = self._job_artifact_resources(
             job_records, thorough=thorough, deadline=deadline,
             cancellation=request.cancellation,
         )
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                (*path_resources, *job_resources, *completed_docker),
+                (*docker_outcomes, *path_outcomes, job_outcome),
+                "request_ended_after_job_inventory",
+            )
         resources = [
             *path_resources,
             *job_resources,
@@ -1390,6 +1439,11 @@ class LocalResourceAdapter:
                 cancellation=request.cancellation,
             ),
         ]
+        if request.is_terminal():
+            return terminal_snapshot(
+                resources, (*docker_outcomes, *path_outcomes, job_outcome),
+                "request_ended_after_typed_inventory",
+            )
         if thorough:
             for path, name in ((Path("/var/log"), "host_logs"), (Path("/var/cache"), "host_package_cache")):
                 remaining = deadline - time.monotonic()

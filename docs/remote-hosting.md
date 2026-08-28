@@ -1,5 +1,24 @@
 # Remote VPS hosting for sandbox instances
 
+## Agent-aware source sync
+
+Use the opt-in one-time path to transfer one credential-screened generation
+without running `host apply` or restarting Compose:
+
+```bash
+./sb host sync --project-dir /path/to/site --environment production \
+  --remote myvps --request-id edit-20260828-01 --json
+```
+
+For a bounded caller-owned watch loop, add `--watch --watch-seconds 3600`.
+Capture is Git-relative and refuses the complete generation when tracked,
+modified, untracked, or explicitly included input looks credential-like. The
+remote replaces only sync-owned files atomically; it preserves Git metadata,
+runtime state, and unknown files. The result reports `restarted: false`.
+
+This is not promotion. A later `host apply --confirm` restores the committed
+revision and performs the controlled Compose, route, and health workflow.
+
 ## 1. What this is
 
 `./sb remote` + `./sb deploy` let you run a sandbox instance on a VPS you already own

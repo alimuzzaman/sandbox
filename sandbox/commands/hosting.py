@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import re
 import secrets
 import subprocess
 import base64
@@ -14,11 +16,178 @@ from getpass import getpass
 from pathlib import Path
 
 from sandbox.core import die, info, ok
+from sandbox.core._paths import RUNTIME_DIR
 from sandbox.registry import register
+from sandbox.sync.repository import SyncRepository
+from sandbox.sync.service import SyncService
+from sandbox.transports.remote_sync import HostSourceSyncTransport
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
+
+
+_HOST_SYNC_WATCH_EXCLUDES = frozenset({
+    ".git", ".sandbox", ".cache", ".pytest_cache", ".mypy_cache",
+    "node_modules", "vendor", "build", "dist", "out", "coverage",
+    "runtime", "cache", "caches", "logs", "tmp", "temp", "uploads",
+    "storage", "__pycache__", ".venv", "venv",
+})
+
+
+def _host_sync_watch_signature(source_root: str) -> str:
+    """Metadata-only fingerprint; content screening stays in SyncService."""
+    digest = hashlib.sha256()
+    count = 0
+    root = Path(source_root).resolve(strict=True)
+    for directory, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name for name in directories if name.lower() not in _HOST_SYNC_WATCH_EXCLUDES
+        )
+        for name in sorted(filenames):
+            path = Path(directory) / name
+            try:
+                stat_result = path.lstat()
+            except OSError:
+                continue
+            digest.update(path.relative_to(root).as_posix().encode("utf-8", "surrogateescape"))
+            digest.update(
+                f"\0{stat_result.st_mode}\0{stat_result.st_size}\0"
+                f"{stat_result.st_mtime_ns}\0{stat_result.st_ino}".encode()
+            )
+            count += 1
+            if count > 20_000:
+                raise hosting.HostingError("host sync watch source exceeds the 20000-file watch bound")
+    digest.update(f"\0{count}".encode())
+    return digest.hexdigest()
+
+
+def _host_sync_context(validated: dict, remote_name: str) -> tuple[str, str, dict]:
+    source_root = str(Path(validated["source_root"]).resolve())
+    project = str(validated["project"])
+    environment = str(validated["environment"])
+    digest = hashlib.sha256(
+        f"{source_root}\0{remote_name}\0{project}\0{environment}".encode()
+    ).hexdigest()
+    workspace_id = "host-" + hashlib.sha256(
+        f"{project}\0{environment}".encode()
+    ).hexdigest()[:32]
+    return workspace_id, source_root, {"identity": f"host:{digest}", "root": source_root}
+
+
+def _host_sync_service(validated: dict, remote_name: str, entry: dict):
+    workspace_id, source_root, identity = _host_sync_context(validated, remote_name)
+    service = SyncService(
+        repository=SyncRepository(RUNTIME_DIR / "sync" / "journal.json"),
+        transport_factory=lambda: HostSourceSyncTransport(
+            remote_lookup=lambda _name: entry,
+            ssh_run=remote.ssh_run,
+            ssh_process=remote.ssh_process,
+            resolve_home=remote.resolve_sandbox_home,
+            project_slug=validated["project"],
+        ),
+        identity_resolver=lambda _root, *, remote: identity,
+    )
+    return service, workspace_id, source_root
+
+
+def _host_sync_request_id(args, suffix: str | None = None) -> str:
+    explicit = getattr(args, "request_id", None)
+    base = explicit.strip() if isinstance(explicit, str) and explicit.strip() else (
+        f"host-sync-{int(time.time() * 1000)}"
+    )
+    if suffix:
+        base = f"{base}-{suffix}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", base):
+        raise hosting.HostingError(
+            "--request-id must use letters, numbers, dots, underscores, colons, or hyphens"
+        )
+    return base
+
+
+def _host_sync_emit(result: dict, args, *, watch: bool = False) -> None:
+    if getattr(args, "json", False):
+        payload = dict(result)
+        if watch:
+            payload["watch"] = True
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+        return
+    generation = result.get("generation") or {}
+    generation_id = generation.get("id") if isinstance(generation, dict) else None
+    if result.get("ok"):
+        suffix = f" generation={generation_id}" if generation_id else ""
+        print(f"host sync {result.get('status', 'complete')}{suffix}", flush=True)
+    else:
+        print(
+            f"host sync failed: {result.get('message', 'synchronization failed')} "
+            f"({result.get('code', 'sync_failed')})", flush=True,
+        )
+
+
+def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None:
+    if not entry.get("provisioned"):
+        die(f"remote '{remote_name}' is not provisioned")
+    service = None
+    source_root = None
+    workspace_id = None
+    try:
+        service, workspace_id, source_root = _host_sync_service(validated, remote_name, entry)
+        common = {
+            "project_dir": source_root, "remote": remote_name,
+            "workspace_id": workspace_id,
+            "explicit_includes": tuple(getattr(args, "include", None) or ()),
+        }
+        request_id = _host_sync_request_id(args)
+        if not getattr(args, "watch", False):
+            result = service.once(**common, request_id=request_id)
+            _host_sync_emit(result, args)
+            if not result.get("ok"):
+                raise SystemExit(1)
+            return
+
+        seconds = getattr(args, "watch_seconds", 3600)
+        interval = getattr(args, "interval", 0.25)
+        debounce = getattr(args, "debounce", 0.5)
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86400:
+            raise hosting.HostingError("--watch-seconds must be between 1 and 86400")
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 0.1 <= interval <= 10:
+            raise hosting.HostingError("--interval must be between 0.1 and 10 seconds")
+        if isinstance(debounce, bool) or not isinstance(debounce, (int, float)) or not 0.1 <= debounce <= 10:
+            raise hosting.HostingError("--debounce must be between 0.1 and 10 seconds")
+
+        started = time.monotonic()
+        service.start(source_root, remote=remote_name, workspace_id=workspace_id, mode="live")
+        last_signature = None
+        attempted_signature = None
+        quiet_since = started - float(debounce)
+        sequence = 0
+        while time.monotonic() - started < seconds:
+            now = time.monotonic()
+            signature = _host_sync_watch_signature(source_root)
+            if signature != last_signature:
+                last_signature = signature
+                quiet_since = now
+                attempted_signature = None
+            if now - quiet_since >= float(debounce) and attempted_signature != signature:
+                result = service.once(
+                    **common, request_id=_host_sync_request_id(args, f"{sequence:08d}")
+                )
+                _host_sync_emit(result, args, watch=True)
+                attempted_signature = signature
+            time.sleep(float(interval))
+            sequence += 1
+        _host_sync_emit(
+            service.stop(source_root, remote=remote_name, workspace_id=workspace_id),
+            args, watch=True,
+        )
+    except KeyboardInterrupt:
+        if service is not None and source_root is not None and workspace_id is not None:
+            _host_sync_emit(
+                service.stop(source_root, remote=remote_name, workspace_id=workspace_id),
+                args, watch=True,
+            )
+    except (hosting.HostingError, RuntimeError, OSError, ValueError) as exc:
+        die(str(exc))
 
 
 def _emit(data: dict, as_json: bool) -> None:
@@ -1170,7 +1339,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, status, diagnose, apply, logs, and login-url")
+        die("--remote is required for host plan, status, diagnose, apply, logs, sync, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -1183,6 +1352,9 @@ def cmd_host(cfg, args) -> None:
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
+    if args.action == "sync":
+        _cmd_host_sync(validated, entry, args.remote, args)
+        return
     if args.action == "status":
         result = _host_runtime_status(validated, entry, args.remote, state)
         if args.json:

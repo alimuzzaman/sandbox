@@ -28,6 +28,11 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_host_help_advertises_sync_action(self):
+        result = run_sb("host", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sync", result.stdout)
+
     def test_remote_instance_control_flags_reach_registered_handlers(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

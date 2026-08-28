@@ -856,8 +856,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, apply, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -877,6 +877,18 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--request-id", default=None,
+        help="replay-safe host sync request identity (auto-generated when omitted)")
+    host_p.add_argument("--include", action="append", default=None, metavar="PATH",
+        help="explicit relative source path to include (repeatable; credential-like paths are refused)")
+    host_p.add_argument("--watch", action="store_true",
+        help="keep polling and transfer changed source generations without restarting Compose")
+    host_p.add_argument("--watch-seconds", type=int, default=3600,
+        help="maximum watch duration in seconds (1-86400; default 3600)")
+    host_p.add_argument("--interval", type=float, default=0.25,
+        help="watch polling interval in seconds (0.1-10; default 0.25)")
+    host_p.add_argument("--debounce", type=float, default=0.5,
+        help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
 

@@ -100,7 +100,7 @@ class TestMcpComposition(unittest.TestCase):
             "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
             "resources", "feedback",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
-            "secrets", "plugin_check", "remote", "hermes", "recovery",
+            "secrets", "plugin_check", "remote", "hermes", "recovery", "sync",
         )
         self.assertEqual(BUILTIN_TOOL_GROUPS, expected)
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
@@ -159,7 +159,7 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
@@ -180,10 +180,11 @@ class TestMcpComposition(unittest.TestCase):
                               "node_store_service_factory"),
                 "feedback": ("feedback_service_factory",),
                 "secrets": ("secret_service_factory",),
+                "sync": ("sync_service",),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync"}))
 
     def test_domains_group_declares_the_full_ingress_transport_contract(self):
         from tools.manifest import BUILTIN_TOOL_NAMES

@@ -76,7 +76,8 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   validated PID/PGID cleanup receipt before normal marker publication; retained
   receipts let status/kill retry whole-group cleanup, plus exact Docker container
   cleanup, without caller-supplied ownership. Fresh launcher identity must match
-  before every group signal; PID reuse or unknown identity remains non-terminal.
+  before every group signal; PID reuse or unknown identity remains non-terminal
+  and renders as CLI nonzero / MCP `ok:false`, never "already finished".
 
 ## Phase 9: Convergence
 

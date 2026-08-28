@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, call, patch
@@ -432,6 +432,37 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(result["status"], "running")
         self.assertFalse(result["killed"])
         self.assertFalse(status.exists())
+
+    def test_cli_kill_identity_refusal_is_nonzero_and_bounded(self):
+        jid = "d" * 16
+        args = SimpleNamespace(resolved_instance=self.instance, job_id=jid, kill=True)
+        errors = io.StringIO()
+        refusal = {
+            "job_id": jid,
+            "status": "running",
+            "killed": False,
+            "error": "job process identity could not be verified",
+        }
+        with patch.object(jobs, "kill_job", return_value=refusal), \
+                redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+            jobs.cmd_job({}, args)
+
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertEqual(
+            errors.getvalue().strip(),
+            "error: job process identity could not be verified",
+        )
+
+    def test_cli_kill_only_exact_terminal_noops_are_success(self):
+        jid = "d" * 16
+        args = SimpleNamespace(resolved_instance=self.instance, job_id=jid, kill=True)
+        for status in ("completed", "not_found"):
+            with self.subTest(status=status), \
+                    patch.object(
+                        jobs, "kill_job",
+                        return_value={"job_id": jid, "status": status, "killed": False},
+                    ), redirect_stdout(io.StringIO()):
+                jobs.cmd_job({}, args)
 
     def test_kill_verifies_docker_container_removal_before_recording_cancelled(self):
         jid = "e" * 16

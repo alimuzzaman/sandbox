@@ -703,7 +703,14 @@ def cmd_job(cfg, args) -> None:
         die("invalid job id (expected 16 hex chars)")
     if getattr(args, "kill", False):
         r = kill_job(inst, jid)
-        ok(f"job {jid}: {'killed' if r.get('killed') else 'already finished'}")
+        if r.get("killed"):
+            ok(f"job {jid}: killed")
+        elif r.get("status") == "completed":
+            ok(f"job {jid}: already finished")
+        elif r.get("status") == "not_found":
+            ok(f"job {jid}: not found")
+        else:
+            die(r.get("error") or "job termination was refused")
         return
     if getattr(args, "follow", False):
         offset = 0

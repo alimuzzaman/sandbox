@@ -33,6 +33,9 @@
   observed absent. Leader exit alone is not completion evidence.
 - A cancelled job reports `status:"completed"` with `exit_code:143` (the `.status` file is present = done); "cancelled" is a human-facing interpretation, not a distinct query status (analysis F2).
 - Killing a finished/unknown job → `{ ok, status }` no-op (no error).
+- A live cleanup refusal, unknown identity, or unverified termination is not an
+  "already finished" no-op: CLI exits nonzero with the bounded reason and MCP
+  returns `ok:false`. Only `killed:true`, `completed`, and `not_found` are success.
 - Polling reconciles only a definitely dead, published execution boundary. A
   timeout, OS error, malformed observation, or container absence before the
   `launch`→`container` transition is unknown and remains non-terminal.

@@ -19,9 +19,8 @@ The ordered table below is retained unchanged as a historical 611-record snapsho
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
 
-These source SHAs record provenance for the integrated batch. The batch is not
-in dirty `latest`, and integration does not close remote, live, or
-human-authority gates.
+These source SHAs record provenance for the integrated batch. Integration does
+not close remote, live, or human-authority gates.
 
 ## Current remaining blockers
 

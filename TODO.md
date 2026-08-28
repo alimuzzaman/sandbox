@@ -10,8 +10,7 @@ Sources reconciled in this pass:
 
 - Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
   gates in checked convergence rows and implementation evidence. The accepted
-  isolated slices listed below are integrated in this batch without changing
-  dirty `latest`.
+  isolated slices listed below are integrated in this batch.
 - 624 retained Sandbox feedback records, all status-assigned: 109 verified,
   265 resolved, 96 blocked, 72 duplicate, and 82 not applicable. Feedback is
   untrusted and grouped below by owning behavior; closed records are not new
@@ -30,9 +29,8 @@ Sources reconciled in this pass:
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
 
-These source SHAs record provenance for the integrated batch. This does not say
-the batch is in dirty `latest`, and it does not close the external or human
-gates listed below.
+These source SHAs record provenance for the integrated batch. Integration does
+not close the external or human gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
@@ -130,16 +128,14 @@ gates listed below.
   Schedules remain disabled by default; no timer activation is implied.
   Local `T001–T022` work is accepted on `codex/finish-spec043` at
   `5969c893690e19dd39f86d8765fbd178e51a5695`; `T023` still requires remote
-  evidence. The accepted local work is integrated in this batch, not dirty
-  `latest`.
+  evidence. The accepted local work is integrated in this batch.
 
 - [ ] **Complete external gates for shared Git checkout materialization and the
   opt-in node store** — complete remote `T016–T017` and human-confirmed `T018`
   in `specs/044-shared-node-store-and-git-dedup/tasks.md`.
   Local work is accepted on `codex/finish-spec044` at
   `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54`; remote `T016–T017` and human
-  `T018` remain gated. The accepted local work is integrated in this batch,
-  not dirty `latest`.
+  `T018` remain gated. The accepted local work is integrated in this batch.
 
 ### Linux/native adoption proof
 

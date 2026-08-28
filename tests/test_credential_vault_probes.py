@@ -192,14 +192,31 @@ class TestProbeCommandModel(unittest.TestCase):
     def test_absence_checks_pass_only_when_the_resource_is_gone(self):
         # A cleaned host makes these commands fail. Reading that as a failed
         # check reported a clean host as bad and a dirty host as good.
-        for check_id in ("process_absent_after_cleanup", "route_absent_after_cleanup",
-                         "nftables_absent_after_cleanup",
-                         "interface_absent_after_cleanup",
-                         "cgroup_absent_after_cleanup",
-                         "temporary_absent_after_cleanup"):
+        interface = self.manifest["transport"]["guest_interface"]
+        table = self.manifest["kernel"]["nftables_table"]
+        diagnostics = {
+            "process_absent_after_cleanup": "",
+            "route_absent_after_cleanup": f'Cannot find device "{interface}"\n',
+            "nftables_absent_after_cleanup": (
+                "Error: Could not process rule: No such file or directory\n"
+                f"list table inet {table}\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            ),
+            "interface_absent_after_cleanup": f'Device "{interface}" does not exist.\n',
+            "cgroup_absent_after_cleanup": (
+                "/usr/bin/stat: cannot statx "
+                f"'/sys/fs/cgroup{self.manifest['service']['cgroup']}': "
+                "No such file or directory\n"
+            ),
+            "temporary_absent_after_cleanup": (
+                "/usr/bin/stat: cannot statx "
+                f"'{self.manifest['cleanup']['paths'][0]}': No such file or directory\n"
+            ),
+        }
+        for check_id, diagnostic in diagnostics.items():
             with self.subTest(check_id=check_id):
                 self.assertEqual(probes.expectation_kind(check_id), "exit_nonzero")
-                gone = probes.parse(check_id, result(returncode=1), self.manifest)
+                gone = probes.parse(check_id, result(returncode=1, stderr=diagnostic),
+                                    self.manifest)
                 self.assertEqual(gone["state"], "passed")
                 self.assertEqual(gone["code"], "observed_absent")
                 present = probes.parse(check_id, result(returncode=0), self.manifest)
@@ -305,7 +322,7 @@ class TestProbeCommandModel(unittest.TestCase):
 
     def test_socket_identity_requires_exact_address_and_process_owner(self):
         address = self.manifest["transport"]["lease_socket"]
-        good = (f"u_str LISTEN 0 16 {address} 123 * 0 "
+        good = (f"u_str LISTEN 0 16 {address} 123 * 0 uid:991 "
                 'users:(("native-credenti",pid=4242,fd=7))\n')
         self.assertEqual(probes.parse("lease_socket_owned", result(stdout=good),
                                      self.manifest)["state"], "passed")
@@ -313,11 +330,53 @@ class TestProbeCommandModel(unittest.TestCase):
             good.replace("native-credenti", "other-owner"),
             good.replace(address, f"lookalike-{address}"),
             good.replace("pid=4242", "pid=1"),
+            good.replace("uid:991", "uid:1991"),
         ):
             with self.subTest(output=output[:64]):
                 parsed = probes.parse("lease_socket_owned", result(stdout=output),
                                       self.manifest)
                 self.assertEqual(parsed["state"], "failed")
+
+    def test_socket_pid_and_uid_are_sealed_to_the_process_observation(self):
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        artifact = fixtures.execution_artifact(self.manifest, states)
+        lease = next(item for item in artifact if item["check_id"] == "lease_socket_owned")
+        lease["observation"] = {"kind": "socket_owner",
+                                "value": {**lease["observation"]["value"], "pid": 5252}}
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.validate_execution_artifact(artifact, self.manifest)
+        self.assertEqual(raised.exception.code,
+                         "execution_artifact_socket_process_mismatch")
+
+    def test_cleanup_process_uses_truncated_comm_and_detects_a_live_broker(self):
+        entry = probes.build("process_absent_after_cleanup", self.manifest)
+        self.assertEqual(entry["argv"][-1], "native-credenti")
+        live = probes.parse("process_absent_after_cleanup",
+                            result(returncode=0, stdout="4242\n"), self.manifest)
+        self.assertEqual((live["state"], live["code"]),
+                         ("failed", "resource_still_present"))
+
+    def test_cleanup_permission_denial_never_proves_path_absence(self):
+        for check_id in ("cgroup_absent_after_cleanup",
+                         "temporary_absent_after_cleanup"):
+            with self.subTest(check_id=check_id):
+                parsed = probes.parse(check_id, result(
+                    returncode=1, stderr="/usr/bin/stat: permission denied\n"),
+                    self.manifest)
+                self.assertEqual((parsed["state"], parsed["code"]),
+                                 ("blocked", "probe_stderr"))
+
+    def test_cleanup_missing_resource_diagnostics_are_exact(self):
+        interface = self.manifest["transport"]["guest_interface"]
+        good = probes.parse("interface_absent_after_cleanup", result(
+            returncode=1, stderr=f'Device "{interface}" does not exist.\n'),
+            self.manifest)
+        self.assertEqual(good["state"], "passed")
+        near_miss = probes.parse("interface_absent_after_cleanup", result(
+            returncode=1, stderr=f'Device "lookalike-{interface}" does not exist.\n'),
+            self.manifest)
+        self.assertEqual((near_miss["state"], near_miss["code"]),
+                         ("blocked", "probe_stderr"))
 
     def test_mount_isolation_requires_exact_systemd_fields(self):
         good = ("BindPaths=\nBindReadOnlyPaths=\nInaccessiblePaths=/home /root\n"

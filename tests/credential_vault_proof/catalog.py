@@ -39,6 +39,12 @@ _TYPED_PREDICATES = {
     "no_unexpected_host_mount": "mount_isolation",
     "unit_absent_after_cleanup": "unit_absent",
     "socket_absent_after_cleanup": "empty_output",
+    "process_absent_after_cleanup": "process_absent",
+    "interface_absent_after_cleanup": "interface_absent",
+    "route_absent_after_cleanup": "route_absent",
+    "nftables_absent_after_cleanup": "nftables_absent",
+    "cgroup_absent_after_cleanup": "path_absent",
+    "temporary_absent_after_cleanup": "path_absent",
 }
 
 

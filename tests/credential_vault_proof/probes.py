@@ -77,6 +77,10 @@ def _socket_name(value: str) -> str:
     return value
 
 
+def _cgroup_path(manifest: dict[str, Any]) -> str:
+    return "/sys/fs/cgroup" + manifest["service"]["cgroup"]
+
+
 # --- builders ---------------------------------------------------------------
 # Each builder takes the validated manifest and returns one argv array. They are
 # deliberately small and boring: the safety comes from the allowlist above and
@@ -130,18 +134,18 @@ def _cgroup_identity(manifest):
 
 
 def _lease_socket_owner(manifest):
-    return _argv("/usr/bin/ss", "-x", "-p", "-H",
+    return _argv("/usr/bin/ss", "-x", "-p", "-e", "-H",
                  "src", _socket_name(manifest["transport"]["lease_socket"]))
 
 
 def _controller_socket_owner(manifest):
-    return _argv("/usr/bin/ss", "-x", "-p", "-H",
+    return _argv("/usr/bin/ss", "-x", "-p", "-e", "-H",
                  "src", _socket_name(manifest["transport"]["controller_socket"]))
 
 
 def _guest_listener(manifest):
     transport = manifest["transport"]
-    return _argv("/usr/bin/ss", "-tlnp", "-H",
+    return _argv("/usr/bin/ss", "-tlnp", "-e", "-H",
                  "src", f"{transport['host_address']}:{transport['guest_port']}")
 
 
@@ -195,11 +199,11 @@ def _interface_absent(manifest):
 
 
 def _cgroup_absent(manifest):
-    return _argv("/usr/bin/test", "-d", manifest["service"]["cgroup"])
+    return _argv("/usr/bin/stat", "-c", "%F", _cgroup_path(manifest))
 
 
 def _process_absent(manifest):
-    return _argv("/usr/bin/ps", "-o", "pid=", "-C", "native-credential-broker")
+    return _argv("/usr/bin/ps", "-o", "pid=", "-C", "native-credenti")
 
 
 def _route_absent(manifest):
@@ -216,7 +220,7 @@ def _temporary_absent(manifest):
     paths = manifest["cleanup"]["paths"]
     if not paths:
         raise _refuse("cleanup_path_unknown")
-    return _argv("/usr/bin/test", "-e", paths[0])
+    return _argv("/usr/bin/stat", "-c", "%F", paths[0])
 
 
 EXPECTATION_KINDS = ("exit_zero", "exit_nonzero", "empty_output")
@@ -364,7 +368,8 @@ def _process_observation(check_id: str, stdout: str,
         observed_executable = match.group(3)
         correct = observed_executable == executable if check_id == "broker_process_identity" \
             else observed_executable.rsplit("/", 1)[-1] == executable
-    return _matched("process_identity", expected, correct)
+    return {"kind": "process_identity",
+            "value": {**expected, "pid": int(match.group(1))} if correct else None}
 
 
 def _socket_observation(check_id: str, stdout: str,
@@ -377,15 +382,22 @@ def _socket_observation(check_id: str, stdout: str,
     else:
         address = f"{transport['host_address']}:{transport['guest_port']}"
         owner = "native-credenti"
-    expected = {"address": address, "owner": owner, "pid_positive": True,
-                "fd_nonnegative": True}
+    uid = (manifest["service"]["controller_uid"]
+           if check_id == "controller_socket_owned"
+           else manifest["service"]["service_uid"])
+    expected = {"address": address, "owner": owner, "uid": uid,
+                "pid_positive": True, "fd_nonnegative": True}
     lines = _lines(stdout)
     if len(lines) != 1 or address not in lines[0].split():
         return _matched("socket_owner", expected, False)
     owners = re.findall(r'users:\(\(\"([^\"]+)\",pid=(\d+),fd=(\d+)\)\)', lines[0])
+    uids = re.findall(r"(?:^|\s)uid:(\d+)(?:\s|$)", lines[0])
     correct = len(owners) == 1 and owners[0][0] == owner \
-        and int(owners[0][1]) > 1 and int(owners[0][2]) >= 0
-    return _matched("socket_owner", expected, correct)
+        and int(owners[0][1]) > 1 and int(owners[0][2]) >= 0 \
+        and len(uids) == 1 and int(uids[0]) == uid
+    return {"kind": "socket_owner", "value": {
+        **expected, "pid": int(owners[0][1]), "fd": int(owners[0][2]),
+    } if correct else None}
 
 
 def _json_contains_pair(value: Any, key: str, expected: Any) -> bool:
@@ -446,16 +458,19 @@ def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
         "cgroup_identity_expected": {"ControlGroup": service["cgroup"]},
         "lease_socket_owned": {
             "address": transport["lease_socket"], "owner": "native-credenti",
-            "pid_positive": True, "fd_nonnegative": True,
+            "uid": service["service_uid"], "pid_positive": True,
+            "fd_nonnegative": True,
         },
         "controller_socket_owned": {
             "address": transport["controller_socket"],
-            "owner": "sandbox-credent", "pid_positive": True,
+            "owner": "sandbox-credent", "uid": service["controller_uid"],
+            "pid_positive": True,
             "fd_nonnegative": True,
         },
         "guest_listener_bound": {
             "address": f"{transport['host_address']}:{transport['guest_port']}",
-            "owner": "native-credenti", "pid_positive": True,
+            "owner": "native-credenti", "uid": service["service_uid"],
+            "pid_positive": True,
             "fd_nonnegative": True,
         },
         "veth_identity_expected": {"interface": transport["guest_interface"]},
@@ -471,6 +486,13 @@ def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
                                      "InaccessiblePaths": "/home /root",
                                      "ProtectHome": "yes"},
         "unit_absent_after_cleanup": "LoadState=not-found",
+        "process_absent_after_cleanup": {"comm": "native-credenti"},
+        "interface_absent_after_cleanup": {"interface": transport["guest_interface"]},
+        "route_absent_after_cleanup": {"interface": transport["guest_interface"]},
+        "nftables_absent_after_cleanup": {"family": "inet",
+                                          "table": kernel["nftables_table"]},
+        "cgroup_absent_after_cleanup": {"path": _cgroup_path(manifest)},
+        "temporary_absent_after_cleanup": {"path": manifest["cleanup"]["paths"][0]},
     }
     if check_id in values:
         return values[check_id]
@@ -483,7 +505,43 @@ def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
     return None
 
 
-def _normalize(check_id: str, stdout: str, manifest: dict[str, Any]) -> dict[str, Any]:
+def _missing_observation(check_id: str, stdout: str, stderr: str,
+                         manifest: dict[str, Any]) -> dict[str, Any]:
+    transport, service, kernel = (manifest["transport"], manifest["service"],
+                                  manifest["kernel"])
+    if check_id == "process_absent_after_cleanup":
+        return _matched("process_absent", {"comm": "native-credenti"},
+                        not stdout.strip() and not stderr)
+    if check_id in {"cgroup_absent_after_cleanup", "temporary_absent_after_cleanup"}:
+        path = (_cgroup_path(manifest) if check_id == "cgroup_absent_after_cleanup"
+                else manifest["cleanup"]["paths"][0])
+        expected_stderr = f"/usr/bin/stat: cannot statx '{path}': No such file or directory\n"
+        return _matched("path_absent", {"path": path},
+                        not stdout.strip() and stderr == expected_stderr)
+    if check_id == "interface_absent_after_cleanup":
+        interface = transport["guest_interface"]
+        return _matched("interface_absent", {"interface": interface},
+                        not stdout.strip()
+                        and stderr == f'Device "{interface}" does not exist.\n')
+    if check_id == "route_absent_after_cleanup":
+        interface = transport["guest_interface"]
+        return _matched("route_absent", {"interface": interface},
+                        not stdout.strip()
+                        and stderr == f'Cannot find device "{interface}"\n')
+    if check_id == "nftables_absent_after_cleanup":
+        table = kernel["nftables_table"]
+        lines = stderr.splitlines()
+        correct = (not stdout.strip() and len(lines) == 3
+                   and lines[0] == "Error: Could not process rule: No such file or directory"
+                   and lines[1] == f"list table inet {table}"
+                   and bool(re.fullmatch(r"\s*\^+", lines[2])))
+        return _matched("nftables_absent", {"family": "inet", "table": table},
+                        correct)
+    return {"kind": "predicate_unavailable", "value": None}
+
+
+def _normalize(check_id: str, stdout: str, stderr: str,
+               manifest: dict[str, Any]) -> dict[str, Any]:
     """Produce only catalog-derived, secret-free typed observations."""
     exact = _expected_text(check_id, manifest)
     if exact is not None:
@@ -585,7 +643,7 @@ def _normalize(check_id: str, stdout: str, manifest: dict[str, Any]) -> dict[str
     if expectation_kind(check_id) == "empty_output":
         return _matched("empty_output", "", not stdout.strip())
     if expectation_kind(check_id) == "exit_nonzero":
-        return {"kind": "not_found_exit", "value": None}
+        return _missing_observation(check_id, stdout, stderr, manifest)
     return {"kind": "predicate_unavailable", "value": None}
 
 
@@ -601,6 +659,18 @@ def _observation_matches(check_id: str, observation: dict[str, Any],
         return False
     if kind == "not_found_exit":
         return value is None
+    if kind in {"process_identity", "socket_owner"}:
+        if not isinstance(value, dict):
+            return False
+        dynamic = dict(value)
+        pid = dynamic.pop("pid", None)
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            return False
+        if kind == "socket_owner":
+            fd = dynamic.pop("fd", None)
+            if not isinstance(fd, int) or isinstance(fd, bool) or fd < 0:
+                return False
+        return dynamic == _expected_value(check_id, manifest)
     return value is not None and value == _expected_value(check_id, manifest)
 
 
@@ -611,16 +681,18 @@ def _outcome(check_id: str, result: dict[str, Any], observation: dict[str, Any],
         return "blocked", "probe_timeout"
     if observation.get("kind") == "secret_output":
         return "blocked", "secret_like_output"
-    if not result["stderr_empty"]:
-        return "blocked", "probe_stderr"
     rc = result["returncode"]
     expectation = expectation_kind(check_id)
     if expectation == "exit_nonzero":
         if rc == 1 and _observation_matches(check_id, observation, manifest):
             return "passed", "observed_absent"
+        if not result["stderr_empty"]:
+            return "blocked", "probe_stderr"
         if rc in {126, 127} or rc < 0 or rc > 1:
             return "blocked", "probe_unavailable"
         return "failed", "resource_still_present"
+    if not result["stderr_empty"]:
+        return "blocked", "probe_stderr"
     if expectation == "empty_output" and rc != 0:
         return "blocked", "probe_unavailable"
     if rc in {126, 127} or rc < 0:
@@ -690,6 +762,22 @@ def validate_execution_artifact(document: Any, manifest: dict[str, Any]
         observed[check_id] = {**item, "state": state, "code": code}
     if set(observed) != set(planned):
         raise _refuse("execution_artifact_incomplete", "checks.json")
+    socket_process = {
+        "lease_socket_owned": "broker_process_identity",
+        "controller_socket_owned": "controller_process_identity",
+        "guest_listener_bound": "broker_process_identity",
+    }
+    for socket_check, process_check in socket_process.items():
+        if socket_check not in observed or observed[socket_check]["state"] != "passed":
+            continue
+        socket_value = observed[socket_check]["observation"]["value"]
+        process = observed.get(process_check, {})
+        process_value = process.get("observation", {}).get("value")
+        if not isinstance(socket_value, dict) or not isinstance(process_value, dict) \
+                or process.get("state") != "passed" \
+                or socket_value.get("pid") != process_value.get("pid") \
+                or socket_value.get("uid") != process_value.get("uid"):
+            raise _refuse("execution_artifact_socket_process_mismatch", "checks.json")
     return tuple(observed[name] for name in planned)
 
 
@@ -729,7 +817,7 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         raise _refuse("result_schema_invalid", check_id)
     findings = scanner.scan_text(stdout, location=f"{check_id}.stdout")
     observation = ({"kind": "secret_output", "value": None} if findings else
-                   _normalize(check_id, stdout, manifest))
+                   _normalize(check_id, stdout, stderr, manifest))
     raw = {"returncode": completed["returncode"], "stdout": stdout,
            "stderr": stderr, "timed_out": completed["timed_out"]}
     result = {

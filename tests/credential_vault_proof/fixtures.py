@@ -86,6 +86,8 @@ def manifest(**overrides: Any) -> dict[str, Any]:
              "required": True, "description": "installed revision matches the plan"},
             {"check_id": "unit_identity_expected", "category": "service_identity",
              "required": True, "description": "unit identity and ownership match"},
+            {"check_id": "broker_process_identity", "category": "process_identity",
+             "required": True, "description": "broker process identity matches"},
             {"check_id": "lease_socket_owned", "category": "transport",
              "required": True, "description": "lease socket is broker owned"},
             {"check_id": "scm_rights_exactly_one", "category": "descriptor",
@@ -176,9 +178,13 @@ def execution_artifact(manifest_document: Any, check_states: Any
                 "NoNewPrivileges=yes",
                 f"ControlGroup={manifest_document['service']['cgroup']}",
             )) + "\n",
+            "broker_process_identity": (
+                "4242 991 Mon Sep 1 10:00:00 2026 "
+                f"{manifest_document['service']['executable']} --fixture\n"
+            ),
             "lease_socket_owned": (
                 "u_str LISTEN 0 16 "
-                f"{manifest_document['transport']['lease_socket']} 123 * 0 "
+                f"{manifest_document['transport']['lease_socket']} 123 * 0 uid:991 "
                 'users:(("native-credenti",pid=4242,fd=7))\n'
             ),
             "unit_absent_after_cleanup": "LoadState=not-found\n",

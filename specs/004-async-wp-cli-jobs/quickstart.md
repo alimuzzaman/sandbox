@@ -48,6 +48,8 @@ behavior.
 If Docker process/container observation is unavailable, polling must remain
 non-terminal and kill must report that termination could not be verified. Never
 interpret that result as completion or retry the WP command under a new job ID.
+Marker-publication failures retain a private cleanup receipt; a later poll/kill
+retries only its validated PGID and exact Docker job name until cleanup is proven.
 
 ## 6. Safety
 

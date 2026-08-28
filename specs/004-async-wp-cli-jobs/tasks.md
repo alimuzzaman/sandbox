@@ -72,12 +72,16 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 - Docker acceptance is the live host supervisor plus durable `launch:<pid>`
   marker; the named container transition continues asynchronously under that
   supervisor's cleanup ownership. Owner/container observation is tri-state and
-  cleanup uncertainty never creates terminal status.
+  cleanup uncertainty never creates terminal status. Both drivers stage a
+  validated PID/PGID cleanup receipt before normal marker publication; retained
+  receipts let status/kill retry whole-group cleanup, plus exact Docker container
+  cleanup, without caller-supplied ownership.
 
 ## Phase 9: Convergence
 
 - [ ] T021 Redesign Docker async-job acceptance around a live isolated supervisor
-  with durable running evidence, tri-state observation, and exact named-container
-  cleanup. Local measurements are below two seconds and adversarial tests cover
-  unknown probes/cleanup; keep open until independent review accepts the hardened
-  implementation and its local evidence record.
+  with durable running evidence, tri-state observation, receipt-bound whole-group
+  cleanup, and exact named-container cleanup. Post-hardening local measurements
+  are mixed (1.26s and 2.13s), so SC-001 is not consistently proven. Adversarial
+  tests cover unknown probes, residual group members, marker failures, and cleanup
+  retry; keep open pending a consistently passing timing gate and independent review.

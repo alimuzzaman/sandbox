@@ -108,11 +108,15 @@ class TestWpCliJobs(unittest.TestCase):
                 patch.object(jobs, "_write_new_artifact", side_effect=fail_handle), \
                 patch.object(jobs, "_remove_docker_job_container"), \
                 patch.object(jobs, "_docker_container_running", return_value=False), \
+                patch.object(jobs, "_herd_group_running", side_effect=[True, False]), \
                 patch.object(jobs.os, "killpg") as killpg:
             with self.assertRaises(OSError):
                 jobs.launch_job(self.instance, ["option", "get", "siteurl"])
 
-        killpg.assert_called_once_with(5353, jobs.signal.SIGTERM)
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(5353, jobs.signal.SIGTERM), call(5353, jobs.signal.SIGKILL)],
+        )
         self.assertFalse(any(path.exists() for path in self._paths("6" * 16)))
 
     def test_docker_marker_failure_retains_evidence_when_cleanup_is_unknown(self):
@@ -133,6 +137,7 @@ class TestWpCliJobs(unittest.TestCase):
                 patch.object(jobs, "_write_new_artifact", side_effect=fail_handle), \
                 patch.object(jobs, "_remove_docker_job_container"), \
                 patch.object(jobs, "_docker_container_running", return_value=None), \
+                patch.object(jobs, "_herd_group_running", return_value=False), \
                 patch.object(jobs.os, "killpg"):
             with self.assertRaises(OSError):
                 jobs.launch_job(self.instance, ["option", "get", "siteurl"])
@@ -164,6 +169,7 @@ class TestWpCliJobs(unittest.TestCase):
                 patch.object(jobs, "_write_new_artifact", side_effect=fail_handle), \
                 patch.object(jobs, "_remove_docker_job_container"), \
                 patch.object(jobs, "_docker_container_running", return_value=False), \
+                patch.object(jobs, "_herd_group_running", side_effect=[True, None]), \
                 patch.object(jobs.os, "killpg") as killpg:
             with self.assertRaises(OSError):
                 jobs.launch_job(self.instance, ["option", "get", "siteurl"])
@@ -177,6 +183,75 @@ class TestWpCliJobs(unittest.TestCase):
             "cleanup could not be verified",
             self._paths("1" * 16)[0].read_text(),
         )
+
+    def test_herd_marker_failure_retains_validated_receipt_until_group_absence(self):
+        real_write = jobs._write_new_artifact
+        process = SimpleNamespace(pid=5656, wait=lambda timeout: 143)
+
+        def fail_handle(path, value):
+            if path.suffix == ".pid":
+                raise OSError("marker unavailable")
+            return real_write(path, value)
+
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=True), \
+                patch.object(jobs, "_herd_wp_cmd", return_value=["wp"]), \
+                patch.object(jobs.secrets, "token_hex", return_value="2" * 16), \
+                patch.object(jobs.subprocess, "Popen", return_value=process), \
+                patch.object(jobs, "_write_new_artifact", side_effect=fail_handle), \
+                patch.object(jobs, "_herd_group_running", return_value=None), \
+                patch.object(jobs.os, "killpg"):
+            with self.assertRaises(OSError):
+                jobs.launch_job(self.instance, ["option", "get", "siteurl"])
+
+        log, status, handle = self._paths("2" * 16)
+        with patch.object(jobs, "wp_dir", return_value=self.root):
+            self.assertEqual(
+                jobs._read_cleanup_receipt(self.instance, "2" * 16),
+                ("herd", 5656),
+            )
+        self.assertIn("cleanup could not be verified", log.read_text())
+        self.assertFalse(status.exists())
+        self.assertFalse(handle.exists())
+
+    def test_docker_cleanup_receipt_retries_both_owned_boundaries(self):
+        jid = "3" * 16
+        log, status, _ = self._paths(jid)
+        log.touch()
+        receipt = self.job_dir / f"job_{jid}.cleanup"
+        receipt.write_text(f"docker-cleanup-v1|5757|5757|sb-job-{self.instance}-{jid}")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_supervisor_running", return_value=True), \
+                patch.object(jobs, "_herd_group_running", side_effect=[True, False]), \
+                patch.object(jobs, "_remove_docker_job_container") as remove, \
+                patch.object(jobs, "_docker_container_running", return_value=False), \
+                patch.object(jobs.os, "killpg") as killpg:
+            result = jobs.job_status(self.instance, jid)
+
+        killpg.assert_called_once_with(5757, jobs.signal.SIGTERM)
+        remove.assert_called_once_with(self.instance, jid)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["exit_code"], 1)
+        self.assertFalse(receipt.exists())
+
+    def test_herd_cleanup_receipt_retries_and_verifies_entire_group(self):
+        jid = "a" * 16
+        log, status, _ = self._paths(jid)
+        log.touch()
+        receipt = self.job_dir / f"job_{jid}.cleanup"
+        receipt.write_text("herd-cleanup-v1|5858|5858")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=True), \
+                patch.object(jobs, "_herd_launcher_running", return_value=True), \
+                patch.object(jobs, "_herd_group_running", side_effect=[True, False]), \
+                patch.object(jobs.os, "killpg") as killpg:
+            result = jobs.job_status(self.instance, jid)
+
+        killpg.assert_called_once_with(5858, jobs.signal.SIGTERM)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(status.read_text(), "1")
+        self.assertFalse(receipt.exists())
 
     def test_immediate_poll_treats_verified_docker_supervisor_as_running(self):
         jid = "4" * 16
@@ -250,6 +325,7 @@ class TestWpCliJobs(unittest.TestCase):
                 patch.object(jobs, "_docker_launcher_running", side_effect=[True, False, False]), \
                 patch.object(jobs, "_docker_container_running", return_value=False), \
                 patch.object(jobs, "_remove_docker_job_container"), \
+                patch.object(jobs, "_herd_group_running", return_value=False), \
                 patch.object(jobs.os, "killpg") as killpg, \
                 patch.object(jobs.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
             result = jobs.kill_job(self.instance, jid)

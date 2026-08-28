@@ -90,10 +90,10 @@ not close the external or human gates listed below.
 
 ### Remote/runtime and migration evidence
 
-- [ ] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021 has measured
-  local Docker samples below two seconds, but the tri-state liveness and exact
-  cleanup hardening remains under independent review. See the checked-in local
-  evidence record; no remote or accepted-proof claim is implied.
+- [ ] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021 has mixed
+  post-hardening local Docker samples (1.26s and 2.13s). The lifecycle is hardened,
+  but the strict timing target is not consistently proven. See the checked-in
+  local evidence record; no remote or accepted-proof claim is implied.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and

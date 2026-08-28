@@ -45,6 +45,10 @@ def _job_paths(instance: str, jid: str) -> tuple[Path, Path, Path]:
     return tuple(job_dir / f"job_{jid}.{suffix}" for suffix in ("log", "status", "pid"))
 
 
+def _cleanup_receipt_path(instance: str, jid: str) -> Path:
+    return _job_dir(instance, create=False) / f"job_{jid}.cleanup"
+
+
 def _known_job(paths: tuple[Path, Path, Path]) -> bool:
     return any(path.exists() for path in paths)
 
@@ -85,6 +89,48 @@ def _write_new_artifact(path: Path, value: str) -> None:
         os.fsync(handle.fileno())
 
 
+def _write_cleanup_receipt(instance: str, jid: str, kind: str, pid: int) -> Path:
+    if kind == "docker":
+        value = f"docker-cleanup-v1|{pid}|{pid}|{_job_name(instance, jid)}"
+    elif kind == "herd":
+        value = f"herd-cleanup-v1|{pid}|{pid}"
+    else:
+        raise ValueError("invalid cleanup receipt kind")
+    path = _cleanup_receipt_path(instance, jid)
+    _write_new_artifact(path, value)
+    return path
+
+
+def _read_cleanup_receipt(instance: str, jid: str) -> tuple[str, int] | None:
+    path = _cleanup_receipt_path(instance, jid)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(513)
+    except OSError:
+        return None
+    if len(raw) > 512:
+        return None
+    try:
+        fields = raw.decode("ascii").split("|")
+    except UnicodeDecodeError:
+        return None
+    try:
+        if len(fields) == 3 and fields[0] == "herd-cleanup-v1":
+            pid, pgid = int(fields[1]), int(fields[2])
+            return ("herd", pid) if pid > 1 and pid == pgid else None
+        if len(fields) == 4 and fields[0] == "docker-cleanup-v1":
+            pid, pgid = int(fields[1]), int(fields[2])
+            expected = _job_name(instance, jid)
+            return (
+                ("docker", pid)
+                if pid > 1 and pid == pgid and fields[3] == expected
+                else None
+            )
+    except ValueError:
+        return None
+    return None
+
+
 def _remove_launch_artifacts(paths: tuple[Path, Path, Path]) -> None:
     for path in paths:
         try:
@@ -93,7 +139,7 @@ def _remove_launch_artifacts(paths: tuple[Path, Path, Path]) -> None:
             pass
 
 
-def _herd_group_running(pid: int) -> bool:
+def _herd_group_running(pid: int) -> bool | None:
     """Whether a Herd wrapper's process group still exists.
 
     ``start_new_session=True`` below makes the wrapper PID its process-group
@@ -106,6 +152,8 @@ def _herd_group_running(pid: int) -> bool:
     except PermissionError:
         # It exists, but the current user is not allowed to signal it.
         return True
+    except OSError:
+        return None
     return True
 
 
@@ -135,11 +183,8 @@ def _docker_container_running(instance: str, jid: str) -> bool | None:
     return None
 
 
-def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool | None:
-    """Observe the exact host supervisor as running, dead, or unknown."""
-    pid = _read_docker_launcher_pid(pid_file)
-    if pid is None:
-        return None
+def _docker_supervisor_running(instance: str, jid: str, pid: int) -> bool | None:
+    """Observe one receipt-bound Docker supervisor as running/dead/unknown."""
     try:
         result = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
@@ -166,6 +211,45 @@ def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool | 
         observed_pid == pid
         and observed_pgid == pid
         and _job_name(instance, jid) in fields[2]
+    )
+
+
+def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    """Observe the exact host supervisor as running, dead, or unknown."""
+    pid = _read_docker_launcher_pid(pid_file)
+    return (
+        _docker_supervisor_running(instance, jid, pid)
+        if pid is not None else None
+    )
+
+
+def _herd_launcher_running(jid: str, pid: int) -> bool | None:
+    """Validate the receipt-bound Herd wrapper before signalling its group."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
+            check=False, capture_output=True, text=True, timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = (result.stdout or "").strip().split(maxsplit=2)
+    if result.returncode != 0:
+        return (
+            False
+            if result.returncode == 1 and not fields and not (result.stderr or "").strip()
+            else None
+        )
+    if len(fields) != 3:
+        return None
+    try:
+        observed_pid, observed_pgid = int(fields[0]), int(fields[1])
+    except ValueError:
+        return None
+    return (
+        observed_pid == pid
+        and observed_pgid == pid
+        and f"job_{jid}.log" in fields[2]
+        and "wp" in fields[2]
     )
 
 
@@ -197,26 +281,51 @@ def _remove_docker_job_container(instance: str, jid: str) -> None:
         pass
 
 
-def _stop_process_group(process: subprocess.Popen) -> bool:
-    """Boundedly stop a process group created by ``start_new_session``."""
+def _stop_owned_group(
+    pgid: int,
+    observe,
+    process: subprocess.Popen | None = None,
+) -> bool:
+    """TERM, then KILL if needed, and prove the entire owned group absent."""
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     except OSError:
         return False
-    try:
-        process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
-        return True
-    except subprocess.TimeoutExpired:
+    if process is not None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
-            return True
         except (OSError, subprocess.SubprocessError):
-            return False
-    except (OSError, subprocess.SubprocessError):
+            pass
+    state = observe()
+    if state is False:
+        return True
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
         return False
+    if process is not None:
+        try:
+            process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    deadline = time.monotonic() + _JOB_LAUNCH_STOP_SECONDS
+    state = observe()
+    while state is True and time.monotonic() < deadline:
+        time.sleep(_JOB_LAUNCH_POLL_SECONDS)
+        state = observe()
+    return state is False
+
+
+def _stop_process_group(process: subprocess.Popen) -> bool:
+    return _stop_owned_group(
+        process.pid,
+        lambda: _herd_group_running(process.pid),
+        process,
+    )
 
 
 def _retain_cleanup_unknown(log_file: Path) -> None:
@@ -236,13 +345,42 @@ def _abort_docker_launch(
     process: subprocess.Popen,
     log_file: Path,
 ) -> bool:
-    stopped = _stop_process_group(process)
+    stopped = _stop_owned_group(
+        process.pid,
+        lambda: _herd_group_running(process.pid),
+        process,
+    )
     _remove_docker_job_container(instance, jid)
     absent = _docker_container_running(instance, jid) is False
     if not (stopped and absent):
         _retain_cleanup_unknown(log_file)
         return False
     return True
+
+
+def _retry_cleanup_receipt(instance: str, jid: str, kind: str, pid: int) -> bool:
+    if kind == "herd":
+        state = _herd_launcher_running(jid, pid)
+        if state is None:
+            return False
+        group = _herd_group_running(pid)
+        if group is None:
+            return False
+        stopped = group is False or _stop_owned_group(
+            pid, lambda: _herd_group_running(pid),
+        )
+        return stopped
+    state = _docker_supervisor_running(instance, jid, pid)
+    if state is None:
+        return False
+    group = _herd_group_running(pid)
+    if group is None:
+        return False
+    stopped = group is False or _stop_owned_group(
+        pid, lambda: _herd_group_running(pid),
+    )
+    _remove_docker_job_container(instance, jid)
+    return stopped and _docker_container_running(instance, jid) is False
 
 
 def _job_process_running(instance: str, jid: str, pid_file: Path) -> bool | None:
@@ -269,6 +407,16 @@ def _reconcile_job(instance: str, jid: str, paths: tuple[Path, Path, Path] | Non
         return "completed"
     if not _known_job((log, status_file, pid_file)):
         return "not_found"
+    receipt = _read_cleanup_receipt(instance, jid) if not pid_file.exists() else None
+    if receipt is not None:
+        if _retry_cleanup_receipt(instance, jid, *receipt):
+            _record_terminal(status_file, _JOB_ORPHAN_EXIT)
+            try:
+                _cleanup_receipt_path(instance, jid).unlink()
+            except OSError:
+                pass
+            return "completed"
+        return "running"
     running = _job_process_running(instance, jid, pid_file)
     if running is False:
         _record_terminal(status_file, _JOB_ORPHAN_EXIT)
@@ -292,25 +440,38 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
             f"{wp} {quoted} > .sb-jobs/job_{jid}.log 2>&1; "
             f"echo $? > .sb-jobs/job_{jid}.status"
         )
+        _write_new_artifact(log_file, "")
         try:
-            _write_new_artifact(log_file, "")
             process = subprocess.Popen(
                 ["sh", "-c", wrapper], cwd=str(root),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            try:
-                _write_new_artifact(pid_file, str(process.pid))
-            except Exception:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                raise
         except Exception:
             _remove_launch_artifacts(paths)
             raise
+        try:
+            receipt_path = _write_cleanup_receipt(
+                instance, jid, "herd", process.pid,
+            )
+            _write_new_artifact(pid_file, str(process.pid))
+        except Exception:
+            cleanup_proven = _stop_process_group(process)
+            if cleanup_proven:
+                _remove_launch_artifacts(paths)
+                try:
+                    _cleanup_receipt_path(instance, jid).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            else:
+                _retain_cleanup_unknown(log_file)
+            raise
+        try:
+            receipt_path.unlink()
+        except OSError:
+            # A retained receipt is safe: the normal pid handle remains
+            # authoritative and the status path will reconcile it.
+            pass
     else:
         wrapper = (
             f"wp {quoted} > /var/www/html/.sb-jobs/job_{jid}.log 2>&1; "
@@ -384,6 +545,9 @@ fi
                 pass
             raise
         try:
+            receipt_path = _write_cleanup_receipt(
+                instance, jid, "docker", process.pid,
+            )
             _write_new_artifact(pid_file, f"launch:{process.pid}")
         except Exception:
             cleanup_proven = _abort_docker_launch(
@@ -395,7 +559,15 @@ fi
                     Path(temporary_handle).unlink(missing_ok=True)
                 except OSError:
                     pass
+                try:
+                    _cleanup_receipt_path(instance, jid).unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise
+        try:
+            receipt_path.unlink()
+        except OSError:
+            pass
     return jid
 
 
@@ -443,19 +615,9 @@ def kill_job(instance: str, jid: str) -> dict:
         if pid is None:
             return {"job_id": jid, "status": "running", "killed": False,
                     "error": "job process group is not available"}
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            _record_terminal(st, _JOB_ORPHAN_EXIT)
-            return {"job_id": jid, "status": "completed", "exit_code": _JOB_ORPHAN_EXIT,
-                    "killed": False}
-        except PermissionError:
-            return {"job_id": jid, "status": "running", "killed": False,
-                    "error": "permission denied terminating job process group"}
-        deadline = time.monotonic() + 2
-        while _herd_group_running(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        terminated = not _herd_group_running(pid)
+        terminated = _stop_owned_group(
+            pid, lambda: _herd_group_running(pid),
+        )
     else:
         handle = _read_docker_handle(pid_file)
         launcher_pid = _read_docker_launcher_pid(pid_file)
@@ -463,16 +625,18 @@ def kill_job(instance: str, jid: str) -> dict:
             _docker_launcher_running(instance, jid, pid_file)
             if handle == "launch" else False
         )
+        group_stopped = handle == "container"
         if launcher_pid is not None and launcher_state is True:
-            try:
-                os.killpg(launcher_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            deadline = time.monotonic() + _JOB_LAUNCH_STOP_SECONDS
-            while launcher_state is True and time.monotonic() < deadline:
-                time.sleep(_JOB_LAUNCH_POLL_SECONDS)
-                launcher_state = _docker_launcher_running(
-                    instance, jid, pid_file,
+            group_stopped = _stop_owned_group(
+                launcher_pid, lambda: _herd_group_running(launcher_pid),
+            )
+        elif launcher_pid is not None and launcher_state is False:
+            group = _herd_group_running(launcher_pid)
+            if group is False:
+                group_stopped = True
+            elif group is True:
+                group_stopped = _stop_owned_group(
+                    launcher_pid, lambda: _herd_group_running(launcher_pid),
                 )
         _remove_docker_job_container(instance, jid)
         # Do not create a successful cancellation record solely because the
@@ -481,6 +645,8 @@ def kill_job(instance: str, jid: str) -> dict:
         if handle == "launch":
             launcher_state = _docker_launcher_running(instance, jid, pid_file)
             terminated = (
+                group_stopped
+                and
                 launcher_state is False
                 and _docker_container_running(instance, jid) is False
             )
@@ -502,7 +668,7 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
     now = time.time()
     n = 0
     job_ids = sorted({match.group(1) for path in jd.glob("job_*")
-                      if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid)", path.name))})
+                      if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid|cleanup)", path.name))})
     for jid in job_ids:
         paths = _job_paths(instance, jid)
         try:
@@ -515,6 +681,7 @@ def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
             if now - newest > max_age:
                 for path in paths:
                     path.unlink(missing_ok=True)
+                _cleanup_receipt_path(instance, jid).unlink(missing_ok=True)
                 n += 1
         except OSError:
             pass
@@ -616,7 +783,7 @@ def cmd_jobs(cfg, args) -> None:
     prune_jobs(inst)
     jd = _job_dir(inst, create=False)
     ids = sorted({match.group(1) for path in jd.glob("job_*")
-                  if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid)", path.name))}) if jd.is_dir() else []
+                  if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid|cleanup)", path.name))}) if jd.is_dir() else []
     if not ids:
         info(f"no jobs for instance '{inst}'")
         return

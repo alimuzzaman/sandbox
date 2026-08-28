@@ -16,6 +16,7 @@ No database. A Job is three files under `runtime/wp-<instance>/.sb-jobs/`.
 |------|---------|
 | `job_<id>.log` | combined stdout+stderr, appended as it runs |
 | `job_<id>.pid` | internal cancel handle: Herd wrapper PID, Docker `launch:<pid>`, or Docker `container` |
+| `job_<id>.cleanup` | temporary durable internal cleanup receipt binding owned PID/PGID and, for Docker, exact container name; retained only when normal marker publication/cleanup is uncertain |
 | `job_<id>.status` | absent ⇒ public non-terminal/running presentation; present ⇒ terminal certainty, contents = exit code (`143` if killed) |
 
 Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
@@ -30,9 +31,10 @@ container removal → completed(`143`). Age-prune removes terminal jobs' files.
 Docker liveness is internally tri-state: running, dead, or unknown. A probe
 timeout/error and an absent container while the handle still says `launch` are
 unknown. Unknown never creates `.status`; poll remains non-terminal and kill
-returns `killed:false`. If marker-write abort cannot prove both supervisor and
-container absence, bounded secret-free cleanup-unknown evidence remains in the
-log instead of being deleted.
+returns `killed:false`. If marker-write abort cannot prove the entire owned group
+and, for Docker, container absent, the validated cleanup receipt plus bounded
+secret-free log evidence remain. Later poll/kill retries that exact cleanup and
+records terminal failure only after full absence is proven.
 
 ## Query result (`wp_cli_job`)
 

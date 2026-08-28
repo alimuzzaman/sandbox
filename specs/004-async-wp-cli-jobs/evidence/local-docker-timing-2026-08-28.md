@@ -38,3 +38,14 @@ long-job command returned job `93282075eef46b08` in `real 1.20` seconds
 (`user 0.49`, `sys 0.07`). Immediate supported polling reported `running`, kill
 reported `killed`, and repeat polling reported `completed (exit 143)`. Its exact
 runtime identity was `sb-job-xspeed-released-93282075eef46b08`.
+
+After cleanup-receipt and whole-PGID hardening, two further supported runs returned:
+
+- `cdf56389e6b736a3`: `real 2.13`, `user 0.56`, `sys 0.13`; immediate poll was
+  running, kill succeeded, and repeat poll completed with exit 143.
+- `5a83c62299df5025`: `real 1.26`, `user 0.51`, `sys 0.07`; immediate poll was
+  running, kill succeeded, and repeat poll completed with exit 143.
+
+The 2.13-second observation misses SC-001. T021 therefore remains open: this
+local evidence does not prove the strict target consistently even though the
+second same-build sample passed.

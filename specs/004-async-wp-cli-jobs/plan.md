@@ -13,9 +13,11 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 `.sb-jobs/` (log + status + process handle). Docker acceptance starts an
 isolated host supervisor immediately; it owns the slower named `compose run -d`
 transition and every failure/cancel cleanup. Herd keeps its isolated host
-wrapper. Poll and kill use tri-state observations; probe failure never becomes
-terminal state. Both paths return only after a durable running handle exists
-and are auto-pruned by age.
+wrapper. Before publishing the normal handle, both paths durably retain a
+validated cleanup receipt containing the owned PID/PGID and, for Docker, the
+exact named-container identity. Poll and kill use that receipt to retry cleanup;
+probe failure never becomes terminal state. Both paths return only after a
+durable running handle exists and are auto-pruned by age.
 
 ## Technical Context
 

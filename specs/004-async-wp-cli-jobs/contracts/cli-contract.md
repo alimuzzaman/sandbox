@@ -14,6 +14,10 @@
   `launch:<supervisor-pid>` before return, then atomically changes it to
   `container` after named-container acceptance. Both states support immediate
   poll/cancel without minting another job ID.
+- Before publishing that normal handle, Sandbox durably records a private,
+  validated cleanup receipt binding PID/PGID and the exact Docker container name.
+  A marker-publication failure retains this ownership until status/kill proves
+  the whole group and container absent; callers cannot supply the receipt.
 
 ### `wp_cli_job(job_id, offset=0, limit=1048576, *, project_dir)`
 - Validates `job_id`; returns `{ ok, job_id, status, exit_code?, stdout, bytes_read, truncated }`.
@@ -23,7 +27,8 @@
 - Herd sends `SIGTERM` to the wrapper process **group**. Docker force-removes
   the detached job container (and therefore its children). During Docker launch,
   it also stops the identity-checked supervisor. A `143` status is written only
-  after the applicable owner and exact named container are both observed absent.
+  after the entire applicable process group and exact named container are both
+  observed absent. Leader exit alone is not completion evidence.
 - A cancelled job reports `status:"completed"` with `exit_code:143` (the `.status` file is present = done); "cancelled" is a human-facing interpretation, not a distinct query status (analysis F2).
 - Killing a finished/unknown job → `{ ok, status }` no-op (no error).
 - Polling reconciles only a definitely dead, published execution boundary. A

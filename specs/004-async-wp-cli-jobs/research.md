@@ -23,12 +23,18 @@
   by Sandbox with `start_new_session=True`. Sandbox durably writes the returned
   process handle before returning. Docker changes that
   handle to the literal `container` only after the named container is accepted.
+- Before normal handle publication, Sandbox writes an internal cleanup receipt.
+  It binds `PID == PGID`; Docker also binds the exact derived container name.
+  Normal publication removes it. If publication fails, later status/kill calls
+  validate the receipt and process identity, retry TERM/KILL for the whole group,
+  and for Docker retry exact container removal.
 - **Cancel** signals only an identity-checked group or removes the exact named
   container. Probe timeout, malformed output, or transport error is unknown and
   cannot authorize completion. A launch-marker job with no container is also
   unknown until explicit cleanup proves both boundaries absent.
 - **Rationale**: no PID is public or accepted from the WP command. The host owns
   the Popen identity and checks PID, PGID, and exact job name before signalling.
+  Leader exit alone is insufficient: the entire PGID must be observed absent.
 - **Alternatives**: `exec wp` (makes `$$`==wp but then can't capture the exit code); parse `docker top` (brittle); no-cancel (rejected — clarification put cancel in v1).
 
 ## Decision: file-based state machine (no DB/registry)

@@ -54,7 +54,10 @@ not close the external or human gates listed below.
   `workspace_index_incomplete` fail-closed. Do not infer cleanup from names,
   age, or an incomplete scan. Feedback: `78aaf583`, `0fac3b07`, `bf05eeb9`,
   `a813480b`, `600d2def`, `0ed665d0`, `84585e00`, `01df389c`, `fc79f41e`,
-  `088652d4`, `cd84b75d`, `b5ea1432`, `6a1cca01`, `3a6e8c1a`, `822262fe`.
+  `088652d4`, `cd84b75d`, `b5ea1432`, `6a1cca01`, `3a6e8c1a`, `822262fe`,
+  `c34c2e55fced753e665ff9e827a2a3bf` (verified and locally reproduced; blocked
+  on generation-receipt/pre-materialization lease design plus remote Linux
+  acceptance).
 
 - [ ] **Make target, transport, revision, and deployment truth actionable.**
   Separate registered reachability from brokered SSH/MCP usability; expose a

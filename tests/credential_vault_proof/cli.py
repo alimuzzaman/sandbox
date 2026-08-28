@@ -166,7 +166,8 @@ def run(argv: Any = None) -> int:
             document = _load(_require(args.manifest, "manifest_required"))
             result = bundle_module.validate_bundle(
                 _require(args.bundle, "bundle_required"), manifest=document,
-                expected_request_id=args.request_id, now=args.now,
+                expected_request_id=args.request_id,
+                now=_require(args.now, "timestamp_required"),
             )
             _emit({key: (list(value) if isinstance(value, tuple) else value)
                    for key, value in result.items()})
@@ -177,9 +178,18 @@ def run(argv: Any = None) -> int:
         if record is None:
             _emit({"ok": False, "code": "run_unknown", "location": "ledger"})
             return EXIT_REFUSED
-        built = report_module.build_report(manifest=document, record=record)
+        validated_bundle = None
+        if args.bundle is not None:
+            validated_bundle = bundle_module.validate_bundle(
+                _require(args.bundle, "bundle_required"), manifest=document,
+                expected_request_id=record["request_id"],
+                now=_require(args.now, "timestamp_required"),
+            )
+        built = report_module.build_report(
+            manifest=document, record=record, bundle=validated_bundle)
         sys.stdout.write(report_module.render(built))
-        return EXIT_OK if built["classification"] == "passed_live" else EXIT_BLOCKED
+        return EXIT_OK if validated_bundle is not None \
+            and built["classification"] == "passed_live" else EXIT_BLOCKED
     except (manifest_module.ManifestError, ledger_module.LedgerError,
             bundle_module.BundleError, probes_module.ProbeError,
             cleanup_module.CleanupError) as error:

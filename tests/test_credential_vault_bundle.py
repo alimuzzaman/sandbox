@@ -25,6 +25,7 @@ from credential_vault_proof import (  # noqa: E402
 REQUEST = "cv-proof-0001"
 START = "2026-09-01T10:00:00Z"
 END = "2026-09-01T12:00:00Z"
+NOW = "2026-09-02T00:00:00Z"
 
 
 class BundleTestCase(unittest.TestCase):
@@ -74,6 +75,7 @@ class BundleTestCase(unittest.TestCase):
         return record
 
     def validate(self, **kwargs):
+        kwargs.setdefault("now", NOW)
         return bundle_module.validate_bundle(
             self.root, manifest=self.manifest, **kwargs)
 
@@ -101,7 +103,7 @@ class TestBundleValidator(BundleTestCase):
         other = manifest_module.validate_manifest(
             fixtures.manifest(manifest_id="credential-vault-proof-other"))
         with self.assertRaises(bundle_module.BundleError) as raised:
-            bundle_module.validate_bundle(self.root, manifest=other)
+            bundle_module.validate_bundle(self.root, manifest=other, now=NOW)
         self.assertEqual(raised.exception.code, "manifest_digest_mismatch")
 
     def test_evidence_from_another_machine_or_epoch_is_refused(self):
@@ -244,6 +246,22 @@ class TestBundleValidator(BundleTestCase):
         self.assert_refused("evidence_from_the_future", now="2026-08-01T00:00:00Z")
         self.assertTrue(self.validate(now="2026-09-02T00:00:00Z")["ok"])
 
+    def test_validation_requires_an_explicit_freshness_time(self):
+        self.build()
+        self.assert_refused("timestamp_required", now=None)
+
+    def test_events_must_stay_inside_the_run_window(self):
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        events = fixtures.events(states)
+        events[0] = {**events[0], "at": "2026-09-01T09:59:59Z"}
+        self.build(events=events)
+        self.assert_refused("events_outside_run")
+
+    def test_bundle_owner_mismatch_is_refused(self):
+        import os
+        self.build()
+        self.assert_refused("bundle_foreign_owner", owner_uid=os.getuid() + 1)
+
     def test_symlinked_or_oversize_artifacts_are_refused(self):
         self.build()
         (self.root / "checks.json").unlink()
@@ -254,6 +272,30 @@ class TestBundleValidator(BundleTestCase):
         record = self.build()
         (self.root / "run.json").write_text(json.dumps(record, indent=2))
         self.assert_refused("encoding_not_canonical")
+
+    def test_events_and_artifacts_must_be_canonical(self):
+        record = self.build()
+        events = json.loads((self.root / "events.json").read_text())
+        (self.root / "events.json").write_text(json.dumps(events, indent=2))
+        self.assert_refused("encoding_not_canonical")
+
+        self.setUp()
+        record = self.build()
+        path = self.root / "checks.json"
+        document = json.loads(path.read_text())
+        raw = json.dumps(document, indent=2).encode()
+        path.write_bytes(raw)
+        record["artifacts"]["checks.json"] = hashlib.sha256(raw).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("encoding_not_canonical")
+
+    def test_unplanned_artifact_in_the_record_is_refused(self):
+        record = self.build()
+        record["artifacts"]["extra.json"] = "a" * 64
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("artifact_unplanned")
 
     def test_a_failed_live_bundle_validates_but_does_not_claim_success(self):
         states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}

@@ -81,7 +81,8 @@ def _validate_ancestors(path: Path) -> None:
             raise _refuse("artifact_ancestor_invalid", path.name)
 
 
-def _read(path: Path, *, limit: int) -> bytes:
+def _read(path: Path, *, limit: int, owner_uid: int | None = None) -> bytes:
+    expected_owner = os.getuid() if owner_uid is None else int(owner_uid)
     _validate_ancestors(path)
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -94,6 +95,8 @@ def _read(path: Path, *, limit: int) -> bytes:
         details = os.fstat(descriptor)
         if not stat.S_ISREG(details.st_mode):
             raise _refuse("artifact_not_regular", path.name)
+        if details.st_uid != expected_owner:
+            raise _refuse("artifact_foreign_owner", path.name)
         if details.st_size > limit:
             raise _refuse("artifact_oversize", path.name)
         chunks = []
@@ -122,13 +125,30 @@ def _json(raw: bytes, location: str) -> Any:
         raise _refuse("artifact_corrupt", location) from exc
 
 
+def _canonical(raw: bytes, document: Any, location: str) -> None:
+    expected = canonical_json(document).encode("ascii")
+    actual = raw[:-1] if raw.endswith(b"\n") else raw
+    if actual != expected:
+        raise _refuse("encoding_not_canonical", location)
+
+
+def _timestamp(value: Any, location: str) -> datetime:
+    if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
+        raise _refuse("timestamp_invalid", location)
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        raise _refuse("timestamp_invalid", location) from None
+
+
 def validate_events(document: Any, *, checks: Any) -> tuple[dict[str, Any], ...]:
     """Require monotonic sequence, one terminal event per check, no extras."""
     if not isinstance(document, list) or not 1 <= len(document) <= MAX_EVENTS:
         raise _refuse("events_invalid", "events")
     known = set(checks or ())
     previous = 0
-    previous_at = ""
+    previous_at: datetime | None = None
     started: set[str] = set()
     terminal: dict[str, str] = {}
     for index, item in enumerate(document):
@@ -141,18 +161,17 @@ def validate_events(document: Any, *, checks: Any) -> tuple[dict[str, Any], ...]
             raise _refuse("events_not_monotonic", place)
         previous = sequence
         at = item["at"]
-        if not isinstance(at, str) or not _TIMESTAMP.fullmatch(at):
-            raise _refuse("timestamp_invalid", place)
-        if at < previous_at:
+        at_dt = _timestamp(at, place)
+        if previous_at and at_dt < previous_at:
             raise _refuse("events_not_monotonic", place)
-        previous_at = at
+        previous_at = at_dt
         check_id = item["check_id"]
         if not isinstance(check_id, str) or not _CHECK_ID.fullmatch(check_id):
             raise _refuse("events_check_invalid", place)
         if check_id not in known:
             raise _refuse("events_check_unplanned", place)
         state = item["state"]
-        if state not in EVENT_STATES:
+        if not isinstance(state, str) or state not in EVENT_STATES:
             raise _refuse("events_state_invalid", place)
         if not isinstance(item["code"], str) or len(item["code"]) > 64 \
                 or not re.fullmatch(r"[a-z0-9_.-]{1,64}", item["code"]):
@@ -200,18 +219,25 @@ def validate_artifact_payload(name: str, raw: bytes, manifest: dict[str, Any]) -
 
 
 def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None,
-                    now: Any = None) -> dict[str, Any]:
+                    now: Any = None, owner_uid: int | None = None) -> dict[str, Any]:
     """Validate one bundle directory against its manifest and ledger record."""
     path = Path(root)
     if path.is_symlink() or not path.is_dir():
         raise _refuse("bundle_root_invalid", str(path))
+    try:
+        root_details = path.lstat()
+    except OSError as exc:
+        raise _refuse("bundle_root_invalid", str(path)) from exc
+    expected_owner = os.getuid() if owner_uid is None else int(owner_uid)
+    if not stat.S_ISDIR(root_details.st_mode) or root_details.st_uid != expected_owner:
+        raise _refuse("bundle_foreign_owner", str(path))
     accepted = validate_manifest(manifest)
     digest = manifest_digest(accepted)
 
-    record_raw = _read(path / "run.json", limit=512 * 1024)
+    record_raw = _read(path / "run.json", limit=512 * 1024,
+                       owner_uid=expected_owner)
     record = validate_record(_json(record_raw, "run.json"))
-    if canonical_json(record).encode("ascii") != record_raw.rstrip(b"\n"):
-        raise _refuse("encoding_not_canonical", "run.json")
+    _canonical(record_raw, record, "run.json")
     if record["manifest_digest"] != digest:
         raise _refuse("manifest_digest_mismatch", "run.json")
     if expected_request_id is not None and record["request_id"] != expected_request_id:
@@ -230,6 +256,11 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
         raise _refuse("acceptance_timestamp_invalid", "run.json")
     if record["provenance"] != "live_authorized_host":
         raise _refuse("provenance_not_live", "run.json")
+    started_dt = _timestamp(record["started_at"], "run.json.started_at")
+    accepted_dt = _timestamp(record["job"]["accepted_at"], "run.json.job.accepted_at")
+    terminal_dt = _timestamp(record["terminal_at"], "run.json.terminal_at")
+    if not started_dt <= accepted_dt <= terminal_dt:
+        raise _refuse("acceptance_timestamp_invalid", "run.json")
 
     # The manifest digest binds the plan, but nothing binds the record's own
     # check set to it. Without this comparison a bundle could claim
@@ -248,9 +279,17 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     if pending:
         raise _refuse("check_incomplete", pending[0])
 
-    events_raw = _read(path / "events.json", limit=1024 * 1024)
-    events = validate_events(_json(events_raw, "events.json"),
-                             checks=tuple(record["checks"]))
+    events_raw = _read(path / "events.json", limit=1024 * 1024,
+                       owner_uid=expected_owner)
+    events_document = _json(events_raw, "events.json")
+    _canonical(events_raw, events_document, "events.json")
+    events = validate_events(events_document, checks=tuple(record["checks"]))
+    event_times = tuple(
+        _timestamp(item["at"], f"events[{index}]")
+        for index, item in enumerate(events)
+    )
+    if event_times[0] < started_dt or event_times[-1] > terminal_dt:
+        raise _refuse("events_outside_run", "events")
 
     findings = scanner.scan_directory(path)
     if findings:
@@ -274,7 +313,8 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     decoded_artifacts: dict[str, Any] = {}
     for name, expected in expectations.items():
         member = path / name
-        raw = _read(member, limit=min(expected["max_bytes"], MAX_ARTIFACT_BYTES))
+        raw = _read(member, limit=min(expected["max_bytes"], MAX_ARTIFACT_BYTES),
+                    owner_uid=expected_owner)
         observed = hashlib.sha256(raw).hexdigest()
         if expected["sha256"] is not None and observed != expected["sha256"]:
             raise _refuse("artifact_digest_mismatch", name)
@@ -283,7 +323,15 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
             raise _refuse("artifact_unrecorded", name)
         if recorded != observed:
             raise _refuse("artifact_digest_mismatch", name)
-        decoded_artifacts[name] = _json(raw, name)
+        document = _json(raw, name)
+        _canonical(raw, document, name)
+        surface = raw.decode("utf-8", errors="ignore").lower()
+        if any(marker in surface for marker in FAKE_MARKERS):
+            raise _refuse("fake_evidence_marker", name)
+        decoded_artifacts[name] = document
+    extra_recorded = tuple(sorted(set(record["artifacts"]) - set(expectations)))
+    if extra_recorded:
+        raise _refuse("artifact_unplanned", extra_recorded[0])
 
     try:
         executions = probes_module.validate_execution_artifact(
@@ -334,17 +382,13 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     if record["classification"] == "passed_live" \
             and record["cleanup_state"] != "complete":
         raise _refuse("cleanup_contradiction", "classification")
-    if now is not None:
-        if not isinstance(now, str) or not _TIMESTAMP.fullmatch(now):
-            raise _refuse("timestamp_invalid", "now")
-        if record["terminal_at"] > now:
-            raise _refuse("evidence_from_the_future", "run.json")
-        current = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc)
-        terminal = datetime.strptime(record["terminal_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc)
-        if (current - terminal).total_seconds() > MAX_EVIDENCE_AGE_SECONDS:
-            raise _refuse("evidence_stale", "run.json")
+    if now is None:
+        raise _refuse("timestamp_required", "now")
+    current = _timestamp(now, "now")
+    if terminal_dt > current:
+        raise _refuse("evidence_from_the_future", "run.json")
+    if (current - terminal_dt).total_seconds() > MAX_EVIDENCE_AGE_SECONDS:
+        raise _refuse("evidence_stale", "run.json")
     return {
         "ok": True,
         "code": "bundle_verified",

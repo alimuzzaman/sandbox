@@ -104,7 +104,8 @@ class TestHarnessLifecycle(unittest.TestCase):
         self.assertEqual(record["classification"], "passed_live")
         self.assertTrue(verified["ok"])
         result = bundle_module.validate_bundle(
-            bundle_root, manifest=self.manifest, expected_request_id=REQUEST)
+            bundle_root, manifest=self.manifest, expected_request_id=REQUEST,
+            now="2026-09-02T00:00:00Z")
         self.assertTrue(result["ok"])
         self.assertEqual(result["classification"], "passed_live")
 

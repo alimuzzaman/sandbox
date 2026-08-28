@@ -44,9 +44,13 @@ Only things about itself, offline:
   `cleanup.json` must observe every exact planned resource once and no extra
   resource;
 - a completed bundle is refused when it is over 24 hours old, copied,
-  mixed-revision, contradictory, incomplete, or carries fake markers;
+  mixed-revision, contradictory, incomplete, non-canonical, foreign-owned, or
+  carries fake markers. Event timestamps must be canonical, monotonic, and
+  inside the declared run window;
 - a resource that cannot be proven ours is retained, never removed;
-- the report keeps local harness behaviour and live evidence visibly apart.
+- the report keeps local harness behaviour and live evidence visibly apart. A
+  `live_authorized_host` label without the exact `bundle_verified` result never
+  makes a check live.
 
 ## What it does not prove
 
@@ -66,6 +70,10 @@ does **not** establish:
 
 Every local test uses injected fakes. A run whose provenance is
 `local_injected_fake` is refused by the bundle validator by design.
+`live_authorized_host` is an operator assertion, not cryptographic host
+attestation. This offline validator binds files to the manifest, request,
+revision, owner, timestamps, and typed schemas, but external host/job evidence
+and independent review are still required.
 
 ## Prerequisites for the authorized host
 
@@ -92,8 +100,10 @@ Every local test uses injected fakes. A run whose provenance is
 5. **collect** — `record-artifact` for each planned artifact, using the same
    manifest. Recording uses the declared byte ceiling and validates the typed
    artifact before its digest enters the ledger; then `finalize`.
-6. **validate** — `validate-bundle` against the same manifest. This is where
-   copied, stale, mixed-revision, or contradictory evidence dies.
+6. **validate** — `validate-bundle --now <UTC timestamp>` against the same
+   manifest. The explicit clock is required so the evidence-age bound is
+   deterministic. This is where copied, stale, mixed-revision, or
+   contradictory evidence dies.
 7. **clean up** — verify absence with the cleanup verifier. A foreign or
    unreadable resource is a retained item for a human, never a deletion.
 8. **review independently** — a reviewer who did not run the harness reads the
@@ -102,7 +112,9 @@ Every local test uses injected fakes. A run whose provenance is
 ## Evidence retention and redaction
 
 - Artifacts are named in the manifest and hashed in the ledger. Anything not
-  planned is refused as an unplanned artifact.
+  planned is refused as an unplanned artifact. A matching digest alone is not
+  proof: retained artifacts must also be canonical and pass their exact typed
+  schema and semantic checks.
 - Raw stdout and stderr are never persisted. A parsed check keeps a digest of
   the bounded raw result and a small normalized typed observation. The bundle
   validator derives the state and stable code from those fields again.
@@ -114,6 +126,11 @@ Every local test uses injected fakes. A run whose provenance is
   followed by file sync, atomic replace, and directory sync. Symlinked,
   foreign-owned, oversized, corrupt, or non-canonical records are refused
   rather than repaired.
+- Bundle roots and members must be owned by the reviewing operator. A report
+  lists live results only when given a `bundle_verified` result bound to the
+  same request, manifest, and classification. `render-report` therefore needs
+  `--bundle <directory>` and `--now <UTC timestamp>` to return a successful
+  live report; without a bundle it returns a blocked report.
 - No credential, source reference, header, body, operation ID, lease ID, or
   request digest may appear anywhere in a manifest, record, artifact, or
   report.

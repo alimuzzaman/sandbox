@@ -144,13 +144,14 @@ def evaluate_binding_egress(
             continue
         if binding.port not in grant.ports:
             continue
-        if grant.kind == "hostname_https":
+        grant_type = grant.kind
+        if grant_type == "hostname_https":
             # EgressGrant normalizes DNS names.  The binding model already
             # canonicalizes its host and only permits HTTPS/443.
             if binding.port == 443 and binding.host in grant.destinations:
                 eligible.append(grant.grant_id)
             continue
-        if grant.kind != "public_cidr_tcp" or not addresses:
+        if grant_type != "public_cidr_tcp" or not addresses:
             continue
         try:
             networks = tuple(public_ipv4_network(value) for value in grant.destinations)

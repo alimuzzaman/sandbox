@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import re
 import secrets
+import threading
 from typing import Any, Iterable, Mapping
 
 
@@ -361,26 +362,70 @@ class NetworkLifecycleRegistry:
         return tuple(sorted(self._records.values(), key=lambda item: item.network_id))
 
 
+class ResourceCancellationSignal:
+    """Thread-safe, first-terminal-state signal owned by one request."""
+
+    __slots__ = ("_lock", "_state")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state: str | None = None
+
+    def _finish(self, state: str) -> bool:
+        if type(state) is not str or state not in {"cancelled", "disconnected"}:
+            raise ValueError("invalid resource cancellation state")
+        with self._lock:
+            if self._state is not None:
+                return False
+            self._state = state
+            return True
+
+    def cancel(self) -> bool:
+        return self._finish("cancelled")
+
+    def disconnect(self) -> bool:
+        return self._finish("disconnected")
+
+    def terminal_status(self) -> str | None:
+        with self._lock:
+            return self._state
+
+    def is_set(self) -> bool:
+        return self.terminal_status() is not None
+
+
+def resource_cancellation_signal(value: object = False) -> ResourceCancellationSignal:
+    """Translate the reviewed boolean seam once; reject probe-shaped objects."""
+    if type(value) is ResourceCancellationSignal:
+        return value
+    if type(value) is not bool:
+        raise ValueError("cancellation must be a resource cancellation signal")
+    signal = ResourceCancellationSignal()
+    if value:
+        signal.cancel()
+    return signal
+
+
 @dataclass(frozen=True)
 class ResourceRequest:
     """Per-call measurement controls; cancellation is never persisted."""
 
     budget_seconds: float
-    cancellation: Any = False
+    cancellation: ResourceCancellationSignal | bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "cancellation", resource_cancellation_signal(self.cancellation),
+        )
+
+    def terminal_status(self) -> str | None:
+        return self.cancellation.terminal_status()
 
     def is_cancelled(self) -> bool:
-        signal = self.cancellation
-        if isinstance(signal, bool):
-            return signal
-        probe = getattr(signal, "is_set", None)
-        if not callable(probe) and callable(signal):
-            probe = signal
-        if not callable(probe):
-            return False
-        try:
-            return bool(probe())
-        except Exception:
-            return False
+        return self.terminal_status() == "cancelled"
+
+    def is_terminal(self) -> bool:
+        return self.terminal_status() is not None
 
 
 @dataclass(frozen=True)

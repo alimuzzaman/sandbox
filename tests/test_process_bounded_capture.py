@@ -6,9 +6,15 @@ must never exceed the limit, and — the subtle first-overflow case where the
 overflowing chunk itself is smaller than the tail window — the tail must be
 the TRUE last bytes of the full stream, never a duplicated prefix fragment.
 """
+import sys
+import threading
+import time
 import unittest
 
-from sandbox.services.process import _EDGE_TRUNCATION_MARKER, _BoundedEdgeCapture
+from sandbox.resources.models import ResourceCancellationSignal
+from sandbox.services.process import (
+    BoundedProcessRunner, _EDGE_TRUNCATION_MARKER, _BoundedEdgeCapture,
+)
 
 MARKER = _EDGE_TRUNCATION_MARKER
 
@@ -24,6 +30,22 @@ def stream_of(seed: int, total: int) -> bytes:
 
 
 class TestBoundedEdgeCapture(unittest.TestCase):
+    def test_cancellation_terminates_and_reaps_owned_child_with_partial_output(self):
+        signal = ResourceCancellationSignal()
+        timer = threading.Timer(0.1, signal.cancel)
+        timer.start()
+        started = time.monotonic()
+        try:
+            result = BoundedProcessRunner(max_output=1024).run((
+                sys.executable, "-c",
+                "import sys,time; print('completed', flush=True); time.sleep(30)",
+            ), timeout=10, cancellation=signal)
+        finally:
+            timer.cancel()
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("completed", result.stdout)
+        self.assertLess(time.monotonic() - started, 2.0)
+
     def _feed(self, cap: _BoundedEdgeCapture, data: bytes, chunk: int) -> None:
         for i in range(0, len(data), max(chunk, 1)):
             cap.append(data[i:i + chunk])

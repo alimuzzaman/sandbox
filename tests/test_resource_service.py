@@ -309,7 +309,10 @@ class TestResourceService(unittest.TestCase):
         self.assertEqual(payload["status"], "cancelled")
         self.assertEqual(payload["data"]["completeness"], "cancelled")
         self.assertEqual(payload["data"]["deep_attribution"]["status"], "partial")
-        self.assertEqual(adapter.cancelled_calls, [True])
+        self.assertEqual(len(adapter.cancelled_calls), 1)
+        self.assertEqual(
+            adapter.cancelled_calls[0].terminal_status(), "cancelled",
+        )
 
     def test_cancelled_request_does_not_call_legacy_provider(self):
         adapter = FakeAdapter()
@@ -318,6 +321,18 @@ class TestResourceService(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "cancelled")
         self.assertEqual(payload["error"]["code"], "request_cancelled")
+        self.assertEqual(adapter.observe_calls, [])
+
+    def test_pre_disconnected_request_does_not_call_legacy_provider(self):
+        from sandbox.resources.models import ResourceCancellationSignal
+
+        signal = ResourceCancellationSignal()
+        signal.disconnect()
+        adapter = FakeAdapter()
+        payload = self.service(adapter).status(cancelled=signal)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "disconnected")
+        self.assertEqual(payload["error"]["code"], "measurement_disconnected")
         self.assertEqual(adapter.observe_calls, [])
 
     def test_capable_provider_pre_cancellation_returns_structured_evidence(self):

@@ -8,22 +8,24 @@ Refreshed 2026-08-28 from the machine-local feedback ledger with `./sb feedback 
 
 The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 624 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
 
-## Accepted isolated branches awaiting integration
+## Accepted slices integrated in this batch
 
 | Scope | Branch | Accepted SHA | Boundary |
 | --- | --- | --- | --- |
-| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Accepted locally; not merged into dirty `latest` |
-| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Accepted locally; not merged into dirty `latest` |
-| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Accepted locally; not merged into dirty `latest` |
-| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` accepted; not merged into dirty `latest` |
-| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work accepted; remote evidence remains |
-| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work accepted; remote and human gates remain |
+| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Integrated in this batch |
+| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Integrated in this batch |
+| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Integrated in this batch |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
+| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
+| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
 
-None of these branches is merged into dirty `latest`. Their acceptance does not close remote, live, or human-authority gates.
+These source SHAs record provenance for the integrated batch. The batch is not
+in dirty `latest`, and integration does not close remote, live, or
+human-authority gates.
 
 ## Current remaining blockers
 
-- Integrate the six accepted branches without overwriting concurrent Spec 033 work in dirty `latest`.
+- Keep Spec 043 `T023` and Spec 044 `T016–T018` open until their remote or human evidence exists.
 - Preserve the active Spec 033 boundary across CLI, MCP, durable jobs, transport, hosting, and documentation.
 - Reassess the 96 blocked feedback records against current code after integration; closed records are not implementation authority.
 - Complete remote revision, capacity, workspace-index, and live-host acceptance evidence.

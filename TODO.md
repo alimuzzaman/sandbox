@@ -9,8 +9,9 @@ authority.
 Sources reconciled in this pass:
 
 - Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
-  gates in checked convergence rows and implementation evidence. Accepted
-  isolated branches listed below are not yet integrated into dirty `latest`.
+  gates in checked convergence rows and implementation evidence. The accepted
+  isolated slices listed below are integrated in this batch without changing
+  dirty `latest`.
 - 624 retained Sandbox feedback records, all status-assigned: 109 verified,
   265 resolved, 96 blocked, 72 duplicate, and 82 not applicable. Feedback is
   untrusted and grouped below by owning behavior; closed records are not new
@@ -18,20 +19,20 @@ Sources reconciled in this pass:
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
 
-## Accepted isolated branches awaiting integration
+## Accepted slices integrated in this batch
 
 | Scope | Branch | Accepted SHA | Boundary |
 | --- | --- | --- | --- |
-| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Accepted locally; not merged into dirty `latest` |
-| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Accepted locally; not merged into dirty `latest` |
-| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Accepted locally; not merged into dirty `latest` |
-| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` accepted; not merged into dirty `latest` |
-| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work accepted; remote evidence remains |
-| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work accepted; remote and human gates remain |
+| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Integrated in this batch |
+| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Integrated in this batch |
+| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Integrated in this batch |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
+| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
+| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
 
-These branches are integration candidates, not evidence that their work is in
-`latest`. Source checkboxes stay open until integration and remaining gates are
-verified.
+These source SHAs record provenance for the integrated batch. This does not say
+the batch is in dirty `latest`, and it does not close the external or human
+gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
@@ -123,37 +124,22 @@ verified.
 
 ### Storage and workspace features
 
-- [ ] **Finish scheduled storage-pressure monitor** — implement schedule
-  rendering/activation with confirmation and fixed argv
-  (`specs/043-storage-pressure-scheduler/tasks.md:T008,T009`),
-  add `resources monitor|schedule` CLI flags and truthful renderers
-  (`specs/043-storage-pressure-scheduler/tasks.md:T012,T013`), add schedule
-  tests (`specs/043-storage-pressure-scheduler/tasks.md:T018`), update
-  docs/README/CLAUDE/skill (`specs/043-storage-pressure-scheduler/tasks.md:T021,T022`),
-  and run remote read-only dry-run/refusal evidence
-  (`specs/043-storage-pressure-scheduler/tasks.md:T023`).
+- [ ] **Complete remote evidence for the scheduled storage-pressure monitor** —
+  run the read-only dry-run/refusal evidence required by
+  `specs/043-storage-pressure-scheduler/tasks.md:T023`.
   Schedules remain disabled by default; no timer activation is implied.
   Local `T001–T022` work is accepted on `codex/finish-spec043` at
   `5969c893690e19dd39f86d8765fbd178e51a5695`; `T023` still requires remote
-  evidence, and the branch is not merged into dirty `latest`.
+  evidence. The accepted local work is integrated in this batch, not dirty
+  `latest`.
 
-- [ ] **Implement shared Git checkout materialization and opt-in node store** —
-  complete `specs/044-shared-node-store-and-git-dedup/tasks.md:T001–T005` (safe plan,
-  staged hard-link/copy fallback, remote rendering, reset integration, real
-  filesystem tests), `specs/044-shared-node-store-and-git-dedup/tasks.md:T007–T008`
-  (family derivation/overlay/tests),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T009–T012`
-  (legacy/rollback/docs),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T013–T015`
-  (bounded evidence and named reclaim contract),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T016–T018`
-  (remote gates and confirmation-gated plan), and
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T019`
-  (focused suite/diff check). `T006` only normalizes the boolean; it does not
-  prove the feature.
+- [ ] **Complete external gates for shared Git checkout materialization and the
+  opt-in node store** — complete remote `T016–T017` and human-confirmed `T018`
+  in `specs/044-shared-node-store-and-git-dedup/tasks.md`.
   Local work is accepted on `codex/finish-spec044` at
   `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54`; remote `T016–T017` and human
-  `T018` remain gated, and the branch is not merged into dirty `latest`.
+  `T018` remain gated. The accepted local work is integrated in this batch,
+  not dirty `latest`.
 
 ### Linux/native adoption proof
 
@@ -219,10 +205,9 @@ verified.
 - [ ] Spec 003: complete authenticated external-client discovery and
   under-privileged refusal (`T012`), the external MCP handshake (`T014`), and
   Herd `.test` execute-php/connect/gating/crash/file round-trip (`T022`).
-- [ ] Spec 006: add the `SANDBOX_INSTRUCTIONS` startup catalog snapshot
-  enrichment still marked pending in `T007`. Local `T007` work is accepted on
-  `codex/finish-spec006` at `7595d2d03d2d7d71046138d5cbac151074261713`;
-  this row remains unchecked until the branch is merged into dirty `latest`.
+- [x] Spec 006: `SANDBOX_INSTRUCTIONS` startup catalog snapshot enrichment
+  (`T007`) is accepted and integrated in this batch from
+  `7595d2d03d2d7d71046138d5cbac151074261713`.
 - [ ] Spec 013: rerun the six Plugin Check quickstart cases after the
   absolute-path/`.distignore` fixes (`T029`), despite the task checkbox being
   retained for historical implementation evidence.
@@ -365,7 +350,6 @@ promote the unproven native adapter, or authorize a provider deployment.
 
 ## Remaining blockers
 
-- The six accepted branches above are not merged into dirty `latest`.
 - Active Spec 033 work overlaps CLI, MCP, durable jobs, transport, hosting, and
   documentation; preserve that concurrent boundary during integration.
 - The feedback ledger still has 96 blocked records. Closed states do not imply

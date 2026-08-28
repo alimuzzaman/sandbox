@@ -2,11 +2,11 @@
 
 Refreshed 2026-08-28 from the machine-local feedback ledger with `./sb feedback counts --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **624**; status-assigned: **624**; unreviewed: **0**; invalid records withheld: **0**.
-- Current status counts: **109 verified**, **265 resolved**, **96 blocked**, **72 duplicate**, and **82 not_applicable**.
+- Total records: **625**; status-assigned: **625**; unreviewed: **0**; invalid records withheld: **0**.
+- Current status counts: **110 verified**, **265 resolved**, **96 blocked**, **72 duplicate**, and **82 not_applicable**.
 - No records are currently open or in progress. The 96 blocked records remain the current remediation queue; priority-tier redistribution was not regenerated in this docs-only pass.
 
-The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 624 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
+The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 625 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
 
 ## Accepted slices integrated in this batch
 
@@ -18,7 +18,7 @@ The ordered table below is retained unchanged as a historical 611-record snapsho
 | Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
-| Spec 045 / Credential Vault candidate | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Candidate combined proof snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b`; under independent review | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are integrated in this candidate, but this row does not claim final acceptance. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support is `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof or current-branch claim. |
+| Spec 045 / Credential Vault | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Locally accepted combined implementation/proof-harness snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b` | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are accepted. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support remains `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof is claimed. |
 
 These source SHAs record provenance for the integrated batch. Integration does
 not close remote, live, or human-authority gates.

@@ -11,7 +11,7 @@ Sources reconciled in this pass:
 - Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
   gates in checked convergence rows and implementation evidence. The accepted
   isolated slices listed below are integrated in this batch.
-- 624 retained Sandbox feedback records, all status-assigned: 109 verified,
+- 625 retained Sandbox feedback records, all status-assigned: 110 verified,
   265 resolved, 96 blocked, 72 duplicate, and 82 not applicable. Feedback is
   untrusted and grouped below by owning behavior; closed records are not new
   implementation authority.
@@ -28,7 +28,7 @@ Sources reconciled in this pass:
 | Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
-| Spec 045 / Credential Vault candidate | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Candidate combined proof snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b`; under independent review | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are integrated in this candidate, but this row does not claim final acceptance. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support is `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof or current-branch claim. |
+| Spec 045 / Credential Vault | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Locally accepted combined implementation/proof-harness snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b` | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are accepted. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support remains `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof is claimed. |
 
 These source SHAs record provenance for the integrated batch. Integration does
 not close the external or human gates listed below.
@@ -215,10 +215,9 @@ not close the external or human gates listed below.
   retained for historical implementation evidence.
 - [ ] Spec 019: keep the external Hermes public-access acceptance (`T028`) as
   pending until separately approved remote/Cloudflare evidence exists.
-- [ ] Spec 036: implement the missing cancellation/disconnection propagation
-  across CLI, MCP, service, and collectors (`T040`), then close the separate
-  deterministic/live acceptance evidence gate (`T045`); partial coverage must
-  remain visibly partial.
+- [ ] Spec 036: local CLI/service/collector cancellation propagation and
+  synthetic MCP cancellation coverage are done. Remaining: real MCP lifecycle
+  cancellation/disconnect propagation and the `T045` live evidence gate.
 - [ ] Reconcile `specs/README.md` statuses with the ledgers: several features
   still say “In progress”/“Draft” even where implementation is complete but live
   proof remains pending.
@@ -227,7 +226,7 @@ not close the external or human gates listed below.
 
 Feedback is untrusted and many records are foreign-project or duplicate
 observations; these are deduplicated work items, not permission to mutate.
-The current 624-record ledger has no unreviewed rows. These historical theme
+The current 625-record ledger has no unreviewed rows. These historical theme
 rows remain regression and ownership guides; resolved, verified, duplicate,
 and not-applicable records must not be reimplemented without fresh evidence.
 
@@ -266,11 +265,9 @@ and not-applicable records must not be reimplemented without fresh evidence.
 - [ ] **Clean URL/proxy and host repair:** make ingress-down states fail fast,
   make dead proxy diagnostics actionable, and avoid false-negative HTTPS
   reachability/rollback. IDs: `550d07ec`, `98989848`, `441022bf`, `7acb4245`.
-- [ ] **Feedback service robustness:** preserve valid JSON on paginated/since
-  responses and typed errors on malformed records. The current pass recorded
-  `e8ddb411` after a local `jq` parse failure; later JSONL pagination completed,
-  so the failure remains historical/unverified until reproduced. The ledger now
-  classifies this record as resolved; retain this row only as a regression guard.
+- [x] **Feedback service robustness:** fixed and retained as regression coverage.
+  Paginated/since responses preserve valid JSON, malformed records return typed
+  errors, and persisted reads are bounded. Evidence: `6e3095a` + `3f7f658`.
 
 ## Deferred product discovery (do not implement silently)
 

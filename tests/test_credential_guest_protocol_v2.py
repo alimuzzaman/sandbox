@@ -144,6 +144,15 @@ class CorrelationExecutor(EffectExecutionV2):
             "effect_entered", "completed", "completed", "upstream_completed")
 
 
+class PreEffectExecutor(EffectExecutionV2):
+    def execute_authorized(self, context, _descriptor):
+        return EffectExecutionResultV2(
+            GuestResultV2.failure(
+                state="refused", code="egress_denied", retryable=False,
+                correlation_id=context.request.correlation_id),
+            "pre_effect", "refused", "none", "egress_denied")
+
+
 class TestCredentialGuestProtocolV2(unittest.TestCase):
     def test_exact_request_and_result_round_trip_and_vectors(self):
         selected = request()
@@ -154,14 +163,14 @@ class TestCredentialGuestProtocolV2(unittest.TestCase):
         self.assertEqual(guest_request_digest_v2(selected),
                          "9532346a704c35b7514024bd4398e95f7f6015b3305e3279a184b9e4e35475cc")
         self.assertEqual(guest_protocol_registry_digest_v2(),
-                         "64e8c58bc1a63fab4ccf1338b2fd4a57d0ecc0cf166cf538fcb70f1e6cd41ad8")
+                         "3f8a869b73c1a36b7a4889b66856f60168bcf054ac4478312d406d6725d4f645")
         state_codes = GUEST_PROTOCOL_REGISTRY["result"]["state_codes"]
         self.assertEqual(set(state_codes), {"refused", "indeterminate"})
         self.assertEqual(
             set(state_codes["refused"]) & set(state_codes["indeterminate"]),
-            {"deadline_exceeded"})
+            {"deadline_exceeded", "upstream_refused"})
         self.assertIn("upstream_refused", state_codes["refused"])
-        self.assertNotIn("upstream_refused", state_codes["indeterminate"])
+        self.assertIn("upstream_refused", state_codes["indeterminate"])
 
         success = GuestResultV2.success(
             200, (("content-type", "application/json"),), b"{}",
@@ -238,6 +247,7 @@ class TestCredentialGuestProtocolV2(unittest.TestCase):
             local_port=18443, peer_address="10.203.0.2", forwarded=False,
             loopback=False, route_interface="ve-sb01234567",
             route_source="10.203.0.2", network_namespace_isolated=True,
+            default_egress_denied=True, default_route_absent=True,
         )
         self.assertTrue(verify_guest_transport_v2(projection, observation))
         for name, value in (("forwarded", True), ("loopback", True),
@@ -329,6 +339,12 @@ class TestCredentialGuestProtocolV2(unittest.TestCase):
         result = executor.execute(context, 71)
         self.assertEqual(result.effect_certainty, "completed")
         self.assertEqual(len(executor.calls), 1)
+        with self.assertRaisesRegex(GuestProtocolV2Error, "effect_replayed"):
+            executor.execute(context, 71)
+        context = authorized_context()
+        executor = PreEffectExecutor()
+        with self.assertRaisesRegex(GuestProtocolV2Error, "effect_indeterminate"):
+            executor.execute(context, 71)
         with self.assertRaisesRegex(GuestProtocolV2Error, "effect_replayed"):
             executor.execute(context, 71)
         context = authorized_context()

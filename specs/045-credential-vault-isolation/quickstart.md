@@ -85,7 +85,8 @@ complete and must converge on v2 before any production completion claim:
 
 1. T034 is complete locally: 16 fake/local standalone service and transport
    contract tests pass. They do not open real sockets or prove Linux isolation.
-2. T035 remains open: local fake-driven seams now cover retained guests,
+2. T035 is locally complete and independently accepted by Sol High (local only):
+   local fake-driven and closed-first seams cover retained guests,
    authenticated ACTIVATE/QUIESCE and persistent claim ownership,
    one-use descriptor rendezvous, typed execution, terminal SBRS,
    coordinator-owned one-use prepared-attempt tokens, terminal canonical-prefix
@@ -95,17 +96,31 @@ complete and must converge on v2 before any production completion claim:
    exact reviewed per-operation abstract v2 lease listener/address derivation,
    one-second controller connect, collision refusal, ancillary prescan, one-use
    socket/descriptor ownership, and reciprocal registry digest/bounds are now
-   implemented with injected local tests. An integrated installed cross-process
-   executable using real kernel-owned controller/guest listeners, config
-   ownership lifecycle, a continuous disconnect/deadline loop, and observed
-   lifecycle/audit cleanup remain incomplete. The reviewed foundation now also
+   implemented with injected local tests. The local executable module now also
+   owns a strict SBG2 listener and selector service-loop foundation. Reciprocal
+   configs seal the guest registry digest and control-plane-derived private-veth
+   tuple; listener admission requires exact device, route, namespace, and
+   default-deny observation. Typed request, one-resolution egress decision,
+   descriptor effect, durable audit/ACK, SBR2 result, deadline, and sticky
+   cleanup paths have injected local tests. The reviewed terminal timing now
+   uses a fixed 2-second grace after the request deadline, composed from the
+   1-second POST-audit and 1-second lease-ACK bounds; connected PRE retry and
+   exact deadline mutation probes pass without replay. Reciprocal configs now
+   derive rather than accept their process-config digests, cross-pin fixed peer
+   unit/UID/config identities, and validate both no-follow canonical role files
+   before one-PID start/observe/start sampling. Packet credentials only recheck
+   the pinned tuple. Exact unprivileged nft/default-deny topology evidence is
+   not yet available; unavailable authority refuses before guest bytes or
+   credential resolution and reverses partial construction. DNS is isolated in a
+   deadline-bound owned non-daemon process rather than an arbitrary synchronous
+   callback. It remains closed and uninstalled. The reviewed foundation also
    supplies a pure strict SBG2/SBR2 guest codec, the fixed private-veth tuple
    and topology observation contract, canonical reciprocal full-set egress
    projection, a pinned hostname/SNI/resolved-IP decision, and a phase-exact
    immutable one-shot authorized-effect boundary. These are
-   production-shaped but closed and uninstalled. Finishing the local executable
-   is T035; proving its real Ubuntu 24.04 systemd/kernel behavior is separately
-   T022/T029, followed by T031 human review.
+   production-shaped but closed and uninstalled. This satisfies local T035;
+   proving its real Ubuntu 24.04 systemd/kernel behavior is separately T022/T029,
+   followed by T031 human review.
 3. T036: add secret-free fixed helper supervision, cleanup observation/order,
    and inert application wiring with local tests.
 4. T037: add the proof-gated public `./sb` acceptance seam and offline harness

@@ -17,19 +17,23 @@ from typing import Any, Mapping
 
 
 PROTOCOL = "credential-broker-controller-v2"
-REVIEWED_REGISTRY_DIGEST = "8557648d370ea7c45a76336ee99b0aa6d165afaac92a3ce385fd3459d213da08"
+REVIEWED_REGISTRY_DIGEST = "9ca91b799e1898f9ad5c6beea588ef19876fcf271293aa25189dc892055d3b42"
 LEASE_FRAME_BYTES = 732
 LEASE_ACK_BYTES = 444
 MAX_SEQUENCE = 9_007_199_254_740_991
 MAX_AUTHORIZATIONS = 16
 MAX_AUTHORIZATION_TOMBSTONES = MAX_AUTHORIZATIONS
+AUDIT_ACK_TIMEOUT_MS = 1000
+LEASE_ACK_TIMEOUT_MS = 1000
+LEASE_TERMINAL_GRACE_MS = AUDIT_ACK_TIMEOUT_MS + LEASE_ACK_TIMEOUT_MS
 
 _BOUNDS = {
-    "activation_ttl_ms": 30000, "audit_ack_timeout_ms": 1000,
+    "activation_ttl_ms": 30000, "audit_ack_timeout_ms": AUDIT_ACK_TIMEOUT_MS,
     "audit_transport_retries": 1, "authorization_ttl_ms": 5000,
     "clock_skew_ms": 250, "controller_frame_bytes": 16384,
     "drain_timeout_ms": 5000, "handshake_timeout_ms": 1000,
-    "lease_ack_bytes": 444, "lease_ack_timeout_ms": 1000,
+    "lease_ack_bytes": 444, "lease_ack_timeout_ms": LEASE_ACK_TIMEOUT_MS,
+    "lease_terminal_grace_ms": LEASE_TERMINAL_GRACE_MS,
     "lease_bytes": 16384, "lease_frame_bytes": 732, "lease_ttl_ms": 5000,
     "max_active_operations": 16, "max_sequence": MAX_SEQUENCE,
     "min_sequence": 1, "no_pending_retry_max_ms": 1000,
@@ -126,7 +130,7 @@ _MESSAGES = {
 }
 _REASON_CODES = {
     "activate": ("activated", "admission_closed", "identity_mismatch", "proof_unproven", "proof_mismatch", "digest_mismatch", "evidence_missing", "expired", "quiescing"),
-    "post": ("upstream_completed", "upstream_refused", "guest_disconnected", "deadline_exceeded", "revoked", "lease_invalid", "audit_unavailable", "internal_indeterminate"),
+    "post": ("upstream_completed", "upstream_refused", "guest_disconnected", "deadline_exceeded", "revoked", "lease_invalid", "audit_unavailable", "internal_indeterminate", "egress_denied"),
     "quiesce": ("operator_stop", "restart", "revoke", "expiry", "proof_drift", "egress_drift", "identity_drift", "cleanup", "drained", "drain_timeout", "identity_mismatch"),
     "refuse": ("admission_closed", "request_invalid", "binding_missing", "binding_mismatch", "binding_stale", "binding_expired", "source_unavailable", "proof_unproven", "proof_mismatch", "egress_denied", "authorization_expired", "lease_invalid", "revoked", "deadline_exceeded", "capacity_exceeded", "audit_unavailable", "internal_refusal"),
 }
@@ -396,6 +400,37 @@ def _context_int(context: Mapping[str, Any], name: str, *, required: bool = True
     return value
 
 
+def _terminal_add(base_unix_ms: int, delta_ms: int) -> int:
+    if (not _is_int(base_unix_ms, _BOUNDS["timestamp_min_unix_ms"],
+                    _BOUNDS["timestamp_max_unix_ms"])
+            or type(delta_ms) is not int or delta_ms < 0):
+        raise ProtocolV2Error("terminal_deadline_invalid")
+    value = base_unix_ms + delta_ms
+    if value > _BOUNDS["timestamp_max_unix_ms"]:
+        raise ProtocolV2Error("terminal_deadline_invalid")
+    return value
+
+
+def post_ack_deadline_v2(post_started_unix_ms: int,
+                         request_deadline_unix_ms: int) -> int:
+    return min(
+        _terminal_add(post_started_unix_ms, AUDIT_ACK_TIMEOUT_MS),
+        _terminal_add(request_deadline_unix_ms, AUDIT_ACK_TIMEOUT_MS),
+    )
+
+
+def lease_ack_deadline_v2(request_deadline_unix_ms: int) -> int:
+    return _terminal_add(request_deadline_unix_ms, LEASE_TERMINAL_GRACE_MS)
+
+
+def broker_ack_send_deadline_v2(post_ack_received_unix_ms: int,
+                                request_deadline_unix_ms: int) -> int:
+    return min(
+        _terminal_add(post_ack_received_unix_ms, LEASE_ACK_TIMEOUT_MS),
+        lease_ack_deadline_v2(request_deadline_unix_ms),
+    )
+
+
 class TemporalObservation:
     """Injected wall-clock observation with bounded uncertainty and rollback.
 
@@ -541,12 +576,14 @@ def _validate_semantics(value: Mapping[str, Any], variant: str,
             ("refused", "none", "upstream_refused"),
             ("refused", "none", "deadline_exceeded"),
             ("refused", "none", "revoked"), ("refused", "none", "lease_invalid"),
+            ("refused", "none", "egress_denied"),
             ("indeterminate", "possible", "guest_disconnected"),
             ("indeterminate", "possible", "deadline_exceeded"),
             ("indeterminate", "possible", "audit_unavailable"),
             ("indeterminate", "possible", "internal_indeterminate"),
             ("indeterminate", "completed", "audit_unavailable"),
             ("indeterminate", "completed", "internal_indeterminate"),
+            ("indeterminate", "completed", "upstream_refused"),
         }
         if triple not in valid:
             raise ProtocolV2Error("audit_outcome_invalid")
@@ -847,12 +884,14 @@ def _valid_post(value: Mapping[str, Any]) -> bool:
         ("completed", "completed", "upstream_completed"),
         ("refused", "none", "upstream_refused"), ("refused", "none", "deadline_exceeded"),
         ("refused", "none", "revoked"), ("refused", "none", "lease_invalid"),
+        ("refused", "none", "egress_denied"),
         ("indeterminate", "possible", "guest_disconnected"),
         ("indeterminate", "possible", "deadline_exceeded"),
         ("indeterminate", "possible", "audit_unavailable"),
         ("indeterminate", "possible", "internal_indeterminate"),
         ("indeterminate", "completed", "audit_unavailable"),
         ("indeterminate", "completed", "internal_indeterminate"),
+        ("indeterminate", "completed", "upstream_refused"),
         }
     except (KeyError, TypeError):
         return False
@@ -1128,11 +1167,13 @@ class AuthorizationRegistry:
 __all__ = [
     "AuthorizationIdentity", "AuthorizationRegistry", "DirectionalSequence",
     "LeaseSequence", "LEASE_ACK_BYTES", "LEASE_FRAME_BYTES", "MAX_SEQUENCE",
+    "AUDIT_ACK_TIMEOUT_MS", "LEASE_ACK_TIMEOUT_MS", "LEASE_TERMINAL_GRACE_MS",
     "MAX_AUTHORIZATIONS", "MAX_AUTHORIZATION_TOMBSTONES", "TemporalObservation",
     "PROTOCOL", "ProtocolV2Error", "REVIEWED_REGISTRY",
     "REVIEWED_REGISTRY_DIGEST", "authorization_digest", "canonical_json",
     "decode_controller_frame", "decode_lease_ack", "decode_lease_frame",
     "digest_document", "encode_controller_frame", "encode_lease_ack",
     "encode_lease_frame", "registry_digest", "validate_controller_message",
-    "validate_digest",
+    "validate_digest", "post_ack_deadline_v2", "lease_ack_deadline_v2",
+    "broker_ack_send_deadline_v2",
 ]

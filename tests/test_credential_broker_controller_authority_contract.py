@@ -13,7 +13,7 @@ PLAN = ROOT / "specs/045-credential-vault-isolation/plan.md"
 DATA_MODEL = ROOT / "specs/045-credential-vault-isolation/data-model.md"
 QUICKSTART = ROOT / "specs/045-credential-vault-isolation/quickstart.md"
 TASKS = ROOT / "specs/045-credential-vault-isolation/tasks.md"
-REVIEWED_REGISTRY_DIGEST = "8557648d370ea7c45a76336ee99b0aa6d165afaac92a3ce385fd3459d213da08"
+REVIEWED_REGISTRY_DIGEST = "4a2ec24e98481efdf3f7f3ce2020613e8d340e7d0158beca1a3d49265120ebd2"
 
 
 def schema_table(document):
@@ -127,6 +127,7 @@ class ControllerAuthorityV2ContractTests(unittest.TestCase):
                 "handshake_timeout_ms": 1000,
                 "lease_ack_bytes": 444,
                 "lease_ack_timeout_ms": 1000,
+                "lease_terminal_grace_ms": 2000,
                 "lease_bytes": 16384,
                 "lease_frame_bytes": 732,
                 "lease_ttl_ms": 5000,
@@ -332,15 +333,16 @@ class ControllerAuthorityV2ContractTests(unittest.TestCase):
         self.assertIn("independently Sol High-accepted T043 implementation provides one connected inert full-flow v2 harness", self.plan)
         self.assertIn("locally complete and independently accepted", self.plan)
 
-    def test_local_contract_and_codec_complete_but_release_review_remains_open(self):
+    def test_local_contract_complete_but_release_gates_remain_open(self):
         for document in (self.v2, self.quickstart, self.tasks):
             self.assertIn("implemented_unproven", document)
             self.assertIn("adoptable=false", document)
         self.assertIn("evidence_id=null", self.v2)
         for task_id in (22, 29, 31):
             self.assertIn(f"- [ ] T{task_id:03d}", self.tasks)
-        for task_id in (35, 36):
+        for task_id in (36,):
             self.assertIn(f"- [ ] T{task_id:03d}", self.tasks)
+        self.assertIn("- [x] T035", self.tasks)
         for task_id in (37, 38, 43):
             self.assertIn(f"- [x] T{task_id:03d}", self.tasks)
         self.assertIn("- [x] T039", self.tasks)

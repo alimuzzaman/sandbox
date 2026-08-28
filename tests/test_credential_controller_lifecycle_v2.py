@@ -1,4 +1,5 @@
 import hashlib
+import dataclasses
 import unittest
 from types import MappingProxyType
 
@@ -12,13 +13,18 @@ from sandbox.isolation.credential_controller_lifecycle_v2 import (
     OwnershipObservationV2,
     canonical_config_bytes,
     derived_config_document,
+    process_config_digest_v2,
+    process_unit_digest_v2,
     verify_owned_config,
 )
 from sandbox.isolation.credential_controller_service_v2 import (
     lease_endpoint_registry_digest_v2,
 )
+from sandbox.isolation.credential_guest_protocol_v2 import (
+    guest_protocol_registry_digest_v2,
+)
 from sandbox.runtimes.managed.services import compile_credential_service_plans_v2
-from sandbox.isolation.models import EgressGrant, EgressGrantSet
+from sandbox.isolation.models import EgressGrant, EgressGrantSet, ManagedIsolationPolicy
 from tests import test_credential_controller_audit_v2 as audit_fixtures
 
 
@@ -38,6 +44,23 @@ def egress_projection(policy_digest, *, with_grant=False):
     return value
 
 
+def guest_transport_projection(policy_digest):
+    return {
+        "machine_id": "sb-0123456789ab", "base_policy_digest": policy_digest,
+        "interface": "veth-sb0", "subnet": "10.73.0.0/30",
+        "broker_address": "10.73.0.1", "guest_address": "10.73.0.2",
+    }
+
+
+def managed_policy():
+    return ManagedIsolationPolicy(
+        1, "sb-0123456789ab", {"root": 100000}, {"digest": DIGESTS[0]},
+        (), (), {"veth": "veth-sb0", "host_address": "10.73.0.1/30",
+                 "guest_address": "10.73.0.2/30", "egress": "deny",
+                 "default_route": False}, {}, frozenset(), {}, (),
+    )
+
+
 def document(component="controller", **changes):
     controller = component == "controller"
     value = derived_config_document(
@@ -53,12 +76,12 @@ def document(component="controller", **changes):
         effective_isolation_digest=audit_fixtures.CONFIG.effective_isolation_digest,
         evidence_id=audit_fixtures.CONFIG.evidence_id,
         egress_projection=egress_projection(audit_fixtures.CONFIG.policy_digest),
+        guest_transport_projection=guest_transport_projection(
+            audit_fixtures.CONFIG.policy_digest),
         peer_executable_digest=DIGESTS[1 if controller else 0],
-        peer_config_digest=DIGESTS[7 if controller else 6],
-        own_config_digest=DIGESTS[6 if controller else 7],
         controller_endpoint_identity="v2-controller.sock",
         lease_endpoint_identity="v2-lease.sock",
-        guest_endpoint_identity="v2-guest.sock",
+        guest_endpoint_identity="credential-broker-guest-v2",
     )
     value.update(changes)
     return value
@@ -137,10 +160,28 @@ class Executor(FixedLifecycleExecutorV2):
 class TestCredentialControllerLifecycleV2(unittest.TestCase):
     def plans(self, executor=None, session=None):
         selected = executor or Executor()
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker = DerivedServiceConfigV2.derive(document("broker"))
         selected_session = session or audit_fixtures.session()
+        selected_session.config = dataclasses.replace(
+                selected_session.config,
+                controller=dataclasses.replace(
+                    selected_session.config.controller,
+                    uid=controller.document["service_uid"],
+                    gid=controller.document["service_gid"],
+                    executable_digest=controller.document["executable_digest"],
+                    unit_digest=controller.document["unit_digest"],
+                    config_digest=controller.document["own_config_digest"]),
+                broker=dataclasses.replace(
+                    selected_session.config.broker,
+                    uid=broker.document["service_uid"],
+                    gid=broker.document["service_gid"],
+                    executable_digest=broker.document["executable_digest"],
+                    unit_digest=broker.document["unit_digest"],
+                    config_digest=broker.document["own_config_digest"]),
+        )
         return ManagedCredentialLifecycleV2(
-            DerivedServiceConfigV2.derive(document("controller")),
-            DerivedServiceConfigV2.derive(document("broker")), selected,
+            controller, broker, selected,
             selected_session,
         ), selected
 
@@ -154,6 +195,27 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
                          hashlib.sha256(plan.canonical_bytes).hexdigest())
         self.assertEqual(plan.document["lease_endpoint_registry_digest"],
                          lease_endpoint_registry_digest_v2())
+        self.assertEqual(plan.document["guest_protocol_registry_digest"],
+                         guest_protocol_registry_digest_v2())
+        self.assertEqual(plan.document["guest_transport_projection"]["interface"],
+                         "veth-sb0")
+        self.assertEqual(plan.document["unit_digest"], process_unit_digest_v2(
+            machine_id=plan.machine_id, component="controller", service_uid=992,
+            service_gid=2001,
+            unit_identity="sandbox-credential-controller-v2@sb-0123456789ab.service"))
+        self.assertEqual(plan.document["unit_digest"],
+                         "1429454eb2004257363406cb2c914cfdf059e25434841d3aca9ef4869aed1c69")
+        self.assertEqual(plan.document["peer_unit_identity"],
+                         "sandbox-credential-broker-v2@sb-0123456789ab.service")
+        self.assertEqual(plan.document["peer_service_uid"], 993)
+        self.assertEqual(plan.document["peer_config_identity"],
+                         "sandbox-v2-broker-config")
+        self.assertEqual(plan.document["process_identity_authority"],
+                         "sealed_systemd_cgroup_v2")
+        self.assertEqual(plan.document["own_config_digest"],
+                         process_config_digest_v2(plan.document))
+        self.assertNotEqual(plan.config_digest, plan.document["own_config_digest"])
+        self.assertEqual(plan.document["bounds"]["lease_terminal_grace_ms"], 2000)
         forbidden = (b"operation_id", b"lease_id", b"audit_root_id",
                      b"request_digest", b"source_reference", b"auth_form")
         self.assertTrue(all(item not in plan.canonical_bytes for item in forbidden))
@@ -161,9 +223,25 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
             plan.document["service_uid"] = 9
         with self.assertRaises(TypeError):
             plan.document["bounds"]["drain_timeout_ms"] = 1
+        with self.assertRaises(TypeError):
+            plan.document["guest_transport_projection"]["interface"] = "other"
         with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
             DerivedServiceConfigV2.derive(document(
                 lease_endpoint_registry_digest="0" * 64))
+        with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
+            DerivedServiceConfigV2.derive(document(
+                guest_protocol_registry_digest="0" * 64))
+        for field, value in (("base_policy_digest", "0" * 64),
+                             ("interface", "lo"),
+                             ("broker_address", "127.0.0.1"),
+                             ("guest_address", "10.73.0.1"),
+                             ("subnet", "10.73.0.0/24")):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    LifecycleV2Error, "config_invalid"):
+                changed = guest_transport_projection(audit_fixtures.CONFIG.policy_digest)
+                changed[field] = value
+                DerivedServiceConfigV2.derive(document(
+                    guest_transport_projection=changed))
         with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
             DerivedServiceConfigV2(
                 document=MappingProxyType(dict(plan.document)),
@@ -172,22 +250,41 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
                 component=plan.component, service_gid=9999,
             )
 
+    def test_direct_constructor_requires_deeply_frozen_guest_topology(self):
+        plan = DerivedServiceConfigV2.derive(document())
+        mutable_topology = dict(plan.document["guest_transport_projection"])
+        shallow = MappingProxyType({
+            **dict(plan.document),
+            "guest_transport_projection": mutable_topology,
+        })
+        with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
+            DerivedServiceConfigV2(
+                document=shallow, canonical_bytes=plan.canonical_bytes,
+                config_digest=plan.config_digest, machine_id=plan.machine_id,
+                component=plan.component, service_gid=plan.service_gid)
+        mutable_topology["interface"] = "lo"
+        self.assertEqual(plan.document["guest_transport_projection"]["interface"],
+                         "veth-sb0")
+        self.assertEqual(plan.config_digest,
+                         hashlib.sha256(plan.canonical_bytes).hexdigest())
+
     def test_managed_service_compiler_derives_both_closed_plan_identities(self):
-        projection = egress_projection(DIGESTS[1])
+        policy = managed_policy()
+        projection = egress_projection(policy.digest)
         plans = compile_credential_service_plans_v2(
             machine_id="sb-0123456789ab", service_gid=2001,
             controller_executable_digest=DIGESTS[0],
             broker_executable_digest=DIGESTS[1],
             controller_config_identity="sandbox-v2-controller-config",
             broker_config_identity="sandbox-v2-broker-config",
-            policy_digest=DIGESTS[1], egress_digest=projection["egress_digest"],
+            policy_digest=policy.digest, egress_digest=projection["egress_digest"],
             broker_digest=DIGESTS[3], proof_digest=DIGESTS[4],
             effective_isolation_digest=DIGESTS[5], evidence_id=None,
             egress_projection=projection,
-            controller_config_digest=DIGESTS[6], broker_config_digest=DIGESTS[7],
+            managed_policy=policy,
             controller_endpoint_identity="v2-controller.sock",
             lease_endpoint_identity="v2-lease.sock",
-            guest_endpoint_identity="v2-guest.sock",
+            guest_endpoint_identity="credential-broker-guest-v2",
         )
         self.assertEqual(set(plans), {"controller", "broker"})
         self.assertEqual(plans["controller"].document["service_uid"], 992)
@@ -195,8 +292,51 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
         self.assertIsNone(plans["broker"].document["evidence_id"])
         self.assertEqual(plans["controller"].document["egress_projection"],
                          plans["broker"].document["egress_projection"])
+        self.assertEqual(plans["controller"].document["guest_transport_projection"],
+                         plans["broker"].document["guest_transport_projection"])
+        self.assertEqual(plans["controller"].document["guest_protocol_registry_digest"],
+                         plans["broker"].document["guest_protocol_registry_digest"])
+        self.assertEqual(plans["controller"].document["peer_unit_digest"],
+                         plans["broker"].document["unit_digest"])
+        self.assertEqual(plans["broker"].document["peer_unit_digest"],
+                         plans["controller"].document["unit_digest"])
+        self.assertEqual(plans["controller"].document["peer_config_digest"],
+                         plans["broker"].document["own_config_digest"])
+        self.assertEqual(plans["broker"].document["peer_config_digest"],
+                         plans["controller"].document["own_config_digest"])
         with self.assertRaises(TypeError):
             plans["broker"].document["egress_projection"]["grants"] = ()
+        with self.assertRaisesRegex(ValueError, "guest policy"):
+            compile_credential_service_plans_v2(
+                machine_id="sb-other00000000", service_gid=2001,
+                controller_executable_digest=DIGESTS[0],
+                broker_executable_digest=DIGESTS[1],
+                controller_config_identity="sandbox-v2-controller-config",
+                broker_config_identity="sandbox-v2-broker-config",
+                policy_digest=policy.digest, egress_digest=projection["egress_digest"],
+                broker_digest=DIGESTS[3], proof_digest=DIGESTS[4],
+                effective_isolation_digest=DIGESTS[5], evidence_id=None,
+                egress_projection=projection, managed_policy=policy,
+                controller_endpoint_identity="v2-controller.sock",
+                lease_endpoint_identity="v2-lease.sock",
+                guest_endpoint_identity="credential-broker-guest-v2")
+
+    def test_process_config_digest_excludes_only_reciprocal_digest_slots(self):
+        base = document("controller")
+        baseline = process_config_digest_v2(base)
+        for name in ("own_config_digest", "peer_config_digest"):
+            changed = dict(base); changed[name] = "0" * 64
+            self.assertEqual(process_config_digest_v2(changed), baseline)
+        for name, value in (
+            ("peer_service_uid", 994),
+            ("peer_config_identity", "sandbox-v2-other-config"),
+            ("process_identity_authority", "other_authority"),
+            ("peer_unit_identity",
+             "sandbox-credential-broker-v2@sb-1123456789ab.service"),
+        ):
+            with self.subTest(name=name):
+                changed = dict(base); changed[name] = value
+                self.assertNotEqual(process_config_digest_v2(changed), baseline)
 
     def test_unknown_secret_or_runtime_fields_are_refused(self):
         for name, value in (
@@ -219,7 +359,35 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
     def test_cross_plan_peer_identity_mismatch_is_refused(self):
         controller = DerivedServiceConfigV2.derive(document("controller"))
         broker_doc = document("broker", peer_executable_digest=DIGESTS[2])
+        broker_doc["own_config_digest"] = process_config_digest_v2(broker_doc)
         broker = DerivedServiceConfigV2.derive(broker_doc)
+        with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
+            ManagedCredentialLifecycleV2(
+                controller, broker, Executor(), audit_fixtures.session())
+
+    def test_unit_digest_schema_and_reciprocal_mutations_refuse(self):
+        base = document("controller")
+        for mutation in (
+            lambda value: value.pop("unit_digest"),
+            lambda value: value.__setitem__("extra_unit_digest", DIGESTS[0]),
+            lambda value: value.__setitem__("unit_digest", value["unit_digest"].upper()),
+            lambda value: value.__setitem__("unit_digest", DIGESTS[0]),
+            lambda value: value.__setitem__("unit_digest", process_unit_digest_v2(
+                machine_id="sb-1123456789ab", component="controller",
+                service_uid=992, service_gid=2001,
+                unit_identity=(
+                    "sandbox-credential-controller-v2@sb-1123456789ab.service"))),
+            lambda value: value.__setitem__("unit_identity",
+                "sandbox-credential-broker-v2@sb-0123456789ab.service"),
+        ):
+            changed = dict(base)
+            mutation(changed)
+            with self.assertRaisesRegex(LifecycleV2Error, "config_invalid"):
+                DerivedServiceConfigV2.derive(changed)
+        controller = DerivedServiceConfigV2.derive(document("controller"))
+        broker_value = document("broker")
+        broker_value["peer_config_digest"] = broker_value["own_config_digest"]
+        broker = DerivedServiceConfigV2.derive(broker_value)
         with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
             ManagedCredentialLifecycleV2(
                 controller, broker, Executor(), audit_fixtures.session())
@@ -232,6 +400,7 @@ class TestCredentialControllerLifecycleV2(unittest.TestCase):
             "broker", egress_digest=changed_projection["egress_digest"],
             egress_projection=changed_projection,
         )
+        broker_doc["own_config_digest"] = process_config_digest_v2(broker_doc)
         broker = DerivedServiceConfigV2.derive(broker_doc)
         with self.assertRaisesRegex(LifecycleV2Error, "lifecycle_plan_invalid"):
             ManagedCredentialLifecycleV2(

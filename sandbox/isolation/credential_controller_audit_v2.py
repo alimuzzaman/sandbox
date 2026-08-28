@@ -52,12 +52,14 @@ _POST_COMBINATIONS = frozenset((
     ("refused", "none", "deadline_exceeded"),
     ("refused", "none", "revoked"),
     ("refused", "none", "lease_invalid"),
+    ("refused", "none", "egress_denied"),
     ("indeterminate", "possible", "guest_disconnected"),
     ("indeterminate", "possible", "deadline_exceeded"),
     ("indeterminate", "possible", "audit_unavailable"),
     ("indeterminate", "possible", "internal_indeterminate"),
     ("indeterminate", "completed", "audit_unavailable"),
     ("indeterminate", "completed", "internal_indeterminate"),
+    ("indeterminate", "completed", "upstream_refused"),
 ))
 _FINGERPRINT_KEYS = {
     "audit_pre_fingerprint": ("machine_id", "operation_id", "binding_id",

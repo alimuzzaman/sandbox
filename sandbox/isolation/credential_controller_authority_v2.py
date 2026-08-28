@@ -23,6 +23,7 @@ from sandbox.isolation.credential_controller_protocol_v2 import (
     authorization_digest,
     decode_lease_ack,
     encode_lease_frame,
+    lease_ack_deadline_v2,
 )
 from sandbox.isolation.credential_controller_service_v2 import (
     ControllerBrokerSession,
@@ -348,7 +349,8 @@ class ControllerOperationAuthorityV2:
                 dispatcher, operation_id=authorization["operation_id"],
                 authorization_digest=authorization["authorization_digest"],
                 authorization_expires_at_unix_ms=(
-                    authorization["authorization_expires_at_unix_ms"]))
+                    authorization["authorization_expires_at_unix_ms"]),
+                request_deadline_unix_ms=pending["claim"]["request_deadline_unix_ms"])
         except ControllerServiceV2Error:
             raise ControllerAuthorityV2Error("lease_dispatch_invalid") from None
         self._pending.pop(ack["operation_id"])
@@ -424,8 +426,12 @@ class ControllerOperationAuthorityV2:
             except Exception:
                 raise ControllerAuthorityV2Error("lease_dispatch_invalid") from None
             try:
+                terminal_deadline = lease_ack_deadline_v2(
+                    pending["claim"]["request_deadline_unix_ms"])
+                if terminal_deadline < now_ms:
+                    raise ControllerAuthorityV2Error("lease_ack_invalid")
                 dispatched = dispatcher.exchange(
-                    packet, descriptor, min(1000, lease_expiry - now_ms))
+                    packet, descriptor, terminal_deadline - now_ms)
             except ControllerServiceV2Error as exc:
                 raise ControllerAuthorityV2Error(
                     "lease_ack_invalid" if exc.code in {

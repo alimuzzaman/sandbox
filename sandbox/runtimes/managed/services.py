@@ -10,15 +10,19 @@ import re
 import shlex
 from collections.abc import Mapping
 
-from sandbox.isolation.models import canonical_digest
+from sandbox.isolation.models import ManagedIsolationPolicy, canonical_digest
 from sandbox.isolation.bubblewrap import USERNS_FILTER_FD, userns_filtered_argv
 from sandbox.isolation.seccomp import compile_userns_filter
 from sandbox.isolation.credential_controller_lifecycle_v2 import (
     DerivedServiceConfigV2,
     derived_config_document,
+    validate_reciprocal_service_plans_v2,
 )
 from sandbox.isolation.credential_controller_service_v2 import (
     BoundGuestSubmitCapabilityV2,
+)
+from sandbox.isolation.credential_guest_protocol_v2 import (
+    sealed_guest_transport_projection_v2,
 )
 
 
@@ -149,13 +153,17 @@ def compile_credential_service_plans_v2(*, machine_id, service_gid,
                                         broker_digest, proof_digest,
                                         effective_isolation_digest,
                                         evidence_id, egress_projection,
-                                        controller_config_digest,
-                                        broker_config_digest,
+                                        managed_policy,
                                         controller_endpoint_identity,
                                         lease_endpoint_identity,
                                         guest_endpoint_identity):
     """Derive only immutable secret-free v2 controller/broker config plans."""
 
+    if (not isinstance(managed_policy, ManagedIsolationPolicy)
+            or managed_policy.machine_id != machine_id
+            or managed_policy.digest != policy_digest):
+        raise ValueError("credential service guest policy is invalid")
+    guest_transport_projection = dict(sealed_guest_transport_projection_v2(managed_policy))
     common = {
         "machine_id": machine_id, "service_gid": service_gid,
         "policy_digest": policy_digest, "egress_digest": egress_digest,
@@ -163,6 +171,7 @@ def compile_credential_service_plans_v2(*, machine_id, service_gid,
         "effective_isolation_digest": effective_isolation_digest,
         "evidence_id": evidence_id,
         "egress_projection": egress_projection,
+        "guest_transport_projection": guest_transport_projection,
         "controller_endpoint_identity": controller_endpoint_identity,
         "lease_endpoint_identity": lease_endpoint_identity,
         "guest_endpoint_identity": guest_endpoint_identity,
@@ -173,8 +182,7 @@ def compile_credential_service_plans_v2(*, machine_id, service_gid,
         executable_digest=controller_executable_digest,
         config_identity=controller_config_identity,
         peer_executable_digest=broker_executable_digest,
-        peer_config_digest=broker_config_digest,
-        own_config_digest=controller_config_digest, **common,
+        **common,
     ))
     broker = DerivedServiceConfigV2.derive(derived_config_document(
         component="broker", unit_identity=f"sandbox-credential-broker-v2@{machine_id}.service",
@@ -182,9 +190,9 @@ def compile_credential_service_plans_v2(*, machine_id, service_gid,
         executable_digest=broker_executable_digest,
         config_identity=broker_config_identity,
         peer_executable_digest=controller_executable_digest,
-        peer_config_digest=controller_config_digest,
-        own_config_digest=broker_config_digest, **common,
+        **common,
     ))
+    validate_reciprocal_service_plans_v2(controller, broker)
     return {"controller": controller, "broker": broker}
 
 

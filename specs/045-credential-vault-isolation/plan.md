@@ -180,14 +180,28 @@ task IDs were established:
 3. T034 adds the passing fake/local service and transport contracts. T035 now
    has a guarded fake-driven coordinator that retains one guest through claim,
    one-use descriptor rendezvous, existing typed-broker execution, terminal
-   SBRS delivery, and bounded cleanup. T035 remains open for the local
-   production-shaped, closed and uninstalled
-   controller AF_UNIX/SOCK_SEQPACKET listener/event loop. The exact per-operation
+   SBRS delivery, and bounded cleanup. T035 now has a local production-shaped,
+   closed and uninstalled v2 controller/guest/lease service-loop foundation.
+   Reciprocal sealed configs carry the reviewed guest registry digest and exact
+   control-plane-derived private-veth projection; the Linux listener verifies
+   device readback plus route/namespace/default-deny observation before SBG2.
+   The exact per-operation
    93-byte abstract recvmsg/SCM_RIGHTS endpoint, independent controller
    derivation, collision refusal, peer/ancillary gates, and reciprocal registry
-   digest/bounds now exist locally. Cross-process config/entrypoint, guest
-   disconnect/deadline loop, and lifecycle/audit observation remain. T035 completion may
-   establish that local code shape only. Authorized Ubuntu/systemd/kernel proof
+   digest/bounds now exist locally. Typed GuestRequestV2 admission, one-resolution
+   full-set egress authorization, immutable effect context, durable audit/ACK,
+   SBR2 delivery, selector dispatch, deadlines, and sticky cleanup are locally
+   implemented with injected tests. The terminal schedule uses the reviewed
+   overflow-checked `R+2000` grace. Reciprocal plans now compiler-derive their
+   process-config digests, cross-pin fixed peer unit/UID/config identities, and
+   validate both canonical role files before fixed-cgroup one-PID
+   start/observe/start sampling. Exact unprivileged nft/default-deny topology
+   evidence remains unavailable. The executable nevertheless attempts the fixed
+   closed-first graph and reverses partial construction; missing authority refuses
+   before guest bytes or credential resolution. A typed owned DNS process makes
+   the absolute deadline enforceable without daemon leakage. T035 is locally
+   complete and independently accepted by Sol High for production-shaped closed
+   and uninstalled code only. Authorized Ubuntu/systemd/kernel proof
    belongs to T022/T029 and human evidence review to T031.
    T036 adds secret-free helper supervision, broker-first cleanup, and inert
    composition wiring.

@@ -146,7 +146,8 @@ def authority(events, *, auth_form="authorization_bearer"):
 
 
 def lease_exchange(owner, callback=lambda *_args: True, *, durable=True,
-                   ack_ancillary=None, ack_flags=0, ack_closer=None):
+                   ack_ancillary=None, ack_flags=0, ack_closer=None,
+                   ack_delay_ms=0):
     class LeaseSocket:
         def __init__(self):
             self.ack = b""
@@ -193,6 +194,8 @@ def lease_exchange(owner, callback=lambda *_args: True, *, durable=True,
             return len(packet)
 
         def recvmsg(self, _size, _ancillary_size, _flags=0):
+            if ack_delay_ms > self.timeout_ms:
+                raise socket.timeout
             ancillary = ack_ancillary
             if ancillary is None:
                 ancillary = [(socket.SOL_SOCKET, 3, struct.pack(
@@ -472,6 +475,37 @@ class TestControllerAuthorityV2(unittest.TestCase):
             )
         self.assertEqual((attempts, closed), ([1], [71]))
         self.assertEqual(retained[0], bytearray(len(retained[0])))
+
+    def test_connected_lease_ack_accepts_r_plus_2000_and_refuses_r_plus_2001(self):
+        for delay_ms, accepted in ((11_999, True), (12_000, False)):
+            with self.subTest(delay_ms=delay_ms):
+                events = []
+                owner = authority(events)
+                authorization = decide_claim(owner)
+                ack = {
+                    "type": "AUTHORIZED_V2", "sequence": 3,
+                    **{key: authorization[key] for key in (
+                        "protocol", "machine_id", "broker_epoch", "controller_epoch",
+                        "operation_id", "request_digest", "binding_id", "binding_version",
+                        "decision_id", "authorization_digest",
+                        "authorization_expires_at_unix_ms",
+                    )}, "reply_to": authorization["sequence"],
+                }
+                accept_controller_ack(owner, ack)
+                call = lambda: owner.acknowledge_and_dispatch(
+                    ack, now_ms=NOW + 1, lease_sequence=1,
+                    memfd_factory=lambda material: {
+                        "descriptor": 93, "descriptor_size": len(material),
+                        "anonymous_memfd": True, "close_on_exec": True,
+                        "seals": {"write", "grow", "shrink", "seal"}},
+                    dispatcher=lease_exchange(owner, ack_delay_ms=delay_ms),
+                    descriptor_closer=lambda _fd: None)
+                if accepted:
+                    self.assertEqual(call()["code"], "upstream_completed")
+                else:
+                    with self.assertRaisesRegex(ControllerAuthorityV2Error,
+                                                "lease_dispatch_invalid"):
+                        call()
 
     def test_lease_ack_requires_exact_credentials_and_refuses_all_rights(self):
         credentials = (socket.SOL_SOCKET, 3, struct.pack(

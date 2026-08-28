@@ -126,12 +126,33 @@ lease ID as consumed before reading/applying the credential. Transfer or
 acknowledgement failure is terminal and never retried. Fixed offsets, widths,
 padding, hash, bounds, and endian rules live only in the v2 contract.
 
-### `BrokerRequest`
+### `GuestRequestV2`
 
-A normalized request from the reviewed guest client: binding ID/version,
+A canonical SBG2 request from the reviewed guest client: binding ID/version,
 scheme/host/port, method/path, bounded headers/body, deadline, and correlation
-ID. It contains no credential value. It is rejected before resolution when its
+ID. It contains no credential value or operation/lease/source/auth authority.
+It is rejected before resolution when its
 scope does not match the binding.
+
+### `DerivedServiceConfigV2` guest authority
+
+Both reciprocal service configs carry the exact guest-protocol registry digest
+and one deeply immutable `guest_transport_projection`: machine ID, base policy
+digest, interface, canonical RFC1918 `/30`, broker address, and guest address.
+The control plane derives it from an already validated `ManagedIsolationPolicy`;
+the broker never reads a policy repository or accepts an address from a guest.
+Its logical endpoint identity is exactly `credential-broker-guest-v2`.
+They also carry exact reciprocal `unit_digest`/`peer_unit_digest` values derived
+only from canonical machine/component/service UID/GID/unit/cgroup identity JSON.
+These values bind the sealed T040 process identities; missing, legacy, swapped,
+or cross-machine config is rejected before lifecycle or listener work.
+The reciprocal plan fields also include exact peer unit, service UID, and
+config identities and the fixed `sealed_systemd_cgroup_v2` process authority.
+Own process-config digests are derived from every plan field except the two
+reciprocal config-digest slots, then cross-filled; callers cannot supply them.
+The complete canonical-file digest is separate. Runtime identity is one
+fixed-cgroup PID pinned by start/observe/start before handshake, while packet
+credentials only recheck its PID/UID/GID tuple.
 
 ### `CapabilityProof`
 

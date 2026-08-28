@@ -18,8 +18,10 @@ from typing import Any, Callable, Mapping
 
 from .credential_controller_audit_v2 import (
     ControllerAuditAuthorityV2,
-    CredentialEffectExecutorV2,
     DurableAuditRepositoryV2,
+)
+from .credential_guest_protocol_v2 import (
+    AuthorizedEgressDecisionV2, EffectExecutionV2,
 )
 from .credential_controller_authority_v2 import (
     ControllerAuthorityInterfaces,
@@ -248,13 +250,13 @@ class ConnectedOfflineCredentialV2:
                  controller_epoch: str, broker_epoch: str,
                  interfaces: ControllerAuthorityInterfaces,
                  repository: DurableAuditRepositoryV2,
-                 executor: CredentialEffectExecutorV2,
+                 executor: EffectExecutionV2,
                  now_ms: int) -> None:
         if (type(config) is not ControllerServiceConfig
                 or not callable(broker_connection_type)
                 or not isinstance(interfaces, ControllerAuthorityInterfaces)
                 or not isinstance(repository, DurableAuditRepositoryV2)
-                or not isinstance(executor, CredentialEffectExecutorV2)):
+                or not isinstance(executor, EffectExecutionV2)):
             raise OfflineV2Error("offline_graph_invalid")
         self.config = config
         self.now_ms = now_ms
@@ -353,9 +355,15 @@ class ConnectedOfflineCredentialV2:
                                "egress_digest": self.config.egress_digest,
                                "version": 1, "grant_authority": "staged-v1",
                                "grants": []},
+            guest_transport_projection={
+                "machine_id": self.config.machine_id,
+                "base_policy_digest": self.config.policy_digest,
+                "interface": "veth-sb0", "subnet": "10.73.0.0/30",
+                "broker_address": "10.73.0.1", "guest_address": "10.73.0.2",
+            },
             controller_endpoint_identity="v2-controller.sock",
             lease_endpoint_identity="v2-lease.sock",
-            guest_endpoint_identity="v2-guest.sock",
+            guest_endpoint_identity="credential-broker-guest-v2",
         )
         controller_plan = DerivedServiceConfigV2.derive(derived_config_document(
             component="controller", unit_identity=(
@@ -363,8 +371,7 @@ class ConnectedOfflineCredentialV2:
             service_uid=992, executable_digest=self.config.controller.executable_digest,
             config_identity="sandbox-v2-controller-config",
             peer_executable_digest=self.config.broker.executable_digest,
-            peer_config_digest=self.config.broker.config_digest,
-            own_config_digest=self.config.controller.config_digest, **common,
+            **common,
         ))
         broker_plan = DerivedServiceConfigV2.derive(derived_config_document(
             component="broker", unit_identity=(
@@ -372,8 +379,7 @@ class ConnectedOfflineCredentialV2:
             service_uid=993, executable_digest=self.config.broker.executable_digest,
             config_identity="sandbox-v2-broker-config",
             peer_executable_digest=self.config.controller.executable_digest,
-            peer_config_digest=self.config.controller.config_digest,
-            own_config_digest=self.config.broker.config_digest, **common,
+            **common,
         ))
         self.lifecycle_executor = _OfflineLifecycleExecutor()
         self.managed_lifecycle = ManagedCredentialLifecycleV2(
@@ -452,7 +458,10 @@ class ConnectedOfflineCredentialV2:
         self.events.extend(("claimed", "authorized"))
         return claim["operation_id"], ack
 
-    def dispatch_and_execute(self, operation_id: str, ack: Mapping[str, Any]) -> dict[str, Any]:
+    def dispatch_and_execute(self, operation_id: str, ack: Mapping[str, Any], *,
+                             pre_effect_refusal: str | None = None) -> dict[str, Any]:
+        if pre_effect_refusal not in {None, "egress_denied"}:
+            raise OfflineV2Error("effect_graph_invalid")
         endpoint = self.broker_session.lease_endpoint_v2(operation_id)
         self.last_lease_endpoint = endpoint
         controller_lease = _LeaseControllerEnd(self.config.broker)
@@ -479,6 +488,8 @@ class ConnectedOfflineCredentialV2:
                 for _ in range(self.audit_receive_count):
                     message = self._controller_receive()
                     self.audit_authority.handle(message, now_ms=self.now_ms + 1)
+                    ack_message = self._broker_receive()
+                    self.broker_session.route_audit_ack_v2(ack_message)
             except Exception as exc:
                 audit_errors.append(exc)
 
@@ -487,19 +498,24 @@ class ConnectedOfflineCredentialV2:
 
         def run_effect():
             try:
-                self.effect_result = self.broker_session.execute_effect_v2(
-                    operation_id,
+                common = dict(
                     audit_id_factory=lambda kind: {
                         "root": "audit-root0123456789",
                         "pre": "audit-pre0123456789",
                         "post": "audit-post012345678",
                     }[kind],
-                    executor=self.executor,
-                    observer=self._observer(self.config.controller),
-                    so_peercred=1, scm_credentials=2, scm_rights=socket.SCM_RIGHTS,
-                    closer=lambda fd: self.broker_fd_closed.append(fd),
                     monotonic=lambda: 0.0, wall_clock=lambda: self.now_ms + 1,
                 )
+                if pre_effect_refusal is None:
+                    self.effect_result = self.broker_session.execute_effect_v2(
+                        operation_id,
+                        egress_decision=AuthorizedEgressDecisionV2(
+                            "api.example.test", "api.example.test", 443,
+                            ("8.8.8.8",), self.config.egress_digest),
+                        executor=self.executor, **common)
+                else:
+                    self.effect_result = self.broker_session.refuse_effect_v2(
+                        operation_id, reason_code=pre_effect_refusal, **common)
             except Exception as exc:
                 self.effect_error = exc
 

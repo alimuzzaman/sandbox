@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import re
 import threading
@@ -22,7 +23,11 @@ from .credential_controller_service_v2 import (
     lease_endpoint_registry_digest_v2,
 )
 from .credential_controller_audit_v2 import ControllerAuditAuthorityV2
-from .credential_guest_protocol_v2 import canonical_egress_projection_v2
+from .credential_guest_protocol_v2 import (
+    GuestTransportProjectionV2,
+    canonical_egress_projection_v2,
+    guest_protocol_registry_digest_v2,
+)
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -40,21 +45,27 @@ LIFECYCLE_VERBS_V2 = (
     "credential-broker-status-v2", "credential-broker-stop-v2",
 )
 _PLAN_KEYS = frozenset((
-    "schema_version", "machine_id", "component", "unit_identity", "service_uid",
+    "schema_version", "machine_id", "component", "unit_identity", "unit_digest",
+    "peer_unit_identity", "peer_unit_digest", "peer_service_uid",
+    "peer_config_identity", "process_identity_authority", "service_uid",
     "service_gid", "executable_digest", "config_identity", "policy_digest",
     "egress_digest", "broker_digest", "proof_digest",
     "effective_isolation_digest", "evidence_id", "bounds",
     "peer_executable_digest", "peer_config_digest",
     "controller_endpoint_identity", "lease_endpoint_identity",
     "guest_endpoint_identity",
+    "guest_protocol_registry_digest", "guest_transport_projection",
     "lease_endpoint_registry_digest",
     "egress_projection",
     "own_config_digest",
 ))
+_PROCESS_IDENTITY_AUTHORITY = "sealed_systemd_cgroup_v2"
+_PROCESS_CONFIG_EXCLUDED = frozenset(("own_config_digest", "peer_config_digest"))
 _BOUND_KEYS = frozenset((
     "controller_frame_bytes", "lease_frame_bytes", "lease_ack_bytes",
     "handshake_timeout_ms", "audit_ack_timeout_ms", "audit_transport_retries",
     "lease_ack_timeout_ms", "drain_timeout_ms", "max_active_operations",
+    "lease_terminal_grace_ms",
     "lease_connect_timeout_ms", "lease_endpoint_address_bytes",
     "lease_packets_per_endpoint",
 ))
@@ -62,7 +73,8 @@ _FIXED_BOUNDS = {
     "controller_frame_bytes": 16384, "lease_frame_bytes": 732,
     "lease_ack_bytes": 444, "handshake_timeout_ms": 1000,
     "audit_ack_timeout_ms": 1000, "audit_transport_retries": 1,
-    "lease_ack_timeout_ms": 1000, "drain_timeout_ms": 5000,
+    "lease_ack_timeout_ms": 1000, "lease_terminal_grace_ms": 2000,
+    "drain_timeout_ms": 5000,
     "max_active_operations": 16,
     "lease_connect_timeout_ms": 1000, "lease_endpoint_address_bytes": 93,
     "lease_packets_per_endpoint": 1,
@@ -129,6 +141,53 @@ class _PublicAcceptanceLifecycleReceiptV2:
         raise LifecycleV2Error("public_acceptance_refused")
 
 
+def process_unit_digest_v2(*, machine_id: str, component: str,
+                           service_uid: int, service_gid: int,
+                           unit_identity: str) -> str:
+    exact_uid = {"controller": 992, "broker": 993}.get(component)
+    exact_unit = (f"sandbox-credential-{component}-v2@{machine_id}.service"
+                  if exact_uid is not None else None)
+    cgroup_identity = f"/system.slice/{exact_unit}" if exact_unit else None
+    if (not isinstance(machine_id, str) or _MACHINE.fullmatch(machine_id) is None
+            or service_uid != exact_uid or type(service_gid) is not int
+            or service_gid < 1 or unit_identity != exact_unit):
+        raise LifecycleV2Error("config_invalid")
+    value = {
+        "schema_version": 2, "protocol": PROTOCOL,
+        "purpose": "process_unit_identity", "machine_id": machine_id,
+        "component": component, "service_uid": service_uid,
+        "service_gid": service_gid, "unit_identity": unit_identity,
+        "cgroup_identity": cgroup_identity,
+    }
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True, allow_nan=False).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def process_config_digest_v2(value: Mapping[str, Any]) -> str:
+    """Digest every sealed plan field except the reciprocal config digests."""
+
+    if not isinstance(value, Mapping) or set(value) != _PLAN_KEYS:
+        raise LifecycleV2Error("config_invalid")
+    try:
+        def plain(item):
+            if isinstance(item, Mapping):
+                return {key: plain(selected) for key, selected in item.items()}
+            if isinstance(item, (tuple, list)):
+                return [plain(selected) for selected in item]
+            return item
+        selected = {
+            key: plain(item) for key, item in value.items()
+            if key not in _PROCESS_CONFIG_EXCLUDED
+        }
+        encoded = json.dumps(
+            selected, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False).encode("ascii")
+    except Exception:
+        raise LifecycleV2Error("config_invalid") from None
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
     if not isinstance(value, Mapping) or set(value) != _PLAN_KEYS:
         raise LifecycleV2Error("config_invalid")
@@ -137,6 +196,23 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
     exact_uid = {"controller": 992, "broker": 993}.get(component)
     exact_unit = (f"sandbox-credential-{component}-v2@{machine_id}.service"
                   if component in {"controller", "broker"} else None)
+    peer_component = "broker" if component == "controller" else "controller"
+    peer_uid = {"controller": 992, "broker": 993}.get(peer_component)
+    peer_unit = (f"sandbox-credential-{peer_component}-v2@{machine_id}.service"
+                 if peer_uid is not None else None)
+    peer_config = (f"sandbox-v2-{peer_component}-config"
+                   if peer_uid is not None else None)
+    try:
+        exact_unit_digest = process_unit_digest_v2(
+            machine_id=machine_id, component=component,
+            service_uid=value.get("service_uid"), service_gid=value.get("service_gid"),
+            unit_identity=value.get("unit_identity"))
+        exact_peer_unit_digest = process_unit_digest_v2(
+            machine_id=machine_id, component=peer_component,
+            service_uid=peer_uid, service_gid=value.get("service_gid"),
+            unit_identity=peer_unit)
+    except Exception:
+        raise LifecycleV2Error("config_invalid") from None
     if (value.get("schema_version") != 2
             or value.get("component") not in {"controller", "broker"}
             or not isinstance(value.get("machine_id"), str)
@@ -145,10 +221,19 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
             or type(value.get("service_gid")) is not int or value["service_gid"] < 1
             or not isinstance(value.get("unit_identity"), str)
             or value.get("unit_identity") != exact_unit
+            or value.get("unit_digest") != exact_unit_digest
+            or value.get("peer_unit_identity") != peer_unit
+            or value.get("peer_service_uid") != peer_uid
+            or value.get("peer_config_identity") != peer_config
+            or value.get("process_identity_authority") != _PROCESS_IDENTITY_AUTHORITY
+            or value.get("peer_unit_digest") != exact_peer_unit_digest
             or not isinstance(value.get("config_identity"), str)
             or value.get("config_identity") != f"sandbox-v2-{component}-config"
             or not isinstance(value.get("bounds"), Mapping)
-            or set(value["bounds"]) != _BOUND_KEYS or dict(value["bounds"]) != _FIXED_BOUNDS):
+            or set(value["bounds"]) != _BOUND_KEYS or dict(value["bounds"]) != _FIXED_BOUNDS
+            or value["bounds"]["lease_terminal_grace_ms"] !=
+               value["bounds"]["audit_ack_timeout_ms"] +
+               value["bounds"]["lease_ack_timeout_ms"]):
         raise LifecycleV2Error("config_invalid")
     for name in ("executable_digest", "peer_executable_digest", "peer_config_digest",
                  "own_config_digest",
@@ -157,6 +242,8 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
                  "lease_endpoint_registry_digest"):
         if not isinstance(value.get(name), str) or _DIGEST.fullmatch(value[name]) is None:
             raise LifecycleV2Error("config_invalid")
+    if value["own_config_digest"] != process_config_digest_v2(value):
+        raise LifecycleV2Error("config_invalid")
     if value["lease_endpoint_registry_digest"] != lease_endpoint_registry_digest_v2():
         raise LifecycleV2Error("config_invalid")
     evidence = value.get("evidence_id")
@@ -176,7 +263,42 @@ def canonical_config_bytes(value: Mapping[str, Any]) -> bytes:
                 raise LifecycleV2Error("config_forbidden")
     if (value.get("controller_endpoint_identity") != "v2-controller.sock"
             or value.get("lease_endpoint_identity") != "v2-lease.sock"
-            or value.get("guest_endpoint_identity") != "v2-guest.sock"):
+            or value.get("guest_endpoint_identity") != "credential-broker-guest-v2"):
+        raise LifecycleV2Error("config_invalid")
+    if value.get("guest_protocol_registry_digest") != guest_protocol_registry_digest_v2():
+        raise LifecycleV2Error("config_invalid")
+    transport = value.get("guest_transport_projection")
+    transport_keys = {"machine_id", "base_policy_digest", "interface", "subnet",
+                      "broker_address", "guest_address"}
+    if not isinstance(transport, Mapping) or set(transport) != transport_keys:
+        raise LifecycleV2Error("config_invalid")
+    try:
+        projection = GuestTransportProjectionV2(
+            transport["machine_id"], transport["interface"], transport["subnet"],
+            transport["broker_address"], transport["guest_address"],
+        )
+        network = ipaddress.ip_network(projection.subnet, strict=True)
+        broker = ipaddress.ip_address(projection.broker_address)
+        guest = ipaddress.ip_address(projection.guest_address)
+        usable = tuple(network.hosts())
+    except Exception:
+        raise LifecycleV2Error("config_invalid") from None
+    private_ranges = tuple(ipaddress.ip_network(value) for value in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+    if (projection.machine_id != machine_id
+            or transport["base_policy_digest"] != value.get("policy_digest")
+            or network.version != 4 or network.prefixlen != 30
+            or str(network) != projection.subnet
+            or str(broker) != projection.broker_address
+            or str(guest) != projection.guest_address
+            or broker not in usable or guest not in usable or broker == guest
+            or not all(any(address in candidate for candidate in private_ranges)
+                       and not address.is_loopback and not address.is_link_local
+                       and not address.is_reserved and not address.is_unspecified
+                       and not address.is_multicast for address in (broker, guest))
+            or not isinstance(projection.interface, str)
+            or projection.interface == "lo"
+            or re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", projection.interface) is None):
         raise LifecycleV2Error("config_invalid")
     try:
         egress_projection = canonical_egress_projection_v2(value.get("egress_projection"))
@@ -224,6 +346,7 @@ class DerivedServiceConfigV2:
         if (type(self.document) is not MappingProxyType
                 or type(self.document.get("bounds")) is not MappingProxyType
                 or type(self.document.get("egress_projection")) is not MappingProxyType
+                or type(self.document.get("guest_transport_projection")) is not MappingProxyType
                 or type(self.canonical_bytes) is not bytes
                 or self.canonical_bytes != encoded
                 or not isinstance(self.config_digest, str)
@@ -247,6 +370,8 @@ class DerivedServiceConfigV2:
             "ports": tuple(item["ports"]),
         }) for item in projection["grants"])
         copied["egress_projection"] = MappingProxyType(projection)
+        copied["guest_transport_projection"] = MappingProxyType(
+            copied["guest_transport_projection"])
         frozen = MappingProxyType(copied)
         return cls(document=frozen, canonical_bytes=encoded,
                    config_digest=hashlib.sha256(encoded).hexdigest(),
@@ -278,6 +403,40 @@ def verify_owned_config(plan: DerivedServiceConfigV2, observed: OwnershipObserva
     )
 
 
+def validate_reciprocal_service_plans_v2(
+        controller: DerivedServiceConfigV2,
+        broker: DerivedServiceConfigV2) -> bool:
+    """Validate both sealed role plans before any runtime identity observation."""
+
+    shared = (
+        "policy_digest", "egress_digest", "broker_digest", "proof_digest",
+        "effective_isolation_digest", "evidence_id", "service_gid", "bounds",
+        "controller_endpoint_identity", "lease_endpoint_identity",
+        "guest_endpoint_identity", "lease_endpoint_registry_digest",
+        "guest_protocol_registry_digest", "guest_transport_projection",
+        "egress_projection", "process_identity_authority",
+    )
+    if (not isinstance(controller, DerivedServiceConfigV2)
+            or not isinstance(broker, DerivedServiceConfigV2)
+            or controller.component != "controller" or broker.component != "broker"
+            or controller.machine_id != broker.machine_id
+            or controller.document["peer_executable_digest"] != broker.document["executable_digest"]
+            or broker.document["peer_executable_digest"] != controller.document["executable_digest"]
+            or controller.document["peer_config_digest"] != broker.document["own_config_digest"]
+            or broker.document["peer_config_digest"] != controller.document["own_config_digest"]
+            or controller.document["peer_unit_digest"] != broker.document["unit_digest"]
+            or broker.document["peer_unit_digest"] != controller.document["unit_digest"]
+            or controller.document["peer_unit_identity"] != broker.document["unit_identity"]
+            or broker.document["peer_unit_identity"] != controller.document["unit_identity"]
+            or controller.document["peer_service_uid"] != broker.document["service_uid"]
+            or broker.document["peer_service_uid"] != controller.document["service_uid"]
+            or controller.document["peer_config_identity"] != broker.document["config_identity"]
+            or broker.document["peer_config_identity"] != controller.document["config_identity"]
+            or any(controller.document[name] != broker.document[name] for name in shared)):
+        raise LifecycleV2Error("lifecycle_plan_invalid")
+    return True
+
+
 class FixedLifecycleExecutorV2(ABC):
     """One fixed-verb local execution seam used only by managed service planning."""
 
@@ -300,20 +459,12 @@ class ManagedCredentialLifecycleV2:
                  broker: DerivedServiceConfigV2,
                  executor: FixedLifecycleExecutorV2,
                  session: ControllerBrokerSession) -> None:
-        if (not isinstance(controller, DerivedServiceConfigV2)
-                or not isinstance(broker, DerivedServiceConfigV2)
-                or controller.component != "controller" or broker.component != "broker"
-                or controller.machine_id != broker.machine_id
-                or controller.document["peer_executable_digest"] != broker.document["executable_digest"]
-                or broker.document["peer_executable_digest"] != controller.document["executable_digest"]
-                or controller.document["peer_config_digest"] != broker.document["own_config_digest"]
-                or broker.document["peer_config_digest"] != controller.document["own_config_digest"]
-                or any(controller.document[name] != broker.document[name] for name in (
-                    "policy_digest", "egress_digest", "broker_digest", "proof_digest",
-                    "effective_isolation_digest", "evidence_id", "service_gid", "bounds",
-                    "controller_endpoint_identity", "lease_endpoint_identity",
-                    "guest_endpoint_identity", "lease_endpoint_registry_digest",
-                    "egress_projection"))
+        try:
+            validate_reciprocal_service_plans_v2(controller, broker)
+        except LifecycleV2Error:
+            raise LifecycleV2Error("lifecycle_plan_invalid") from None
+        if (
+                not isinstance(controller, DerivedServiceConfigV2)
                 or not isinstance(session, ControllerBrokerSession)
                 or not session.authenticated
                 or session.config.machine_id != controller.machine_id
@@ -321,6 +472,14 @@ class ManagedCredentialLifecycleV2:
                        for name in ("policy_digest", "egress_digest", "broker_digest",
                                     "proof_digest", "effective_isolation_digest",
                                     "evidence_id"))
+                or any((plan.document["service_uid"], plan.document["service_gid"],
+                        plan.document["executable_digest"], plan.document["unit_digest"],
+                        plan.document["own_config_digest"]) !=
+                       (identity.uid, identity.gid, identity.executable_digest,
+                        identity.unit_digest, identity.config_digest)
+                       for plan, identity in (
+                           (controller, session.config.controller),
+                           (broker, session.config.broker)))
                 or not isinstance(executor, FixedLifecycleExecutorV2)):
             raise LifecycleV2Error("lifecycle_plan_invalid")
         self.controller = controller
@@ -769,31 +928,68 @@ def derived_config_document(*, machine_id: str, component: str,
                             effective_isolation_digest: str,
                             evidence_id: str | None,
                             peer_executable_digest: str,
-                            peer_config_digest: str,
-                            own_config_digest: str,
                             controller_endpoint_identity: str,
                             lease_endpoint_identity: str,
                             guest_endpoint_identity: str,
-                            egress_projection: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "schema_version": 2, "machine_id": machine_id, "component": component,
-        "unit_identity": unit_identity, "service_uid": service_uid,
-        "service_gid": service_gid, "executable_digest": executable_digest,
-        "config_identity": config_identity, "policy_digest": policy_digest,
+                            egress_projection: Mapping[str, Any],
+                            guest_transport_projection: Mapping[str, Any]) -> dict[str, Any]:
+    def base(selected_component: str, selected_unit: str, selected_uid: int,
+             selected_executable: str, selected_config: str,
+             other_executable: str) -> dict[str, Any]:
+        other_component = ("broker" if selected_component == "controller"
+                           else "controller")
+        other_uid = 993 if selected_component == "controller" else 992
+        other_unit = f"sandbox-credential-{other_component}-v2@{machine_id}.service"
+        value = {
+        "schema_version": 2, "machine_id": machine_id,
+        "component": selected_component,
+        "unit_identity": selected_unit,
+        "unit_digest": process_unit_digest_v2(
+            machine_id=machine_id, component=selected_component,
+            service_uid=selected_uid, service_gid=service_gid,
+            unit_identity=selected_unit),
+        "peer_unit_identity": other_unit,
+        "peer_unit_digest": process_unit_digest_v2(
+            machine_id=machine_id,
+            component=other_component, service_uid=other_uid,
+            service_gid=service_gid,
+            unit_identity=other_unit),
+        "peer_service_uid": other_uid,
+        "peer_config_identity": f"sandbox-v2-{other_component}-config",
+        "process_identity_authority": _PROCESS_IDENTITY_AUTHORITY,
+        "service_uid": selected_uid,
+        "service_gid": service_gid, "executable_digest": selected_executable,
+        "config_identity": selected_config, "policy_digest": policy_digest,
         "egress_digest": egress_digest, "broker_digest": broker_digest,
         "proof_digest": proof_digest,
         "effective_isolation_digest": effective_isolation_digest,
         "evidence_id": evidence_id,
-        "peer_executable_digest": peer_executable_digest,
-        "peer_config_digest": peer_config_digest,
-        "own_config_digest": own_config_digest,
+        "peer_executable_digest": other_executable,
+        "peer_config_digest": "0" * 64,
+        "own_config_digest": "0" * 64,
         "controller_endpoint_identity": controller_endpoint_identity,
         "lease_endpoint_identity": lease_endpoint_identity,
         "guest_endpoint_identity": guest_endpoint_identity,
         "lease_endpoint_registry_digest": lease_endpoint_registry_digest_v2(),
+        "guest_protocol_registry_digest": guest_protocol_registry_digest_v2(),
+        "guest_transport_projection": guest_transport_projection,
         "egress_projection": egress_projection,
         "bounds": dict(_FIXED_BOUNDS),
-    }
+        }
+        value["own_config_digest"] = process_config_digest_v2(value)
+        return value
+
+    selected = base(component, unit_identity, service_uid, executable_digest,
+                    config_identity, peer_executable_digest)
+    other_component = "broker" if component == "controller" else "controller"
+    other = base(
+        other_component,
+        f"sandbox-credential-{other_component}-v2@{machine_id}.service",
+        993 if component == "controller" else 992,
+        peer_executable_digest, f"sandbox-v2-{other_component}-config",
+        executable_digest)
+    selected["peer_config_digest"] = other["own_config_digest"]
+    return selected
 
 
 __all__ = [
@@ -801,5 +997,6 @@ __all__ = [
     "FixedLifecycleExecutorV2", "LIFECYCLE_VERBS_V2",
     "LifecycleV2Error", "ManagedCredentialLifecycleV2", "OwnershipObservationV2",
     "VerifiedQuiesceReceiptV2", "canonical_config_bytes", "derived_config_document",
-    "verify_owned_config",
+    "process_config_digest_v2", "process_unit_digest_v2",
+    "validate_reciprocal_service_plans_v2", "verify_owned_config",
 ]

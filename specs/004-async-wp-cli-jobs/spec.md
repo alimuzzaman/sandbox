@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Draft
+**Status**: In progress
 
 **Input**: User description: "Steal from Novamira #2 — WP-CLI runs synchronously today and
 long migrations/imports time out or block the agent; add background jobs with a job id and

@@ -167,14 +167,6 @@ container; compose renders `extra_hosts`; bridge auto-start up in ~2s, idempoten
 nonce+cap, → bridge over `host.docker.internal` with the Bearer token), keeping
 FR-004's nonce. This matches the clarified container→host design.
 
-**Remaining — manual browser verification (needs wp-admin):** re-provision an
-instance so the mu-plugin + token land (`sb install`/`sb ensure --recreate` or
-`sb apply` then `sb up`), then in **Tools → Sandbox Snapshots**: take `t1` (→
-appears in `sb snapshots`), mutate state, restore `t1`, list, delete — i.e.
-quickstart S1–S6. On herd instances the feature is intentionally absent (v1).
-Note: `extra_hosts` changes mean existing instances need a `sb apply`/recreate to
-pick up container→host reachability.
-
 ## Browser verification — 2026-06-24 (headless, via the real wp-admin UI)
 
 Drove Tools → Sandbox Snapshots headlessly (autologin + Playwright) against the
@@ -185,10 +177,10 @@ live bridge:
 - **S3 list + delete** ✓ — list matched; delete removed `t1` from dashboard + CLI + disk.
 - **U1 restore-failure recovery** ✓ — the restore job reported `failed` and the
   instance stayed usable (siteurl resolves).
-- **S2 restore happy-path** ✗ BLOCKED — `sb restore` fails on fpm/nginx instances
-  (`env: 'mysql': No such file or directory`; the wp tier lacks a mysql client,
-  only the db container has `mariadb`). Real bug, not a 002-bridge defect — the
-  bridge job machinery worked. See `memory/plugin-behavior/restore-needs-mysql-client.md`.
+- **S2 restore happy-path** ✓ — the initial fpm/nginx mysql-client failure was
+  fixed by routing the database reset through the `wpcli` service. The dashboard
+  restore then rolled `blogname` back successfully. See T016 and
+  `memory/plugin-behavior/restore-needs-mysql-client.md`.
 
 Two operational notes found + fixed:
 - The long-running `sb web` bridge (like the MCP server) does NOT auto-reload; it

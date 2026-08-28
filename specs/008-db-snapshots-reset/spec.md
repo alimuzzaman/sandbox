@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Draft
+**Status**: In progress
 
 **Input**: User description: "Add a wp reset / db-reset option to return WordPress to its
 initial state after install; add DB-only snapshots since most of the time resetting the DB

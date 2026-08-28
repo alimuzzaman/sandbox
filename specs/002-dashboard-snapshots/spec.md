@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-21
 
-**Status**: Draft
+**Status**: Complete
 
 **Input**: User description: "Snapshot and restore from the WordPress admin dashboard via a sandbox mu-plugin, so users can capture and roll back instance state without the CLI"
 

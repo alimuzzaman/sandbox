@@ -202,7 +202,7 @@ def cmd_domains(cfg, args) -> None:
         return
 
     if args.action == "ingress":
-        from sandbox.application.context import ingress_service
+        from sandbox.application.context import domain_service, ingress_service
         subaction = args.tld or "status"
         if subaction not in INGRESS_ACTIONS:
             _emit({"ok": False, "operation": f"ingress_{subaction}",
@@ -211,7 +211,13 @@ def cmd_domains(cfg, args) -> None:
                               "message": "This ingress mutation action is not implemented yet."}},
                   bool(args.json))
             return
-        service = ingress_service(cfg)
+        if subaction == "status":
+            route_context = domain_service(cfg).route_context(
+                args.project_dir or ".", label=args.label,
+            )
+            service = ingress_service(cfg, caddy_health_context=route_context)
+        else:
+            service = ingress_service(cfg)
         if subaction == "support":
             payload = service.support()
         elif subaction in {"detect", "status"}:

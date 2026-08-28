@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections.abc import Mapping
 import hashlib
 import ipaddress
 from pathlib import Path
@@ -14,12 +15,69 @@ from sandbox.ingress.models import digest
 
 PROTOCOL_PORTS = {"http": 80, "https": 443}
 
+_CADDY_REASON_MESSAGES = {
+    "sandbox_caddy_ready": "Sandbox Caddy route health is ready.",
+    "sandbox_caddy_route_unconfigured": "Sandbox Caddy route is not configured.",
+    "sandbox_caddy_route_unreachable": "Sandbox Caddy route probe failed.",
+    "sandbox_caddy_config_unreadable": "Sandbox Caddy configuration is unreadable.",
+    "sandbox_caddy_health_unavailable": "Sandbox Caddy health could not be observed.",
+    "sandbox_caddy_route_invalid": "Sandbox Caddy route scope contains an invalid hostname.",
+    "project_route_context_unavailable": "The project route context is unavailable.",
+    "proxy_not_running": "Sandbox Caddy is not running.",
+}
+
+
+def _sanitized_caddy_health(value) -> dict:
+    """Validate the dependency envelope and return only bounded safe fields."""
+    unavailable = {"ok": False, "state": "degraded", "mutated": False,
+                   "reason": {"code": "sandbox_caddy_health_unavailable",
+                              "message": _CADDY_REASON_MESSAGES[
+                                  "sandbox_caddy_health_unavailable"]},
+                   "routes": (), "scope": "unknown"}
+    if not isinstance(value, Mapping):
+        return unavailable
+    reason = value.get("reason")
+    code = reason.get("code") if isinstance(reason, Mapping) else None
+    if (type(value.get("ok")) is not bool
+            or value.get("state") not in {"ready", "degraded"}
+            or type(value.get("mutated")) is not bool
+            or value.get("mutated") is not False
+            or code not in _CADDY_REASON_MESSAGES
+            or not isinstance(value.get("routes"), (tuple, list))):
+        return unavailable
+    from sandbox.config.domains import normalize_hostname
+
+    routes = []
+    for route in value["routes"]:
+        if not isinstance(route, Mapping):
+            return unavailable
+        try:
+            hostname = normalize_hostname(route.get("hostname"))
+        except (TypeError, ValueError):
+            return unavailable
+        if any(type(route.get(field)) is not bool
+               for field in ("secure", "configured", "serving")):
+            return unavailable
+        routes.append({"hostname": hostname, "secure": route["secure"],
+                       "configured": route["configured"], "serving": route["serving"]})
+    return {"ok": value["ok"], "state": value["state"], "mutated": False,
+            "reason": {"code": code, "message": _CADDY_REASON_MESSAGES[code]},
+            "routes": tuple(routes),
+            "scope": value.get("scope") if value.get("scope") in {
+                "explicit", "managed", "project"} else "unknown",
+            "container_running": (value.get("container_running")
+                                  if value.get("container_running") in {True, False, None}
+                                  else None),
+            "config_readable": (value.get("config_readable")
+                                if value.get("config_readable") in {True, False, None}
+                                else None)}
+
 
 class IngressService:
     def __init__(self, *, detector, registry, bind_address="127.0.0.77",
                  bind_probe=None, repository=None, transaction_runner=None,
                  consent_decider=None, route_verifier=None, credential_lookup=None,
-                 clock=None, sandbox_owner=None):
+                 clock=None, sandbox_owner=None, caddy_health=None):
         self.detector = detector
         self.registry = registry
         self.bind_address = bind_address
@@ -38,6 +96,7 @@ class IngressService:
         # the service would read its own proxy as a foreign conflict and refuse
         # to reuse it (037 US1 scenario 3, FR-002).
         self.sandbox_owner = sandbox_owner or (lambda _endpoint: False)
+        self.caddy_health = caddy_health
         self.clock = clock
 
     def support(self):
@@ -63,15 +122,49 @@ class IngressService:
             ]
             probe = self.bind_probe.check(endpoint) if self.bind_probe else "unavailable"
             owned = bool(self.sandbox_owner(endpoint))
+            exact_proven = probe == "conflict" and any(
+                item.address == self.bind_address and item.owner_confidence == "proven"
+                for observation in observations for item in observation.endpoints
+                if item.port == port and item.protocol == "tcp"
+            )
+            state = ("sandbox_owned" if owned else
+                     "free" if probe == "free" else
+                     "conflict" if exact_proven else
+                     "overlapping" if overlap else "unknown")
+            reason_code = ("sandbox_endpoint_owned" if owned else
+                           "endpoint_free" if probe == "free" else
+                           "listener_conflict" if exact_proven else
+                           "listener_overlap" if overlap else
+                           "kernel_bind_conflict_unattributed" if probe == "conflict" else
+                           "kernel_bind_unavailable")
             requested.append({
                 "protocol": protocol, "address": self.bind_address, "port": port,
                 "kernel_bind": probe,
-                "state": "sandbox_owned" if owned else
-                         "free" if probe == "free" else
-                         "conflict" if probe == "conflict" or overlap else "unknown",
+                "state": state, "reason": {"code": reason_code},
                 "overlaps": overlap,
             })
-        return {"ok": True, "operation": "ingress_detect", "state": "ready",
+        caddy = None
+        if self.caddy_health and any(
+                item["state"] == "sandbox_owned" for item in requested):
+            try:
+                caddy = _sanitized_caddy_health(self.caddy_health())
+            except Exception:
+                caddy = _sanitized_caddy_health(None)
+        if caddy is not None and not caddy.get("ok"):
+            state, healthy, reason = "degraded", False, caddy.get("reason")
+        elif any(item["state"] == "conflict" for item in requested):
+            state, healthy, reason = "conflict", False, {
+                "code": "listener_conflict",
+                "message": "A proven listener owns an exact Sandbox ingress endpoint.",
+            }
+        elif any(item["state"] == "overlapping" for item in requested):
+            state, healthy, reason = "overlapping", True, {
+                "code": "listener_overlap",
+                "message": "Listener overlap was observed without exact ownership proof.",
+            }
+        else:
+            state, healthy, reason = "ready", True, {"code": "ingress_ready"}
+        return {"ok": healthy, "operation": "ingress_detect", "state": state,
                 "observations": [{
                     "adapter_id": item.adapter_id, "product": item.product,
                     "support_tier": item.support_tier,
@@ -79,6 +172,7 @@ class IngressService:
                     "fingerprint": item.fingerprint,
                     "endpoints": [endpoint.to_dict() for endpoint in item.endpoints],
                 } for item in observations], "requested_endpoints": requested,
+                "caddy_health": caddy, "reason": reason,
                 "mutated": False}
 
     @staticmethod

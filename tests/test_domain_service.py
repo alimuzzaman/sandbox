@@ -70,6 +70,23 @@ class FakeAuthority:
 
 
 class TestDomainServiceIntegration(unittest.TestCase):
+    def test_route_context_registry_failure_is_bounded_and_fail_closed(self):
+        from unittest import mock
+        from sandbox.application.domain_service import DomainService
+
+        service = DomainService(
+            config_loader=None, project_registry=None, adapters=None,
+            repository=None, process=None, http=None, endpoints=None,
+        )
+        secret = "token=" + "x" * 5000
+        with mock.patch.object(service, "_context", side_effect=RuntimeError(secret)):
+            result = service.route_context("/tmp/project")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["domains"], ())
+        self.assertEqual(result["reason"]["code"],
+                         "project_route_context_unavailable")
+        self.assertNotIn("token=", repr(result))
+
     def test_public_name_is_verify_only_and_never_calls_local_adapter(self):
         from sandbox.application.domain_service import DomainService
         from sandbox.network.models import ResolverObservation

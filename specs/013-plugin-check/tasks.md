@@ -285,11 +285,11 @@ gate before considering the feature done, per Constitution Principle IV.
 
 ---
 
-## Phase 9: Exact-release archive mode (design convergence; implementation gated)
+## Phase 9: Exact-release archive mode (implementation and acceptance)
 
-**Purpose**: Define and prove a hostile ZIP and disposable review lifecycle before
-adding an archive flag. These tasks supersede the earlier design-only archive note;
-the source-tree Plugin Check path remains unchanged while this phase is incomplete.
+**Purpose**: Define and prove a hostile ZIP and disposable review lifecycle around
+the explicit archive flag. These tasks supersede the earlier design-only archive
+note; the source-tree Plugin Check path remains unchanged.
 
 - [x] T034 Amend `archive-mode-design.md`, `contracts/cli-and-mcp.md`, and
   `data-model.md` with the internal target identity, exact ZIP limits and
@@ -297,30 +297,46 @@ the source-tree Plugin Check path remains unchanged while this phase is incomple
   isolation, owner-only artifact path, pinned checker provenance, typed errors,
   and the durable cleanup journal/receipt contract. Keep MCP archive support
   deferred until parity is independently proven.
-- [ ] T035 Create a deterministic stdlib-only archive fixture generator and corpus:
+- [x] T035 Create a deterministic stdlib-only archive fixture generator and corpus:
   valid archive with a non-slug main filename, deterministic ERROR/WARNING,
   side-effect sentinel, traversal/duplicate/Unicode/case/drive/UNC/special/
   encrypted/truncated/CRC/root-layout/limit-boundary invalid archives.
-- [ ] T036 Implement pure host preflight using one `O_NOFOLLOW` descriptor for
+- [x] T036 Implement pure host preflight using one `O_NOFOLLOW` descriptor for
   hashing, validation, and streaming extraction; reject every corpus case before
   extraction and emit a stable member-manifest digest.
-- [ ] T037 Implement the isolated archive target/config builder: run-local
+- [x] T037 Implement the isolated archive target/config builder: run-local
   `SANDBOX_HOME` and `SANDBOX_PROJECT_ROOTS`, forced local Compose, inactive
   read-only target, active pinned Plugin Check only, invoking-UID readability,
   and no inherited global config, secrets, aliases, domains, or hooks.
-- [ ] T038 Implement the owner-only journal, idempotent cleanup/recovery service,
+- [x] T038 Implement the owner-only journal, idempotent cleanup/recovery service,
   per-plane absence checks, retained unknown-state receipt, and fault-injection
   tests for descriptor, journal, registry, boot, check, report, and every cleanup
   boundary.
-- [ ] T039 Normalize archive findings relative to the extracted root, make
+- [x] T039 Normalize archive findings relative to the extracted root, make
   `--update` atomically update only the caller baseline after complete cleanup,
   persist reports/results under retained Sandbox state, and harden HTML escaping
   for archive-controlled strings.
-- [ ] T040 Integrate the CLI archive flag with typed failures and deterministic
+- [x] T040 Integrate the CLI archive flag with typed failures and deterministic
   provenance; preserve source-tree behavior and leave MCP unchanged until a
-  separate parity task is approved.
+  separate parity task is approved. The implementation uses a fresh child process,
+  run-local configuration, cleanup-gated baseline replacement, and retained
+  owner-only artifacts; missing provenance fails before archive open.
 - [ ] T041 Run focused, full regression, concurrency, and fixed live acceptance
   checks proving exact SHA/provenance, target inactivity, source/archive finding
   identity, unchanged caller state, retained report, complete cleanup, and
   idempotent recovery after an injected cleanup failure. Close feedback only
   after all evidence exists.
+
+  Archive-specific evidence is complete as of 2026-08-26: 108 focused tests,
+  28 journal/result/CLI recovery tests, one live disposable run, and two
+  concurrent live disposable runs all passed with exact archive/checker
+  provenance, inactive-target proofs, retained reports, complete seven-plane
+  cleanup receipts, and a direct source/archive `(file, rule)` identity
+  regression plus a live source/archive parity run with matching four ERROR
+  identities. The repository-wide gate is still separate: a bounded run
+  executed 3,298 tests with 19 skips and passed after omitting the unbounded
+  `test_resource_remote`, optional `test_server_transport`, and separately
+  verified `test_cli` modules. The full CLI slice (82 tests) and audit-agent
+  slice (25 tests) also passed. Keep T041 open only until remote-resource
+  acceptance is bounded and the optional MCP transport environment is tested;
+  source/archive finding-key parity itself is complete.

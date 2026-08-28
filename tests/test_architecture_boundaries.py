@@ -34,7 +34,9 @@ class TestArchitectureBoundaries(unittest.TestCase):
         accept project-controlled PHP/CLI payloads.
         """
         boundaries = (
-            ("sandbox/core/_docker.py", "wpcli", "_managed_execution_gate", "compose("),
+            # ``wpcli`` owns the activity lease; the private unleased helper
+            # owns the legacy Docker/Herd dispatch and must gate it first.
+            ("sandbox/core/_docker.py", "_wpcli_unleased", "_managed_execution_gate", "compose("),
             ("sandbox/core/_tests.py", "_ensure_project_dependencies_docker", "_managed_execution_gate", "compose("),
             ("sandbox/core/_tests.py", "_run_tests", "_managed_execution_gate", "compose("),
             ("sandbox/core/_tests.py", "_run_tests_unit", "_managed_execution_gate", "compose("),
@@ -105,7 +107,9 @@ class TestArchitectureBoundaries(unittest.TestCase):
         from sandbox.registry import COMMANDS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 88)
+        # The request-activation command is now part of the explicit built-in
+        # manifest; keep this inventory tied to the shipped command set.
+        self.assertEqual(len(COMMANDS), 89)
         self.assertEqual(validate_builtin_command_coverage(), ())
 
         import sys

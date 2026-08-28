@@ -1376,3 +1376,9 @@ def durable_job_dependencies():
         "target_service": target,
         "workspace_service": workspace,
     }
+
+
+def sync_service_dependencies():
+    """Compose opt-in sync service without initializing runtime."""
+    from sandbox.application.sync_service import build_sync_service
+    return build_sync_service()

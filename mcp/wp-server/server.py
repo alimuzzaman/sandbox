@@ -308,6 +308,15 @@ def _durable_job_dependencies():
     return durable_job_dependencies()
 
 
+def _sync_service():
+    import sys
+    repository_root = str(SANDBOX_ROOT)
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from sandbox.application.context import sync_service_dependencies
+    return sync_service_dependencies()
+
+
 def _last_json(stdout: str) -> dict | None:
     for line in reversed((stdout or "").splitlines()):
         try:
@@ -360,6 +369,8 @@ if _scoped_groups is not None:
     _selected_groups = _scoped_groups
 _job_dependencies = _durable_job_dependencies() \
     if _selected_groups is None or "jobs" in _selected_groups else {}
+_sync_dependencies = {"sync_service": _sync_service()} \
+    if _selected_groups is None or "sync" in _selected_groups else {}
 built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "app": mcp,
     "sandbox_root": SANDBOX_ROOT,
@@ -389,6 +400,7 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "secret_service_factory": _secret_service,
     "hermes_service": _HermesCommandAdapter(),
     **_job_dependencies,
+    **_sync_dependencies,
 }))
 
 

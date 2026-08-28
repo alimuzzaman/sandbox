@@ -15,6 +15,9 @@ from sandbox.isolation.bubblewrap import USERNS_FILTER_FD, userns_filtered_argv
 from sandbox.isolation.seccomp import compile_userns_filter
 from sandbox.isolation.credential_controller_lifecycle_v2 import (
     DerivedServiceConfigV2,
+    FixedLifecycleExecutorV2,
+    LIFECYCLE_VERBS_V2,
+    LifecycleV2Error,
     derived_config_document,
     validate_reciprocal_service_plans_v2,
 )
@@ -40,6 +43,18 @@ CREDENTIAL_CONTROLLER_SERVICE_UID_V2 = 992
 CREDENTIAL_BROKER_SERVICE_UID_V2 = 993
 CONTROLLER_PROTOCOL_V2 = "credential-broker-controller-v2"
 _GUEST_BRIDGE_ISSUER = object()
+_CREDENTIAL_V2_STATUS_KEYS = frozenset({
+    "ok", "code", "machine_id", "component", "config_digest",
+    "plan_identity", "unit_identity", "unit_digest", "service_uid",
+    "service_gid", "executable_digest", "process_identity_authority",
+    "observed", "owned", "unit_absent", "process_absent", "socket_absent",
+    "cgroup_absent", "descriptor_absent",
+})
+_CREDENTIAL_V2_FORBIDDEN_OUTPUT = re.compile(
+    r"(?i)(secret|token|password|authorization|api[_-]?key|"
+    r"source[_-]?(?:ref|handle)|operation[_-]?id|lease[_-]?id|audit[_-]|"
+    r"binding[_-]?id|request[_-]?digest|header[_-]|body[_-]|argv[_-])"
+)
 
 
 class CredentialV2GuestBridge(tuple):
@@ -194,6 +209,139 @@ def compile_credential_service_plans_v2(*, machine_id, service_gid,
     ))
     validate_reciprocal_service_plans_v2(controller, broker)
     return {"controller": controller, "broker": broker}
+
+
+class NativeCredentialLifecycleExecutorV2(FixedLifecycleExecutorV2):
+    """Bind one reciprocal v2 plan pair to the fixed privileged helper.
+
+    Construction and validation are inert.  No config, repository, policy, or
+    credential source is read here.  The root helper remains the sole future
+    owner of installed unit/config observation; until T022 proves that service
+    installation, its fixed verbs refuse and this executor reports a bounded
+    closed result.
+    """
+
+    __slots__ = ("process", "helper", "controller", "broker", "plan_identity")
+
+    def __init__(self, *, process, helper, controller, broker):
+        if (not isinstance(helper, str) or not helper.startswith("/")
+                or "\x00" in helper or len(helper.encode()) > 4096):
+            raise LifecycleV2Error("lifecycle_executor_invalid")
+        try:
+            validate_reciprocal_service_plans_v2(controller, broker)
+        except Exception:
+            raise LifecycleV2Error("lifecycle_plan_invalid") from None
+        if not callable(getattr(process, "run", None)):
+            raise LifecycleV2Error("lifecycle_executor_invalid")
+        self.process = process
+        self.helper = helper
+        self.controller = controller
+        self.broker = broker
+        self.plan_identity = hashlib.sha256(
+            controller.canonical_bytes + b"\0" + broker.canonical_bytes
+        ).hexdigest()
+
+    def _bound(self, plan):
+        selected = {"controller": self.controller, "broker": self.broker}.get(
+            getattr(plan, "component", None)
+        )
+        if plan is not selected:
+            raise LifecycleV2Error("lifecycle_plan_invalid")
+        return selected
+
+    def _invoke(self, verb, plan):
+        selected = self._bound(plan)
+        expected_component = (
+            "controller" if verb.startswith("credential-controller-") else
+            "broker" if verb.startswith("credential-broker-") else None
+        )
+        if verb not in LIFECYCLE_VERBS_V2 or expected_component != selected.component:
+            raise LifecycleV2Error("lifecycle_action_invalid")
+        argv = (
+            "sudo", "-n", self.helper, verb, selected.machine_id,
+            selected.config_digest, self.plan_identity,
+        )
+        try:
+            return self.process.run(argv, timeout=30)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _json(result):
+        try:
+            if result is None or getattr(result, "returncode", 1) != 0:
+                return None
+            stdout = getattr(result, "stdout", "")
+            if not isinstance(stdout, str):
+                return None
+        except Exception:
+            return None
+
+        def exact_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if not isinstance(key, str) or key in value:
+                    raise ValueError("duplicate or invalid lifecycle status key")
+                value[key] = item
+            return value
+
+        def forbidden(item):
+            if isinstance(item, Mapping):
+                return any(
+                    _CREDENTIAL_V2_FORBIDDEN_OUTPUT.search(key) is not None
+                    or forbidden(value) for key, value in item.items()
+                )
+            if isinstance(item, list):
+                return any(forbidden(value) for value in item)
+            return (isinstance(item, str)
+                    and _CREDENTIAL_V2_FORBIDDEN_OUTPUT.search(item) is not None)
+
+        try:
+            encoded = stdout.encode("utf-8", errors="strict")
+            if len(encoded) > 4096:
+                return None
+            value = json.loads(stdout, object_pairs_hook=exact_object)
+            if not isinstance(value, dict) or forbidden(value):
+                return None
+            return value
+        except (TypeError, ValueError, UnicodeError):
+            return None
+
+    def execute(self, verb, plan):
+        value = self._json(self._invoke(verb, plan))
+        if (not isinstance(value, Mapping) or set(value) != {"ok", "code"}
+                or value.get("ok") is not True or value.get("code") != "completed"):
+            return {"ok": False, "code": "lifecycle_unavailable"}
+        return {"ok": True, "code": "completed"}
+
+    def observe_absence(self, plan):
+        selected = self._bound(plan)
+        verb = f"credential-{selected.component}-status-v2"
+        value = self._json(self._invoke(verb, selected))
+        expected = {
+            "machine_id": selected.machine_id,
+            "component": selected.component,
+            "config_digest": selected.config_digest,
+            "plan_identity": self.plan_identity,
+            "unit_identity": selected.document["unit_identity"],
+            "unit_digest": selected.document["unit_digest"],
+            "service_uid": selected.document["service_uid"],
+            "service_gid": selected.document["service_gid"],
+            "executable_digest": selected.document["executable_digest"],
+            "process_identity_authority": selected.document["process_identity_authority"],
+        }
+        booleans = (
+            "observed", "owned", "unit_absent", "process_absent",
+            "socket_absent", "cgroup_absent", "descriptor_absent",
+        )
+        if (not isinstance(value, Mapping) or set(value) != _CREDENTIAL_V2_STATUS_KEYS
+                or value.get("ok") is not True or value.get("code") != "completed"
+                or any(value.get(name) != item for name, item in expected.items())
+                or any(type(value.get(name)) is not bool for name in booleans)
+                or value.get("observed") is not True
+                or value.get("owned") is not True):
+            raise LifecycleV2Error("lifecycle_observation_unavailable")
+        return {name: value[name] for name in booleans}
 
 
 def _persistent_payload(command, writable_targets):

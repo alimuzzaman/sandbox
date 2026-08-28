@@ -691,6 +691,12 @@ class ManagedNativeAdapter:
                                   else getattr(dependencies, "credential_broker", None))
         self.credential_supervisor = (credential_supervisor if credential_supervisor is not None
                                       else getattr(dependencies, "credential_supervisor", None))
+        if self.credential_supervisor is not None:
+            from sandbox.isolation.credential_controller_lifecycle_v2 import (
+                ManagedCredentialLifecycleV2,
+            )
+            if type(self.credential_supervisor) is not ManagedCredentialLifecycleV2:
+                raise ValueError("credential v2 lifecycle composition is required")
         self.credential_health = (credential_health if credential_health is not None
                                   else getattr(dependencies, "credential_health", None))
         self.credential_recovery = (credential_recovery if credential_recovery is not None

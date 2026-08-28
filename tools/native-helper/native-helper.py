@@ -56,7 +56,7 @@ FIXED_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
-# T042 declares these exact derived-plan lifecycle identities. T043 registers
+# T042 declares these exact derived-plan lifecycle identities. T036 registers
 # only these fixed argv shapes. The local helper still refuses them because
 # installation and live ownership proof remain blocked under T022.
 CREDENTIAL_V2_LIFECYCLE_VERBS = (
@@ -113,6 +113,17 @@ PREFLIGHT_PROBES = (
 
 def fail(message, code=65):
     print(f"native-helper: {message}", file=sys.stderr); raise SystemExit(code)
+
+
+def credential_v2_lifecycle_action(verb, identity, config_digest, plan_identity):
+    """Closed fixed boundary until reviewed units/config observers are installed."""
+
+    if verb not in CREDENTIAL_V2_LIFECYCLE_VERBS:
+        fail("native credential v2 lifecycle action is invalid")
+    machine(identity)
+    digest_value(config_digest)
+    digest_value(plan_identity)
+    fail("native credential v2 lifecycle is not installed", 69)
 
 
 def require_root():
@@ -4718,9 +4729,8 @@ def main(argv=None):
         # credential, or free-form action. The root helper will derive the
         # canonical component config path when T022 installs reviewed units.
         # Until then every fixed v2 action stays closed.
-        require_root(); machine(args.machine)
-        digest_value(args.config_digest); digest_value(args.plan_identity)
-        fail("native credential v2 lifecycle is not installed")
+        require_root(); credential_v2_lifecycle_action(
+            args.verb, args.machine, args.config_digest, args.plan_identity)
     elif args.verb == "credential-install":
         require_root(); credential_install(machine(args.machine), digest_value(args.digest), args.name)
     elif args.verb in {"services-activate", "services-health", "services-status", "services-stop"}:

@@ -13,12 +13,45 @@ class CheckExpectation:
     source: str
     expectation: str = "exit_zero"
     required: bool = True
+    predicate: str = "predicate_unavailable"
+
+
+_TYPED_PREDICATES = {
+    "os_release_supported": "exact_text",
+    "kernel_release_expected": "exact_text",
+    "architecture_expected": "exact_text",
+    "sandbox_revision_expected": "exact_text",
+    "service_account_expected": "exact_text",
+    "unit_identity_expected": "unit_identity",
+    "unit_ownership_expected": "unit_ownership",
+    "broker_process_identity": "process_identity",
+    "controller_process_identity": "process_identity",
+    "executable_ownership_expected": "executable_ownership",
+    "cgroup_identity_expected": "systemd_fields",
+    "lease_socket_owned": "socket_owner",
+    "controller_socket_owned": "socket_owner",
+    "guest_listener_bound": "socket_owner",
+    "veth_identity_expected": "link_identity",
+    "veth_address_expected": "interface_address",
+    "route_table_expected": "route",
+    "nftables_default_drop": "nftables_policy",
+    "apparmor_profile_enforced": "apparmor_profile",
+    "no_unexpected_host_mount": "mount_isolation",
+    "unit_absent_after_cleanup": "unit_absent",
+    "socket_absent_after_cleanup": "empty_output",
+}
 
 
 def _check(check_id: str, category: str, source: str = "host_command",
            expectation: str = "exit_zero", required: bool = True
            ) -> CheckExpectation:
-    return CheckExpectation(check_id, category, source, expectation, required)
+    predicate = _TYPED_PREDICATES.get(check_id)
+    if predicate is None and source != "host_command":
+        predicate = "typed_source"
+    if predicate is None and expectation == "exit_nonzero":
+        predicate = "not_found_exit"
+    return CheckExpectation(check_id, category, source, expectation, required,
+                            predicate or "predicate_unavailable")
 
 
 _CHECKS = (

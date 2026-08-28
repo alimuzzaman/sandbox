@@ -29,8 +29,11 @@ Only things about itself, offline:
   with leftover state as good;
 - `checks.json` must bind every result to the exact catalog category, source,
   expectation, and argv that was planned. Its typed observation is evaluated
-  from immutable catalog and manifest predicates, and permission, tool, or
-  unsupported-result errors block instead of passing. Bundle validation
+  from immutable catalog and manifest predicates. Process UID/argv, socket
+  address/owner, interface/address, executable ownership, mount isolation, and
+  policy fields are parsed structurally and matched exactly; embedded or
+  lookalike text cannot satisfy them. Permission, tool, or unsupported-result
+  errors block instead of passing. Bundle validation
   recomputes the outcome rather than trusting a recorded state or code;
   `cleanup.json` must observe every exact planned resource once and no extra
   resource;

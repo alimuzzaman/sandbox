@@ -22,9 +22,8 @@ from . import scanner
 
 MAX_ARGV = 24
 MAX_OUTPUT_BYTES = 64 * 1024
-MAX_OBSERVATIONS = 32
 
-# Commas and percent signs appear in fixed `ps`/`stat`/`findmnt` format
+# Commas and percent signs appear in fixed `ps`/`stat` format
 # strings. Shell metacharacters stay out: argv arrays never reach a shell,
 # and keeping them out means a mistake cannot become one either.
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9@._:/=+%,-]{1,255}$")
@@ -34,7 +33,7 @@ ALLOWED_EXECUTABLES = (
     "/usr/bin/cat", "/usr/bin/getent", "/usr/bin/ip", "/usr/bin/journalctl",
     "/usr/bin/ss", "/usr/bin/stat", "/usr/bin/systemctl", "/usr/bin/test",
     "/usr/sbin/nft", "/usr/bin/uname", "/usr/bin/ps", "/usr/bin/aa-status",
-    "/usr/bin/lsb_release", "/usr/bin/findmnt", "/usr/bin/id",
+    "/usr/bin/lsb_release", "/usr/bin/id",
 )
 
 
@@ -113,12 +112,12 @@ def _unit_ownership(manifest):
 
 def _process_identity(manifest):
     return _argv("/usr/bin/ps", "-o", "pid=,uid=,lstart=,args=", "-C",
-                 "native-credential-broker")
+                 "native-credenti")
 
 
 def _controller_identity(manifest):
-    return _argv("/usr/bin/ps", "-o", "pid=,uid=,lstart=", "-C",
-                 "sandbox-credential-controller")
+    return _argv("/usr/bin/ps", "-o", "pid=,uid=,lstart=,args=", "-C",
+                 "sandbox-credent")
 
 
 def _executable_identity(manifest):
@@ -171,7 +170,9 @@ def _apparmor_state(manifest):
 
 
 def _mount_state(manifest):
-    return _argv("/usr/bin/findmnt", "-J", "-o", "TARGET,SOURCE,OPTIONS")
+    return _argv("/usr/bin/systemctl", "show", _unit(manifest),
+                 "--property=BindPaths", "--property=BindReadOnlyPaths",
+                 "--property=InaccessiblePaths", "--property=ProtectHome")
 
 
 def _service_account(manifest):
@@ -326,115 +327,281 @@ def _expected_text(check_id: str, manifest: dict[str, Any]) -> str | None:
     return values.get(check_id)
 
 
-def _contains_expectations(check_id: str, manifest: dict[str, Any]
-                           ) -> tuple[str, ...] | None:
-    return {
-        "broker_process_identity": (str(manifest["service"]["service_uid"]),
-                                    manifest["service"]["executable"]),
-        "controller_process_identity": (str(manifest["service"]["controller_uid"]),),
-        "cgroup_identity_expected": (f"ControlGroup={manifest['service']['cgroup']}",),
-        "lease_socket_owned": (manifest["transport"]["lease_socket"],),
-        "controller_socket_owned": (manifest["transport"]["controller_socket"],),
-        "guest_listener_bound": (manifest["transport"]["host_address"],
-                                 str(manifest["transport"]["guest_port"])),
-        "veth_identity_expected": (manifest["transport"]["guest_interface"],),
-        "veth_address_expected": (manifest["transport"]["guest_interface"],
-                                  manifest["transport"]["guest_address"]),
-        "route_table_expected": (manifest["transport"]["guest_interface"],),
-        "nftables_default_drop": (manifest["kernel"]["nftables_table"],
-                                  manifest["kernel"]["nftables_policy"]),
-        "apparmor_profile_enforced": (manifest["kernel"]["apparmor_profile"],
-                                      manifest["kernel"]["apparmor_mode"]),
-    }.get(check_id)
+def _matched(kind: str, expected: Any, condition: bool) -> dict[str, Any]:
+    return {"kind": kind, "value": expected if condition else None}
+
+
+def _lines(stdout: str) -> list[str]:
+    return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+
+def _fields(stdout: str) -> dict[str, str] | None:
+    lines = _lines(stdout)
+    if any("=" not in line for line in lines):
+        return None
+    pairs = [line.split("=", 1) for line in lines]
+    if len({key for key, _ in pairs}) != len(pairs):
+        return None
+    return dict(pairs)
+
+
+def _process_observation(check_id: str, stdout: str,
+                         manifest: dict[str, Any]) -> dict[str, Any]:
+    service = manifest["service"]
+    uid = service["service_uid"] if check_id == "broker_process_identity" \
+        else service["controller_uid"]
+    executable = service["executable"] if check_id == "broker_process_identity" \
+        else "sandbox-credential-controller"
+    expected = {"uid": uid, "executable": executable, "pid_positive": True,
+                "start_time_typed": True}
+    suffix = r"\s+(\S+)(?:\s+.*)?$"
+    pattern = (r"^(\d+)\s+(\d+)\s+\S+\s+\S+\s+\d{1,2}\s+"
+               r"\d{2}:\d{2}:\d{2}\s+\d{4}" + suffix)
+    lines = _lines(stdout)
+    match = re.fullmatch(pattern, lines[0]) if len(lines) == 1 else None
+    correct = bool(match and int(match.group(1)) > 1 and int(match.group(2)) == uid)
+    if correct:
+        observed_executable = match.group(3)
+        correct = observed_executable == executable if check_id == "broker_process_identity" \
+            else observed_executable.rsplit("/", 1)[-1] == executable
+    return _matched("process_identity", expected, correct)
+
+
+def _socket_observation(check_id: str, stdout: str,
+                        manifest: dict[str, Any]) -> dict[str, Any]:
+    transport = manifest["transport"]
+    if check_id == "lease_socket_owned":
+        address, owner = transport["lease_socket"], "native-credenti"
+    elif check_id == "controller_socket_owned":
+        address, owner = transport["controller_socket"], "sandbox-credent"
+    else:
+        address = f"{transport['host_address']}:{transport['guest_port']}"
+        owner = "native-credenti"
+    expected = {"address": address, "owner": owner, "pid_positive": True,
+                "fd_nonnegative": True}
+    lines = _lines(stdout)
+    if len(lines) != 1 or address not in lines[0].split():
+        return _matched("socket_owner", expected, False)
+    owners = re.findall(r'users:\(\(\"([^\"]+)\",pid=(\d+),fd=(\d+)\)\)', lines[0])
+    correct = len(owners) == 1 and owners[0][0] == owner \
+        and int(owners[0][1]) > 1 and int(owners[0][2]) >= 0
+    return _matched("socket_owner", expected, correct)
+
+
+def _json_contains_pair(value: Any, key: str, expected: Any) -> bool:
+    if isinstance(value, dict):
+        return value.get(key) == expected or any(
+            _json_contains_pair(item, key, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_contains_pair(item, key, expected) for item in value)
+    return False
+
+
+def _nftables_matches(value: Any, table_name: str, policy: str) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("nftables"), list):
+        return False
+    objects = value["nftables"]
+    table_ok = any(isinstance(item, dict) and isinstance(item.get("table"), dict)
+                   and item["table"].get("family") == "inet"
+                   and item["table"].get("name") == table_name for item in objects)
+    chain_ok = any(isinstance(item, dict) and isinstance(item.get("chain"), dict)
+                   and item["chain"].get("family") == "inet"
+                   and item["chain"].get("table") == table_name
+                   and item["chain"].get("policy") == policy for item in objects)
+    return table_ok and chain_ok
+
+
+def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
+    exact = _expected_text(check_id, manifest)
+    if exact is not None:
+        return exact
+    service, transport, kernel = (manifest["service"], manifest["transport"],
+                                  manifest["kernel"])
+    values = {
+        "unit_identity_expected": {
+            "lines": sorted({f"Id={_unit(manifest)}", "LoadState=loaded",
+                             "ActiveState=active", "User=sandbox-credential-broker",
+                             "Group=sandbox-credential-broker", "NoNewPrivileges=yes",
+                             f"ControlGroup={service['cgroup']}"}),
+            "executable": service["executable"],
+        },
+        "unit_ownership_expected": {
+            "UID": str(service["service_uid"]), "GID": str(service["service_gid"]),
+            "MainPID": "positive",
+        },
+        "broker_process_identity": {
+            "uid": service["service_uid"], "executable": service["executable"],
+            "pid_positive": True, "start_time_typed": True,
+        },
+        "controller_process_identity": {
+            "uid": service["controller_uid"],
+            "executable": "sandbox-credential-controller",
+            "pid_positive": True, "start_time_typed": True,
+        },
+        "executable_ownership_expected": {
+            "uid": service["service_uid"], "gid": service["service_gid"],
+            "owner_executable": True, "group_world_not_writable": True,
+            "size_positive": True,
+        },
+        "cgroup_identity_expected": {"ControlGroup": service["cgroup"]},
+        "lease_socket_owned": {
+            "address": transport["lease_socket"], "owner": "native-credenti",
+            "pid_positive": True, "fd_nonnegative": True,
+        },
+        "controller_socket_owned": {
+            "address": transport["controller_socket"],
+            "owner": "sandbox-credent", "pid_positive": True,
+            "fd_nonnegative": True,
+        },
+        "guest_listener_bound": {
+            "address": f"{transport['host_address']}:{transport['guest_port']}",
+            "owner": "native-credenti", "pid_positive": True,
+            "fd_nonnegative": True,
+        },
+        "veth_identity_expected": {"interface": transport["guest_interface"]},
+        "veth_address_expected": {"interface": transport["guest_interface"],
+                                  "address": transport["host_address"]},
+        "route_table_expected": {"interface": transport["guest_interface"],
+                                 "destination": transport["guest_address"]},
+        "nftables_default_drop": {"family": "inet", "table": kernel["nftables_table"],
+                                  "policy": kernel["nftables_policy"]},
+        "apparmor_profile_enforced": {"profile": kernel["apparmor_profile"],
+                                      "mode": kernel["apparmor_mode"]},
+        "no_unexpected_host_mount": {"BindPaths": "", "BindReadOnlyPaths": "",
+                                     "InaccessiblePaths": "/home /root",
+                                     "ProtectHome": "yes"},
+        "unit_absent_after_cleanup": "LoadState=not-found",
+    }
+    if check_id in values:
+        return values[check_id]
+    if catalog_module.CHECKS[check_id].source != "host_command":
+        return {"check_id": check_id, "observed": True}
+    if expectation_kind(check_id) == "empty_output":
+        return ""
+    if expectation_kind(check_id) == "exit_nonzero":
+        return None
+    return None
 
 
 def _normalize(check_id: str, stdout: str, manifest: dict[str, Any]) -> dict[str, Any]:
     """Produce only catalog-derived, secret-free typed observations."""
     exact = _expected_text(check_id, manifest)
     if exact is not None:
-        return {"kind": "exact_text", "value": exact if stdout.strip() == exact else None}
+        return _matched("exact_text", exact, stdout.strip() == exact)
     if check_id == "unit_identity_expected":
-        required = {
-            f"Id={_unit(manifest)}", "LoadState=loaded", "ActiveState=active",
-            "User=sandbox-credential-broker", "Group=sandbox-credential-broker",
-            "NoNewPrivileges=yes", f"ControlGroup={manifest['service']['cgroup']}",
+        required_fields = {
+            "Id": _unit(manifest), "LoadState": "loaded", "ActiveState": "active",
+            "User": "sandbox-credential-broker", "Group": "sandbox-credential-broker",
+            "NoNewPrivileges": "yes", "ControlGroup": manifest["service"]["cgroup"],
         }
-        lines = set(stdout.splitlines())
+        fields = _fields(stdout) or {}
         executable = manifest["service"]["executable"]
-        return {"kind": "unit_identity", "value": {
-            "lines": sorted(required & lines),
-            "exec_start": (f"ExecStart={executable}" if any(
-                line.startswith("ExecStart=") and executable in line for line in lines)
-                else None),
-        }}
+        start = fields.get("ExecStart", "")
+        exec_ok = start == executable or start.startswith(f"{{ path={executable} ;")
+        expected = _expected_value(check_id, manifest)
+        return _matched("unit_identity", expected,
+                        set(fields) == set(required_fields) | {"ExecStart"}
+                        and all(fields.get(key) == value
+                                for key, value in required_fields.items()) and exec_ok)
     if check_id == "unit_ownership_expected":
-        fields = dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
-        matched = fields.get("UID") == str(manifest["service"]["service_uid"]) \
-            and fields.get("GID") == str(manifest["service"]["service_gid"]) \
-            and fields.get("MainPID", "").isdigit() and int(fields["MainPID"]) > 1
-        return {"kind": "unit_ownership", "value": {
-            key: fields[key] for key in ("UID", "GID", "MainPID") if key in fields
-        } if matched else {}}
-    contains = _contains_expectations(check_id, manifest)
-    if contains is not None:
-        return {"kind": "contains_all", "value": [item for item in contains
-                                                     if item in stdout]}
+        fields = _fields(stdout) or {}
+        expected = {"UID": str(manifest["service"]["service_uid"]),
+                    "GID": str(manifest["service"]["service_gid"]),
+                    "MainPID": "positive"}
+        correct = set(fields) == {"UID", "GID", "MainPID"} \
+            and fields["UID"] == expected["UID"] and fields["GID"] == expected["GID"] \
+            and fields["MainPID"].isdigit() and int(fields["MainPID"]) > 1
+        return _matched("unit_ownership", expected, correct)
+    if check_id in {"broker_process_identity", "controller_process_identity"}:
+        return _process_observation(check_id, stdout, manifest)
+    if check_id == "executable_ownership_expected":
+        expected = {"uid": manifest["service"]["service_uid"],
+                    "gid": manifest["service"]["service_gid"],
+                    "owner_executable": True, "group_world_not_writable": True,
+                    "size_positive": True}
+        match = re.fullmatch(r"(\d+):(\d+):(\d{3,4}):(\d+)", stdout.strip())
+        mode = int(match.group(3), 8) if match else 0
+        correct = bool(match and int(match.group(1)) == expected["uid"]
+                       and int(match.group(2)) == expected["gid"] and mode & 0o100
+                       and not mode & 0o022 and int(match.group(4)) > 0)
+        return _matched("executable_ownership", expected, correct)
+    if check_id == "cgroup_identity_expected":
+        expected = {"ControlGroup": manifest["service"]["cgroup"]}
+        return _matched("systemd_fields", expected, _fields(stdout) == expected)
+    if check_id in {"lease_socket_owned", "controller_socket_owned",
+                    "guest_listener_bound"}:
+        return _socket_observation(check_id, stdout, manifest)
+    if check_id == "veth_identity_expected":
+        expected = {"interface": manifest["transport"]["guest_interface"]}
+        match = re.fullmatch(r"\d+:\s+([^:@]+)(?:@[^:]+)?:.*", stdout.strip())
+        return _matched("link_identity", expected,
+                        bool(match and match.group(1) == expected["interface"]))
+    if check_id == "veth_address_expected":
+        expected = {"interface": manifest["transport"]["guest_interface"],
+                    "address": manifest["transport"]["host_address"]}
+        match = re.fullmatch(r"\d+:\s+(\S+)\s+inet\s+([0-9.]+)/(\d+)(?:\s+.*)?",
+                             stdout.strip())
+        return _matched("interface_address", expected, bool(match and
+                        match.group(1) == expected["interface"] and
+                        match.group(2) == expected["address"] and
+                        0 <= int(match.group(3)) <= 32))
+    if check_id == "route_table_expected":
+        expected = {"interface": manifest["transport"]["guest_interface"],
+                    "destination": manifest["transport"]["guest_address"]}
+        tokens = stdout.strip().split()
+        correct = len(_lines(stdout)) == 1 and bool(tokens) \
+            and tokens[0] == expected["destination"] and "dev" in tokens \
+            and tokens.index("dev") + 1 < len(tokens) \
+            and tokens[tokens.index("dev") + 1] == expected["interface"]
+        return _matched("route", expected, correct)
+    if check_id in {"nftables_default_drop", "apparmor_profile_enforced"}:
+        try:
+            value = json.loads(stdout)
+        except json.JSONDecodeError:
+            value = None
+        if check_id == "nftables_default_drop":
+            expected = {"family": "inet", "table": manifest["kernel"]["nftables_table"],
+                        "policy": manifest["kernel"]["nftables_policy"]}
+            correct = _nftables_matches(value, expected["table"], expected["policy"])
+            return _matched("nftables_policy", expected, correct)
+        expected = {"profile": manifest["kernel"]["apparmor_profile"],
+                    "mode": manifest["kernel"]["apparmor_mode"]}
+        return _matched("apparmor_profile", expected,
+                        _json_contains_pair(value, expected["profile"], expected["mode"]))
+    if check_id == "no_unexpected_host_mount":
+        expected = {"BindPaths": "", "BindReadOnlyPaths": "",
+                    "InaccessiblePaths": "/home /root", "ProtectHome": "yes"}
+        return _matched("mount_isolation", expected, _fields(stdout) == expected)
     if catalog_module.CHECKS[check_id].source != "host_command":
         try:
             value = json.loads(stdout)
         except json.JSONDecodeError:
             value = None
         expected = {"check_id": check_id, "observed": True}
-        return {"kind": "typed_source", "value": expected if value == expected else None}
+        return _matched("typed_source", expected, value == expected)
     if check_id == "unit_absent_after_cleanup":
-        value = "LoadState=not-found"
-        return {"kind": "unit_absent", "value": value if stdout.strip() == value else None}
+        return _matched("unit_absent", "LoadState=not-found",
+                        stdout.strip() == "LoadState=not-found")
     if expectation_kind(check_id) == "empty_output":
-        return {"kind": "empty_output", "value": "" if not stdout.strip() else None}
+        return _matched("empty_output", "", not stdout.strip())
     if expectation_kind(check_id) == "exit_nonzero":
         return {"kind": "not_found_exit", "value": None}
-    # A catalogued host check without a typed predicate cannot contribute a
-    # pass. This is safer than treating arbitrary non-empty output as proof.
     return {"kind": "predicate_unavailable", "value": None}
 
 
 def _observation_kind(check_id: str, manifest: dict[str, Any]) -> str:
-    return _normalize(check_id, "", manifest)["kind"]
+    del manifest
+    return catalog_module.CHECKS[check_id].predicate
 
 
 def _observation_matches(check_id: str, observation: dict[str, Any],
                          manifest: dict[str, Any]) -> bool:
     kind, value = observation["kind"], observation["value"]
-    exact = _expected_text(check_id, manifest)
-    if kind == "exact_text":
-        return value == exact
-    if kind == "unit_identity":
-        required = sorted({
-            f"Id={_unit(manifest)}", "LoadState=loaded", "ActiveState=active",
-            "User=sandbox-credential-broker", "Group=sandbox-credential-broker",
-            "NoNewPrivileges=yes", f"ControlGroup={manifest['service']['cgroup']}",
-        })
-        return isinstance(value, dict) and value.get("lines") == required \
-            and isinstance(value.get("exec_start"), str) \
-            and manifest["service"]["executable"] in value["exec_start"]
-    if kind == "unit_ownership":
-        return isinstance(value, dict) \
-            and value.get("UID") == str(manifest["service"]["service_uid"]) \
-            and value.get("GID") == str(manifest["service"]["service_gid"]) \
-            and str(value.get("MainPID", "")).isdigit() \
-            and int(value["MainPID"]) > 1
-    if kind == "contains_all":
-        expected = _contains_expectations(check_id, manifest)
-        return isinstance(value, list) and value == list(expected or ())
-    if kind == "typed_source":
-        return value == {"check_id": check_id, "observed": True}
-    if kind == "unit_absent":
-        return value == "LoadState=not-found"
-    if kind == "empty_output":
-        return value == ""
+    if kind == "predicate_unavailable":
+        return False
     if kind == "not_found_exit":
         return value is None
-    return False
+    return value is not None and value == _expected_value(check_id, manifest)
 
 
 def _outcome(check_id: str, result: dict[str, Any], observation: dict[str, Any],

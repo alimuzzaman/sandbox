@@ -7,6 +7,7 @@ output, and that parsing refuses to persist anything it should not.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -14,7 +15,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credential_vault_proof import (  # noqa: E402
-    fixtures, manifest as manifest_module, probes,
+    catalog as catalog_module, fixtures, manifest as manifest_module, probes,
 )
 
 
@@ -57,6 +58,15 @@ class TestProbeCommandModel(unittest.TestCase):
         ):
             with self.subTest(check_id=check_id):
                 self.assertIn(check_id, catalog)
+
+    def test_every_required_check_has_a_typed_predicate(self):
+        for check_id, definition in catalog_module.CHECKS.items():
+            if definition.required:
+                with self.subTest(check_id=check_id):
+                    self.assertNotEqual(
+                        definition.predicate,
+                        "predicate_unavailable",
+                    )
 
     def test_every_host_plan_is_an_allowlisted_bounded_argv_array(self):
         for check_id in probes.catalog():
@@ -251,6 +261,91 @@ class TestProbeCommandModel(unittest.TestCase):
                     returncode=returncode, stderr="permission denied\n"), self.manifest)
                 self.assertEqual((parsed["state"], parsed["code"]),
                                  ("blocked", "probe_stderr"))
+
+    def test_executable_ownership_is_typed_and_exact(self):
+        passed = probes.parse("executable_ownership_expected", result(
+            stdout="991:991:750:4096\n"), self.manifest)
+        self.assertEqual(passed["state"], "passed")
+        for output in ("1991:991:750:4096\n", "991:991:770:4096\n",
+                       "991:991:750:0\n", "991:991:750:4096 extra\n"):
+            with self.subTest(output=output.strip()):
+                parsed = probes.parse("executable_ownership_expected",
+                                      result(stdout=output), self.manifest)
+                self.assertEqual((parsed["state"], parsed["code"]),
+                                 ("failed", "observation_mismatch"))
+
+    def test_veth_address_binds_the_exact_host_side_address(self):
+        interface = self.manifest["transport"]["guest_interface"]
+        host = self.manifest["transport"]["host_address"]
+        guest = self.manifest["transport"]["guest_address"]
+        passed = probes.parse("veth_address_expected", result(
+            stdout=f"12: {interface} inet {host}/30 scope global {interface}\n"),
+            self.manifest)
+        self.assertEqual(passed["state"], "passed")
+        near_miss = probes.parse("veth_address_expected", result(
+            stdout=f"12: {interface} inet {guest}/30 scope global {interface}\n"),
+            self.manifest)
+        self.assertEqual((near_miss["state"], near_miss["code"]),
+                         ("failed", "observation_mismatch"))
+
+    def test_process_identity_requires_exact_uid_and_executable_fields(self):
+        executable = self.manifest["service"]["executable"]
+        good = f"4242 991 Mon Sep 1 10:00:00 2026 {executable} --fixture\n"
+        self.assertEqual(probes.parse("broker_process_identity", result(stdout=good),
+                                     self.manifest)["state"], "passed")
+        for output in (
+            good.replace(" 991 ", " 1991 "),
+            good.replace(executable, f"{executable}-lookalike"),
+            good + good,
+        ):
+            with self.subTest(output=output[:48]):
+                parsed = probes.parse("broker_process_identity", result(stdout=output),
+                                      self.manifest)
+                self.assertEqual(parsed["state"], "failed")
+
+    def test_socket_identity_requires_exact_address_and_process_owner(self):
+        address = self.manifest["transport"]["lease_socket"]
+        good = (f"u_str LISTEN 0 16 {address} 123 * 0 "
+                'users:(("native-credenti",pid=4242,fd=7))\n')
+        self.assertEqual(probes.parse("lease_socket_owned", result(stdout=good),
+                                     self.manifest)["state"], "passed")
+        for output in (
+            good.replace("native-credenti", "other-owner"),
+            good.replace(address, f"lookalike-{address}"),
+            good.replace("pid=4242", "pid=1"),
+        ):
+            with self.subTest(output=output[:64]):
+                parsed = probes.parse("lease_socket_owned", result(stdout=output),
+                                      self.manifest)
+                self.assertEqual(parsed["state"], "failed")
+
+    def test_mount_isolation_requires_exact_systemd_fields(self):
+        good = ("BindPaths=\nBindReadOnlyPaths=\nInaccessiblePaths=/home /root\n"
+                "ProtectHome=yes\n")
+        self.assertEqual(probes.parse("no_unexpected_host_mount", result(stdout=good),
+                                     self.manifest)["state"], "passed")
+        near_miss = good.replace("BindPaths=", "BindPaths=/srv/project")
+        parsed = probes.parse("no_unexpected_host_mount", result(stdout=near_miss),
+                              self.manifest)
+        self.assertEqual((parsed["state"], parsed["code"]),
+                         ("failed", "observation_mismatch"))
+
+    def test_nft_policy_must_belong_to_the_exact_manifest_table(self):
+        table = self.manifest["kernel"]["nftables_table"]
+        document = {"nftables": [
+            {"table": {"family": "inet", "name": table}},
+            {"chain": {"family": "inet", "table": table, "name": "output",
+                       "policy": "drop"}},
+        ]}
+        good = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(probes.parse("nftables_default_drop", result(stdout=good),
+                                     self.manifest)["state"], "passed")
+        document["nftables"][1]["chain"]["table"] = "lookalike-table"
+        wrong_chain = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        parsed = probes.parse("nftables_default_drop", result(stdout=wrong_chain),
+                              self.manifest)
+        self.assertEqual((parsed["state"], parsed["code"]),
+                         ("failed", "observation_mismatch"))
 
 
 if __name__ == "__main__":

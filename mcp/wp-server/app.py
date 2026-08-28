@@ -622,8 +622,10 @@ def _list_sandbox_skills() -> list[dict]:
             if not meta["enable"]:
                 continue
             out.append({
+                "slug": entry.name,
                 "name": meta["name"] or entry.name,
                 "description": meta["description"],
+                "source": "sandbox",
                 "path": str(skill_md.relative_to(SANDBOX_ROOT)),
             })
     return out
@@ -650,7 +652,8 @@ def _startup_skill_catalog() -> str:
     if not skills:
         return "none"
     return "; ".join(
-        f"`{skill['name']}`" + (f" — {skill['description']}" if skill["description"] else "")
+        f"`{skill['slug']}` [{skill['source']}]"
+        + (f" — {skill['description']}" if skill["description"] else "")
         for skill in skills
     )
 

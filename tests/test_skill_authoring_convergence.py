@@ -36,6 +36,7 @@ def _skill(root: Path, slug: str, description: str, *, enabled: bool = True,
 class SkillAuthoringConvergenceTests(unittest.TestCase):
     @unittest.skipIf(app is None, "MCP server dependencies are not installed")
     def test_startup_skill_catalog_omits_disabled_entries_and_points_to_live_tools(self):
+        startup_snapshot = app.SANDBOX_INSTRUCTIONS
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             _skill(root, "visible", "shown at startup")
@@ -43,10 +44,15 @@ class SkillAuthoringConvergenceTests(unittest.TestCase):
             with patch.object(app, "SANDBOX_ROOT", root), \
                  patch.object(app, "SANDBOX_SKILLS_DIR", root):
                 instructions = app._startup_instructions()
-        self.assertIn("`visible` — shown at startup", instructions)
+        self.assertIn("`visible` [sandbox] — shown at startup", instructions)
         self.assertNotIn("disabled", instructions)
+        self.assertIn("[sandbox]", instructions)
+        self.assertNotIn("# body", instructions)
         self.assertIn("list_skills(project_dir=...)", instructions)
         self.assertIn("load_skill(name, project_dir=...)", instructions)
+        self.assertEqual(app.SANDBOX_INSTRUCTIONS, startup_snapshot)
+        self.assertNotIn("shown at startup", app.SANDBOX_INSTRUCTIONS)
+        self.assertIn("[sandbox]", app.SANDBOX_INSTRUCTIONS)
 
     def test_explicit_project_dir_wins_and_disabled_skills_are_omitted(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -83,8 +83,10 @@ def verify(manifest: dict[str, Any], observations: Any) -> dict[str, Any]:
     for index, item in enumerate(observations):
         value = _validate_observation(item, f"observations[{index}]")
         key = (value["kind"], value["identity"])
-        if key in observed and observed[key] != value:
-            raise _refuse("observation_contradiction", f"observations[{index}]")
+        if key in observed:
+            code = ("observation_duplicate" if observed[key] == value
+                    else "observation_contradiction")
+            raise _refuse(code, f"observations[{index}]")
         observed[key] = value
     retained: list[dict[str, str]] = []
     removed: list[dict[str, str]] = []
@@ -110,7 +112,6 @@ def verify(manifest: dict[str, Any], observations: Any) -> dict[str, Any]:
     unexpected = tuple(sorted(
         f"{kind}:{identity}" for (kind, identity), value in observed.items()
         if (kind, identity) not in {(item["kind"], item["identity"]) for item in expected}
-        and value["state"] != "absent"
     ))
     state = "complete" if not retained and not unexpected else "incomplete"
     return {
@@ -123,7 +124,24 @@ def verify(manifest: dict[str, Any], observations: Any) -> dict[str, Any]:
     }
 
 
+def validate_artifact(document: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate exact cleanup observations and their retained classification."""
+    if not isinstance(document, dict) \
+            or frozenset(document) != frozenset({"observations", "state"}):
+        raise _refuse("cleanup_artifact_schema_invalid", "cleanup.json")
+    result = verify(manifest, document["observations"])
+    expected = {(item["kind"], item["identity"])
+                for item in expected_resources(manifest)}
+    observed = {(item["kind"], item["identity"])
+                for item in document["observations"]}
+    if observed != expected:
+        raise _refuse("cleanup_artifact_coverage_mismatch", "cleanup.json")
+    if document["state"] != result["state"]:
+        raise _refuse("cleanup_artifact_state_mismatch", "cleanup.json")
+    return result
+
+
 __all__ = [
     "CleanupError", "OBSERVED_STATES", "RESOURCE_KINDS", "expected_resources",
-    "verify",
+    "validate_artifact", "verify",
 ]

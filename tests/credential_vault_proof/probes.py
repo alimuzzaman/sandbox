@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import catalog as catalog_module
 from . import scanner
 
 
@@ -215,50 +216,7 @@ def _temporary_absent(manifest):
     return _argv("/usr/bin/test", "-e", paths[0])
 
 
-# Checks whose evidence comes from the broker's own bounded status or from a
-# guest-side probe the future run drives, not from a host command. They are
-# still catalogued so the manifest can require them and the ledger can record
-# them; their plan says explicitly where the evidence must come from.
-_GUEST_SOURCED = {
-    "peer_credentials_observed": "broker_status",
-    "scm_credentials_observed": "broker_status",
-    "scm_rights_exactly_one": "broker_status",
-    "memfd_type_and_seals": "broker_status",
-    "descriptor_closed_on_success": "broker_status",
-    "descriptor_closed_on_failure": "broker_status",
-    "guest_cannot_reach_controller": "guest_probe",
-    "guest_cannot_reach_lease_socket": "guest_probe",
-    "guest_cannot_reach_host": "guest_probe",
-    "guest_cannot_reach_loopback": "guest_probe",
-    "guest_cannot_reach_metadata": "guest_probe",
-    "guest_cannot_reach_other_interface": "guest_probe",
-    "bindtodevice_enforced": "guest_probe",
-    "dns_pinning_enforced": "guest_probe",
-    "tls_verification_enforced": "guest_probe",
-    "redirect_refused": "guest_probe",
-    "response_size_bounded": "guest_probe",
-    "request_timeout_bounded": "guest_probe",
-    "concurrency_ceiling_enforced": "guest_probe",
-    "epoch_rotates_on_restart": "broker_status",
-    "quiesce_before_drain": "broker_status",
-    "drain_precedes_stop": "broker_status",
-    "descriptor_absent_after_cleanup": "broker_status",
-}
-
-# How a check proves itself. Absence checks are the reason this exists: `test
-# -d` on a removed cgroup exits non-zero, and reading that as a failure meant a
-# correctly cleaned host reported `failed` while a host with leftover state
-# reported `passed` -- backwards in the one direction that matters.
 EXPECTATION_KINDS = ("exit_zero", "exit_nonzero", "empty_output")
-_EXPECTATIONS = {
-    "process_absent_after_cleanup": "exit_nonzero",
-    "route_absent_after_cleanup": "exit_nonzero",
-    "nftables_absent_after_cleanup": "exit_nonzero",
-    "interface_absent_after_cleanup": "exit_nonzero",
-    "cgroup_absent_after_cleanup": "exit_nonzero",
-    "temporary_absent_after_cleanup": "exit_nonzero",
-    "socket_absent_after_cleanup": "empty_output",
-}
 
 _HOST_BUILDERS = {
     "os_release_supported": _os_release,
@@ -291,7 +249,7 @@ _HOST_BUILDERS = {
     "temporary_absent_after_cleanup": _temporary_absent,
 }
 
-CHECK_IDS = tuple(sorted(set(_HOST_BUILDERS) | set(_GUEST_SOURCED)))
+CHECK_IDS = tuple(catalog_module.CHECKS)
 
 
 def catalog() -> tuple[str, ...]:
@@ -302,7 +260,7 @@ def expectation_kind(check_id: Any) -> str:
     """What a passing result looks like for this check."""
     if not isinstance(check_id, str) or check_id not in CHECK_IDS:
         raise _refuse("check_unknown", str(check_id)[:64])
-    return _EXPECTATIONS.get(check_id, "exit_zero")
+    return catalog_module.CHECKS[check_id].expectation
 
 
 def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -314,20 +272,26 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
     timeout = manifest["bounds"]["command_timeout_seconds"]
     output_bytes = min(manifest["bounds"]["max_output_bytes"], MAX_OUTPUT_BYTES)
     expectation = expectation_kind(check_id)
-    if check_id in _GUEST_SOURCED:
+    definition = catalog_module.CHECKS[check_id]
+    if definition.source != "host_command":
         return {
             "check_id": check_id,
-            "kind": _GUEST_SOURCED[check_id],
+            "category": definition.category,
+            "kind": definition.source,
             "argv": (),
             "expectation": expectation,
             "timeout_seconds": timeout,
             "max_output_bytes": output_bytes,
             "redact": True,
         }
+    builder = _HOST_BUILDERS.get(check_id)
+    if builder is None:
+        raise _refuse("catalog_builder_missing", check_id)
     return {
         "check_id": check_id,
+        "category": definition.category,
         "kind": "host_command",
-        "argv": _HOST_BUILDERS[check_id](manifest),
+        "argv": builder(manifest),
         "expectation": expectation,
         "timeout_seconds": timeout,
         "max_output_bytes": output_bytes,
@@ -338,6 +302,46 @@ def build(check_id: Any, manifest: dict[str, Any]) -> dict[str, Any]:
 def plan(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Build one plan entry per check the manifest asks for, in manifest order."""
     return tuple(build(item["check_id"], manifest) for item in manifest["checks"])
+
+
+_EXECUTION_FIELDS = frozenset({
+    "check_id", "category", "source", "expectation", "argv", "state", "code",
+})
+
+
+def validate_execution_artifact(document: Any, manifest: dict[str, Any]
+                                ) -> tuple[dict[str, Any], ...]:
+    """Bind retained check results to the exact catalog-derived execution plan."""
+    planned = {entry["check_id"]: entry for entry in plan(manifest)}
+    if not isinstance(document, list) or len(document) != len(planned):
+        raise _refuse("execution_artifact_incomplete", "checks.json")
+    observed: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(document):
+        location = f"checks.json[{index}]"
+        if not isinstance(item, dict) or frozenset(item) != _EXECUTION_FIELDS:
+            raise _refuse("execution_artifact_schema_invalid", location)
+        check_id = item["check_id"]
+        expected = planned.get(check_id)
+        if expected is None or check_id in observed:
+            raise _refuse("execution_artifact_check_invalid", location)
+        if item["category"] != expected["category"]:
+            raise _refuse("execution_artifact_category_mismatch", location)
+        if item["source"] != expected["kind"]:
+            raise _refuse("execution_artifact_source_mismatch", location)
+        if item["expectation"] != expected["expectation"]:
+            raise _refuse("execution_artifact_expectation_mismatch", location)
+        if not isinstance(item["argv"], list) \
+                or tuple(item["argv"]) != expected["argv"]:
+            raise _refuse("execution_artifact_argv_mismatch", location)
+        if item["state"] not in {"passed", "failed", "blocked", "skipped"}:
+            raise _refuse("execution_artifact_state_invalid", location)
+        if not isinstance(item["code"], str) \
+                or not re.fullmatch(r"[a-z0-9_.-]{1,64}", item["code"]):
+            raise _refuse("execution_artifact_code_invalid", location)
+        observed[check_id] = item
+    if set(observed) != set(planned):
+        raise _refuse("execution_artifact_incomplete", "checks.json")
+    return tuple(observed[name] for name in planned)
 
 
 def _bounded_output(value: Any, limit: int) -> str:
@@ -420,5 +424,5 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
 __all__ = [
     "ALLOWED_EXECUTABLES", "CHECK_IDS", "EXPECTATION_KINDS", "MAX_ARGV",
     "MAX_OUTPUT_BYTES", "ProbeError", "build", "catalog", "expectation_kind",
-    "parse", "plan",
+    "parse", "plan", "validate_execution_artifact",
 ]

@@ -127,6 +127,20 @@ class TestCleanupVerifier(unittest.TestCase):
             self.assertNotIn(name.lower().split("_")[0],
                              {"delete", "remove", "stop", "kill", "purge"})
 
+    def test_duplicate_and_absent_unplanned_observations_fail_exact_coverage(self):
+        observations = self.observations()
+        observations.append(dict(observations[0]))
+        with self.assertRaises(cleanup_module.CleanupError) as raised:
+            cleanup_module.verify(self.manifest, observations)
+        self.assertEqual(raised.exception.code, "observation_duplicate")
+
+        observations = self.observations()
+        observations.append({"kind": "path", "identity": "/run/foreign",
+                             "state": "absent", "owned": False})
+        result = cleanup_module.verify(self.manifest, observations)
+        self.assertEqual(result["state"], "incomplete")
+        self.assertEqual(result["unexpected"], ("path:/run/foreign",))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,9 +97,12 @@ class TestOfflineRunner(RunnerTestCase):
                       "--at", START, "--acceptance",
                       json.dumps(fixtures.acceptance()))
         artifact = self.root / "checks.json"
-        artifact.write_text('{"check":"passed"}')
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        artifact.write_text(manifest_module.canonical_json(
+            fixtures.execution_artifact(self.manifest, states)))
         code, document = self.json_cli(
-            "record-artifact", "--ledger", str(self.ledger_path),
+            "record-artifact", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path),
             "--request-id", REQUEST, "--artifact", "checks.json",
             "--artifact-path", str(artifact),
         )
@@ -110,12 +113,56 @@ class TestOfflineRunner(RunnerTestCase):
         link = self.root / "link.json"
         link.symlink_to(artifact)
         code, document = self.json_cli(
-            "record-artifact", "--ledger", str(self.ledger_path),
+            "record-artifact", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path),
             "--request-id", REQUEST, "--artifact", "cleanup.json",
             "--artifact-path", str(link),
         )
         self.assertEqual(code, cli.EXIT_REFUSED)
-        self.assertEqual(document["code"], "artifact_missing")
+        self.assertEqual(document["code"], "artifact_symlink")
+
+    def test_acceptance_and_artifact_inputs_are_bounded_before_recording(self):
+        code, document = self.json_cli(
+            "record-acceptance", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path), "--request-id", REQUEST,
+            "--at", START, "--acceptance", "x" * (cli.MAX_ACCEPTANCE_BYTES + 1),
+        )
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertEqual(document["code"], "acceptance_oversize")
+
+        store = ledger_module.ProofRunLedger(self.ledger_path)
+        store.open_run(request_id="cv-proof-large", manifest=self.manifest,
+                       started_at=START)
+        artifact = self.root / "checks-large.json"
+        artifact.write_bytes(b"x" * 262145)
+        code, document = self.json_cli(
+            "record-artifact", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path), "--request-id", "cv-proof-large",
+            "--artifact", "checks.json", "--artifact-path", str(artifact),
+        )
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertEqual(document["code"], "artifact_oversize")
+
+    def test_artifact_recording_refuses_a_caller_owned_symlink_ancestor(self):
+        self.json_cli("record-acceptance", "--manifest", str(self.manifest_path),
+                      "--ledger", str(self.ledger_path), "--request-id", REQUEST,
+                      "--at", START, "--acceptance",
+                      json.dumps(fixtures.acceptance()))
+        real = self.root / "real-artifacts"
+        real.mkdir()
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        (real / "checks.json").write_text(manifest_module.canonical_json(
+            fixtures.execution_artifact(self.manifest, states)))
+        linked = self.root / "linked-artifacts"
+        linked.symlink_to(real, target_is_directory=True)
+        code, document = self.json_cli(
+            "record-artifact", "--manifest", str(self.manifest_path),
+            "--ledger", str(self.ledger_path), "--request-id", REQUEST,
+            "--artifact", "checks.json", "--artifact-path",
+            str(linked / "checks.json"),
+        )
+        self.assertEqual(code, cli.EXIT_REFUSED)
+        self.assertEqual(document["code"], "artifact_ancestor_symlink")
 
     def test_finalize_reports_the_classification_and_exit_code(self):
         store = ledger_module.ProofRunLedger(self.ledger_path)

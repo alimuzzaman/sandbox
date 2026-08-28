@@ -30,10 +30,15 @@ VERBS = (
 EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_BLOCKED = 3
+MAX_CLI_OUTPUT_BYTES = 256 * 1024
+MAX_ACCEPTANCE_BYTES = 16 * 1024
 
 
 def _emit(document: Any) -> None:
-    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > MAX_CLI_OUTPUT_BYTES:
+        payload = '{"code":"output_oversize","location":"harness","ok":false}'
+    print(payload)
 
 
 def _bounded_failure(error: Any) -> dict[str, Any]:
@@ -105,7 +110,9 @@ def run(argv: Any = None) -> int:
             _emit({"ok": True, "code": "plan_built",
                    "manifest_digest": manifest_module.manifest_digest(document),
                    "entries": [
-                       {"check_id": item["check_id"], "kind": item["kind"],
+                        {"check_id": item["check_id"], "kind": item["kind"],
+                        "category": item["category"],
+                        "expectation": item["expectation"],
                         "argv": list(item["argv"]),
                         "timeout_seconds": item["timeout_seconds"],
                         "max_output_bytes": item["max_output_bytes"]}
@@ -118,21 +125,29 @@ def run(argv: Any = None) -> int:
             request_id = _require(args.request_id, "request_id_required")
             store.open_run(request_id=request_id, manifest=document,
                            started_at=_require(args.at, "timestamp_required"))
-            acceptance = json.loads(args.acceptance) if args.acceptance else {}
+            raw_acceptance = args.acceptance or "{}"
+            if len(raw_acceptance.encode("utf-8")) > MAX_ACCEPTANCE_BYTES:
+                raise ledger_module.LedgerError("acceptance_oversize", "acceptance")
+            acceptance = json.loads(raw_acceptance)
             record = store.record_acceptance(request_id, acceptance)
             _emit({"ok": record["job"]["state"] == "accepted",
                    "code": f"acceptance_{record['job']['state']}",
                    "request_id": request_id})
             return EXIT_OK if record["job"]["state"] == "accepted" else EXIT_BLOCKED
         if args.verb == "record-artifact":
+            document = _load(_require(args.manifest, "manifest_required"))
             store = ledger_module.ProofRunLedger(_require(args.ledger, "ledger_required"))
             path = Path(_require(args.artifact_path, "artifact_path_required"))
-            if path.is_symlink() or not path.is_file():
-                _emit({"ok": False, "code": "artifact_missing", "location": path.name})
-                return EXIT_REFUSED
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            name = _require(args.artifact, "artifact_required")
+            expectation = next((item for item in document["artifacts"]
+                                if item["name"] == name), None)
+            if expectation is None:
+                raise bundle_module.BundleError("artifact_unplanned", str(name)[:64])
+            raw = bundle_module._read(path, limit=expectation["max_bytes"])
+            bundle_module.validate_artifact_payload(name, raw, document)
+            digest = hashlib.sha256(raw).hexdigest()
             store.record_artifact(_require(args.request_id, "request_id_required"),
-                                  _require(args.artifact, "artifact_required"), digest)
+                                  name, digest, manifest=document)
             _emit({"ok": True, "code": "artifact_recorded", "sha256": digest})
             return EXIT_OK
         if args.verb == "finalize":

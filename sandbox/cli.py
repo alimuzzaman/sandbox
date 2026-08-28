@@ -1324,7 +1324,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             bool(getattr(args, "project_dir", None))
             and args.cmd in {
                 "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
-                "plugin-check", "deploy", "wp", "exec",
+                "plugin-check", "deploy", "wp", "exec", "sync",
             }
         )
         if (inner_local_observation or project_routed_with_root) and not explicit:
@@ -1367,7 +1367,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy", "sync"}
     # `apply` reconciles a PROJECT. Without --project-dir it used to fall
     # through to the sandbox.yml setup alias even when the caller had named an
     # instance or was standing inside a project — so `apply --instance X`

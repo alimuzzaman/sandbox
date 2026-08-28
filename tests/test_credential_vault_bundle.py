@@ -280,6 +280,30 @@ class TestBundleValidator(BundleTestCase):
                     manifest_module.canonical_json(record) + "\n")
                 self.assert_refused(code)
 
+    def test_bundle_recomputes_outcome_and_refuses_coordinated_pass_claims(self):
+        record = self.build()
+        path = self.root / "checks.json"
+        document = json.loads(path.read_text())
+        document[0]["observation"] = {"kind": "exact_text", "value": "22.04"}
+        raw = manifest_module.canonical_json(document).encode()
+        path.write_bytes(raw)
+        record["artifacts"]["checks.json"] = hashlib.sha256(raw).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("execution_artifact_result_mismatch")
+
+        self.setUp()
+        record = self.build()
+        path = self.root / "checks.json"
+        document = json.loads(path.read_text())
+        document[0].update({"state": "passed", "code": "observed"})
+        raw = manifest_module.canonical_json(document).encode()
+        path.write_bytes(raw)
+        record["artifacts"]["checks.json"] = hashlib.sha256(raw).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("execution_artifact_schema_invalid")
+
     def test_cleanup_artifact_must_cover_every_exact_resource(self):
         record = self.build()
         path = self.root / "cleanup.json"

@@ -19,8 +19,7 @@ from credential_vault_proof import (  # noqa: E402
 
 
 def result(**overrides):
-    value = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False,
-             "expected": []}
+    value = {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
     value.update(overrides)
     return value
 
@@ -143,22 +142,21 @@ class TestProbeCommandModel(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "result_schema_invalid")
 
     def test_parsing_states_follow_exit_status_and_expected_observations(self):
-        passed = probes.parse("os_release_supported", result(
-            stdout="24.04\n", expected=["24.04"]), self.manifest)
+        passed = probes.parse("os_release_supported", result(stdout="24.04\n"),
+                              self.manifest)
         self.assertEqual(passed["state"], "passed")
-        self.assertEqual(passed["observations"], ("24.04",))
+        self.assertEqual(passed["observation"], {"kind": "exact_text", "value": "24.04"})
 
-        missing = probes.parse("os_release_supported", result(
-            stdout="22.04\n", expected=["24.04"]), self.manifest)
+        missing = probes.parse("os_release_supported", result(stdout="22.04\n"),
+                               self.manifest)
         self.assertEqual(missing["state"], "failed")
-        self.assertEqual(missing["code"], "expected_observation_missing")
+        self.assertEqual(missing["code"], "observation_mismatch")
 
-        nonzero = probes.parse("os_release_supported", result(
-            returncode=1, expected=[]), self.manifest)
+        nonzero = probes.parse("os_release_supported", result(returncode=1), self.manifest)
         self.assertEqual(nonzero["state"], "failed")
 
-        timed_out = probes.parse("os_release_supported", result(
-            timed_out=True, expected=[]), self.manifest)
+        timed_out = probes.parse("os_release_supported", result(timed_out=True),
+                                 self.manifest)
         self.assertEqual(timed_out["state"], "blocked")
         self.assertEqual(timed_out["code"], "probe_timeout")
 
@@ -174,11 +172,10 @@ class TestProbeCommandModel(unittest.TestCase):
 
     def test_secret_like_output_blocks_the_check_and_is_never_persisted(self):
         parsed = probes.parse("os_release_supported", result(
-            stdout=fixtures.SECRET_SHAPED["authorization_header"] + "\n",
-            expected=["24.04"]), self.manifest)
+            stdout=fixtures.SECRET_SHAPED["authorization_header"] + "\n"), self.manifest)
         self.assertEqual(parsed["state"], "blocked")
         self.assertEqual(parsed["code"], "secret_like_output")
-        self.assertEqual(parsed["observations"], ())
+        self.assertEqual(parsed["observation"]["kind"], "secret_output")
         self.assertNotIn("aaaaaaaaaaaaaaaaaaaa", repr(parsed))
         self.assertIn("authorization_header", parsed["findings"])
 
@@ -217,7 +214,7 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual(probes.expectation_kind("unit_absent_after_cleanup"),
                          "exit_zero")
         parsed = probes.parse("unit_absent_after_cleanup", result(
-            stdout="LoadState=not-found\n", expected=["LoadState=not-found"]),
+            stdout="LoadState=not-found\n"),
             self.manifest)
         self.assertEqual(parsed["state"], "passed")
 
@@ -231,12 +228,29 @@ class TestProbeCommandModel(unittest.TestCase):
     def test_parsed_results_never_carry_raw_output(self):
         parsed = probes.parse("os_release_supported", result(
             stdout="24.04 plus a lot of other host detail\n",
-            stderr="a warning nobody needs to keep",
-            expected=["24.04"]), self.manifest)
+            stderr="a warning nobody needs to keep"), self.manifest)
         self.assertNotIn("other host detail", repr(parsed))
         self.assertNotIn("warning", repr(parsed))
-        self.assertEqual(set(parsed), {"check_id", "state", "code", "observations",
-                                       "findings"})
+        self.assertEqual(set(parsed), {"check_id", "state", "code", "observation",
+                                       "result", "findings"})
+
+    def test_caller_expectations_cannot_turn_wrong_platform_into_a_pass(self):
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.parse("os_release_supported", {**result(stdout="22.04\n"),
+                                                   "expected": []}, self.manifest)
+        self.assertEqual(raised.exception.code, "result_schema_invalid")
+        parsed = probes.parse("os_release_supported", result(stdout="22.04\n"),
+                              self.manifest)
+        self.assertEqual((parsed["state"], parsed["code"]),
+                         ("failed", "observation_mismatch"))
+
+    def test_permission_or_tool_failure_never_proves_cleanup_absence(self):
+        for returncode in (126, 127):
+            with self.subTest(returncode=returncode):
+                parsed = probes.parse("process_absent_after_cleanup", result(
+                    returncode=returncode, stderr="permission denied\n"), self.manifest)
+                self.assertEqual((parsed["state"], parsed["code"]),
+                                 ("blocked", "probe_stderr"))
 
 
 if __name__ == "__main__":

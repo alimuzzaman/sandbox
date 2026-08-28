@@ -28,8 +28,12 @@ Only things about itself, offline:
   and reading that as a failure would report a clean host as bad and a host
   with leftover state as good;
 - `checks.json` must bind every result to the exact catalog category, source,
-  expectation, and argv that was planned; `cleanup.json` must observe every
-  exact planned resource once and no extra resource;
+  expectation, and argv that was planned. Its typed observation is evaluated
+  from immutable catalog and manifest predicates, and permission, tool, or
+  unsupported-result errors block instead of passing. Bundle validation
+  recomputes the outcome rather than trusting a recorded state or code;
+  `cleanup.json` must observe every exact planned resource once and no extra
+  resource;
 - a completed bundle is refused when it is over 24 hours old, copied,
   mixed-revision, contradictory, incomplete, or carries fake markers;
 - a resource that cannot be proven ours is retained, never removed;
@@ -90,8 +94,9 @@ Every local test uses injected fakes. A run whose provenance is
 
 - Artifacts are named in the manifest and hashed in the ledger. Anything not
   planned is refused as an unplanned artifact.
-- Raw stdout and stderr are never persisted. A parsed check keeps its state, a
-  stable code, and the small set of expected observations that matched.
+- Raw stdout and stderr are never persisted. A parsed check keeps a digest of
+  the bounded raw result and a small normalized typed observation. The bundle
+  validator derives the state and stable code from those fields again.
 - The no-leak scanner runs over the evidence directory before a bundle is
   accepted. A finding names a code and an offset, never the matched text.
 - Ledger records are owner-only, canonical, and bounded. The ledger refuses

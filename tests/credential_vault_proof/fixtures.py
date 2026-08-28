@@ -160,15 +160,50 @@ def events(check_states: Any, *, start_at: str = "2026-09-01T10:00:00Z"
 
 def execution_artifact(manifest_document: Any, check_states: Any
                        ) -> list[dict[str, Any]]:
-    from .probes import plan
+    import json
+    from .probes import parse, plan
 
-    return [{
-        "check_id": entry["check_id"], "category": entry["category"],
-        "source": entry["kind"], "expectation": entry["expectation"],
-        "argv": list(entry["argv"]), "state": check_states.get(entry["check_id"],
-                                                               "passed"),
-        "code": "observed",
-    } for entry in plan(manifest_document)]
+    def stdout_for(entry: dict[str, Any]) -> str:
+        check_id = entry["check_id"]
+        values = {
+            "os_release_supported": "24.04\n",
+            "sandbox_revision_expected": f"{manifest_document['source']['sandbox_revision']}\n",
+            "unit_identity_expected": "\n".join((
+                f"Id={manifest_document['service']['units'][0]}", "LoadState=loaded",
+                "ActiveState=active", "User=sandbox-credential-broker",
+                "Group=sandbox-credential-broker",
+                f"ExecStart={manifest_document['service']['executable']}",
+                "NoNewPrivileges=yes",
+                f"ControlGroup={manifest_document['service']['cgroup']}",
+            )) + "\n",
+            "lease_socket_owned": f"{manifest_document['transport']['lease_socket']}\n",
+            "unit_absent_after_cleanup": "LoadState=not-found\n",
+            "route_table_expected": f"dev {manifest_document['transport']['guest_interface']}\n",
+        }
+        if entry["kind"] != "host_command":
+            return json.dumps({"check_id": check_id, "observed": True},
+                              sort_keys=True, separators=(",", ":"))
+        return values.get(check_id, "")
+
+    artifacts = []
+    for entry in plan(manifest_document):
+        desired = check_states.get(entry["check_id"], "passed")
+        completed = {"returncode": 0, "stdout": stdout_for(entry), "stderr": "",
+                     "timed_out": False}
+        if entry["expectation"] == "exit_nonzero":
+            completed["returncode"] = 1
+        if desired == "failed":
+            completed.update(returncode=0, stdout="wrong-observation\n")
+        elif desired in {"blocked", "skipped"}:
+            completed.update(returncode=126, stderr="permission denied\n")
+        parsed = parse(entry["check_id"], completed, manifest_document)
+        artifacts.append({
+            "check_id": entry["check_id"], "category": entry["category"],
+            "source": entry["kind"], "expectation": entry["expectation"],
+            "argv": list(entry["argv"]), "result": parsed["result"],
+            "observation": parsed["observation"],
+        })
+    return artifacts
 
 
 def cleanup_artifact(manifest_document: Any) -> dict[str, Any]:

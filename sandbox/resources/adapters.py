@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -324,6 +325,14 @@ class LocalResourceAdapter:
         self.runtime_root = self.sandbox_home / "runtime"
         self.deploy_root = self.sandbox_home / "deploy-src"
         self.runner = runner or BoundedProcessRunner(max_output=4_000_000)
+        try:
+            parameters = inspect.signature(self.runner.run).parameters.values()
+            self._runner_accepts_cancellation = any(
+                item.name == "cancellation" or item.kind == item.VAR_KEYWORD
+                for item in parameters
+            )
+        except (TypeError, ValueError):
+            self._runner_accepts_cancellation = False
         self.registry_records = registry_records or (lambda: {})
         self.job_resource_records = job_resource_records or (
             lambda: {"jobs": [], "artifacts": []}
@@ -416,12 +425,12 @@ class LocalResourceAdapter:
             item["path"], item["kind"], item["owner_id"],
         )))
 
-    def _deep_capacity_snapshots(self, deadline: float) -> dict[str, dict]:
+    def _deep_capacity_snapshots(self, deadline: float, cancellation=None) -> dict[str, dict]:
         """Take a read-only, pre-scan capacity snapshot per mount boundary."""
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return {}
-        result = self._run(("df", "-Pk"), min(remaining, 5))
+        result = self._run(("df", "-Pk"), min(remaining, 5), cancellation)
         if result.returncode != 0:
             return {}
         snapshots = {}
@@ -512,14 +521,22 @@ class LocalResourceAdapter:
             ))
         return updated
 
-    def _run(self, argv, timeout: float):
+    def _run(self, argv, timeout: float, cancellation=None):
         command = tuple(str(item) for item in argv)
+        if (
+            cancellation is not None
+            and cancellation.terminal_status() is not None
+        ):
+            return ProcessResult(command, 130, "", "request ended")
         if timeout <= 0:
             return ProcessResult(command, 124, "", "overall budget exhausted")
-        return self.runner.run(command, timeout=timeout)
+        kwargs = {"timeout": timeout}
+        if cancellation is not None and self._runner_accepts_cancellation:
+            kwargs["cancellation"] = cancellation
+        return self.runner.run(command, **kwargs)
 
-    def _du(self, path: Path, timeout: float) -> tuple[str, int | None, str | None]:
-        result = self._run(("du", "-sk", str(path)), timeout)
+    def _du(self, path: Path, timeout: float, cancellation=None) -> tuple[str, int | None, str | None]:
+        result = self._run(("du", "-sk", str(path)), timeout, cancellation)
         if result.returncode == 124:
             return "timed_out", None, "measurement timed out"
         if result.returncode != 0:
@@ -536,8 +553,8 @@ class LocalResourceAdapter:
         except (OSError, ValueError, TypeError):
             return None
 
-    def _docker_json(self, argv, timeout: float):
-        result = self._run(("docker", *argv), timeout)
+    def _docker_json(self, argv, timeout: float, cancellation=None):
+        result = self._run(("docker", *argv), timeout, cancellation)
         if result.returncode == 124:
             return None, "timed_out"
         if result.returncode != 0:
@@ -547,7 +564,7 @@ class LocalResourceAdapter:
         except json.JSONDecodeError:
             return None, "unavailable"
 
-    def _docker_inventory(self, deadline: float) -> tuple[dict, tuple[dict, ...]]:
+    def _docker_inventory(self, deadline: float, cancellation=None) -> tuple[dict, tuple[dict, ...]]:
         outcomes = []
 
         def remaining(limit: float) -> float:
@@ -566,7 +583,7 @@ class LocalResourceAdapter:
                     break
                 payload, state = self._docker_json(
                     (*prefix, *values[start:start + batch_size]),
-                    remaining(5),
+                    remaining(5), cancellation,
                 )
                 states.append(state)
                 if isinstance(payload, list):
@@ -579,7 +596,7 @@ class LocalResourceAdapter:
                 return collected, "partial"
             return collected, states[-1] if states else "unavailable"
 
-        container_ids_result = self._run(("docker", "ps", "-aq"), remaining(3))
+        container_ids_result = self._run(("docker", "ps", "-aq"), remaining(3), cancellation)
         containers = []
         if container_ids_result.returncode == 0:
             ids = container_ids_result.stdout.split()
@@ -594,7 +611,7 @@ class LocalResourceAdapter:
             state = "timed_out" if container_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_containers", "status": state})
         volume_ids_result = self._run(
-            ("docker", "volume", "ls", "-q"), remaining(3),
+            ("docker", "volume", "ls", "-q"), remaining(3), cancellation,
         )
         volumes = []
         if volume_ids_result.returncode == 0:
@@ -610,7 +627,7 @@ class LocalResourceAdapter:
             state = "timed_out" if volume_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_volumes", "status": state})
         network_ids_result = self._run(
-            ("docker", "network", "ls", "-q"), remaining(3),
+            ("docker", "network", "ls", "-q"), remaining(3), cancellation,
         )
         networks = []
         if network_ids_result.returncode == 0:
@@ -626,7 +643,7 @@ class LocalResourceAdapter:
             state = "timed_out" if network_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_networks", "status": state})
         image_ids_result = self._run(
-            ("docker", "image", "ls", "-q"), remaining(3),
+            ("docker", "image", "ls", "-q"), remaining(3), cancellation,
         )
         images = []
         if image_ids_result.returncode == 0:
@@ -642,7 +659,7 @@ class LocalResourceAdapter:
             state = "timed_out" if image_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_images", "status": state})
         build_cache_result = self._run(
-            ("docker", "buildx", "du", "--format=json"), remaining(12),
+            ("docker", "buildx", "du", "--format=json"), remaining(12), cancellation,
         )
         build_cache = []
         if build_cache_result.returncode == 0:
@@ -689,15 +706,15 @@ class LocalResourceAdapter:
         return None
 
     def _volume_size(
-        self, name: str, mountpoint: str, timeout: float,
+        self, name: str, mountpoint: str, timeout: float, cancellation=None,
     ) -> tuple[str, int | None, str | None]:
-        pid_result = self._run(("pgrep", "-xo", "dockerd"), min(timeout, 2))
+        pid_result = self._run(("pgrep", "-xo", "dockerd"), min(timeout, 2), cancellation)
         pid = pid_result.stdout.strip() if pid_result.returncode == 0 else ""
         if pid and mountpoint:
             result = self._run((
                 "sudo", "-n", "nsenter", "-t", pid, "-m", "--",
                 "du", "-sk", mountpoint,
-            ), timeout)
+            ), timeout, cancellation)
             if result.returncode == 0:
                 try:
                     return "measured", int(result.stdout.split()[0]) * 1024, None
@@ -717,11 +734,12 @@ class LocalResourceAdapter:
         owner_id: str | None,
         thorough: bool,
         timeout: float,
+        cancellation=None,
         evidence=(),
         references=(),
     ) -> ResourceObservation:
         if thorough:
-            size_state, size_bytes, error = self._du(path, timeout)
+            size_state, size_bytes, error = self._du(path, timeout, cancellation)
         else:
             size_state, size_bytes, error = "not_measured", None, None
         eligible = classification in {"disposable_cache", "stale_candidate"}
@@ -746,6 +764,7 @@ class LocalResourceAdapter:
         self, *, thorough: bool, deadline: float,
         active_sources: set[str], protected_paths: dict[str, tuple[str, ...]],
         workspace_ownership: _WorkspaceOwnership | None = None,
+        cancellation=None,
     ) -> tuple[list[ResourceObservation], list[dict]]:
         resources = []
         outcomes = []
@@ -753,6 +772,12 @@ class LocalResourceAdapter:
             (self.deploy_root, "deploy_worktrees"),
             (self.runtime_root, "sandbox_runtime"),
         ):
+            if cancellation is not None and cancellation.terminal_status() is not None:
+                outcomes.append({
+                    "category": category,
+                    "status": cancellation.terminal_status(),
+                })
+                break
             if not root.is_dir():
                 outcomes.append({"category": category, "status": "complete"})
                 continue
@@ -763,6 +788,9 @@ class LocalResourceAdapter:
                 continue
             category_state = "complete"
             for path in entries:
+                if cancellation is not None and cancellation.terminal_status() is not None:
+                    category_state = cancellation.terminal_status()
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     category_state = "timed_out"
@@ -810,6 +838,7 @@ class LocalResourceAdapter:
                         timeout=min(remaining, 8),
                         evidence=("sandbox_deploy_root",),
                         references=refs,
+                        cancellation=cancellation,
                     ))
                 else:
                     if path.name == "dl-cache":
@@ -845,6 +874,7 @@ class LocalResourceAdapter:
                         timeout=min(remaining, 5),
                         evidence=evidence,
                         references=("retention_policy",) if classification == "retained" else (),
+                        cancellation=cancellation,
                     ))
             outcomes.append({"category": category, "status": category_state})
         return resources, outcomes
@@ -867,6 +897,7 @@ class LocalResourceAdapter:
         self, inventory: dict, *, thorough: bool, deadline: float,
         protected_projects: set[str],
         workspace_ownership: _WorkspaceOwnership,
+        cancellation=None,
     ) -> list[ResourceObservation]:
         resources = []
         active_volumes = {
@@ -957,6 +988,7 @@ class LocalResourceAdapter:
                     size_state, size, error = self._volume_size(
                         name, str(volume.get("Mountpoint") or ""),
                         min(remaining, 12),
+                        cancellation,
                     )
                     if size_state == "measured":
                         classification = "stale_candidate"
@@ -1201,7 +1233,7 @@ class LocalResourceAdapter:
         )
 
     def _job_artifact_resources(
-        self, records: dict, *, thorough: bool, deadline: float,
+        self, records: dict, *, thorough: bool, deadline: float, cancellation=None,
     ) -> tuple[list[ResourceObservation], dict]:
         resources = []
         state = "complete"
@@ -1209,6 +1241,9 @@ class LocalResourceAdapter:
             "succeeded", "failed", "timed_out", "cancelled", "interrupted",
         }
         for artifact in records.get("artifacts", ()):
+            if cancellation is not None and cancellation.terminal_status() is not None:
+                state = cancellation.terminal_status()
+                break
             if time.monotonic() >= deadline:
                 state = "timed_out"
                 break
@@ -1258,7 +1293,7 @@ class LocalResourceAdapter:
                     )
                 else:
                     size_state, measured_size, error = self._du(
-                        path, remaining,
+                        path, remaining, cancellation,
                     )
             else:
                 size_state = "measured" if metadata_size is not None else "not_measured"
@@ -1292,7 +1327,8 @@ class LocalResourceAdapter:
         cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         request = ResourceRequest(float(budget_seconds), cancelled)
-        if request.is_cancelled():
+        if request.is_terminal():
+            terminal = request.terminal_status() or "cancelled"
             try:
                 capacity = self._capacity()
             except OSError:
@@ -1300,8 +1336,12 @@ class LocalResourceAdapter:
             return ProviderSnapshot(
                 self.target(), capacity, (), ({
                     "category": "resource_measurement",
-                    "status": "cancelled",
-                    "reason": "request_cancelled_before_collection",
+                    "status": terminal,
+                    "reason": (
+                        "request_disconnected_before_collection"
+                        if terminal == "disconnected"
+                        else "request_cancelled_before_collection"
+                    ),
                 },),
             )
         deadline = time.monotonic() + float(budget_seconds)
@@ -1310,7 +1350,30 @@ class LocalResourceAdapter:
         protected_paths, protected_projects, job_records = self._ownership_index()
         if progress:
             progress("docker")
-        inventory, docker_outcomes = self._docker_inventory(deadline)
+        inventory, docker_outcomes = self._docker_inventory(
+            deadline, request.cancellation,
+        )
+
+        def terminal_snapshot(resources, outcomes, reason):
+            terminal = request.terminal_status() or "cancelled"
+            return ProviderSnapshot(
+                self.target(), capacity, tuple(resources), tuple((*outcomes, {
+                    "category": "resource_measurement", "status": terminal,
+                    "reason": reason,
+                })),
+            )
+
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                completed_docker, docker_outcomes,
+                "request_ended_after_docker_inventory",
+            )
         active_sources = {
             str(mount.get("Source"))
             for container in inventory.get("containers", ())
@@ -1333,10 +1396,36 @@ class LocalResourceAdapter:
             deadline=deadline, active_sources=active_sources,
             protected_paths=protected_paths,
             workspace_ownership=workspace_ownership,
+            cancellation=request.cancellation,
         )
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                (*path_resources, *completed_docker),
+                (*docker_outcomes, *path_outcomes),
+                "request_ended_after_path_inventory",
+            )
         job_resources, job_outcome = self._job_artifact_resources(
             job_records, thorough=thorough, deadline=deadline,
+            cancellation=request.cancellation,
         )
+        if request.is_terminal():
+            completed_docker = self._docker_resources(
+                inventory, thorough=False, deadline=deadline,
+                protected_projects=protected_projects,
+                workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
+            )
+            return terminal_snapshot(
+                (*path_resources, *job_resources, *completed_docker),
+                (*docker_outcomes, *path_outcomes, job_outcome),
+                "request_ended_after_job_inventory",
+            )
         resources = [
             *path_resources,
             *job_resources,
@@ -1344,8 +1433,14 @@ class LocalResourceAdapter:
                 inventory, thorough=thorough, deadline=deadline,
                 protected_projects=protected_projects,
                 workspace_ownership=workspace_ownership,
+                cancellation=request.cancellation,
             ),
         ]
+        if request.is_terminal():
+            return terminal_snapshot(
+                resources, (*docker_outcomes, *path_outcomes, job_outcome),
+                "request_ended_after_typed_inventory",
+            )
         if thorough:
             for path, name in ((Path("/var/log"), "host_logs"), (Path("/var/cache"), "host_package_cache")):
                 remaining = deadline - time.monotonic()
@@ -1357,6 +1452,7 @@ class LocalResourceAdapter:
                     classification="unmanaged", owner_kind="unmanaged", owner_id=None,
                     thorough=True, timeout=min(remaining, 5),
                     evidence=("monitoring_only",),
+                    cancellation=request.cancellation,
                 ))
         deep_attribution = None
         deep_outcomes = []
@@ -1374,7 +1470,9 @@ class LocalResourceAdapter:
             } for volume in inventory.get("volumes", ())
                 if volume.get("Name") and volume.get("Mountpoint"))
             try:
-                capacity_snapshots = self._deep_capacity_snapshots(deadline)
+                capacity_snapshots = self._deep_capacity_snapshots(
+                    deadline, request.cancellation,
+                )
             except Exception:
                 # The collector retains its own inventory fallback; a failed
                 # pre-snapshot must not discard its independent evidence.
@@ -1403,7 +1501,7 @@ class LocalResourceAdapter:
                         progress=progress,
                         managed_roots=tuple(managed_roots),
                         capacity_snapshots=capacity_snapshots,
-                        cancelled=cancelled,
+                        cancelled=request.cancellation,
                         directory_cache=directory_cache,
                     )
                     deep_outcomes.append({

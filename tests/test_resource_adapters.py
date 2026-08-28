@@ -13,6 +13,7 @@ from sandbox.resources.models import (
     CleanupCandidate,
     NetworkLifecycle,
     NetworkLifecycleRegistry,
+    ResourceCancellationSignal,
     ResourceObservation,
 )
 from sandbox.resources.plans import PlanStore
@@ -54,6 +55,70 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(_parse_byte_size("1.5GB"), 1610612736)
         self.assertEqual(_parse_byte_size("2 MiB"), 2097152)
         self.assertIsNone(_parse_byte_size("unknown"))
+
+    def test_mid_run_cancellation_stops_new_provider_commands_and_keeps_capacity(self):
+        signal = ResourceCancellationSignal()
+
+        class CancellingRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, argv, *, timeout=None, cancellation=None):
+                self.calls.append(tuple(argv))
+                self.assert_signal = cancellation
+                signal.cancel()
+                return ProcessResult(tuple(argv), 130, "", "request ended")
+
+        runner = CancellingRunner()
+        snapshot = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        ).observe(thorough=True, budget_seconds=15, cancelled=signal)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIs(runner.assert_signal, signal)
+        self.assertIsNotNone(snapshot.capacity)
+        self.assertEqual(snapshot.category_outcomes[-1]["status"], "cancelled")
+
+    def test_cancellation_retains_completed_docker_inventory_and_skips_paths(self):
+        signal = ResourceCancellationSignal()
+        progress = []
+        container = {
+            "Id": "container-complete",
+            "Name": "/completed",
+            "SizeRw": 64,
+            "State": {"Running": False},
+            "Config": {"Labels": {
+                "com.docker.compose.project": "sandbox-fixture",
+                "com.docker.compose.project.working_dir": "/srv/sandbox/fixture",
+            }},
+            "Mounts": [],
+        }
+
+        class InventoryRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, argv, *, timeout=None, cancellation=None):
+                command = tuple(argv)
+                self.calls.append(command)
+                if command == ("docker", "ps", "-aq"):
+                    return ProcessResult(command, 0, "container-complete\n", "")
+                if command[:3] == ("docker", "inspect", "--size"):
+                    return ProcessResult(command, 0, json.dumps([container]), "")
+                signal.cancel()
+                return ProcessResult(command, 130, "", "request ended")
+
+        runner = InventoryRunner()
+        snapshot = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        ).observe(
+            thorough=True, budget_seconds=15, cancelled=signal,
+            progress=progress.append,
+        )
+        self.assertEqual(progress, ["docker"])
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(len(snapshot.resources), 1)
+        self.assertEqual(snapshot.resources[0].locator, "container-complete")
+        self.assertEqual(snapshot.category_outcomes[-1]["status"], "cancelled")
 
     def test_fast_scan_is_read_only_and_marks_unmeasured_stale_paths_unverified(self):
         runner = FakeRunner()

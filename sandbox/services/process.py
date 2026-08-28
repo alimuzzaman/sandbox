@@ -95,7 +95,7 @@ class ProcessResult:
 class ProcessRunner(Protocol):
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
-            timeout: float | None = None) -> ProcessResult: ...
+            timeout: float | None = None, cancellation=None) -> ProcessResult: ...
 
 
 class BoundedProcessRunner:
@@ -188,7 +188,7 @@ class BoundedProcessRunner:
 
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
-            timeout: float | None = None) -> ProcessResult:
+            timeout: float | None = None, cancellation=None) -> ProcessResult:
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a non-empty argument sequence")
         if (not all(isinstance(item, str) and "\x00" not in item for item in argv)
@@ -206,6 +206,23 @@ class BoundedProcessRunner:
                 raise ValueError("env must contain NUL-free string keys and values")
         command = tuple(argv)
         deadline = None if timeout is None else time.monotonic() + timeout
+        terminal_status = None
+        initial_state = None
+        if cancellation is not None:
+            terminal_status = getattr(cancellation, "terminal_status", None)
+            if not callable(terminal_status):
+                raise ValueError("cancellation must expose terminal_status")
+            try:
+                initial_state = terminal_status()
+            except Exception as exc:
+                raise ValueError("cancellation probe failed before process start") from exc
+            if initial_state is not None and (
+                type(initial_state) is not str
+                or initial_state not in {"cancelled", "disconnected"}
+            ):
+                raise ValueError("cancellation returned an invalid terminal state")
+            if initial_state is not None:
+                return ProcessResult(command, 130, "", "process cancelled")
         process = subprocess.Popen(
             command, cwd=cwd, env={**os.environ, **dict(env or {})},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
@@ -233,17 +250,48 @@ class BoundedProcessRunner:
         for reader in readers:
             reader.start()
         timed_out = False
+        cancelled = False
+        cancellation_probe_failed = False
         leader_reaped = False
-        try:
-            process.wait(timeout=self._remaining(deadline))
-            leader_reaped = True
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        if cancellation is None:
+            try:
+                process.wait(timeout=self._remaining(deadline))
+                leader_reaped = True
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        else:
+            while True:
+                try:
+                    state = terminal_status()
+                except Exception:
+                    cancellation_probe_failed = True
+                    cancelled = True
+                    break
+                if state is not None and (
+                    type(state) is not str
+                    or state not in {"cancelled", "disconnected"}
+                ):
+                    cancellation_probe_failed = True
+                    cancelled = True
+                    break
+                if type(state) is str and state in {"cancelled", "disconnected"}:
+                    cancelled = True
+                    break
+                remaining = self._remaining(deadline)
+                if remaining is not None and remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    process.wait(timeout=min(remaining, 0.05) if remaining is not None else 0.05)
+                    leader_reaped = True
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
 
-        if not timed_out:
+        if not timed_out and not cancelled:
             timed_out = not self._join_readers(readers, self._remaining(deadline))
 
-        if timed_out:
+        if timed_out or cancelled:
             # Group signals are safe only while this Popen still owns the
             # leader PID/PGID. If the leader was already reaped, an inherited
             # pipe holder can delay readers, but its old numeric group ID may
@@ -263,9 +311,17 @@ class BoundedProcessRunner:
                 process.stderr.close()
             return ProcessResult(
                 command,
-                124,
+                130 if cancelled else 124,
                 self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
-                self._redact(_decode_bounded_output(output["stderr"].render(), self.max_output) + "\nprocess timed out"),
+                self._redact(
+                    _decode_bounded_output(output["stderr"].render(), self.max_output)
+                    + (
+                        "\ncancellation probe failed"
+                        if cancellation_probe_failed else
+                        "\nprocess cancelled" if cancelled else
+                        "\nprocess timed out"
+                    )
+                ),
             )
         process.stdout.close()
         process.stderr.close()

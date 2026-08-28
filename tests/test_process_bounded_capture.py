@@ -6,9 +6,16 @@ must never exceed the limit, and — the subtle first-overflow case where the
 overflowing chunk itself is smaller than the tail window — the tail must be
 the TRUE last bytes of the full stream, never a duplicated prefix fragment.
 """
+import sys
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
-from sandbox.services.process import _EDGE_TRUNCATION_MARKER, _BoundedEdgeCapture
+from sandbox.resources.models import ResourceCancellationSignal
+from sandbox.services.process import (
+    BoundedProcessRunner, _EDGE_TRUNCATION_MARKER, _BoundedEdgeCapture,
+)
 
 MARKER = _EDGE_TRUNCATION_MARKER
 
@@ -24,6 +31,62 @@ def stream_of(seed: int, total: int) -> bytes:
 
 
 class TestBoundedEdgeCapture(unittest.TestCase):
+    def test_invalid_cancellation_is_rejected_before_spawn(self):
+        with patch("sandbox.services.process.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "terminal_status"):
+                BoundedProcessRunner().run(
+                    (sys.executable, "-c", "pass"), cancellation=object(),
+                )
+        popen.assert_not_called()
+
+    def test_pre_cancelled_signal_returns_without_spawn(self):
+        cancellation = ResourceCancellationSignal()
+        cancellation.cancel()
+        with patch("sandbox.services.process.subprocess.Popen") as popen:
+            result = BoundedProcessRunner().run(
+                (sys.executable, "-c", "pass"), cancellation=cancellation,
+            )
+        self.assertEqual(result.returncode, 130)
+        popen.assert_not_called()
+
+    def test_later_cancellation_probe_failure_terminates_owned_child(self):
+        class FailingProbe:
+            def __init__(self):
+                self.calls = 0
+
+            def terminal_status(self):
+                self.calls += 1
+                if self.calls > 2:
+                    raise RuntimeError("untrusted detail")
+                return None
+
+        started = time.monotonic()
+        result = BoundedProcessRunner(max_output=1024).run((
+            sys.executable, "-c",
+            "import time; print('retained', flush=True); time.sleep(30)",
+        ), timeout=10, cancellation=FailingProbe())
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("retained", result.stdout)
+        self.assertIn("cancellation probe failed", result.stderr)
+        self.assertNotIn("untrusted detail", result.stderr)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_cancellation_terminates_and_reaps_owned_child_with_partial_output(self):
+        signal = ResourceCancellationSignal()
+        timer = threading.Timer(0.1, signal.cancel)
+        timer.start()
+        started = time.monotonic()
+        try:
+            result = BoundedProcessRunner(max_output=1024).run((
+                sys.executable, "-c",
+                "import sys,time; print('completed', flush=True); time.sleep(30)",
+            ), timeout=10, cancellation=signal)
+        finally:
+            timer.cancel()
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("completed", result.stdout)
+        self.assertLess(time.monotonic() - started, 2.0)
+
     def _feed(self, cap: _BoundedEdgeCapture, data: bytes, chunk: int) -> None:
         for i in range(0, len(data), max(chunk, 1)):
             cap.append(data[i:i + chunk])

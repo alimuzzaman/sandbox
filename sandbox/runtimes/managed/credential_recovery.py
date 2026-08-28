@@ -101,21 +101,28 @@ class CredentialRecoveryService:
                     "reason": {"code": "binding_unknown"}, "fresh_lease": False,
                     "mutated": False}
         if self.supervisor is not None:
-            # A prior broker process must not keep serving while desired state is
-            # being reconciled.  Ignore only bounded shutdown diagnostics.
             try:
-                self.supervisor.shutdown()
+                stopped = self.supervisor.shutdown()
             except Exception:
-                pass
+                stopped = None
+            if not isinstance(stopped, dict) or stopped.get("ok") is not True \
+                    or stopped.get("state") != "closed":
+                return self._result(binding, ok=False, state="blocked",
+                                    code="supervisor_shutdown_failed")
         if binding.state == "ready":
             pending = self._pending(binding)
             if pending is None:
                 return self._result(binding, ok=False, state="blocked",
                                     code="recovery_transition_failed")
             try:
-                self.resolver.invalidate(binding.binding_id, binding_version=binding.version)
+                invalidated = self.resolver.invalidate(
+                    binding.binding_id, binding_version=binding.version,
+                )
             except Exception:
-                pass
+                invalidated = None
+            if type(invalidated) is not int or invalidated < 1:
+                return self._result(pending, ok=False, state="blocked",
+                                    code="lease_invalidation_failed", mutated=True)
         else:
             pending = self._pending(binding)
         if pending is None:
@@ -175,7 +182,8 @@ class CredentialRecoveryService:
             try:
                 lease.invalidate()
             except Exception:
-                pass
+                return self._result(pending, ok=False, state="blocked",
+                                    code="lease_cleanup_failed", mutated=True)
             return self._result(pending, ok=False, state="blocked", code="recovery_conflict", mutated=True)
         return self._result(persisted, ok=True, state="ready", code="recovered",
                             mutated=True, fresh_lease=isinstance(lease, BrokerLease) or lease is not None)

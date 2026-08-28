@@ -20,6 +20,7 @@ import datetime
 import ipaddress
 import json
 import os
+from pathlib import Path
 import re
 import signal
 import socket
@@ -3490,13 +3491,16 @@ class BrokerCoordinator:
         controller_identity: Any,
         adapter: Any,
         identity_observer,
+        controller_identity_observer,
         connection_observer,
         enabled: bool = False,
         socket_factory=None,
         guest_socket_factory=None,
         clock=None,
     ) -> None:
-        if not _validate_service_identity(service) or not isinstance(enabled, bool):
+        if not _validate_service_identity(service) or not isinstance(enabled, bool) \
+                or not callable(identity_observer) \
+                or not callable(controller_identity_observer):
             raise ValueError("broker coordinator configuration is invalid")
         self.service = dict(service)
         self.enabled = enabled
@@ -3506,9 +3510,9 @@ class BrokerCoordinator:
             self.service, self.registry, controller_identity, clock=self.clock,
         )
         self.controller = LinuxControllerEndpoint(
-            self.service, channel=self.channel, identity_observer=(
-                lambda connection: controller_identity
-            ), enabled=enabled, socket_factory=socket_factory, clock=self.clock,
+            self.service, channel=self.channel,
+            identity_observer=controller_identity_observer,
+            enabled=enabled, socket_factory=socket_factory, clock=self.clock,
         )
         self.lease = LinuxOperationLeaseEndpoint(
             self.service, control_plane_uid=control_plane_uid, registry=self.registry,
@@ -3713,6 +3717,9 @@ def parse_service_config(document: Any) -> dict[str, Any]:
         _digest(controller["executable_digest"]),
     )):
         raise ValueError("broker service configuration is invalid")
+    if value["control_plane_uid"] != controller["uid"] \
+            or value["service"]["service_uid"] == value["control_plane_uid"]:
+        raise ValueError("broker service configuration is invalid")
     return {
         "enabled": value["enabled"],
         "control_plane_uid": value["control_plane_uid"],
@@ -3730,15 +3737,115 @@ def read_service_config(path: Any) -> dict[str, Any]:
         raise ValueError("broker service configuration is unavailable") from exc
     try:
         details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode) or details.st_size > 8192:
+        owner_uid = os.geteuid()
+        if not stat.S_ISREG(details.st_mode) or details.st_size > 8192 \
+                or stat.S_IMODE(details.st_mode) != 0o600 \
+                or details.st_uid != owner_uid:
             raise ValueError("broker service configuration is invalid")
         payload = os.read(descriptor, 8192)
     finally:
         os.close(descriptor)
-    return parse_service_config(payload)
+    config = parse_service_config(payload)
+    if config["service"]["service_uid"] != owner_uid:
+        raise ValueError("broker service configuration is invalid")
+    return config
 
 
-def build_coordinator(config: Any, *, adapter=None, upstream=None) -> BrokerCoordinator:
+def _linux_process_identity(pid: Any, uid: Any) -> dict[str, Any] | None:
+    """Observe one Linux process without accepting configured identity claims."""
+    if not sys.platform.startswith("linux") \
+            or not _integer(pid, minimum=1, maximum=2**31 - 1) \
+            or not _integer(uid, minimum=1, maximum=2**31 - 1):
+        return None
+    descriptor = None
+    try:
+        stat_payload = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        close = stat_payload.rfind(")")
+        fields = stat_payload[close + 2:].split() if close >= 0 else []
+        if len(fields) <= 19 or not fields[19].isdigit():
+            return None
+        descriptor = os.open(
+            f"/proc/{pid}/exe", os.O_RDONLY | os.O_CLOEXEC,
+        )
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return {
+            "uid": uid,
+            "pid": pid,
+            "process_start_identity": f"{pid}:{fields[19]}",
+            "executable_digest": digest.hexdigest(),
+        }
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def linux_service_identity_observer(expected: Any):
+    """Build a current-process observer from kernel and procfs evidence."""
+    service = dict(expected) if _validate_service_identity(expected) else None
+    if service is None:
+        raise ValueError("broker service identity is invalid")
+
+    def observe() -> dict[str, Any] | None:
+        pid = os.getpid()
+        uid = os.geteuid()
+        process = _linux_process_identity(pid, uid)
+        if process is None:
+            return None
+        try:
+            cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+        if process != {
+            "uid": service["service_uid"],
+            "pid": service["pid"],
+            "process_start_identity": service["process_start_identity"],
+            "executable_digest": service["executable_digest"],
+        } or service["unit_identity"] not in cgroup \
+                or service["cgroup_identity"] not in cgroup:
+            return None
+        return dict(service)
+
+    return observe
+
+
+def linux_controller_identity_observer(expected: Any):
+    """Build a peer observer from SO_PEERCRED plus immutable procfs facts."""
+    controller = _mapping(expected, _CONTROLLER_IDENTITY_FIELDS)
+    if controller is None:
+        raise ValueError("controller identity is invalid")
+    expected_identity = dict(controller)
+
+    def observe(connection: Any) -> dict[str, Any] | None:
+        try:
+            raw = connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, _PEER_CREDENTIALS.size,
+            )
+            if not isinstance(raw, bytes) or len(raw) != _PEER_CREDENTIALS.size:
+                return None
+            pid, uid, _gid = _PEER_CREDENTIALS.unpack(raw)
+        except (OSError, ValueError, struct.error, AttributeError):
+            return None
+        observed = _linux_process_identity(pid, uid)
+        return observed if observed == expected_identity \
+            and observed.get("pid") == pid and observed.get("uid") == uid else None
+
+    return observe
+
+
+def build_coordinator(
+    config: Any, *, adapter=None, upstream=None, identity_observer=None,
+    controller_identity_observer=None,
+) -> BrokerCoordinator:
     """Build the coordinator from a validated configuration and one adapter.
 
     The adapter is supplied by the caller because credential application must
@@ -3746,13 +3853,16 @@ def build_coordinator(config: Any, *, adapter=None, upstream=None) -> BrokerCoor
     a resolver, or a binding loader implicitly.
     """
     value = parse_service_config(config)
+    if not callable(identity_observer) or not callable(controller_identity_observer):
+        raise ValueError("broker runtime identity observers are required")
     service = value["service"]
     if adapter is None:
         adapter = build_operation_adapter(service, upstream=upstream)
     return BrokerCoordinator(
         service, control_plane_uid=value["control_plane_uid"],
         controller_identity=value["controller"], adapter=adapter,
-        identity_observer=lambda: dict(service),
+        identity_observer=identity_observer,
+        controller_identity_observer=controller_identity_observer,
         connection_observer=LinuxGuestConnectionObserver(service),
         enabled=value["enabled"],
     )
@@ -3794,6 +3904,10 @@ def main(argv: list[str] | None = None) -> int:
     if config_path is None:
         print(json.dumps(bounded_error("broker_service_config_invalid"), sort_keys=True))
         return 2
+    transport = live_transport_status()
+    if not transport.get("ok"):
+        print(json.dumps(_bounded_document(transport), sort_keys=True))
+        return 4
     try:
         config = read_service_config(config_path)
     except ValueError:
@@ -3803,7 +3917,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(bounded_error("broker_service_disabled"), sort_keys=True))
         return 3
     try:
-        coordinator = build_coordinator(config)
+        coordinator = build_coordinator(
+            config,
+            identity_observer=linux_service_identity_observer(config["service"]),
+            controller_identity_observer=linux_controller_identity_observer(
+                config["controller"],
+            ),
+        )
     except (ValueError, OSError):
         print(json.dumps(bounded_error("broker_service_config_invalid"), sort_keys=True))
         return 2

@@ -72,12 +72,13 @@ class FakeUpstream:
 
 
 class TestCredentialBrokerContract(unittest.TestCase):
-    def broker(self, *, binding=None, proof=True, egress=True):
+    def broker(self, *, binding=None, proof=True, egress=True, audit=None,
+               upstream=None):
         from sandbox.isolation.credential_request_broker import CredentialRequestBroker
 
         binding = binding or _binding()
         resolver = FakeResolver()
-        upstream = FakeUpstream()
+        upstream = upstream or FakeUpstream()
         broker = CredentialRequestBroker(
             INSTANCE,
             resolver,
@@ -86,6 +87,7 @@ class TestCredentialBrokerContract(unittest.TestCase):
             egress=lambda _binding: egress,
             upstream=upstream,
             owner=OWNER,
+            audit=audit,
         )
         broker._test_resolver = resolver
         broker._test_upstream = upstream
@@ -119,6 +121,71 @@ class TestCredentialBrokerContract(unittest.TestCase):
         self.assertEqual(len(broker._test_upstream.calls), 1)
         self.assertEqual(broker._test_upstream.calls[0][2], SYNTHETIC_VALUE)
         self.assertNotIn(SYNTHETIC_VALUE, repr(result).encode())
+        self.assertEqual(
+            [(record["decision"], record.get("outcome"))
+             for record in broker.audit.records],
+            [("allow", None), ("complete", "complete")],
+        )
+
+    def test_response_uses_exact_header_allowlist(self):
+        class Upstream(FakeUpstream):
+            def request(self, binding, request, credential):
+                result = super().request(binding, request, credential)
+                result["headers"].update({
+                    "Set-Cookie": "session=not-returned",
+                    "Location": "https://other.example/",
+                    "X-Request-Id": "private-trace",
+                    "Retry-After": "3",
+                })
+                return result
+
+        broker = self.broker(upstream=Upstream())
+        response = broker.request(self.request(), transport_identity=INSTANCE)
+        self.assertEqual(response.headers, {
+            "content-type": "application/json", "retry-after": "3",
+        })
+
+    def test_audited_operation_cannot_replay_after_effect(self):
+        broker = self.broker()
+        broker.request(self.request(), transport_identity=INSTANCE)
+        with self.assertRaisesRegex(Exception, "replay") as caught:
+            broker.request(self.request(), transport_identity=INSTANCE)
+        self.assertEqual(caught.exception.code, "operation_replay_denied")
+        self.assertEqual(len(broker._test_upstream.calls), 1)
+
+    def test_pre_audit_failure_prevents_lease_and_effect(self):
+        from sandbox.isolation.credential_audit import CredentialAuditLog
+
+        audit = CredentialAuditLog(
+            sink=lambda _record: (_ for _ in ()).throw(OSError("private")),
+        )
+        broker = self.broker(audit=audit)
+        with self.assertRaises(Exception) as caught:
+            broker.request(self.request(), transport_identity=INSTANCE)
+        self.assertEqual(caught.exception.code, "audit_unavailable")
+        self.assertEqual(broker._test_resolver.issues, [])
+        self.assertEqual(broker._test_upstream.calls, [])
+
+    def test_missing_post_audit_is_terminal_indeterminate_and_no_replay(self):
+        from sandbox.isolation.credential_audit import CredentialAuditLog
+
+        appended = []
+
+        def sink(record):
+            if appended:
+                raise OSError("private")
+            appended.append(record)
+
+        broker = self.broker(audit=CredentialAuditLog(sink=sink))
+        with self.assertRaises(Exception) as caught:
+            broker.request(self.request(), transport_identity=INSTANCE)
+        self.assertEqual(caught.exception.code, "operation_indeterminate")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(broker._test_upstream.calls), 1)
+        with self.assertRaises(Exception) as replay:
+            broker.request(self.request(), transport_identity=INSTANCE)
+        self.assertEqual(replay.exception.code, "operation_replay_denied")
+        self.assertEqual(len(broker._test_upstream.calls), 1)
 
     def test_scope_near_misses_refuse_before_resolution_or_upstream(self):
         for field, value in (

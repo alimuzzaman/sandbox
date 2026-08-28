@@ -41,12 +41,14 @@ class TestCredentialRecovery(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return CredentialRepository(NativeRepository(Path(directory.name) / "state.json"))
 
-    def service(self, repository, resolver, *, proof=True, egress=True):
+    def service(self, repository, resolver, *, proof=True, egress=True,
+                supervisor=None):
         from sandbox.runtimes.managed.credential_recovery import CredentialRecoveryService
 
         return CredentialRecoveryService(
             repository=repository, resolver=resolver,
             proof=lambda _binding: proof, egress=lambda _binding: egress,
+            supervisor=supervisor,
             utc_clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
@@ -105,6 +107,79 @@ class TestCredentialRecovery(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"]["code"], "binding_recovery_denied")
         self.assertEqual(resolver.issued, [])
+
+    def test_supervisor_shutdown_failure_blocks_before_transition_or_issue(self):
+        repository = self.repository()
+        resolver = FakeResolver()
+        binding = self.pending_binding()
+        repository.create(binding)
+
+        class Supervisor:
+            def shutdown(self):
+                raise OSError("private diagnostic")
+
+        result = self.service(
+            repository, resolver, supervisor=Supervisor(),
+        ).recover(
+            binding.binding_id, policy_digest=binding.policy_digest,
+            egress_digest=binding.egress_digest, broker_digest=binding.broker_digest,
+        )
+        self.assertEqual(result["reason"]["code"], "supervisor_shutdown_failed")
+        self.assertEqual(resolver.issued, [])
+        self.assertEqual(repository.get(binding.binding_id).state,
+                         "credential_pending")
+
+    def test_old_lease_invalidation_failure_leaves_pending_without_fresh_lease(self):
+        repository = self.repository()
+        resolver = FakeResolver()
+        binding = self.pending_binding()
+        repository.create(binding)
+        ready = repository.transition(
+            binding.binding_id, "ready", expected_version=binding.version,
+            owner=OWNER,
+        )
+        resolver.invalidate = lambda *_args, **_kwargs: 0
+        result = self.service(repository, resolver).recover(
+            ready.binding_id, policy_digest=ready.policy_digest,
+            egress_digest=ready.egress_digest, broker_digest=ready.broker_digest,
+        )
+        self.assertEqual(result["reason"]["code"], "lease_invalidation_failed")
+        self.assertEqual(resolver.issued, [])
+        self.assertEqual(repository.get(ready.binding_id).state,
+                         "credential_pending")
+
+    def test_fresh_lease_cleanup_failure_never_persists_ready(self):
+        repository = self.repository()
+        binding = self.pending_binding()
+        repository.create(binding)
+
+        class ConflictRepository:
+            def get(self, *args, **kwargs):
+                return repository.get(*args, **kwargs)
+
+            def transition(self, binding_id, state, **kwargs):
+                if state == "ready":
+                    raise RuntimeError("private conflict")
+                return repository.transition(binding_id, state, **kwargs)
+
+        class BadLease(FakeLease):
+            def invalidate(self):
+                raise OSError("private cleanup")
+
+        class Resolver(FakeResolver):
+            def issue(self, candidate):
+                self.issued.append(candidate)
+                return BadLease(candidate)
+
+        resolver = Resolver()
+        result = self.service(ConflictRepository(), resolver).recover(
+            binding.binding_id, policy_digest=binding.policy_digest,
+            egress_digest=binding.egress_digest, broker_digest=binding.broker_digest,
+        )
+        self.assertEqual(result["reason"]["code"], "lease_cleanup_failed")
+        self.assertEqual(len(resolver.issued), 1)
+        self.assertEqual(repository.get(binding.binding_id).state,
+                         "credential_pending")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -2299,6 +2300,11 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
                 lambda _request, _material: {"outcome": "completed"}, offline_test=True,
             ),
             "identity_observer": lambda: service_identity(),
+            "controller_identity_observer": lambda _connection: {
+                "uid": 501, "pid": 9001,
+                "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
             "connection_observer": lambda _connection: guest_observation(),
             "clock": lambda: 1_000,
         }
@@ -2447,17 +2453,12 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
 
     def test_serving_requires_an_explicitly_enabled_config(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "broker.json"
-            path.write_text(json.dumps({
-                "enabled": False, "control_plane_uid": 501,
-                "service": service_identity(),
-                "controller": {
-                    "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
-                    "executable_digest": EXECUTABLE_DIGEST,
-                },
-            }))
+            path = self._config_file(directory, enabled=False)
             stream = io.StringIO()
-            with contextlib.redirect_stdout(stream):
+            with mock.patch.object(
+                    self.broker, "live_transport_status",
+                    return_value={"ok": True, "code": "live_transport_verified"}), \
+                    contextlib.redirect_stdout(stream):
                 code = self.broker.main(["--serve", "--config", str(path)])
             self.assertNotEqual(code, 0)
             document = json.loads(stream.getvalue())
@@ -2465,17 +2466,21 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
             self.assertEqual(document["code"], "broker_service_disabled")
 
     def _config_file(self, directory, **overrides):
+        owner_uid = os.geteuid()
+        controller_uid = owner_uid + 1
         document = {
-            "enabled": True, "control_plane_uid": 501,
-            "service": service_identity(),
+            "enabled": True, "control_plane_uid": controller_uid,
+            "service": service_identity(service_uid=owner_uid),
             "controller": {
-                "uid": 501, "pid": 9001, "process_start_identity": "9001:551",
+                "uid": controller_uid, "pid": 9001,
+                "process_start_identity": "9001:551",
                 "executable_digest": EXECUTABLE_DIGEST,
             },
         }
         document.update(overrides)
         path = Path(directory) / "broker.json"
         path.write_text(json.dumps(document))
+        path.chmod(0o600)
         return path
 
     def test_an_enabled_config_builds_a_coordinator_that_still_fails_closed(self):
@@ -2485,7 +2490,10 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self._config_file(directory)
             stream = io.StringIO()
-            with contextlib.redirect_stdout(stream):
+            with mock.patch.object(
+                    self.broker, "live_transport_status",
+                    return_value={"ok": True, "code": "live_transport_verified"}), \
+                    contextlib.redirect_stdout(stream):
                 code = self.broker.main(["--serve", "--config", str(path)])
             self.assertNotEqual(code, 0)
             document = json.loads(stream.getvalue())
@@ -2496,7 +2504,12 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
     def test_the_built_coordinator_owns_a_descriptor_backed_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.broker.read_service_config(self._config_file(directory))
-        coordinator = self.broker.build_coordinator(config)
+        service_observer = mock.Mock(return_value=dict(config["service"]))
+        controller_observer = mock.Mock(return_value=dict(config["controller"]))
+        coordinator = self.broker.build_coordinator(
+            config, identity_observer=service_observer,
+            controller_identity_observer=controller_observer,
+        )
         self.assertIsInstance(coordinator, self.broker.BrokerCoordinator)
         self.assertIsInstance(coordinator.lease._adapter,
                               self.broker.CredentialOperationAdapter)
@@ -2504,6 +2517,93 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
                               self.broker.LinuxGuestConnectionObserver)
         self.assertFalse(coordinator.admission_open)
         self.assertEqual(coordinator.status()["state"], "credential_pending")
+        self.assertIs(coordinator.lease._identity_observer, service_observer)
+        self.assertIs(coordinator.controller.identity_observer, controller_observer)
+
+    def test_build_coordinator_refuses_configured_identity_self_report(self):
+        document = {
+            "enabled": True, "control_plane_uid": 501,
+            "service": service_identity(),
+            "controller": {
+                "uid": 501, "pid": 9001,
+                "process_start_identity": "9001:551",
+                "executable_digest": EXECUTABLE_DIGEST,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "runtime identity observers"):
+            self.broker.build_coordinator(document)
+
+    def test_main_supplies_independent_runtime_observers_to_coordinator(self):
+        class Coordinator:
+            def start(self):
+                return {"ok": True, "code": "broker_started"}
+
+            def open_admission(self, _service):
+                return {"ok": True, "code": "broker_admission_open"}
+
+            def run(self, **_kwargs):
+                return {"ok": True, "code": "broker_stopped"}
+
+            def stop(self):
+                return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._config_file(directory)
+            with mock.patch.object(
+                    self.broker, "live_transport_status",
+                    return_value={"ok": True, "code": "live_transport_verified"}), \
+                    mock.patch.object(
+                        self.broker, "build_coordinator",
+                        return_value=Coordinator(),
+                    ) as build, mock.patch.object(self.broker.signal, "signal"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = self.broker.main(["--serve", "--config", str(path)])
+        self.assertEqual(code, 0)
+        self.assertTrue(callable(build.call_args.kwargs["identity_observer"]))
+        self.assertTrue(callable(
+            build.call_args.kwargs["controller_identity_observer"],
+        ))
+
+    def test_controller_observer_requires_kernel_peer_and_proc_identity(self):
+        expected = {
+            "uid": 501, "pid": 9001,
+            "process_start_identity": "9001:551",
+            "executable_digest": EXECUTABLE_DIGEST,
+        }
+        connection = mock.Mock()
+        connection.getsockopt.return_value = self.broker._PEER_CREDENTIALS.pack(
+            9001, 501, 20,
+        )
+        with mock.patch.object(self.broker.sys, "platform", "linux"), \
+                mock.patch.object(
+                    self.broker, "_linux_process_identity",
+                    return_value=dict(expected),
+                ):
+            observer = self.broker.linux_controller_identity_observer(expected)
+            self.assertEqual(observer(connection), expected)
+        connection.getsockopt.return_value = self.broker._PEER_CREDENTIALS.pack(
+            9002, 501, 20,
+        )
+        with mock.patch.object(self.broker.sys, "platform", "linux"), \
+                mock.patch.object(
+                    self.broker, "_linux_process_identity",
+                    return_value=dict(expected),
+                ):
+            self.assertIsNone(observer(connection))
+
+    def test_serve_refuses_unproven_transport_before_config_or_admission(self):
+        with mock.patch.object(self.broker, "read_service_config") as read, \
+                mock.patch.object(self.broker, "build_coordinator") as build, \
+                mock.patch.object(
+                    self.broker, "live_transport_status",
+                    return_value={"ok": False, "code": "live_transport_unproven"},
+                ), contextlib.redirect_stdout(io.StringIO()) as stream:
+            code = self.broker.main(["--serve", "--config", "/not/read.json"])
+        self.assertEqual(code, 4)
+        read.assert_not_called()
+        build.assert_not_called()
+        self.assertEqual(json.loads(stream.getvalue())["code"],
+                         "live_transport_unproven")
 
     def test_a_config_file_that_is_not_a_regular_owner_file_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2514,6 +2614,23 @@ class TestCredentialBrokerCoordinator(unittest.TestCase):
             oversize.write_text(" " * 9000)
             with self.assertRaises(ValueError):
                 self.broker.read_service_config(oversize)
+
+            loose = self._config_file(directory)
+            loose.chmod(0o640)
+            with self.assertRaises(ValueError):
+                self.broker.read_service_config(loose)
+
+            claimed = self._config_file(
+                directory, service=service_identity(service_uid=os.geteuid() + 2),
+            )
+            with self.assertRaises(ValueError):
+                self.broker.read_service_config(claimed)
+
+            secure = self._config_file(directory)
+            with mock.patch.object(self.broker.os, "geteuid",
+                                   return_value=os.geteuid() + 2), \
+                    self.assertRaises(ValueError):
+                self.broker.read_service_config(secure)
 
     def test_no_runtime_composition_selects_the_coordinator(self):
         surface = BROKER.read_text()

@@ -37,6 +37,10 @@ _SENSITIVE_HEADERS = frozenset({
     "api-key", "host", "content-length", "transfer-encoding", "connection",
     "keep-alive", "te", "trailer", "upgrade", "proxy-connection",
 })
+ALLOWED_RESPONSE_HEADERS = frozenset({
+    "cache-control", "content-language", "content-type", "etag",
+    "last-modified", "retry-after",
+})
 
 
 def _safe_code(value: Any, fallback: str = "upstream_failed") -> str:
@@ -213,7 +217,9 @@ class _PinnedHttpsTransport:
         except CredentialUpstreamError:
             raise
         except (OSError, http.client.HTTPException, socket.timeout, TimeoutError):
-            raise CredentialUpstreamError("upstream_timeout", "credential upstream request timed out", retryable=True) from None
+            raise CredentialUpstreamError(
+                "upstream_indeterminate", "credential upstream outcome is indeterminate",
+            ) from None
         finally:
             response.close()
 
@@ -382,11 +388,17 @@ class VerifiedHttpsUpstream:
                     min(self.idle_seconds, remaining),
                 )
             except CredentialUpstreamError:
-                raise
+                raise CredentialUpstreamError(
+                    "upstream_indeterminate", "credential upstream outcome is indeterminate",
+                ) from None
             except (OSError, socket.timeout, TimeoutError, http.client.HTTPException):
-                raise CredentialUpstreamError("upstream_timeout", "credential upstream request timed out", retryable=True) from None
+                raise CredentialUpstreamError(
+                    "upstream_indeterminate", "credential upstream outcome is indeterminate",
+                ) from None
             except Exception:
-                raise CredentialUpstreamError("upstream_failed", "credential upstream request failed", retryable=True) from None
+                raise CredentialUpstreamError(
+                    "upstream_indeterminate", "credential upstream outcome is indeterminate",
+                ) from None
             if not isinstance(result, Mapping):
                 raise CredentialUpstreamError("response_invalid", "upstream response is invalid")
             status = result.get("status")
@@ -407,17 +419,25 @@ class VerifiedHttpsUpstream:
             if not isinstance(response_headers, Mapping):
                 raise CredentialUpstreamError("response_invalid", "upstream response headers are invalid")
             safe_headers: dict[str, str] = {}
+            declared_length = None
             for raw_name, raw_value in response_headers.items():
                 if not isinstance(raw_name, str) or not _HEADER_NAME.fullmatch(raw_name):
                     continue
                 name = raw_name.lower()
-                if name in {"authorization", "proxy-authorization", "x-api-key", "api-key"}:
+                if name == "content-length":
+                    try:
+                        declared_length = _safe_header(raw_value, name="response")
+                    except CredentialUpstreamError:
+                        raise CredentialUpstreamError(
+                            "response_invalid", "upstream response length is invalid",
+                        ) from None
+                    continue
+                if name not in ALLOWED_RESPONSE_HEADERS:
                     continue
                 try:
                     safe_headers[name] = _safe_header(raw_value, name="response")
                 except CredentialUpstreamError:
                     continue
-            declared_length = safe_headers.get("content-length")
             if declared_length is not None:
                 try:
                     if int(declared_length) < 0 or int(declared_length) > self.max_response_body:
@@ -439,7 +459,7 @@ class VerifiedHttpsUpstream:
 
 
 __all__ = [
-    "CredentialUpstreamError", "VerifiedHttpsUpstream", "MAX_CONNECT_SECONDS",
+    "ALLOWED_RESPONSE_HEADERS", "CredentialUpstreamError", "VerifiedHttpsUpstream", "MAX_CONNECT_SECONDS",
     "MAX_IDLE_SECONDS", "MAX_REQUEST_BODY", "MAX_REQUEST_HEADERS", "MAX_RESPONSE_BODY",
     "MAX_TOTAL_SECONDS",
 ]

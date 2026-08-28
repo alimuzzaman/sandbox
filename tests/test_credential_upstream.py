@@ -105,6 +105,40 @@ class TestCredentialUpstream(unittest.TestCase):
         with self.assertRaisesRegex(CredentialUpstreamError, "response"):
             oversized.request(_binding(), _request(), b"SB_SYNTHETIC_VALUE")
 
+    def test_response_headers_use_an_exact_allowlist(self):
+        transport = Transport({
+            "status": 200,
+            "headers": {
+                "content-type": "application/json", "retry-after": "2",
+                "set-cookie": "session=not-returned",
+                "location": "https://other.example/", "x-trace": "private",
+            },
+            "body": b"{}",
+        })
+        result = self.upstream(transport).request(
+            _binding(), _request(), b"SB_SYNTHETIC_VALUE",
+        )
+        self.assertEqual(result["headers"], {
+            "content-type": "application/json", "retry-after": "2",
+        })
+
+    def test_transport_failure_after_send_begins_is_terminal_indeterminate(self):
+        from sandbox.isolation.credential_upstream import CredentialUpstreamError
+
+        class FailingTransport(Transport):
+            def request(self, method, path, headers, body, timeout):
+                self.calls.append((method, path, dict(headers), body, timeout))
+                raise TimeoutError("private")
+
+        transport = FailingTransport()
+        with self.assertRaises(CredentialUpstreamError) as caught:
+            self.upstream(transport).request(
+                _binding(), _request(), b"SB_SYNTHETIC_VALUE",
+            )
+        self.assertEqual(caught.exception.code, "upstream_indeterminate")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(transport.calls), 1)
+
     def test_binding_and_request_destination_must_match(self):
         from sandbox.isolation.credential_upstream import CredentialUpstreamError
 

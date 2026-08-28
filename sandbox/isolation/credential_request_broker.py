@@ -24,7 +24,8 @@ from .credential_binding import (
     ALLOWED_AUTH_FORMS, ALLOWED_METHODS, CredentialBinding, canonical_host,
     canonical_path,
 )
-from .credential_upstream import CredentialUpstreamError
+from .credential_audit import CredentialAuditLog
+from .credential_upstream import ALLOWED_RESPONSE_HEADERS, CredentialUpstreamError
 
 
 MAX_REQUEST_HEADERS = 64 * 1024
@@ -34,6 +35,7 @@ MAX_CONCURRENT_REQUESTS = 16
 MAX_CONNECT_SECONDS = 5
 MAX_TOTAL_SECONDS = 30
 MAX_IDLE_SECONDS = 5
+MAX_AUDIT_OPERATIONS = 4096
 
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -293,7 +295,7 @@ def _response(value: Any, *, correlation_id: str, credential: bytes) -> BrokerRe
     normalized_headers = _normalize_headers(headers, response=True)
     normalized_headers = {
         key: _redact_header(text, credential) for key, text in normalized_headers.items()
-        if key not in {"authorization", "proxy-authorization"}
+        if key in ALLOWED_RESPONSE_HEADERS
     }
     if isinstance(body, bytearray):
         body = bytes(body)
@@ -325,6 +327,7 @@ class CredentialRequestBroker:
         max_concurrent: int = MAX_CONCURRENT_REQUESTS,
         clock: Callable[[], datetime] | None = None,
         drain_seconds: float = MAX_IDLE_SECONDS,
+        audit: CredentialAuditLog | None = None,
     ) -> None:
         if not isinstance(instance_id, str) or not _CORRELATION_ID.fullmatch(instance_id):
             raise ValueError("credential broker instance identity is invalid")
@@ -349,10 +352,14 @@ class CredentialRequestBroker:
         self.max_concurrent = max_concurrent
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.drain_seconds = float(drain_seconds)
+        if audit is not None and not isinstance(audit, CredentialAuditLog):
+            raise ValueError("credential broker audit log is invalid")
+        self.audit = audit or CredentialAuditLog()
         self._condition = threading.Condition()
         self._active = 0
         self._closed = False
         self._closed_bindings: set[str] = set()
+        self._audit_operations: set[tuple[str, int, str]] = set()
 
     @property
     def active_sessions(self) -> int:
@@ -440,6 +447,44 @@ class CredentialRequestBroker:
             self._active = max(0, self._active - 1)
             self._condition.notify_all()
 
+    def _reserve_audit_operation(self, request: BrokerRequest) -> None:
+        identity = (request.binding_id, request.binding_version,
+                    request.correlation_id)
+        with self._condition:
+            if identity in self._audit_operations:
+                raise CredentialBrokerError(
+                    "operation_replay_denied", "credential operation replay is denied",
+                    correlation_id=request.correlation_id,
+                )
+            if len(self._audit_operations) >= MAX_AUDIT_OPERATIONS:
+                self._closed = True
+                raise CredentialBrokerError(
+                    "audit_capacity_exceeded", "credential audit capacity is exhausted",
+                    correlation_id=request.correlation_id,
+                )
+            self._audit_operations.add(identity)
+
+    def _audit_record(self, binding: CredentialBinding, request: BrokerRequest,
+                      *, decision: str, reason_code: str,
+                      outcome: str | None = None) -> None:
+        try:
+            self.audit.record(
+                operation="request", instance_id=self.instance_id,
+                binding_id=binding.binding_id,
+                actor=self.owner or self.instance_id,
+                decision=decision, reason_code=_safe_code(reason_code),
+                state=binding.state, policy_digest=binding.policy_digest,
+                egress_digest=binding.egress_digest,
+                broker_digest=binding.broker_digest,
+                binding_version=binding.version,
+                correlation_id=request.correlation_id, outcome=outcome,
+            )
+        except Exception:
+            raise CredentialBrokerError(
+                "audit_unavailable", "credential audit is unavailable",
+                correlation_id=request.correlation_id,
+            ) from None
+
     def _call_upstream(self, binding: CredentialBinding, request: BrokerRequest, credential: bytes) -> Any:
         if self.upstream is None:
             raise CredentialBrokerError("upstream_unavailable", "credential upstream is unavailable", correlation_id=request.correlation_id)
@@ -450,8 +495,11 @@ class CredentialRequestBroker:
         except CredentialBrokerError:
             raise
         except CredentialUpstreamError as exc:
+            code = _safe_code(getattr(exc, "code", None), "upstream_failed")
+            if code == "upstream_indeterminate":
+                code = "operation_indeterminate"
             raise CredentialBrokerError(
-                _safe_code(getattr(exc, "code", None), "upstream_failed"),
+                code,
                 _safe_message(getattr(exc, "message", None), "credential upstream request failed"),
                 retryable=bool(getattr(exc, "retryable", False)),
                 correlation_id=request.correlation_id,
@@ -460,8 +508,8 @@ class CredentialRequestBroker:
             raise CredentialBrokerError("upstream_failed", "credential upstream request failed", correlation_id=request.correlation_id) from None
         except (TimeoutError, OSError):
             raise CredentialBrokerError(
-                "upstream_timeout", "credential upstream request timed out",
-                retryable=True, correlation_id=request.correlation_id,
+                "operation_indeterminate", "credential upstream outcome is indeterminate",
+                retryable=False, correlation_id=request.correlation_id,
             ) from None
         except Exception:
             raise CredentialBrokerError("upstream_failed", "credential upstream request failed", correlation_id=request.correlation_id) from None
@@ -490,7 +538,15 @@ class CredentialRequestBroker:
         self._check_proof(binding)
         self._check_egress(binding)
         self._acquire(binding.binding_id, request.correlation_id)
+        pre_audited = False
+        effect_possible = False
+        post_attempted = False
         try:
+            self._reserve_audit_operation(request)
+            self._audit_record(
+                binding, request, decision="allow", reason_code="admitted",
+            )
+            pre_audited = True
             try:
                 lease = self.resolver.issue(binding)
             except CredentialBrokerError:
@@ -520,6 +576,7 @@ class CredentialRequestBroker:
                     ).as_dict()}
 
             try:
+                effect_possible = True
                 outcome = lease.consume(consume)
             except SecretBrokerError as exc:
                 raise CredentialBrokerError(
@@ -543,7 +600,41 @@ class CredentialRequestBroker:
             response = outcome.get("response")
             if not isinstance(response, BrokerResponse):
                 raise CredentialBrokerError("lease_result_invalid", "credential lease result is invalid", correlation_id=request.correlation_id)
+            post_attempted = True
+            self._audit_record(
+                binding, request, decision="complete",
+                reason_code="effect_complete", outcome="complete",
+            )
             return response
+        except CredentialBrokerError as exc:
+            if pre_audited and not post_attempted:
+                post_attempted = True
+                try:
+                    self._audit_record(
+                        binding, request,
+                        decision="indeterminate" if effect_possible else "deny",
+                        reason_code="effect_unknown" if effect_possible else exc.code,
+                        outcome="indeterminate" if effect_possible else "refused",
+                    )
+                except CredentialBrokerError:
+                    raise CredentialBrokerError(
+                        "operation_indeterminate",
+                        "credential operation outcome is indeterminate",
+                        correlation_id=request.correlation_id,
+                    ) from None
+            if effect_possible and exc.retryable:
+                raise CredentialBrokerError(
+                    "operation_indeterminate",
+                    "credential operation outcome is indeterminate",
+                    correlation_id=request.correlation_id,
+                ) from None
+            if effect_possible and exc.code == "audit_unavailable":
+                raise CredentialBrokerError(
+                    "operation_indeterminate",
+                    "credential operation outcome is indeterminate",
+                    correlation_id=request.correlation_id,
+                ) from None
+            raise
         finally:
             self._release()
 

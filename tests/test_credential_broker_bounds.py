@@ -74,12 +74,12 @@ class TestCredentialBrokerBounds(unittest.TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(calls, ["entered"])
 
-    def test_timeout_exception_is_retryable_and_no_raw_diagnostic_escapes(self):
+    def test_post_send_timeout_is_terminal_indeterminate_and_redacted(self):
         broker, binding = self.broker(lambda *_args: (_ for _ in ()).throw(TimeoutError("SECRET_TIMEOUT")))
         result = broker.handle(_request(binding), transport_identity=INSTANCE)
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "upstream_timeout")
-        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(result["error"]["code"], "operation_indeterminate")
+        self.assertFalse(result["error"]["retryable"])
         self.assertNotIn("SECRET_TIMEOUT", repr(result))
 
         from sandbox.isolation.credential_upstream import CredentialUpstreamError
@@ -88,8 +88,8 @@ class TestCredentialBrokerBounds(unittest.TestCase):
             CredentialUpstreamError("upstream_timeout", "upstream timed out", retryable=True),
         ))
         result = broker.handle(_request(binding), transport_identity=INSTANCE)
-        self.assertEqual(result["error"]["code"], "upstream_timeout")
-        self.assertTrue(result["error"]["retryable"])
+        self.assertEqual(result["error"]["code"], "operation_indeterminate")
+        self.assertFalse(result["error"]["retryable"])
 
 
 if __name__ == "__main__":

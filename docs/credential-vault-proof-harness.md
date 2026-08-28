@@ -32,8 +32,10 @@ Only things about itself, offline:
   from immutable catalog and manifest predicates. Process UID/argv, socket
   address/owner, interface/address, executable ownership, mount isolation, and
   policy fields are parsed structurally and matched exactly; embedded or
-  lookalike text cannot satisfy them. Permission, tool, or unsupported-result
-  errors block instead of passing. Bundle validation
+  lookalike text cannot satisfy them. Passing socket evidence also binds its
+  UID and PID to the required sealed process observation. Cleanup absence uses
+  command-specific missing-resource diagnostics; permission, tool, ambiguous,
+  or unsupported-result errors block instead of passing. Bundle validation
   recomputes the outcome rather than trusting a recorded state or code;
   `cleanup.json` must observe every exact planned resource once and no extra
   resource;

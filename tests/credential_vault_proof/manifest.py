@@ -285,6 +285,14 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         seen_checks.add(item["check_id"])
     if not any(item["required"] for item in checks):
         raise _refuse("no_required_check", "checks")
+    dependencies = {
+        "lease_socket_owned": "broker_process_identity",
+        "controller_socket_owned": "controller_process_identity",
+        "guest_listener_bound": "broker_process_identity",
+    }
+    for check_id, dependency in dependencies.items():
+        if check_id in seen_checks and dependency not in seen_checks:
+            raise _refuse("check_dependency_missing", f"checks.{check_id}")
 
     artifacts = document.get("artifacts")
     if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= MAX_LIST:

@@ -196,8 +196,8 @@ class TestAcceptanceManifest(unittest.TestCase):
 
     def test_helpers_expose_only_planned_identities(self):
         document = manifest_module.validate_manifest(fixtures.manifest())
-        self.assertEqual(len(manifest_module.check_ids(document)), 8)
-        self.assertEqual(len(manifest_module.required_check_ids(document)), 7)
+        self.assertEqual(len(manifest_module.check_ids(document)), 9)
+        self.assertEqual(len(manifest_module.required_check_ids(document)), 8)
         self.assertEqual(manifest_module.artifact_names(document),
                          ("checks.json", "cleanup.json"))
 
@@ -223,6 +223,14 @@ class TestAcceptanceManifest(unittest.TestCase):
                 with self.assertRaises(manifest_module.ManifestError) as raised:
                     manifest_module.validate_manifest(document)
                 self.assertEqual(raised.exception.code, code)
+
+    def test_socket_checks_require_their_typed_process_observation(self):
+        document = fixtures.manifest()
+        document["checks"] = [item for item in document["checks"]
+                              if item["check_id"] != "broker_process_identity"]
+        with self.assertRaises(manifest_module.ManifestError) as raised:
+            manifest_module.validate_manifest(document)
+        self.assertEqual(raised.exception.code, "check_dependency_missing")
 
     def test_cleanup_must_cover_exact_catalog_derived_identities(self):
         for field, mutation in (

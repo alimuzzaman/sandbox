@@ -19,9 +19,9 @@ description: "Task list for Agent-Aware Remote Development Sync"
 existing deploy or job behavior.
 
 - [X] T001 Create the `sandbox/sync/` package and module exports in `sandbox/sync/__init__.py`.
-- [ ] T002 [P] Add focused test module skeletons in `tests/test_sync_manifest.py`, `tests/test_sync_state.py`, `tests/test_sync_capture.py`, `tests/test_sync_projection.py`, `tests/test_sync_coordinator.py`, `tests/test_sync_transport.py`, `tests/test_sync_cli.py`, and `tests/test_sync_mcp.py`.
-- [ ] T003 [P] Add the feature-owned CLI/MCP registration placeholders in `sandbox/commands/sync.py` and `mcp/wp-server/tools/sync.py` without registering behavior yet.
-- [ ] T004 [P] Add the feature 033 contract fixtures and redaction test fixtures under `tests/fixtures/sync/`.
+- [X] T002 [P] Add focused test module skeletons in `tests/test_sync_manifest.py`, `tests/test_sync_state.py`, `tests/test_sync_capture.py`, `tests/test_sync_projection.py`, `tests/test_sync_coordinator.py`, `tests/test_sync_transport.py`, `tests/test_sync_cli.py`, and `tests/test_sync_mcp.py`.
+- [X] T003 [P] Add the feature-owned CLI/MCP registration placeholders in `sandbox/commands/sync.py` and `mcp/wp-server/tools/sync.py` without registering behavior yet.
+- [X] T004 [P] Add the feature 033 contract fixtures and redaction test fixtures under `tests/fixtures/sync/`.
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 

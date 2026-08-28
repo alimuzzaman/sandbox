@@ -608,6 +608,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn(f"reverse_proxy 127.0.0.1:{runtime['loopback_port']}", runtime["caddyfile"])
         self.assertNotIn("derived_environment", runtime)
 
+    def test_host_sync_dispatches_before_host_plan_or_apply(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+            args = types.SimpleNamespace(
+                action="sync", project_dir=directory, environment=None,
+                remote="myvps", confirm=False, json=True,
+                allow_zone_ssl_change=False, request_id="sync-request",
+                include=None, watch=False, watch_seconds=1,
+                interval=0.1, debounce=0.1,
+            )
+            entry = {"provisioned": True}
+            with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
+                 patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
+                 patch.object(hosting_cmd, "_cmd_host_sync") as sync, \
+                 patch.object(hosting_cmd.hosting, "desired_plan") as plan:
+                hosting_cmd.cmd_host(None, args)
+
+        sync.assert_called_once_with(validated, entry, "myvps", args)
+        plan.assert_not_called()
+
     def test_runtime_plan_defers_derived_environment_resolution_to_apply(self):
         with self._write(_manifest_with_derived_revision()) as directory:
             validated = hosting.validate_manifest(directory)

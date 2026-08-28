@@ -421,10 +421,18 @@ or traversal segment. Object entries accept only `path`, `zip`, `source`,
 `active`, and `onDemand`; their values are validated rather than coerced.
 
 New `sandbox init` scaffolds include the current project (`"."`), Query Monitor
-(installed but inactive until the first QM capture), and the official WordPress
-MCP Adapter release zip by default. Replace the
+(installed but inactive until the first QM capture), Plugin Check, and the official
+WordPress MCP Adapter release zip by default. The scaffold never copies the merged
+user-global source catalog into project declarations; catalog-only Pro plugins remain
+resolved on demand and are not activated by the first ensure. Replace the
 `plugins` field in a project config with a smaller map/list if that project
 should not install those development helpers.
+
+The exact resolved `--project-dir` is init's maximum root boundary. With no explicit
+path, the exact current directory is the boundary. A fresh directory therefore starts
+from reviewed defaults even when an ancestor contains `.git` or another Sandbox
+descriptor; init never writes above the selected target. The user home itself is not a
+valid init target.
 
 Before a descriptor exists, `sb ensure --project-dir DIR` applies the same
 self-mapping automatically when `DIR` contains a root-level PHP file with a

@@ -4,6 +4,10 @@ import json
 import re
 from pathlib import Path
 
+from sandbox.config.init_files import (
+    atomic_write_init_file, validate_init_destination,
+)
+
 
 def propose_astro(root: str | Path) -> dict:
     """Inspect package metadata and write only explicit, reviewable preset files.
@@ -33,7 +37,7 @@ def propose_astro(root: str | Path) -> dict:
         if match:
             port = int(match.group(1))
     compose = root / "sandbox.compose.yml"
-    compose.write_text(
+    compose_payload = (
         "services:\n"
         "  web:\n"
         "    image: node:22-alpine\n"
@@ -48,5 +52,11 @@ def propose_astro(root: str | Path) -> dict:
         "compose": {"file": compose.name, "service": "web", "internal_port": port, "health_path": "/"},
         "preset": {"package_manager": manager, "install_command": install, "dev_command": command},
     }
-    (root / "sandbox.config.json").write_text(json.dumps(descriptor, indent=2) + "\n")
+    descriptor_path = root / "sandbox.config.json"
+    validate_init_destination(root, compose)
+    validate_init_destination(root, descriptor_path)
+    atomic_write_init_file(root, compose, compose_payload)
+    atomic_write_init_file(
+        root, descriptor_path, json.dumps(descriptor, indent=2) + "\n"
+    )
     return descriptor

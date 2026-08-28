@@ -115,6 +115,8 @@ minting that label). Reconcile an existing named instance with
 NAME`; pass `--project-dir DIR` so an initializer cannot mutate the tooling
 checkout by mistake. For an additional labeled instance, run
 `sb ensure --project-dir DIR --label LABEL --create` explicitly.
+Init treats that exact directory (or the exact current directory when omitted) as its
+maximum root, does not inherit ancestor project markers, and refuses the user home itself.
 
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for

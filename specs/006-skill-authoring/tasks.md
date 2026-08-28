@@ -39,7 +39,7 @@ skill roots = repo `skills/`, `<focused-plugin>/.claude/skills/`, `~/.claude/ski
 **Goal**: catalog carries slug+description+source only; body loads on match.
 **Independent test**: `list_skills` shows entries without bodies; `load_skill` fetches body.
 
-- [x] T007 [US2] (partial) Implement `list_skills(*, project_dir)` (all sources, precedence-ordered, enabled-only, may flag shadowed; returns `{slug,description,source,path}`) in `mcp/wp-server/tools/skills.py`; build the **startup catalog snapshot** into `SANDBOX_INSTRUCTIONS` (static, app.py) + a pointer to call `list_skills`/`load_skill` (analysis C3). **DONE**: list_skills MCP tool. PENDING: the SANDBOX_INSTRUCTIONS startup-snapshot enrichment (follow-up).
+- [x] T007 [US2] Implement `list_skills(*, project_dir)` (all sources, precedence-ordered, enabled-only, may flag shadowed; returns `{slug,description,source,path}`) in `mcp/wp-server/tools/skills.py`; build the **startup catalog snapshot** into `SANDBOX_INSTRUCTIONS` (static, app.py) + a pointer to call `list_skills`/`load_skill` (analysis C3). **DONE 2026-08-28:** the static startup snapshot carries enabled built-in `{slug, description, source}` metadata without bodies and points callers to the live `list_skills(project_dir=...)` catalog and lazy `load_skill` body fetch.
 - [x] T008 [P] [US2] Add `./sb skill list` + `./sb skill show <slug>`.  **DONE + live-verified: ./sb skill list + show**
 - [x] T009 [US2] Live verification (quickstart §2, §3, §5): catalog has no bodies; `load_skill` returns body; precedence project>personal>sandbox resolves the winner.  **DONE + live-verified: precedence resolves winner; bodies not in list**
 

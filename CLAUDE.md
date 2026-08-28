@@ -117,6 +117,11 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `load_context` / `load_skill` / `load_workflow` | Pull deep guide / skill / workflow. |
 | `list_skills` / `skill_write` / `skill_edit` / `skill_delete` | Author sandbox skills. |
 
+The MCP startup instructions contain a static snapshot of enabled built-in skill
+slugs, sources, and one-line descriptions only; skill bodies are not embedded. Use
+`list_skills(project_dir=...)` for the live project/personal/sandbox catalog, then
+`load_skill(name, project_dir=...)` only after a description matches the task.
+
 ---
 
 ## sandbox.config.json — plugins map

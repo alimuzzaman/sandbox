@@ -18,6 +18,7 @@ The ordered table below is retained unchanged as a historical 611-record snapsho
 | Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
+| Spec 045 / Credential Vault | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; proof hardening at `348ea09` | Combined `486466e019805bf8ec72e43feffc14461ef2c5f9` | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` integrated and accepted. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support is `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof or current-branch claim. |
 
 These source SHAs record provenance for the integrated batch. Integration does
 not close remote, live, or human-authority gates.

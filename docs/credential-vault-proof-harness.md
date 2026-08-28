@@ -12,7 +12,9 @@ Only things about itself, offline:
 - an acceptance manifest is exact, canonical, bounded, and secret-free, and its
   digest binds the whole execution plan. Check category, execution source,
   requiredness, pass expectation, artifact type, and artifact ceiling come
-  from the immutable harness catalog rather than caller text;
+  from the immutable harness catalog rather than caller text. Every required
+  catalog check must appear exactly once; only catalog-optional checks may be
+  omitted;
 - a revision mismatch refuses before any test action;
 - one request identity owns one run, a retry consults the ledger before it
   launches, and an empty or malformed job acceptance is `acceptance_unknown`

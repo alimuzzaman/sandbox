@@ -110,7 +110,8 @@ class TestHarnessLifecycle(unittest.TestCase):
 
         report = report_module.build_report(
             manifest=self.manifest, record=record, bundle=result, cleanup=verified)
-        self.assertEqual(len(report["live_checks_passed"]), 9)
+        self.assertEqual(len(report["live_checks_passed"]),
+                         len(manifest_module.required_check_ids(self.manifest)))
         self.assertEqual(report["evidence_missing"], ())
         self.assertEqual(report["cleanup_incomplete"], ())
         # Even a clean live bundle does not promote anything on its own.

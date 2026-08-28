@@ -14,7 +14,9 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from credential_vault_proof import fixtures, manifest as manifest_module  # noqa: E402
+from credential_vault_proof import (  # noqa: E402
+    catalog as catalog_module, fixtures, manifest as manifest_module,
+)
 
 
 class TestAcceptanceManifest(unittest.TestCase):
@@ -196,8 +198,10 @@ class TestAcceptanceManifest(unittest.TestCase):
 
     def test_helpers_expose_only_planned_identities(self):
         document = manifest_module.validate_manifest(fixtures.manifest())
-        self.assertEqual(len(manifest_module.check_ids(document)), 9)
-        self.assertEqual(len(manifest_module.required_check_ids(document)), 8)
+        required = sum(definition.required
+                       for definition in catalog_module.CHECKS.values())
+        self.assertEqual(len(manifest_module.check_ids(document)), required)
+        self.assertEqual(len(manifest_module.required_check_ids(document)), required)
         self.assertEqual(manifest_module.artifact_names(document),
                          ("checks.json", "cleanup.json"))
 
@@ -224,13 +228,29 @@ class TestAcceptanceManifest(unittest.TestCase):
                     manifest_module.validate_manifest(document)
                 self.assertEqual(raised.exception.code, code)
 
-    def test_socket_checks_require_their_typed_process_observation(self):
-        document = fixtures.manifest()
-        document["checks"] = [item for item in document["checks"]
-                              if item["check_id"] != "broker_process_identity"]
-        with self.assertRaises(manifest_module.ManifestError) as raised:
-            manifest_module.validate_manifest(document)
-        self.assertEqual(raised.exception.code, "check_dependency_missing")
+    def test_every_required_catalog_check_is_mandatory_across_every_category(self):
+        required = [definition for definition in catalog_module.CHECKS.values()
+                    if definition.required]
+        self.assertEqual({item.category for item in required},
+                         set(manifest_module.CHECK_CATEGORIES))
+        for definition in required:
+            with self.subTest(check_id=definition.check_id,
+                              category=definition.category):
+                document = fixtures.manifest()
+                document["checks"] = [item for item in document["checks"]
+                                      if item["check_id"] != definition.check_id]
+                with self.assertRaises(manifest_module.ManifestError) as raised:
+                    manifest_module.validate_manifest(document)
+                self.assertEqual(raised.exception.code, "required_check_missing")
+                self.assertEqual(raised.exception.location,
+                                 f"checks.{definition.check_id}")
+
+    def test_optional_catalog_checks_may_be_omitted(self):
+        document = manifest_module.validate_manifest(fixtures.manifest())
+        optional = {check_id for check_id, definition in catalog_module.CHECKS.items()
+                    if not definition.required}
+        self.assertTrue(optional)
+        self.assertTrue(optional.isdisjoint(manifest_module.check_ids(document)))
 
     def test_cleanup_must_cover_exact_catalog_derived_identities(self):
         for field, mutation in (

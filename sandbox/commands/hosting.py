@@ -20,6 +20,7 @@ from sandbox.core._paths import RUNTIME_DIR
 from sandbox.registry import register
 from sandbox.sync.repository import SyncRepository
 from sandbox.sync.service import SyncService
+from sandbox.sync.models import failure_envelope, validate_sync_envelope
 from sandbox.transports.remote_sync import HostSourceSyncTransport
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
@@ -105,13 +106,17 @@ def _host_sync_request_id(args, suffix: str | None = None) -> str:
     return base
 
 
-def _host_sync_emit(result: dict, args, *, watch: bool = False) -> None:
+def _host_sync_emit(result: dict, args, *, watch: bool = False) -> dict:
+    try:
+        result = validate_sync_envelope(result)
+    except (KeyError, TypeError, ValueError):
+        result = _host_sync_boundary_failure()
     if getattr(args, "json", False):
         payload = dict(result)
         if watch:
             payload["watch"] = True
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
-        return
+        return result
     generation = result.get("generation") or {}
     generation_id = generation.get("id") if isinstance(generation, dict) else None
     if result.get("ok"):
@@ -122,15 +127,28 @@ def _host_sync_emit(result: dict, args, *, watch: bool = False) -> None:
             f"host sync failed: {result.get('message', 'synchronization failed')} "
             f"({result.get('code', 'sync_failed')})", flush=True,
         )
+    return result
+
+
+def _host_sync_boundary_failure() -> dict:
+    """Return a fixed envelope; never accept exception diagnostics as input."""
+    return failure_envelope(
+        code="remote_unavailable", status="failed",
+        relationship_id="host_sync_boundary", remote_name="redacted-remote",
+        request_id="host_sync_request", retryable=False,
+    )
 
 
 def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None:
-    if not entry.get("provisioned"):
-        die(f"remote '{remote_name}' is not provisioned")
     service = None
     source_root = None
     workspace_id = None
+    started = False
+    failure = None
+    failure_emitted = False
     try:
+        if not entry.get("provisioned"):
+            raise RuntimeError("remote is not provisioned")
         service, workspace_id, source_root = _host_sync_service(validated, remote_name, entry)
         common = {
             "project_dir": source_root, "remote": remote_name,
@@ -140,7 +158,7 @@ def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None
         request_id = _host_sync_request_id(args)
         if not getattr(args, "watch", False):
             result = service.once(**common, request_id=request_id)
-            _host_sync_emit(result, args)
+            result = _host_sync_emit(result, args)
             if not result.get("ok"):
                 raise SystemExit(1)
             return
@@ -155,13 +173,14 @@ def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None
         if isinstance(debounce, bool) or not isinstance(debounce, (int, float)) or not 0.1 <= debounce <= 10:
             raise hosting.HostingError("--debounce must be between 0.1 and 10 seconds")
 
-        started = time.monotonic()
+        watch_started_at = time.monotonic()
         service.start(source_root, remote=remote_name, workspace_id=workspace_id, mode="live")
+        started = True
         last_signature = None
         attempted_signature = None
-        quiet_since = started - float(debounce)
+        quiet_since = watch_started_at - float(debounce)
         sequence = 0
-        while time.monotonic() - started < seconds:
+        while time.monotonic() - watch_started_at < seconds:
             now = time.monotonic()
             signature = _host_sync_watch_signature(source_root)
             if signature != last_signature:
@@ -172,22 +191,36 @@ def _cmd_host_sync(validated: dict, entry: dict, remote_name: str, args) -> None
                 result = service.once(
                     **common, request_id=_host_sync_request_id(args, f"{sequence:08d}")
                 )
-                _host_sync_emit(result, args, watch=True)
+                result = _host_sync_emit(result, args, watch=True)
+                if not result.get("ok"):
+                    failure = result
+                    failure_emitted = True
+                    break
                 attempted_signature = signature
             time.sleep(float(interval))
             sequence += 1
-        _host_sync_emit(
-            service.stop(source_root, remote=remote_name, workspace_id=workspace_id),
-            args, watch=True,
-        )
     except KeyboardInterrupt:
-        if service is not None and source_root is not None and workspace_id is not None:
-            _host_sync_emit(
-                service.stop(source_root, remote=remote_name, workspace_id=workspace_id),
-                args, watch=True,
-            )
-    except (hosting.HostingError, RuntimeError, OSError, ValueError) as exc:
-        die(str(exc))
+        pass
+    except SystemExit:
+        raise
+    except Exception:
+        failure = _host_sync_boundary_failure()
+    finally:
+        stopped = None
+        if started and service is not None and source_root is not None and workspace_id is not None:
+            try:
+                stopped = service.stop(
+                    source_root, remote=remote_name, workspace_id=workspace_id,
+                )
+            except Exception:
+                if failure is None:
+                    failure = _host_sync_boundary_failure()
+        if failure is not None and not failure_emitted:
+            _host_sync_emit(failure, args, watch=bool(getattr(args, "watch", False)))
+        elif failure is None and stopped is not None:
+            _host_sync_emit(stopped, args, watch=True)
+    if failure is not None:
+        raise SystemExit(1)
 
 
 def _emit(data: dict, as_json: bool) -> None:

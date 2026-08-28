@@ -85,12 +85,15 @@ class BundleTestCase(unittest.TestCase):
 
 class TestBundleValidator(BundleTestCase):
     def test_a_complete_live_bundle_is_accepted(self):
-        self.build()
+        record = self.build()
         result = self.validate(expected_request_id=REQUEST)
         self.assertTrue(result["ok"])
         self.assertEqual(result["classification"], "passed_live")
         self.assertEqual(result["artifact_count"], 2)
         self.assertEqual(result["required_failed"], ())
+        self.assertEqual(set(record["checks"]),
+                         set(manifest_module.required_check_ids(self.manifest)))
+        self.assertEqual(set(record["checks"].values()), {"passed"})
         self.assertEqual(result["cleanup_state"], "complete")
 
     def test_a_manifest_digest_mismatch_is_refused(self):

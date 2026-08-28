@@ -188,6 +188,13 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual(parsed["observation"]["kind"], "secret_output")
         self.assertNotIn("aaaaaaaaaaaaaaaaaaaa", repr(parsed))
         self.assertIn("authorization_header", parsed["findings"])
+        process = probes.parse("broker_process_identity", result(stdout=(
+            "4242 991 Mon Sep 1 10:00:00 2026 "
+            f"{self.manifest['service']['executable']} "
+            f"{fixtures.SECRET_SHAPED['authorization_header']}\n"
+        )), self.manifest)
+        self.assertEqual((process["state"], process["code"]),
+                         ("blocked", "secret_like_output"))
 
     def test_absence_checks_pass_only_when_the_resource_is_gone(self):
         # A cleaned host makes these commands fail. Reading that as a failed
@@ -379,17 +386,8 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual(raised.exception.code,
                          "execution_artifact_socket_process_mismatch")
 
-        expanded = fixtures.manifest()
-        expanded["checks"].extend((
-            {"check_id": "controller_process_identity", "category": "process_identity",
-             "required": True, "description": "controller process identity matches"},
-            {"check_id": "controller_socket_owned", "category": "transport",
-             "required": True, "description": "controller socket ownership matches"},
-        ))
-        expanded = manifest_module.validate_manifest(expanded)
-        states = {name: "passed" for name in manifest_module.check_ids(expanded)}
-        artifact = fixtures.execution_artifact(expanded, states)
-        self.assertEqual(len(probes.validate_execution_artifact(artifact, expanded)),
+        artifact = fixtures.execution_artifact(self.manifest, states)
+        self.assertEqual(len(probes.validate_execution_artifact(artifact, self.manifest)),
                          len(artifact))
         controller_process = next(item for item in artifact
                                   if item["check_id"] == "controller_process_identity")
@@ -398,7 +396,7 @@ class TestProbeCommandModel(unittest.TestCase):
             "value": {**controller_process["observation"]["value"], "pid": 6262},
         }
         with self.assertRaises(probes.ProbeError) as raised:
-            probes.validate_execution_artifact(artifact, expanded)
+            probes.validate_execution_artifact(artifact, self.manifest)
         self.assertEqual(raised.exception.code,
                          "execution_artifact_socket_process_mismatch")
 

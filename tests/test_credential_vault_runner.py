@@ -58,12 +58,12 @@ class TestOfflineRunner(RunnerTestCase):
         self.assertTrue(document["ok"])
         self.assertEqual(document["manifest_digest"],
                          manifest_module.manifest_digest(self.manifest))
-        self.assertEqual(document["check_count"], 9)
+        self.assertEqual(document["check_count"], len(self.manifest["checks"]))
 
     def test_plan_emits_bounded_argv_entries_only(self):
         code, document = self.json_cli("plan", "--manifest", str(self.manifest_path))
         self.assertEqual(code, cli.EXIT_OK)
-        self.assertEqual(len(document["entries"]), 9)
+        self.assertEqual(len(document["entries"]), len(self.manifest["checks"]))
         for entry in document["entries"]:
             self.assertLessEqual(entry["timeout_seconds"], 120)
             self.assertLessEqual(entry["max_output_bytes"], 65536)
@@ -247,7 +247,7 @@ class TestReportRendering(RunnerTestCase):
             harness_tests=("manifest", "ledger", "probes"),
         )
         self.assertEqual(built["classification"], "passed_live")
-        self.assertEqual(len(built["live_checks_passed"]), 9)
+        self.assertEqual(len(built["live_checks_passed"]), len(self.manifest["checks"]))
         self.assertEqual(built["harness_locally_tested"],
                          ("ledger", "manifest", "probes"))
         self.assertEqual(built["support_tier"], "implemented_unproven")
@@ -263,7 +263,7 @@ class TestReportRendering(RunnerTestCase):
         record = store.record_cleanup(REQUEST, "complete")
         built = report_module.build_report(manifest=self.manifest, record=record)
         self.assertEqual(built["live_checks_passed"], ())
-        self.assertEqual(len(built["checks_blocked"]), 9)
+        self.assertEqual(len(built["checks_blocked"]), len(self.manifest["checks"]))
         self.assertIn("t022_helper_service_proof",
                       built["independent_review_pending"])
 

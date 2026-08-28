@@ -846,9 +846,19 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
     if not isinstance(completed["returncode"], int) \
             or isinstance(completed["returncode"], bool):
         raise _refuse("result_schema_invalid", check_id)
+    typed_observation = _normalize(check_id, stdout, stderr, manifest)
     findings = scanner.scan_text(stdout, location=f"{check_id}.stdout")
-    observation = ({"kind": "secret_output", "value": None} if findings else
-                   _normalize(check_id, stdout, stderr, manifest))
+    systemd_typed = {
+        "unit_identity_expected", "controller_unit_identity_expected",
+        "unit_ownership_expected", "cgroup_identity_expected",
+        "no_unexpected_host_mount",
+    }
+    if check_id in systemd_typed \
+            and _observation_matches(check_id, typed_observation, manifest):
+        findings = tuple(item for item in findings
+                         if item["code"] != "environment_dump")
+    observation = ({"kind": "secret_output", "value": None} if findings
+                   else typed_observation)
     raw = {"returncode": completed["returncode"], "stdout": stdout,
            "stderr": stderr, "timed_out": completed["timed_out"]}
     result = {

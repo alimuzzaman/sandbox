@@ -301,6 +301,11 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         seen_checks.add(item["check_id"])
     if not any(item["required"] for item in checks):
         raise _refuse("no_required_check", "checks")
+    required_catalog = {check_id for check_id, definition
+                        in catalog_module.CHECKS.items() if definition.required}
+    missing_required = sorted(required_catalog - seen_checks)
+    if missing_required:
+        raise _refuse("required_check_missing", f"checks.{missing_required[0]}")
     dependencies = {
         "lease_socket_owned": "broker_process_identity",
         "controller_socket_owned": "controller_process_identity",

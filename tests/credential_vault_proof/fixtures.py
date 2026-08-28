@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import catalog as catalog_module
+
 
 GIT_SHA = "0" * 39 + "1"
 SANDBOX_REVISION = "sandbox-0.0.0-fixture"
@@ -84,26 +86,11 @@ def manifest(**overrides: Any) -> dict[str, Any]:
             "nftables_objects": ["sandbox-native-sb0123456789ab"],
             "paths": ["/run/sandbox-native/credential-broker"],
         },
-        "checks": [
-            {"check_id": "os_release_supported", "category": "platform",
-             "required": True, "description": "host runs the supported release"},
-            {"check_id": "sandbox_revision_expected", "category": "revision",
-             "required": True, "description": "installed revision matches the plan"},
-            {"check_id": "unit_identity_expected", "category": "service_identity",
-             "required": True, "description": "unit identity and ownership match"},
-            {"check_id": "broker_process_identity", "category": "process_identity",
-             "required": True, "description": "broker process identity matches"},
-            {"check_id": "lease_socket_owned", "category": "transport",
-             "required": True, "description": "lease socket is broker owned"},
-            {"check_id": "scm_rights_exactly_one", "category": "descriptor",
-             "required": True, "description": "exactly one descriptor is accepted"},
-            {"check_id": "guest_cannot_reach_controller", "category": "network",
-             "required": True, "description": "guest cannot reach the controller"},
-            {"check_id": "unit_absent_after_cleanup", "category": "cleanup",
-             "required": True, "description": "unit is gone after cleanup"},
-            {"check_id": "route_table_expected", "category": "network",
-             "required": False, "description": "route table matches the plan"},
-        ],
+        "checks": [{
+            "check_id": definition.check_id, "category": definition.category,
+            "required": definition.required,
+            "description": f"required proof for {definition.check_id}",
+        } for definition in catalog_module.CHECKS.values() if definition.required],
         "artifacts": [
             {"name": "checks.json", "sha256": None, "max_bytes": 262144},
             {"name": "cleanup.json", "sha256": None, "max_bytes": 65536},
@@ -172,8 +159,13 @@ def execution_artifact(manifest_document: Any, check_states: Any
 
     def stdout_for(entry: dict[str, Any]) -> str:
         check_id = entry["check_id"]
+        service = manifest_document["service"]
+        transport = manifest_document["transport"]
+        kernel = manifest_document["kernel"]
         values = {
             "os_release_supported": "24.04\n",
+            "kernel_release_expected": f"{manifest_document['platform']['kernel_release']}\n",
+            "architecture_expected": f"{manifest_document['platform']['architecture']}\n",
             "sandbox_revision_expected": f"{manifest_document['source']['sandbox_revision']}\n",
             "unit_identity_expected": "\n".join((
                 f"Id={manifest_document['service']['units'][0]}", "LoadState=loaded",
@@ -183,6 +175,15 @@ def execution_artifact(manifest_document: Any, check_states: Any
                 "NoNewPrivileges=yes",
                 f"ControlGroup={manifest_document['service']['cgroup']}",
             )) + "\n",
+            "controller_unit_identity_expected": "\n".join((
+                f"Id={service['controller_unit']}", "LoadState=loaded",
+                "ActiveState=active", "User=sandbox-credential-controller",
+                "Group=sandbox-credential-controller",
+                f"ExecStart={service['controller_executable']}",
+                "NoNewPrivileges=yes", f"ControlGroup={service['controller_cgroup']}",
+            )) + "\n",
+            "unit_ownership_expected": "UID=991\nGID=991\nMainPID=4242\n",
+            "service_account_expected": "991\n",
             "broker_process_identity": (
                 "4242 991 Mon Sep 1 10:00:00 2026 "
                 f"{manifest_document['service']['executable']} --fixture\n"
@@ -201,6 +202,33 @@ def execution_artifact(manifest_document: Any, check_states: Any
                 f"{manifest_document['transport']['controller_socket']} 124 * 0 uid:501 "
                 'users:(("sandbox-credent",pid=5252,fd=8))\n'
             ),
+            "executable_ownership_expected": "991:991:750:4096\n",
+            "controller_executable_ownership_expected": "501:501:750:4096\n",
+            "cgroup_identity_expected": f"ControlGroup={service['cgroup']}\n",
+            "guest_listener_bound": (
+                f"LISTEN 0 16 {transport['host_address']}:{transport['guest_port']} "
+                "0.0.0.0:* uid:991 "
+                'users:(("native-credenti",pid=4242,fd=9))\n'
+            ),
+            "veth_identity_expected": (
+                f"12: {transport['guest_interface']}@if13: <BROADCAST,UP> mtu 1500\n"
+            ),
+            "veth_address_expected": (
+                f"12: {transport['guest_interface']} inet {transport['host_address']}/30 "
+                f"scope global {transport['guest_interface']}\n"
+            ),
+            "nftables_default_drop": json.dumps({"nftables": [
+                {"table": {"family": "inet", "name": kernel["nftables_table"]}},
+                {"chain": {"family": "inet", "table": kernel["nftables_table"],
+                           "name": "output", "policy": kernel["nftables_policy"]}},
+            ]}, sort_keys=True, separators=(",", ":")),
+            "apparmor_profile_enforced": json.dumps({
+                "profiles": {kernel["apparmor_profile"]: kernel["apparmor_mode"]},
+            }, sort_keys=True, separators=(",", ":")),
+            "no_unexpected_host_mount": (
+                "BindPaths=\nBindReadOnlyPaths=\nInaccessiblePaths=/home /root\n"
+                "ProtectHome=yes\n"
+            ),
             "unit_absent_after_cleanup": "LoadState=not-found\n",
             "route_table_expected": (
                 f"{manifest_document['transport']['guest_address']} dev "
@@ -212,6 +240,29 @@ def execution_artifact(manifest_document: Any, check_states: Any
                               sort_keys=True, separators=(",", ":"))
         return values.get(check_id, "")
 
+    def missing_stderr(check_id: str) -> str:
+        interface = manifest_document["transport"]["guest_interface"]
+        table = manifest_document["kernel"]["nftables_table"]
+        paths = {
+            "route_absent_after_cleanup": f'Cannot find device "{interface}"\n',
+            "interface_absent_after_cleanup": f'Device "{interface}" does not exist.\n',
+            "nftables_absent_after_cleanup": (
+                "Error: Could not process rule: No such file or directory\n"
+                f"list table inet {table}\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+            ),
+            "cgroup_absent_after_cleanup": (
+                "/usr/bin/stat: cannot statx "
+                f"'/sys/fs/cgroup{manifest_document['service']['cgroup']}': "
+                "No such file or directory\n"
+            ),
+            "temporary_absent_after_cleanup": (
+                "/usr/bin/stat: cannot statx "
+                f"'{manifest_document['cleanup']['paths'][0]}': "
+                "No such file or directory\n"
+            ),
+        }
+        return paths.get(check_id, "")
+
     artifacts = []
     for entry in plan(manifest_document):
         desired = check_states.get(entry["check_id"], "passed")
@@ -219,6 +270,7 @@ def execution_artifact(manifest_document: Any, check_states: Any
                      "timed_out": False}
         if entry["expectation"] == "exit_nonzero":
             completed["returncode"] = 1
+            completed["stderr"] = missing_stderr(entry["check_id"])
         if desired == "failed":
             completed.update(returncode=0, stdout="wrong-observation\n")
         elif desired in {"blocked", "skipped"}:

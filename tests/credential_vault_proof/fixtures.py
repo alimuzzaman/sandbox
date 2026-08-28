@@ -176,9 +176,16 @@ def execution_artifact(manifest_document: Any, check_states: Any
                 "NoNewPrivileges=yes",
                 f"ControlGroup={manifest_document['service']['cgroup']}",
             )) + "\n",
-            "lease_socket_owned": f"{manifest_document['transport']['lease_socket']}\n",
+            "lease_socket_owned": (
+                "u_str LISTEN 0 16 "
+                f"{manifest_document['transport']['lease_socket']} 123 * 0 "
+                'users:(("native-credenti",pid=4242,fd=7))\n'
+            ),
             "unit_absent_after_cleanup": "LoadState=not-found\n",
-            "route_table_expected": f"dev {manifest_document['transport']['guest_interface']}\n",
+            "route_table_expected": (
+                f"{manifest_document['transport']['guest_address']} dev "
+                f"{manifest_document['transport']['guest_interface']} scope link\n"
+            ),
         }
         if entry["kind"] != "host_command":
             return json.dumps({"check_id": check_id, "observed": True},

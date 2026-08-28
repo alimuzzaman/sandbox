@@ -32,17 +32,19 @@ class TestCredentialBrokerBounds(unittest.TestCase):
         )
         return broker, binding
 
-    def test_redirect_oversized_response_and_invalid_method_are_bounded(self):
+    def test_post_effect_response_failures_are_indeterminate_and_method_is_denied(self):
         from sandbox.isolation.credential_request_broker import CredentialBrokerError
 
-        for response, code in (
-            ({"status": 302, "headers": {"location": "https://other"}, "body": b""}, "redirect_denied"),
-            ({"status": 200, "headers": {}, "body": b"x" * (4 * 1024 * 1024 + 1)}, "response_body_too_large"),
+        for response in (
+            {"status": 302, "headers": {"location": "https://other"}, "body": b""},
+            {"status": 200, "headers": {}, "body": b"x" * (4 * 1024 * 1024 + 1)},
         ):
             broker, binding = self.broker(lambda *_args, response=response: response)
             result = broker.handle(_request(binding), transport_identity=INSTANCE)
             self.assertFalse(result["ok"])
-            self.assertEqual(result["error"]["code"], code)
+            self.assertEqual(result["error"]["code"],
+                             "operation_indeterminate")
+            self.assertFalse(result["error"]["retryable"])
         broker, binding = self.broker(lambda *_args: {"status": 200, "body": b"ok"})
         with self.assertRaises(CredentialBrokerError):
             broker.request(_request(binding, method="CONNECT"), transport_identity=INSTANCE)

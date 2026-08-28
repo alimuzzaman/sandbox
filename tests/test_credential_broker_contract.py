@@ -187,6 +187,78 @@ class TestCredentialBrokerContract(unittest.TestCase):
         self.assertEqual(replay.exception.code, "operation_replay_denied")
         self.assertEqual(len(broker._test_upstream.calls), 1)
 
+    def test_every_invalid_post_effect_outcome_is_indeterminate_and_not_replayed(self):
+        cases = (
+            ({"status": 302, "headers": {}, "body": b""},
+             "redirect_denied"),
+            ({"status": "200", "headers": {}, "body": b""},
+             "upstream_response_invalid"),
+            ({"status": 200, "headers": {"Content-Type": "bad\nvalue"},
+              "body": b""}, "response_header_invalid"),
+            ({"status": 200, "headers": {}, "body": "not-bytes"},
+             "upstream_response_invalid"),
+            ({"status": 200, "headers": {},
+              "body": b"x" * (4 * 1024 * 1024 + 1)},
+             "response_body_too_large"),
+        )
+        for index, (result, internal_reason) in enumerate(cases):
+            with self.subTest(internal_reason=internal_reason):
+                upstream = FakeUpstream()
+                upstream.request = lambda *_args, result=result: result
+                broker = self.broker(upstream=upstream)
+                request = self.request(correlation_id=f"corr-invalid-{index}")
+                with self.assertRaises(Exception) as caught:
+                    broker.request(request, transport_identity=INSTANCE)
+                self.assertEqual(caught.exception.code, "operation_indeterminate")
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(
+                    [(record["decision"], record["reason_code"],
+                      record.get("outcome")) for record in broker.audit.records],
+                    [("allow", "admitted", None),
+                     ("indeterminate", internal_reason, "indeterminate")],
+                )
+                with self.assertRaises(Exception) as replay:
+                    broker.request(request, transport_identity=INSTANCE)
+                self.assertEqual(replay.exception.code,
+                                 "operation_replay_denied")
+
+    def test_generic_upstream_failure_is_audited_indeterminate(self):
+        def fail(*_args):
+            raise RuntimeError("private diagnostic")
+
+        broker = self.broker(upstream=fail)
+        request = self.request(correlation_id="corr-generic-failure")
+        with self.assertRaises(Exception) as caught:
+            broker.request(request, transport_identity=INSTANCE)
+        self.assertEqual(caught.exception.code, "operation_indeterminate")
+        self.assertEqual(broker.audit.records[-1]["decision"], "indeterminate")
+        self.assertEqual(broker.audit.records[-1]["reason_code"],
+                         "upstream_failed")
+        self.assertNotIn("private diagnostic", repr(broker.audit.records))
+        with self.assertRaises(Exception) as replay:
+            broker.request(request, transport_identity=INSTANCE)
+        self.assertEqual(replay.exception.code, "operation_replay_denied")
+
+    def test_lease_failure_before_upstream_boundary_is_audited_refusal(self):
+        broker = self.broker()
+
+        class Lease:
+            def consume(self, _callback):
+                raise RuntimeError("private lease failure")
+
+        broker._test_resolver.issue = lambda _binding: Lease()
+        with self.assertRaises(Exception) as caught:
+            broker.request(
+                self.request(correlation_id="corr-pre-effect-failure"),
+                transport_identity=INSTANCE,
+            )
+        self.assertEqual(caught.exception.code, "lease_failed")
+        self.assertEqual(
+            [(record["decision"], record.get("outcome"))
+             for record in broker.audit.records],
+            [("allow", None), ("deny", "refused")],
+        )
+
     def test_scope_near_misses_refuse_before_resolution_or_upstream(self):
         for field, value in (
             ("scheme", "http"), ("host", "other.example.com"), ("port", 444),

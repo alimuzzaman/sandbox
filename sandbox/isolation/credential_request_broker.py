@@ -539,7 +539,7 @@ class CredentialRequestBroker:
         self._check_egress(binding)
         self._acquire(binding.binding_id, request.correlation_id)
         pre_audited = False
-        effect_possible = False
+        effect_entered = [False]
         post_attempted = False
         try:
             self._reserve_audit_operation(request)
@@ -563,6 +563,10 @@ class CredentialRequestBroker:
 
             def consume(credential: bytes) -> dict[str, Any]:
                 try:
+                    # This is the exact effect boundary. Before this assignment
+                    # no upstream call has begun; afterward no failure may be
+                    # represented as safely retryable.
+                    effect_entered[0] = True
                     result = self._call_upstream(binding, request, credential)
                     return {"response": _response(
                         result, correlation_id=request.correlation_id, credential=bytes(credential),
@@ -576,7 +580,6 @@ class CredentialRequestBroker:
                     ).as_dict()}
 
             try:
-                effect_possible = True
                 outcome = lease.consume(consume)
             except SecretBrokerError as exc:
                 raise CredentialBrokerError(
@@ -612,9 +615,9 @@ class CredentialRequestBroker:
                 try:
                     self._audit_record(
                         binding, request,
-                        decision="indeterminate" if effect_possible else "deny",
-                        reason_code="effect_unknown" if effect_possible else exc.code,
-                        outcome="indeterminate" if effect_possible else "refused",
+                        decision="indeterminate" if effect_entered[0] else "deny",
+                        reason_code=exc.code,
+                        outcome="indeterminate" if effect_entered[0] else "refused",
                     )
                 except CredentialBrokerError:
                     raise CredentialBrokerError(
@@ -622,13 +625,7 @@ class CredentialRequestBroker:
                         "credential operation outcome is indeterminate",
                         correlation_id=request.correlation_id,
                     ) from None
-            if effect_possible and exc.retryable:
-                raise CredentialBrokerError(
-                    "operation_indeterminate",
-                    "credential operation outcome is indeterminate",
-                    correlation_id=request.correlation_id,
-                ) from None
-            if effect_possible and exc.code == "audit_unavailable":
+            if effect_entered[0]:
                 raise CredentialBrokerError(
                     "operation_indeterminate",
                     "credential operation outcome is indeterminate",

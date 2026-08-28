@@ -1,13 +1,33 @@
 # Sandbox feedback priority queue
 
-Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb feedback list --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
+Refreshed 2026-08-28 from the machine-local feedback ledger with `./sb feedback counts --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **611**; reviewed/assigned status: **611**; unreviewed: **0**; invalid records withheld: **0**.
-- Active remediation: **361** — P0: 1, P1: 184, P2: 168, P3: 8.
-- Verification/closure follow-up: **250** — resolved: 122, verified: 92, duplicate: 12, not_applicable: 24, wont_fix: 0, invalid: 0.
+- Total records: **624**; status-assigned: **624**; unreviewed: **0**; invalid records withheld: **0**.
+- Current status counts: **109 verified**, **265 resolved**, **96 blocked**, **72 duplicate**, and **82 not_applicable**.
+- No records are currently open or in progress. The 96 blocked records remain the current remediation queue; priority-tier redistribution was not regenerated in this docs-only pass.
 
-- Active remediation includes open, in-progress, blocked, and unreviewed records; closure follow-up includes resolved, verified, duplicate, not_applicable, wont-fix, and invalid records.
-- Rank order: active remediation first (P0 to P3), then closure follow-up. Within a tier, in-progress/blocked/unreviewed work precedes open work; severity, previously reviewed stable rank, freshness, and stable ID break ties. Existing reviewed tiers are retained; new records are assigned by the priority policy below.
+The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 624 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
+
+## Accepted isolated branches awaiting integration
+
+| Scope | Branch | Accepted SHA | Boundary |
+| --- | --- | --- | --- |
+| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Accepted locally; not merged into dirty `latest` |
+| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Accepted locally; not merged into dirty `latest` |
+| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Accepted locally; not merged into dirty `latest` |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` accepted; not merged into dirty `latest` |
+| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work accepted; remote evidence remains |
+| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work accepted; remote and human gates remain |
+
+None of these branches is merged into dirty `latest`. Their acceptance does not close remote, live, or human-authority gates.
+
+## Current remaining blockers
+
+- Integrate the six accepted branches without overwriting concurrent Spec 033 work in dirty `latest`.
+- Preserve the active Spec 033 boundary across CLI, MCP, durable jobs, transport, hosting, and documentation.
+- Reassess the 96 blocked feedback records against current code after integration; closed records are not implementation authority.
+- Complete remote revision, capacity, workspace-index, and live-host acceptance evidence.
+- Obtain explicit human authority before credential, deployment, deletion, schedule-activation, security, or release actions.
 
 ## Priority policy
 
@@ -16,7 +36,7 @@ Generated 2026-08-26 from the machine-local feedback ledger with paginated `./sb
 - **P2** — scoped defects and recurring toil with a workaround, including medium-severity CLI, WordPress, and usability gaps.
 - **P3** — ideas, cosmetic/documentation work, stale or environment-specific observations, and low-impact follow-ups.
 
-## Ordered records
+## Historical ordered records (611-record snapshot)
 
 | Rank | Queue | Tier | Status | Severity | Feedback ID | Summary |
 | ---: | --- | --- | --- | --- | --- | --- |

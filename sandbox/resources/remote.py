@@ -3659,7 +3659,10 @@ class LocalProbeAdapter:
             "managed_host": True,
             "remote_name": None,
             "focus": None,
-            "deep": True,
+            # Reclaim planning needs lifecycle, workspace, engine, and
+            # deployment inventory. Capacity deep-attribution is unrelated
+            # and can consume the shared deadline before deploy-src is read.
+            "deep": False,
             "directory_cache": directory_cache,
         }, budget_seconds + 5)
         payload = _salvage_payload(response.stdout) or {}

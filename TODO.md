@@ -281,13 +281,15 @@ observations; these are deduplicated work items, not permission to mutate.
 
 ## Low-priority regression cleanup
 
-- [ ] Fix the plain-environment MCP/PHP skip behavior, resource-reclaim probe
-  regression, controller-only `structuredClone`/closed-list schema seams, and
-  add the bounded-edge-capture invariant test (review findings 2026-08-22).
-- [ ] Reconcile the remaining baseline/full-suite failures before release:
-  `tests/test_mcp.py`, `tests/test_spec003_discovery_guidance.py`,
-  `tests/test_resource_reclaim_service.py`, and the three baseline failures
-  recorded in feedback `74d503ab`.
+- [x] Fix the plain-environment MCP/PHP skip behavior and the isolated-home
+  resource-reclaim probe regression (review findings 2026-08-22). Optional MCP
+  and PHP harnesses now skip with explicit reasons when their declared runtime
+  is absent; reclaim planning no longer spends its deadline on unrelated deep
+  attribution before reading deployment inventory. Focused guard, PHP, and
+  reclaim tests passed locally on 2026-08-28.
+- [ ] Close the remaining controller-only `structuredClone`/closed-list schema
+  seams and reconcile the three baseline failures recorded in feedback
+  `74d503ab`; keep those separate from the completed local regression slice.
 - [ ] Keep future roadmap items visible but separate from current release work:
   remote hosting V2 (portable provisioner, lifecycle UX, shared-VPS port policy,
   authenticated automation surface), dashboard parity, opt-in telemetry, and

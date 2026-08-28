@@ -113,12 +113,24 @@ spec contains no live runner, timer, or process-isolation proof.
 | `command` | list[str] | the exact argv the timer runs |
 | `units` | dict | filename → file contents |
 | `paths` | dict | filename → absolute install path |
-| `activate_command` / `deactivate_command` | list[str] | shown, not run, by a plan |
+| `activate_command` / `deactivate_command` | list[str] | fixed local scheduler transitions |
+| `activation_supported` / `timeout_enforced` | bool | true only for the bounded systemd renderer |
 
 `command` is always exactly
 `["sb", "resources", "monitor", "--scheduled", "--json"]` plus `["--remote", name]` when a
 remote is targeted. The renderer refuses any other program, mirroring
 `sandbox/recovery/scheduler.py`'s `invalid_schedule_command` guard.
+
+Activation writes an owner-only canonical installed-plan receipt beside the units before
+the scheduler transition. Matching files are never active-state proof: activation always
+re-runs the idempotent transition. Confirmed deactivation reads the receipt instead of
+current policy, so policy drift or remote removal cannot strand a known installation;
+missing or invalid evidence fails with `schedule_evidence_unknown`. Before snapshot, read,
+write, rollback, or removal, the complete scheduler-directory chain must have the expected
+owner, directory type, and safe mode, with no symlink component. Pre-transition update
+failure restores the exact prior units, modes, and receipt. Every unit/receipt read is capped
+at 256 KiB and compares bounded bytes to canonical UTF-8; malformed content is a bounded
+refusal before scheduler state changes.
 
 ## State transitions
 

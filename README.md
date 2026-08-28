@@ -379,9 +379,10 @@ warning/normal runs exit 0 while critical, unknown, refused, or failed runs
 exit 1. Automatic reclamation and real reaping are off by default.
 
 `resources schedule` renders a disabled systemd user service/timer on Linux or
-a launchd user plist on macOS. It installs nothing unless the operator passes
-`--activate --confirm`; `--deactivate --confirm` removes only that exact
-schedule. The unit always runs the fixed cache-only monitor command, and the
+a review-only launchd user plist on macOS. Launchd activation is refused because it cannot
+enforce the configured timeout. Systemd installs nothing unless the operator passes
+`--activate --confirm`; `--deactivate --confirm` removes only the installed receipt-bound
+schedule even after policy drift. The unit always runs the fixed cache-only monitor command, and the
 rendered plan includes its paths and reverse command. No schedule is activated
 by default.
 

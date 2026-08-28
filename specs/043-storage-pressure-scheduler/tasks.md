@@ -41,16 +41,24 @@ parallel.
 ## Phase 3 — Schedule rendering and activation (user story 2)
 
 - [X] **T008** Create `sandbox/resources/schedule.py` with pure `build_schedule_plan(policy,
-  target, platform)` rendering systemd `.service` + `.timer` (with `flock -n`) or a launchd
+  target, platform)` rendering systemd `.service` + `.timer` or a launchd
   `.plist`, refusing any command other than the fixed monitor argv, and always reporting
-  `enabled: false`. DONE: both renderers are pure and install-free; launchd explicitly
-  reports its lack of native randomized delay.
+  `enabled: false`. DONE: both renderers are pure and install-free; systemd delegates
+  overlap to the structured runner lock, while launchd reports jitter limits and refuses
+  activation because it cannot enforce the configured timeout.
 - [X] **T009** In the same module, add `activate(plan, confirm)` / `deactivate(plan,
   confirm)`: refuse without confirmation with code `protected_operation`; on confirmation
   write the unit(s) 0600/0644, run the bounded enable/disable command, and report every path
   written and the reverse command. Activation of an identical existing schedule returns
   `unchanged`. DONE: lifecycle transitions validate and reconstruct the fixed plan, reject
-  unsafe paths/symlinks, use atomic writes, and never run without confirmation.
+  unsafe paths/symlinks, use atomic writes, persist canonical installed-plan evidence,
+  transactionally restore the complete prior unit/receipt set after any pre-transition write
+  failure, retry idempotent transitions even when files match, and remove from installed
+  evidence after policy drift or remote removal. The complete scheduler-directory chain is
+  checked without following symlinks for exact ownership, type, and safe mode before every
+  filesystem phase. They never validate or resolve a target before outer confirmation.
+  Unit and receipt reads are capped at 256 KiB and compare canonical UTF-8 bytes; invalid
+  UTF-8, oversized, or malformed content refuses before any scheduler transition.
 
 ## Phase 4 — The scheduled run (user stories 3, 4)
 
@@ -68,8 +76,8 @@ parallel.
 - [X] **T012** Add `monitor` and `schedule` to the `resources` action choices in
   `sandbox/commands/resources.py` with `--scheduled`, `--dry-run`, `--activate`,
   `--deactivate`, and the existing `--confirm`/`--json`; reject invalid flag combinations.
-  DONE: schedule flags are refused on other actions and contradictory/confirmation-less
-  schedule modes are rejected before policy or host resolution.
+  DONE: schedule flags are refused on other actions and contradictory modes are rejected;
+  confirmation-less lifecycle requests are refused before policy or remote resolution.
 - [X] **T013** Add `_emit_monitor()` and `_emit_schedule()` renderers carrying free bytes,
   total, free percentage, threshold crossed, and the next command on warning/critical, and
   adding no warning line on `normal`. Exit 1 on `critical`/`unknown`/refusal. DONE: monitor
@@ -94,7 +102,11 @@ parallel.
 - [X] **T018** [P] `tests/test_storage_monitor_schedule.py` — plan renders with
   `enabled: false` and writes nothing; activation and deactivation refused without confirm;
   fixed argv enforced; both platforms render; idempotent activation. DONE: disposable HOME
-  tests cover both platforms, modes, fixed argv, atomic files, idempotency, and forged plans.
+  tests cover both platforms, modes, fixed argv, transactional rollback at every systemd
+  write boundary, transition retry, installed evidence, policy-drift removal, timeout
+  refusal, structured overlap, early confirmation, bounded malformed inputs, ancestor
+  symlink/mode mutations across activation, receipt load, rollback, and removal, bounded
+  invalid-UTF-8/oversized unit mutations for activate/deactivate, and forged plans.
 - [x] **T019** [P] `tests/test_storage_monitor_runner.py` — default configuration deletes
   nothing at every level; auto path runs only `safe` and only when eligible; non-safe tier
   refused before any provider call; reap dry by default and real when opted in; record

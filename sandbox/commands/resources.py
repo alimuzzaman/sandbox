@@ -219,15 +219,34 @@ def _schedule_invalid_mode(args) -> dict | None:
 def _run_schedule(args) -> dict:
     """Render or explicitly transition one local storage-monitor schedule."""
     from sandbox.resources.schedule import (
+        ScheduleError,
         activate,
         build_schedule_plan,
-        deactivate,
+        deactivate_installed,
     )
 
     invalid = _schedule_invalid_mode(args)
     if invalid is not None:
         return invalid
     remote = getattr(args, "remote", None)
+    activating = bool(getattr(args, "activate", False))
+    deactivating = bool(getattr(args, "deactivate", False))
+    if (activating or deactivating) and not bool(getattr(args, "confirm", False)):
+        operation = "activating" if activating else "deactivating"
+        return _schedule_envelope(
+            remote, ok=False, status="refused",
+            error=ScheduleError(
+                f"{operation} a storage-monitor timer is a protected operation; re-run with --confirm",
+                "protected_operation",
+            ),
+        )
+    if deactivating:
+        # Removal authority comes from the explicit confirmation plus the
+        # persisted installed-plan receipt.  Current remote policy may have
+        # changed or the remote may have been removed entirely.
+        return deactivate_installed(
+            _schedule_target(remote), confirm=True,
+        )
     try:
         # Policy resolution validates the named remote but never constructs a
         # host-facing service.  A schedule therefore remains install-local.
@@ -235,10 +254,8 @@ def _run_schedule(args) -> dict:
         plan = build_schedule_plan(policy, _schedule_target(remote))
     except Exception as exc:
         return _schedule_envelope(remote, ok=False, status="refused", error=exc)
-    if bool(getattr(args, "activate", False)):
-        return activate(plan, confirm=bool(getattr(args, "confirm", False)))
-    if bool(getattr(args, "deactivate", False)):
-        return deactivate(plan, confirm=bool(getattr(args, "confirm", False)))
+    if activating:
+        return activate(plan, confirm=True)
     return _schedule_envelope(remote, ok=True, status="planned", data=plan)
 
 
@@ -550,10 +567,12 @@ def _emit_schedule(payload: dict, as_json: bool) -> None:
         cadence = f"{data['calendar']}"
         if data.get("randomized_delay"):
             cadence += f" (randomized delay {data['randomized_delay']}"
-            if data.get("timeout"):
+            if data.get("timeout") and data.get("timeout_enforced") is not False:
                 cadence += f", timeout {data['timeout']}"
             cadence += ")"
         print(f"  cadence: {cadence}")
+    if data.get("timeout_enforced") is False:
+        print("  timeout: unenforceable on this platform; activation refused")
     command = data.get("command")
     if isinstance(command, list):
         print(f"  command: {shlex.join(str(item) for item in command)}")
@@ -564,6 +583,9 @@ def _emit_schedule(payload: dict, as_json: bool) -> None:
                 label = "would write" if payload.get("status") == "planned" else key
                 print(f"  {label}: {value}")
     for label, key in (("activate", "activate_command"), ("deactivate", "deactivate_command")):
+        if label == "activate" and data.get("activation_supported") is False:
+            print("  activate: unsupported on this platform")
+            continue
         value = data.get(key)
         if isinstance(value, list):
             print(f"  {label}: {shlex.join(str(item) for item in value)}")

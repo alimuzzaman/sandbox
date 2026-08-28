@@ -92,7 +92,8 @@ of this feature. It must be impossible to acquire by accident, and the operator 
 able to read the exact unattended command before it can ever run.
 
 **Independent Test**: Ask for the schedule for a named target and confirm the output is a
-plan marked not-enabled, containing the rendered units and both scheduled commands, with no
+plan marked not-enabled, containing the rendered units and the fixed monitor command that
+performs both the storage check and the policy-gated retention reap, with no
 file written and no timer registered. Then ask to activate without confirmation and confirm
 it is refused with a protected-operation reason.
 
@@ -259,8 +260,9 @@ refusal; ask for both a tier and a scope in one call and confirm refusal.
 - **FR-010**: The system MUST render a schedule plan for a named target showing the cadence,
   the target, the exact commands that would run unattended, and an explicit not-enabled
   state, without writing anything.
-- **FR-011**: The schedule MUST include both the storage check and the retention reap for
-  the same target.
+- **FR-011**: The schedule MUST run the one fixed monitor command for the target; that
+  command MUST perform both the storage check and the policy-gated retention reap. The
+  schedule MUST NOT render a second independently-authorized reap command.
 - **FR-012**: Activating a schedule MUST be refused unless the caller explicitly confirms,
   and the refusal MUST identify it as a protected operation.
 - **FR-013**: Activation MUST report every path it wrote and the exact command that
@@ -270,7 +272,12 @@ refusal; ask for both a tier and a scope in one call and confirm refusal.
 - **FR-015**: The unattended command MUST be bounded by a finite timeout and MUST be exactly
   the command shown in the plan.
 - **FR-016**: Activation MUST be idempotent: activating an existing identical schedule
-  reports the existing schedule instead of duplicating it.
+  reports the existing schedule instead of duplicating it. Before the scheduler transition,
+  any failed update write MUST restore the complete prior unit and installed-evidence set.
+  Every filesystem phase MUST refuse a scheduler-directory chain with a symlink, unexpected
+  owner, non-directory component, or unsafe mode without writing through that chain.
+  Unit and installed-evidence reads MUST be capped at 256 KiB and invalid UTF-8, oversized,
+  or malformed content MUST refuse before a scheduler transition.
 
 **Scheduled run behaviour**
 

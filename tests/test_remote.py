@@ -666,6 +666,67 @@ class TestDeployTargetPath(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             sr.deploy_target_path({"ssh": "ubuntu@1.2.3.4"}, "/local/path/my-plugin")
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_home_resolution_timeout_is_typed_and_uses_exact_budget(self, run):
+        run.side_effect = subprocess.TimeoutExpired("ssh", 901)
+        with self.assertRaises(sr.RemoteHomeResolutionTimeout) as raised:
+            sr.resolve_sandbox_home(
+                {"ssh": "ubuntu@1.2.3.4"}, timeout=901
+            )
+        self.assertEqual(raised.exception.error_code,
+                         "remote_home_resolution_timeout")
+        run.assert_called_once_with(
+            {"ssh": "ubuntu@1.2.3.4"},
+            "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=901,
+        )
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_home_resolution_rejects_invalid_timeout_before_ssh(self, run):
+        for value in (True, 0, 3601, 1.0, "15", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                sr.resolve_sandbox_home({}, timeout=value)
+        run.assert_not_called()
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ensure_repo_does_not_mutate_after_home_preflight_timeout(self, run):
+        run.side_effect = subprocess.TimeoutExpired("ssh", 600)
+        with self.assertRaises(sr.RemoteHomeResolutionTimeout):
+            sr.ensure_deploy_repo({}, "/local/path/project", home_timeout=600)
+        self.assertEqual(run.call_count, 1)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_untrusted_remote_home_is_rejected_before_deploy_mutation(self, run):
+        malicious = "/srv/sandbox;\ntouch /tmp/remote-home-injection\n"
+        run.return_value = _completed(returncode=0, stdout=malicious)
+        with self.assertRaisesRegex(ValueError, "Sandbox home is invalid"):
+            sr.ensure_deploy_repo({}, "/local/path/project", home_timeout=120)
+        run.assert_called_once()
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_injected_sandbox_home_argument_is_validated_before_ssh(self, run):
+        for value in (
+            "relative/path", "/", "/srv/sandbox/", "//srv/sandbox",
+            "/srv/./sandbox", "/srv/../sandbox", "/srv/sand\x00box",
+            "/srv/sand\nbox", "/" + "a" * 4096, 123,
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                sr.ensure_deploy_repo(
+                    {}, "/local/path/project", sandbox_home=value
+                )
+        run.assert_not_called()
+
+    @patch("sandbox.core._remote.ssh_run", return_value=_completed())
+    def test_deploy_target_is_shell_quoted_in_every_command_position(self, run):
+        home = "/srv/Sandbox Home/it's"
+        target = sr.ensure_deploy_repo(
+            {}, "/local/path/project", sandbox_home=home
+        )
+        quoted = shlex.quote(target)
+        command = run.call_args.args[1]
+        self.assertEqual(command.count(quoted), 2)
+        self.assertIn(f"mkdir -p {quoted}", command)
+        self.assertIn(f"cd {quoted}", command)
+
 
 class TestPushCommits(unittest.TestCase):
     @patch("subprocess.run")
@@ -685,6 +746,17 @@ class TestPushCommits(unittest.TestCase):
         self.assertEqual(mock_run.call_args_list[1].kwargs["timeout"], 900)
         with self.assertRaisesRegex(ValueError, "1 to 3600"):
             sr.normalize_remote_push_timeout(3601)
+
+    def test_push_timeout_rejects_int_subclasses_without_comparison(self):
+        class EvilInt(int):
+            def __ge__(self, other):
+                raise RuntimeError("hostile comparison")
+
+            def __le__(self, other):
+                raise RuntimeError("hostile comparison")
+
+        with self.assertRaises(ValueError):
+            sr.normalize_remote_push_timeout(EvilInt(300))
 
     @patch("subprocess.run")
     def test_push_timeout_is_safe_and_command_free_on_expiry(self, mock_run):
@@ -1429,6 +1501,24 @@ class TestCmdRemoteRemove(unittest.TestCase):
 
 
 class TestUploadRuntimeSource(unittest.TestCase):
+    def test_upload_timeout_validation_is_exact_and_bounded(self):
+        self.assertEqual(remote_cmd._normalize_runtime_source_upload_timeout(1), 1)
+        self.assertEqual(remote_cmd._normalize_runtime_source_upload_timeout(7200), 7200)
+        for value in (True, False, 0, 7201, 1.0, "300", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                remote_cmd._normalize_runtime_source_upload_timeout(value)
+
+    def test_upload_timeout_rejects_int_subclasses_without_comparison(self):
+        class EvilInt(int):
+            def __ge__(self, other):
+                raise RuntimeError("hostile comparison")
+
+            def __le__(self, other):
+                raise RuntimeError("hostile comparison")
+
+        with self.assertRaises(ValueError):
+            remote_cmd._normalize_runtime_source_upload_timeout(EvilInt(300))
+
     @patch("subprocess.run")
     def test_streams_this_checkout_to_remote_sandbox_home(self, mock_run):
         mock_run.side_effect = [
@@ -1542,8 +1632,36 @@ class TestUploadRuntimeSource(unittest.TestCase):
             remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
         ssh_process.assert_called_once()
 
+    @patch.object(sr, "ssh_process")
+    @patch("subprocess.run")
+    def test_custom_upload_timeout_does_not_change_package_bound(
+            self, mock_run, ssh_process):
+        mock_run.return_value = _completed(returncode=0, stdout=b"tarball", stderr=b"")
+        ssh_process.return_value = _completed(returncode=0, stdout=b"", stderr=b"")
+        remote_cmd._upload_runtime_source(
+            "ubuntu@1.2.3.4", upload_timeout=7200
+        )
+        self.assertEqual(mock_run.call_args.kwargs["timeout"], 300)
+        self.assertEqual(ssh_process.call_args.kwargs["timeout"], 7200)
+
 
 class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
+    def test_invalid_upload_timeout_refuses_before_journal_or_remote_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = types.SimpleNamespace(
+                    name="myvps", control="https",
+                    control_host="sandbox.example.com", confirm=True,
+                    upload_timeout=True,
+                )
+                with patch.object(remote_cmd, "_new_provision_log") as journal, \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_provision(args, as_json=True)
+                journal.assert_not_called()
+                upload.assert_not_called()
+
     def test_provision_result_omits_the_minted_token(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
@@ -1631,12 +1749,16 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
                 args = types.SimpleNamespace(name="myvps", control="https",
-                                             control_host="sandbox.example.com", confirm=True)
+                                             control_host="sandbox.example.com", confirm=True,
+                                             upload_timeout=611)
                 with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(remote_cmd, "_upload_runtime_source",
-                                  side_effect=RuntimeError("token=private-value staging failed")):
+                                  side_effect=RuntimeError("token=private-value staging failed")) as upload:
                     with self.assertRaises(SystemExit):
                         remote_cmd._cmd_provision(args, as_json=True)
+                upload.assert_called_once_with(
+                    "ubuntu@1.2.3.4", upload_timeout=611
+                )
                 journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
                 payload = json.loads(journal.read_text())
                 self.assertEqual(payload["status"], "failed")
@@ -1883,30 +2005,34 @@ class TestConfigureHttpsProxy(unittest.TestCase):
 class TestRemotePreviewInstances(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_ensure_remote_instance_uses_new_label(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(stdout='{"instance":"preview-a","wordpress_port":8123}\n')
+        mock_ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout='{"instance":"preview-a","wordpress_port":8123}\n'),
+        ]
         result = sr.ensure_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a")
         self.assertEqual(result["instance"], "preview-a")
-        command = mock_ssh_run.call_args.args[1]
+        command = mock_ssh_run.call_args_list[1].args[1]
         self.assertIn("ensure --local --project-dir /srv/project", command)
         self.assertIn("--label preview-a --create", command)
         self.assertIn("timeout --signal=TERM --kill-after=30s 300s", command)
-        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
+        self.assertEqual(mock_ssh_run.call_args_list[1].kwargs["timeout"], 345)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_reconcile_remote_instance_applies_deployed_config(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(
-            stdout='progress\n{"instance":"preview-a","wordpress_port":8123}\n'
-        )
+        mock_ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout='progress\n{"instance":"preview-a","wordpress_port":8123}\n'),
+        ]
 
         result = sr.reconcile_remote_instance(
             {"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a"
         )
 
         self.assertEqual(result["instance"], "preview-a")
-        command = mock_ssh_run.call_args.args[1]
+        command = mock_ssh_run.call_args_list[1].args[1]
         self.assertIn("apply --project-dir /srv/project", command)
         self.assertIn("--label preview-a --json", command)
-        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
+        self.assertEqual(mock_ssh_run.call_args_list[1].kwargs["timeout"], 345)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_ensure_remote_instance_reports_timeout_once(self, mock_ssh_run):
@@ -2266,26 +2392,32 @@ json.load(open(path))
 class TestRemoteDomainInventory(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_inventory_is_bounded_and_secret_free(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(stdout=json.dumps({
-            "ok": True, "count": 1, "domains": [{
-                "domain": "example.com", "owners": ["site-production"],
-                "sources": ["instance_registry", "caddy_route"],
-                "statuses": ["ready"],
-            }],
-        }))
+        mock_ssh_run.side_effect = [
+            _completed(stdout="/home/alim/sandbox\n"),
+            _completed(stdout=json.dumps({
+                "ok": True, "count": 1, "domains": [{
+                    "domain": "example.com", "owners": ["site-production"],
+                    "sources": ["instance_registry", "caddy_route"],
+                    "statuses": ["ready"],
+                }],
+            })),
+        ]
         result = sr.remote_domain_inventory({
             "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
         })
         self.assertEqual(result["domains"][0]["domain"], "example.com")
-        command = mock_ssh_run.call_args.args[1]
+        command = mock_ssh_run.call_args_list[1].args[1]
         self.assertIn("sudo -n python3", command)
         self.assertNotIn("registered-target", command)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_inventory_rejects_unknown_fields(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(stdout=json.dumps({
-            "ok": True, "count": 0, "domains": [], "secret": "no",
-        }))
+        mock_ssh_run.side_effect = [
+            _completed(stdout="/home/alim/sandbox\n"),
+            _completed(stdout=json.dumps({
+                "ok": True, "count": 0, "domains": [], "secret": "no",
+            })),
+        ]
         with self.assertRaisesRegex(RuntimeError, "invalid envelope"):
             sr.remote_domain_inventory({
                 "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
@@ -2313,6 +2445,32 @@ class TestRemoteDomainInventory(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_invalid_migration_upload_timeout_refuses_before_upload_or_migration(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https",
+                    control_url="https://sandbox.example.test", mcp_port=9174,
+                    bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(
+                    name="migrate", ssh_url="myvps", confirm=True,
+                    upload_timeout=7201,
+                )
+                with patch.object(
+                        remote_cmd.sr, "remote_mcp_service_status",
+                        return_value={"legacy_pidfile": "absent"}), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     redirect_stdout(StringIO()) as output:
+                    remote_cmd._cmd_service(args, as_json=True)
+                upload.assert_not_called()
+                migrate.assert_not_called()
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "remote_service_failed")
+
     def test_single_remote_name_defaults_to_read_only_status(self):
         args = types.SimpleNamespace(name="myvps", ssh_url=None, confirm=False)
         status = {"ownership": "proven", "active": True}
@@ -2403,13 +2561,16 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args.name = "migrate"
                 args.ssh_url = "myvps"
                 args.confirm = True
+                args.upload_timeout = 712
                 service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
                 with patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}), \
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "migrate_remote_mcp_service", return_value={"status": "applied", "service": service}) as migrate, \
                      patch("builtins.print"):
                     remote_cmd._cmd_service(args, as_json=True)
-                upload.assert_called_once_with("ubuntu@1.2.3.4")
+                upload.assert_called_once_with(
+                    "ubuntu@1.2.3.4", upload_timeout=712
+                )
                 self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
 
     def test_service_migration_upload_timeout_has_typed_json_error(self):
@@ -2454,6 +2615,7 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args = MagicMock()
                 args.name = "myvps"
                 args.confirm = True
+                args.upload_timeout = 713
                 service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
                 with patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}), \
@@ -2461,7 +2623,9 @@ class TestRemoteServiceCommand(unittest.TestCase):
                      patch.object(sr, "migrate_remote_mcp_service", return_value={"status": "applied", "service": service}) as migrate, \
                      patch("builtins.print"):
                     remote_cmd._cmd_up(args, as_json=True)
-                upload.assert_called_once_with("ubuntu@1.2.3.4")
+                upload.assert_called_once_with(
+                    "ubuntu@1.2.3.4", upload_timeout=713
+                )
                 proxy.assert_called_once()
                 self.assertTrue(migrate.call_args.kwargs["confirm"])
                 self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
@@ -2561,14 +2725,50 @@ class TestDeployEnsureExpose(unittest.TestCase):
                 with patch.object(sc, "load_project_config", return_value={
                         "root": str(root), "slug": "demo", "kind": "wordpress"}), \
                      patch.object(deploy_cmd, "preflight_project_capability", return_value=None), \
-                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo") as ensure_repo, \
                      patch.object(sr, "current_branch", return_value="latest"), \
                      patch.object(sr, "push_commits", return_value="a" * 40) as push, \
                      patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch("builtins.print"):
                     deploy_cmd.cmd_deploy(None, args)
+                ensure_repo.assert_called_once_with(
+                    sr.get_remote("myvps"), root, home_timeout=900
+                )
                 self.assertEqual(push.call_args.kwargs["push_timeout"], 900)
+
+    def test_deploy_home_timeout_is_typed_and_prevents_push(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = types.SimpleNamespace(
+                    project_dir=str(root), remote="myvps", source_ref=None,
+                    json=True, ensure=False, expose=False, pro_plugins=False,
+                    deploy_timeout=901, include=None, plugin_slug=None,
+                )
+                sc = deploy_cmd._core()
+                timeout = sr.RemoteHomeResolutionTimeout(901)
+                with patch.object(sc, "load_project_config", return_value={
+                        "root": str(root), "slug": "demo", "kind": "wordpress"}), \
+                     patch.object(deploy_cmd, "preflight_project_capability", return_value=None), \
+                     patch.object(sr, "ensure_deploy_repo", side_effect=timeout) as ensure_repo, \
+                     patch.object(sr, "push_commits") as push, \
+                     patch("builtins.print") as printed, \
+                     self.assertRaises(SystemExit):
+                    deploy_cmd.cmd_deploy(None, args)
+                ensure_repo.assert_called_once_with(
+                    sr.get_remote("myvps"), root, home_timeout=901
+                )
+                push.assert_not_called()
+                payload = json.loads(printed.call_args.args[0])
+                self.assertEqual(
+                    payload["error_code"], "remote_home_resolution_timeout"
+                )
 
     def test_json_deploy_reports_remote_branch_divergence(self):
         with tempfile.TemporaryDirectory() as d:

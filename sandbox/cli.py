@@ -810,6 +810,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="required with `remote ssh`: exact operator command to run directly over SSH")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
+    remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
+        default=300, metavar="SECONDS",
+        help="SSH runtime-source upload timeout for provision, up, and confirmed "
+             "service migration (1-7200 seconds; default 300; packaging stays 300)")
 
     deploy_p = sub.add_parser("deploy",
         help="Deploy local project state (committed + uncommitted) to a remote "
@@ -844,7 +848,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="explicitly transfer a relative ignored build artifact such as vendor/ (repeatable; sensitive paths rejected)")
     deploy_p.add_argument("--deploy-timeout", dest="deploy_timeout", type=int,
         default=None, metavar="SECONDS",
-        help="bounded Git push timeout for this deploy (1-3600 seconds; default 120)")
+        help="bounded remote-home preflight and Git push timeout for this deploy "
+             "(1-3600 seconds; default 120)")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

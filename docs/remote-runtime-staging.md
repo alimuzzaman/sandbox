@@ -2,7 +2,8 @@
 
 Remote provisioning, `remote up`, and confirmed remote-service migration stage
 the current Sandbox runtime before changing the remote service. Staging has a
-bounded 300-second package step and a bounded 300-second SSH upload step.
+fixed 300-second package step. Its SSH upload step defaults to 300 seconds and
+accepts `--upload-timeout SECONDS` from 1 through 7200 on those three commands.
 
 Progress is written to stderr, so `--json` keeps stdout as one JSON document.
 If packaging times out, the remote was not contacted. If the upload times out,

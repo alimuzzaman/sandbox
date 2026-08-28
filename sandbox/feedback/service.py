@@ -46,6 +46,15 @@ class FeedbackError(RuntimeError):
         self.code = code
 
 
+class FeedbackRecordError(ValueError):
+    """Typed internal refusal for one malformed persisted record."""
+
+    def __init__(self, code: str, field: str = "record") -> None:
+        super().__init__(code)
+        self.code = code
+        self.field = field
+
+
 def _timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("feedback timestamps must include a timezone")
@@ -387,10 +396,18 @@ class FeedbackStore:
     @staticmethod
     def _read(path: Path) -> dict[str, Any]:
         if path.is_symlink() or not path.is_file():
-            raise OSError("feedback record is not a regular file")
-        value = json.loads(path.read_text(encoding="utf-8"))
+            raise FeedbackRecordError("feedback_record_not_regular")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise FeedbackRecordError("feedback_record_unreadable") from exc
         if not isinstance(value, dict) or value.get("schema_version") != 1:
-            raise ValueError("invalid feedback record")
+            raise FeedbackRecordError("feedback_record_schema_invalid")
+        feedback_id = value.get("feedback_id")
+        if not isinstance(feedback_id, str) or not _FEEDBACK_ID.fullmatch(feedback_id):
+            raise FeedbackRecordError("feedback_record_field_invalid", "feedback_id")
+        if _parse_timestamp(value.get("created_at")) is None:
+            raise FeedbackRecordError("feedback_record_field_invalid", "created_at")
         return value
 
     def query(

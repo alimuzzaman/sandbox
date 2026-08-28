@@ -3,6 +3,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -89,6 +90,48 @@ class TestGenericInitNoBoot(TestCase):
                 harness.assert_not_called()
                 process.assert_not_called()
 
+    def test_astro_dangling_descriptor_symlink_refuses_before_any_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            root.mkdir()
+            (root / "package.json").write_text(json.dumps({
+                "scripts": {"dev": "astro dev"},
+            }))
+            outside = parent / "missing-outside.json"
+            (root / "sandbox.config.json").symlink_to(outside)
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "runtime_service") as runtime_factory, \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, "astro"))
+            self.assertFalse(outside.exists())
+            self.assertFalse((root / "sandbox.compose.yml").exists())
+            ensure.assert_not_called()
+            runtime_factory.assert_not_called()
+
+    def test_astro_compose_output_symlink_refuses_before_descriptor_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            root.mkdir()
+            (root / "package.json").write_text(json.dumps({
+                "scripts": {"dev": "astro dev"},
+            }))
+            outside = parent / "outside-compose.yml"
+            outside.write_text("outside-bytes\n")
+            before = outside.read_bytes()
+            (root / "sandbox.compose.yml").symlink_to(outside)
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "runtime_service") as runtime_factory, \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, "astro"))
+            self.assertEqual(outside.read_bytes(), before)
+            self.assertFalse((root / "sandbox.config.json").exists())
+            ensure.assert_not_called()
+            runtime_factory.assert_not_called()
+
     def test_existing_specific_descriptor_conflict_refuses_before_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -147,6 +190,261 @@ class TestGenericInitNoBoot(TestCase):
                 ))
             ensure.assert_called_once_with(mock.ANY, str(root.resolve()))
             runtime_factory.assert_not_called()
+
+    def test_fresh_explicit_target_does_not_inherit_parent_markers(self):
+        for marker in ("git", "descriptor"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+                parent = Path(tmp)
+                if marker == "git":
+                    (parent / ".git").mkdir()
+                else:
+                    (parent / "sandbox.config.json").write_text(json.dumps({
+                        "slug": "parent", "plugins": {"parent": "."},
+                    }))
+                child = parent / "fresh-child"
+                child.mkdir()
+                parent_before = {
+                    path.relative_to(parent): path.read_bytes()
+                    for path in parent.iterdir() if path.is_file()
+                }
+                entry = {"instance": "fixture", "url": "http://localhost:8188",
+                         "root": str(child), "wordpress_port": 8188,
+                         "db_port": 3318, "mailpit_port": 8125, "server": "nginx"}
+                with mock.patch.object(command, "ensure_instance", return_value=entry) as ensure, \
+                        mock.patch.object(command, "_provision_test_harness"), \
+                        redirect_stdout(io.StringIO()):
+                    command.cmd_init({}, _args(child, None))
+
+                self.assertTrue((child / "sandbox.config.json").is_file())
+                self.assertEqual(
+                    {path.relative_to(parent): path.read_bytes()
+                     for path in parent.iterdir() if path.is_file()},
+                    parent_before,
+                )
+                ensure.assert_called_once_with(mock.ANY, str(child.resolve()))
+
+    def test_fresh_cwd_is_exact_init_boundary(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            (parent / ".git").mkdir()
+            child = parent / "fresh-cwd"
+            child.mkdir()
+            entry = {"instance": "fixture", "url": "http://localhost:8188",
+                     "root": str(child), "wordpress_port": 8188,
+                     "db_port": 3318, "mailpit_port": 8125, "server": "nginx"}
+            args = SimpleNamespace(project_dir=None, type=None, force=False,
+                                   no_test_harness=True)
+            with mock.patch.object(command.os, "getcwd", return_value=str(child)), \
+                    mock.patch.object(command, "ensure_instance", return_value=entry) as ensure, \
+                    redirect_stdout(io.StringIO()):
+                command.cmd_init({}, args)
+            self.assertTrue((child / "sandbox.config.json").is_file())
+            self.assertFalse((parent / "sandbox.config.json").exists())
+            ensure.assert_called_once_with(mock.ANY, str(child.resolve()))
+
+    def test_exact_home_is_refused_before_writes_or_ensure(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            root = Path(fake_home)
+            (root / ".git").mkdir()
+            before = sorted(path.name for path in root.iterdir())
+            with mock.patch.object(command.Path, "home", return_value=root), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            self.assertEqual(sorted(path.name for path in root.iterdir()), before)
+            ensure.assert_not_called()
+
+    def test_home_marker_does_not_capture_fresh_child_target(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            home = Path(fake_home)
+            (home / ".git").mkdir()
+            child = home / "fresh-child"
+            child.mkdir()
+            entry = {"instance": "fixture", "url": "http://localhost:8188",
+                     "root": str(child), "wordpress_port": 8188,
+                     "db_port": 3318, "mailpit_port": 8125, "server": "nginx"}
+            with mock.patch.object(command.Path, "home", return_value=home), \
+                    mock.patch.object(command, "ensure_instance", return_value=entry) as ensure, \
+                    redirect_stdout(io.StringIO()):
+                command.cmd_init({}, _args(child, None))
+            self.assertTrue((child / "sandbox.config.json").is_file())
+            self.assertFalse((home / "sandbox.config.json").exists())
+            ensure.assert_called_once_with(mock.ANY, str(child.resolve()))
+
+    def test_root_descriptor_symlink_is_refused_without_touching_target(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            root.mkdir()
+            outside = parent / "outside.json"
+            outside.write_text('{"slug":"outside"}\n')
+            (root / "sandbox.config.json").symlink_to(outside)
+            before = outside.read_bytes()
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            self.assertEqual(outside.read_bytes(), before)
+            ensure.assert_not_called()
+
+    def test_nested_descriptor_symlink_is_refused_without_touching_target(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            nested = root / ".config" / "sandbox"
+            nested.mkdir(parents=True)
+            outside = parent / "outside.json"
+            outside.write_text('{"slug":"outside"}\n')
+            (nested / "sandbox.config.json").symlink_to(outside)
+            before = outside.read_bytes()
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            self.assertEqual(outside.read_bytes(), before)
+            ensure.assert_not_called()
+
+    def test_wp_env_symlink_is_refused_without_touching_target(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            root.mkdir()
+            outside = parent / "outside-wp-env.json"
+            outside.write_text('{"core":"WordPress/WordPress"}\n')
+            (root / ".wp-env.json").symlink_to(outside)
+            before = outside.read_bytes()
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            self.assertEqual(outside.read_bytes(), before)
+            ensure.assert_not_called()
+
+    def test_non_regular_native_descriptor_is_refused_before_ensure(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "sandbox.config.json").mkdir()
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            ensure.assert_not_called()
+
+    def test_external_nested_config_home_is_refused_without_writes(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            (root / ".config").mkdir(parents=True)
+            outside = parent / "outside-config"
+            outside.mkdir()
+            descriptor = outside / "sandbox.config.json"
+            descriptor.write_text('{"slug":"outside"}\n')
+            (root / ".config" / "sandbox").symlink_to(outside)
+            before = descriptor.read_bytes()
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, _args(root, None))
+            self.assertEqual(descriptor.read_bytes(), before)
+            ensure.assert_not_called()
+
+    def test_destination_swap_is_refused_and_never_follows_symlink(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            parent = Path(tmp)
+            root = parent / "project"
+            root.mkdir()
+            destination = root / "sandbox.config.json"
+            destination.write_text(json.dumps({
+                "slug": "project", "plugins": {"project": "."},
+            }))
+            outside = parent / "outside.json"
+            outside.write_text("outside-bytes\n")
+            before = outside.read_bytes()
+            args = SimpleNamespace(project_dir=str(root), type=None, force=True,
+                                   no_test_harness=True)
+            real_fsync = os.fsync
+            swapped = False
+
+            def swap_destination(fd):
+                nonlocal swapped
+                real_fsync(fd)
+                if not swapped:
+                    swapped = True
+                    destination.unlink()
+                    destination.symlink_to(outside)
+
+            with mock.patch.object(command, "_core", return_value=_FakeCore()), \
+                    mock.patch.object(command.os, "fsync", side_effect=swap_destination), \
+                    mock.patch.object(command, "ensure_instance") as ensure, \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                command.cmd_init({}, args)
+            self.assertTrue(swapped)
+            self.assertEqual(outside.read_bytes(), before)
+            ensure.assert_not_called()
+
+    def test_fresh_scaffold_excludes_global_catalog_but_resolution_keeps_it_on_demand(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "fixture-plugin"
+            root.mkdir()
+            global_path = Path(tmp) / "global.json"
+            global_path.write_text(json.dumps({
+                "plugins": {"paid-pro": str(Path(tmp) / "paid-pro")},
+            }))
+            observed = {}
+
+            def ensure(_cfg, target):
+                observed.update(sandbox_core.load_project_config(target))
+                return {"instance": "fixture", "url": "http://localhost:8188",
+                        "root": target, "wordpress_port": 8188,
+                        "db_port": 3318, "mailpit_port": 8125, "server": "nginx"}
+
+            with mock.patch.dict(os.environ, {"SANDBOX_USER_CONFIG": str(global_path)}), \
+                    mock.patch.object(command, "ensure_instance", side_effect=ensure), \
+                    redirect_stdout(io.StringIO()):
+                command.cmd_init({}, _args(root, None))
+
+            document = json.loads((root / "sandbox.config.json").read_text())
+            self.assertEqual(set(document["plugins"]), {
+                "fixture-plugin", "query-monitor", "plugin-check", "mcp-adapter",
+            })
+            self.assertNotIn("paid-pro", document["plugins"])
+            self.assertFalse(document["plugins"]["query-monitor"])
+            self.assertTrue(document["plugins"]["plugin-check"])
+            self.assertIn("github.com/WordPress/mcp-adapter", document["plugins"]["mcp-adapter"])
+            self.assertFalse(observed["plugins_resolved"]["paid-pro"]["active"])
+            self.assertTrue(observed["plugins_resolved"]["paid-pro"]["on_demand"])
+
+    def test_force_preserves_existing_project_plugin_declarations(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "fixture-plugin"
+            root.mkdir()
+            declarations = {
+                "fixture-plugin": ".",
+                "project-helper": {"path": "../helper", "onDemand": True},
+            }
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "slug": "fixture-plugin", "plugins": declarations,
+            }))
+            global_path = Path(tmp) / "global.json"
+            global_path.write_text(json.dumps({
+                "plugins": {"paid-pro": str(Path(tmp) / "paid-pro")},
+            }))
+            entry = {"instance": "fixture", "url": "http://localhost:8188",
+                     "root": str(root), "wordpress_port": 8188,
+                     "db_port": 3318, "mailpit_port": 8125, "server": "nginx"}
+            args = SimpleNamespace(project_dir=str(root), type=None, force=True,
+                                   no_test_harness=True)
+            with mock.patch.dict(os.environ, {"SANDBOX_USER_CONFIG": str(global_path)}), \
+                    mock.patch.object(command, "ensure_instance", return_value=entry), \
+                    redirect_stdout(io.StringIO()):
+                command.cmd_init({}, args)
+
+            document = json.loads((root / "sandbox.config.json").read_text())
+            self.assertEqual(document["plugins"], declarations)
+            self.assertNotIn("paid-pro", document["plugins"])
 
     def _run_top_level(self, root: Path, requested_type: str):
         """Run the real parser/dispatch boundary with the runtime mocked."""

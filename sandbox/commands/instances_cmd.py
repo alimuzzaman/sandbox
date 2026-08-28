@@ -1,10 +1,12 @@
 from __future__ import annotations
 import argparse
+import copy
 import json
 import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -27,6 +29,10 @@ from sandbox.core import (
     reload_proxy, resolve_instances, snapshots_dir, valet_proxy_remove, wp_dir,
     wpcli, _write_abilities_context,
 )
+from sandbox.config.init_files import (
+    atomic_write_init_file as _atomic_write_init_descriptor,
+    validate_init_destination as _validate_init_destination,
+)
 
 from sandbox.registry import CommandSpec, register, register_specs
 from sandbox.application.context import (
@@ -42,6 +48,10 @@ _GENERIC_INIT_TYPES = frozenset({
 
 _GENERIC_INIT_CHOICES = (
     "compose", "generic", "astro", "laravel", "php", "node", "javascript",
+)
+
+_WORDPRESS_SCAFFOLD_PLUGIN_SLUGS = (
+    "query-monitor", "plugin-check", "mcp-adapter",
 )
 
 
@@ -134,6 +144,100 @@ def _generic_descriptor_document(project_root: Path) -> dict:
         # The canonical loader below remains authoritative for malformed or
         # ambiguous descriptors; this helper must not hide that error.
         return {}
+
+
+def _exact_init_sources(project_root: Path) -> tuple[Path | None, Path | None]:
+    """Return only safe regular descriptors at the exact init target."""
+    from sandbox.config.descriptors import (
+        CONFIG_BASENAMES, CONFIG_SUBDIRECTORY, config_home, primary_config,
+    )
+
+    root = project_root.resolve()
+    selected_home = config_home(root)
+    try:
+        selected_home.resolve().relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "Sandbox init config directory must stay within the project root"
+        ) from exc
+
+    def regular_source(path: Path, label: str) -> Path:
+        try:
+            path.parent.resolve().relative_to(root)
+            path.resolve().relative_to(root)
+            metadata = path.lstat()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"Sandbox init {label} must stay within the project root"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                f"Sandbox init {label} must be a regular non-symlink file"
+            )
+        return path
+
+    # ``Path.exists`` is false for a dangling symlink. Inspect every exact
+    # candidate with lstat semantics before descriptor discovery can miss it.
+    homes = (root, root.joinpath(*CONFIG_SUBDIRECTORY))
+    for home in homes:
+        for name in CONFIG_BASENAMES:
+            candidate = home / name
+            if candidate.exists() or candidate.is_symlink():
+                regular_source(candidate, "native descriptor")
+
+    native = primary_config(project_root)
+    if native is not None:
+        native = regular_source(native, "native descriptor")
+    wp_env_path = root / ".wp-env.json"
+    wp_env = (
+        regular_source(wp_env_path, ".wp-env.json")
+        if wp_env_path.exists() or wp_env_path.is_symlink() else None
+    )
+    return native, wp_env
+
+
+def _load_exact_init_config(sc, project_root: Path) -> dict:
+    """Resolve init without allowing an ancestor marker to redirect its root."""
+    if project_root == Path.home().resolve():
+        raise sc.ConfigError("refusing to initialize the user home as a Sandbox project")
+    if not project_root.is_dir():
+        raise sc.ConfigError(f"project dir does not exist: {project_root}")
+    allowed = getattr(sc, "_is_allowed", None)
+    if callable(allowed) and not allowed(project_root):
+        raise sc.ConfigError(f"path not allowed: {project_root}")
+
+    native, wp_env = _exact_init_sources(project_root)
+    if native is not None or wp_env is not None or (project_root / ".git").exists():
+        resolved = sc.load_project_config(str(project_root))
+        if Path(resolved.get("root", "")).resolve() != project_root:
+            raise sc.ConfigError("init config resolution escaped the requested project directory")
+        return resolved
+
+    # A fresh config-less directory is its own init authority. Do not ask the
+    # general project finder, because its ancestor discovery is correct for
+    # normal commands but would let a parent checkout redirect scaffold writes.
+    resolved = copy.deepcopy(sc.DEFAULTS)
+    detector = getattr(sc, "_detect_project_plugin_slug", None)
+    detected_slug = detector(project_root) if callable(detector) else None
+    resolved.update({
+        "kind": "wordpress",
+        "root": str(project_root),
+        "source": "defaults",
+        "slug": detected_slug,
+    })
+    return resolved
+
+
+def _wordpress_scaffold_plugins(sc, project_slug: str) -> dict:
+    """Return only reviewed built-ins plus this project's own checkout."""
+    defaults = sc.DEFAULTS.get("plugins") or {}
+    plugins = {
+        slug: copy.deepcopy(defaults[slug])
+        for slug in _WORDPRESS_SCAFFOLD_PLUGIN_SLUGS
+        if slug in defaults
+    }
+    plugins[project_slug] = "."
+    return plugins
 
 
 def _generic_init_conflict(requested_type: str, descriptor: Mapping,
@@ -480,6 +584,8 @@ def cmd_init(cfg, args) -> None:
     sc = _core()
     requested_type = getattr(args, "type", None)
     project_root = Path(pd).expanduser().resolve()
+    if project_root == Path.home().resolve():
+        die("refusing to initialize the user home as a Sandbox project")
 
     # Keep the raw spelling for the generated, reviewable framework field;
     # parser choices already constrain normal CLI callers, while this guard
@@ -493,20 +599,25 @@ def cmd_init(cfg, args) -> None:
         # the root-level fallback keeps small test doubles and old callers
         # compatible with the command's prior ``CONFIG_BASENAMES`` contract.
         try:
-            from sandbox.config.descriptors import primary_config
-            native_path = primary_config(project_root)
-        except (ImportError, OSError, TypeError, ValueError):
-            native_path = next(
-                (project_root / name for name in sc.CONFIG_BASENAMES
-                 if (project_root / name).exists()), None,
-            )
+            native_path, _wp_env_path = _exact_init_sources(project_root)
+        except (OSError, TypeError, ValueError) as exc:
+            die(str(exc))
 
         if native_path is None:
             # Astro's preset is read-only with respect to project execution:
             # it examines package metadata and writes only explicit files.
             if requested_type == "astro":
                 from sandbox.runtimes.presets import propose_astro
-                propose_astro(project_root)
+                descriptor_path = project_root / "sandbox.config.json"
+                compose_path = project_root / "sandbox.compose.yml"
+                try:
+                    # Validate the whole publication set before writing either
+                    # file. Each atomic write repeats the check for races.
+                    _validate_init_destination(project_root, descriptor_path)
+                    _validate_init_destination(project_root, compose_path)
+                    propose_astro(project_root)
+                except (OSError, TypeError, ValueError) as exc:
+                    die(str(exc))
                 ok("wrote reviewable Astro Compose and Sandbox configuration")
             else:
                 compose_file = next(
@@ -542,9 +653,13 @@ def cmd_init(cfg, args) -> None:
                     "compose": {"file": compose_file.name, "service": service,
                                  "internal_port": internal_port, "health_path": "/"},
                 }
-                (project_root / "sandbox.config.json").write_text(
-                    json.dumps(config, indent=2) + "\n",
-                )
+                try:
+                    _atomic_write_init_descriptor(
+                        project_root, project_root / "sandbox.config.json",
+                        json.dumps(config, indent=2) + "\n",
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    die(str(exc))
                 ok(f"wrote sandbox.config.json for generic {requested_type} project")
 
         # Resolve/validate the descriptor after any proposal has been written,
@@ -566,12 +681,17 @@ def cmd_init(cfg, args) -> None:
     # Legacy/no-type flow below intentionally retains its historical boot and
     # test-harness provisioning behavior.
     try:
-        pconf = sc.load_project_config(pd)
-    except sc.ConfigError as e:
+        pconf = _load_exact_init_config(sc, project_root)
+        native_path, wp_env_path = _exact_init_sources(project_root)
+    except (sc.ConfigError, OSError, TypeError, ValueError) as e:
         die(str(e))
     root = Path(pconf["root"])
-    base_source = pconf["source"].split("+")[0]   # drop any "+override" suffix
-    has_native = base_source in sc.CONFIG_BASENAMES
+    has_native = native_path is not None
+    base_source = (
+        native_path.name if native_path is not None
+        else wp_env_path.name if wp_env_path is not None
+        else "defaults"
+    )
     force = getattr(args, "force", False)
 
     if pconf.get("kind") == "compose":
@@ -599,26 +719,33 @@ def cmd_init(cfg, args) -> None:
         if _is_wordpress_project(pconf) and not has_native:
             data["phpExtensions"] = {"profile": "wordpress@1"}
         if base_source == "defaults":
-            # Defaults use the canonical map so Query Monitor can be declared
-            # installed-but-inactive. Add this checkout under its real slug at
-            # scaffold time; a map key, unlike legacy ["."], is worktree-safe.
+            # A fresh descriptor declares only the reviewed built-ins and this
+            # checkout. The effective user-global source catalog remains
+            # resolvable on demand, but is never serialized as project opt-in.
             project_slug = str(data.get("slug") or root.name).strip()
-            data["plugins"] = {
-                project_slug: ".",
-                **dict(data.get("plugins") or {}),
-            }
+            data["plugins"] = _wordpress_scaffold_plugins(sc, project_slug)
+        elif has_native and force:
+            # Regeneration may normalize other schema fields, but it must not
+            # turn effective catalog entries into project declarations or
+            # replace the project's existing plugin intent with defaults.
+            existing = _generic_descriptor_document(root)
+            data["plugins"] = copy.deepcopy(existing.get("plugins", {}))
         # Regenerate the SAME native file (preserving an existing .yml/.yaml);
         # scaffold/convert to sandbox.config.json. Writing a fresh .json beside
         # an existing .yml would shadow it (json wins load order) and silently
         # orphan the user's edit surface.
-        dest = root / (base_source if has_native else "sandbox.config.json")
+        dest = native_path if has_native else root / "sandbox.config.json"
         if dest.suffix in (".yml", ".yaml"):
             ensure_pyyaml()
             import yaml
-            dest.write_text(yaml.safe_dump(data, default_flow_style=False,
-                                           sort_keys=False))
+            payload = yaml.safe_dump(data, default_flow_style=False,
+                                     sort_keys=False)
         else:
-            dest.write_text(json.dumps(data, indent=2) + "\n")
+            payload = json.dumps(data, indent=2) + "\n"
+        try:
+            _atomic_write_init_descriptor(root, dest, payload)
+        except (OSError, TypeError, ValueError) as exc:
+            die(str(exc))
         note = ("converted from .wp-env.json" if base_source == ".wp-env.json"
                 else "regenerated" if has_native else "scaffolded")
         ok(f"wrote {dest.name} ({note})")

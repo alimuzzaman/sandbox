@@ -109,6 +109,13 @@ def _unit_identity(manifest):
                  "--property=NoNewPrivileges", "--property=ControlGroup")
 
 
+def _controller_unit_identity(manifest):
+    return _argv("/usr/bin/systemctl", "show", manifest["service"]["controller_unit"],
+                 "--property=Id", "--property=LoadState", "--property=ActiveState",
+                 "--property=User", "--property=Group", "--property=ExecStart",
+                 "--property=NoNewPrivileges", "--property=ControlGroup")
+
+
 def _unit_ownership(manifest):
     return _argv("/usr/bin/systemctl", "show", _unit(manifest),
                  "--property=UID", "--property=GID", "--property=MainPID")
@@ -126,6 +133,11 @@ def _controller_identity(manifest):
 
 def _executable_identity(manifest):
     return _argv("/usr/bin/stat", "-c", "%u:%g:%a:%s", manifest["service"]["executable"])
+
+
+def _controller_executable_identity(manifest):
+    return _argv("/usr/bin/stat", "-c", "%u:%g:%a:%s",
+                 manifest["service"]["controller_executable"])
 
 
 def _cgroup_identity(manifest):
@@ -231,11 +243,13 @@ _HOST_BUILDERS = {
     "architecture_expected": _architecture,
     "sandbox_revision_expected": _sandbox_revision,
     "unit_identity_expected": _unit_identity,
+    "controller_unit_identity_expected": _controller_unit_identity,
     "unit_ownership_expected": _unit_ownership,
     "service_account_expected": _service_account,
     "broker_process_identity": _process_identity,
     "controller_process_identity": _controller_identity,
     "executable_ownership_expected": _executable_identity,
+    "controller_executable_ownership_expected": _controller_executable_identity,
     "cgroup_identity_expected": _cgroup_identity,
     "lease_socket_owned": _lease_socket_owner,
     "controller_socket_owned": _controller_socket_owner,
@@ -355,7 +369,7 @@ def _process_observation(check_id: str, stdout: str,
     uid = service["service_uid"] if check_id == "broker_process_identity" \
         else service["controller_uid"]
     executable = service["executable"] if check_id == "broker_process_identity" \
-        else "sandbox-credential-controller"
+        else service["controller_executable"]
     expected = {"uid": uid, "executable": executable, "pid_positive": True,
                 "start_time_typed": True}
     suffix = r"\s+(\S+)(?:\s+.*)?$"
@@ -365,9 +379,7 @@ def _process_observation(check_id: str, stdout: str,
     match = re.fullmatch(pattern, lines[0]) if len(lines) == 1 else None
     correct = bool(match and int(match.group(1)) > 1 and int(match.group(2)) == uid)
     if correct:
-        observed_executable = match.group(3)
-        correct = observed_executable == executable if check_id == "broker_process_identity" \
-            else observed_executable.rsplit("/", 1)[-1] == executable
+        correct = match.group(3) == executable
     return {"kind": "process_identity",
             "value": {**expected, "pid": int(match.group(1))} if correct else None}
 
@@ -437,6 +449,14 @@ def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
                              f"ControlGroup={service['cgroup']}"}),
             "executable": service["executable"],
         },
+        "controller_unit_identity_expected": {
+            "lines": sorted({f"Id={service['controller_unit']}", "LoadState=loaded",
+                             "ActiveState=active", "User=sandbox-credential-controller",
+                             "Group=sandbox-credential-controller",
+                             "NoNewPrivileges=yes",
+                             f"ControlGroup={service['controller_cgroup']}"}),
+            "executable": service["controller_executable"],
+        },
         "unit_ownership_expected": {
             "UID": str(service["service_uid"]), "GID": str(service["service_gid"]),
             "MainPID": "positive",
@@ -447,11 +467,16 @@ def _expected_value(check_id: str, manifest: dict[str, Any]) -> Any:
         },
         "controller_process_identity": {
             "uid": service["controller_uid"],
-            "executable": "sandbox-credential-controller",
+            "executable": service["controller_executable"],
             "pid_positive": True, "start_time_typed": True,
         },
         "executable_ownership_expected": {
             "uid": service["service_uid"], "gid": service["service_gid"],
+            "owner_executable": True, "group_world_not_writable": True,
+            "size_positive": True,
+        },
+        "controller_executable_ownership_expected": {
+            "uid": service["controller_uid"], "gid": service["controller_gid"],
             "owner_executable": True, "group_world_not_writable": True,
             "size_positive": True,
         },
@@ -546,14 +571,22 @@ def _normalize(check_id: str, stdout: str, stderr: str,
     exact = _expected_text(check_id, manifest)
     if exact is not None:
         return _matched("exact_text", exact, stdout.strip() == exact)
-    if check_id == "unit_identity_expected":
+    if check_id in {"unit_identity_expected", "controller_unit_identity_expected"}:
+        controller = check_id == "controller_unit_identity_expected"
+        account = ("sandbox-credential-controller" if controller
+                   else "sandbox-credential-broker")
+        unit = (manifest["service"]["controller_unit"] if controller
+                else _unit(manifest))
+        cgroup = (manifest["service"]["controller_cgroup"] if controller
+                  else manifest["service"]["cgroup"])
         required_fields = {
-            "Id": _unit(manifest), "LoadState": "loaded", "ActiveState": "active",
-            "User": "sandbox-credential-broker", "Group": "sandbox-credential-broker",
-            "NoNewPrivileges": "yes", "ControlGroup": manifest["service"]["cgroup"],
+            "Id": unit, "LoadState": "loaded", "ActiveState": "active",
+            "User": account, "Group": account, "NoNewPrivileges": "yes",
+            "ControlGroup": cgroup,
         }
         fields = _fields(stdout) or {}
-        executable = manifest["service"]["executable"]
+        executable = (manifest["service"]["controller_executable"] if controller
+                      else manifest["service"]["executable"])
         start = fields.get("ExecStart", "")
         exec_ok = start == executable or start.startswith(f"{{ path={executable} ;")
         expected = _expected_value(check_id, manifest)
@@ -572,11 +605,9 @@ def _normalize(check_id: str, stdout: str, stderr: str,
         return _matched("unit_ownership", expected, correct)
     if check_id in {"broker_process_identity", "controller_process_identity"}:
         return _process_observation(check_id, stdout, manifest)
-    if check_id == "executable_ownership_expected":
-        expected = {"uid": manifest["service"]["service_uid"],
-                    "gid": manifest["service"]["service_gid"],
-                    "owner_executable": True, "group_world_not_writable": True,
-                    "size_positive": True}
+    if check_id in {"executable_ownership_expected",
+                    "controller_executable_ownership_expected"}:
+        expected = _expected_value(check_id, manifest)
         match = re.fullmatch(r"(\d+):(\d+):(\d{3,4}):(\d+)", stdout.strip())
         mode = int(match.group(3), 8) if match else 0
         correct = bool(match and int(match.group(1)) == expected["uid"]

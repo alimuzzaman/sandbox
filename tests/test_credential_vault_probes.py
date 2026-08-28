@@ -320,6 +320,37 @@ class TestProbeCommandModel(unittest.TestCase):
                                       self.manifest)
                 self.assertEqual(parsed["state"], "failed")
 
+        controller = self.manifest["service"]["controller_executable"]
+        controller_good = (
+            f"5252 501 Mon Sep 1 10:00:00 2026 {controller} --fixture\n"
+        )
+        self.assertEqual(probes.parse("controller_process_identity", result(
+            stdout=controller_good), self.manifest)["state"], "passed")
+        tmp = controller_good.replace(controller,
+                                      "/tmp/sandbox-credential-controller")
+        parsed = probes.parse("controller_process_identity", result(stdout=tmp),
+                              self.manifest)
+        self.assertEqual((parsed["state"], parsed["code"]),
+                         ("failed", "observation_mismatch"))
+
+    def test_controller_unit_and_executable_ownership_use_sealed_fields(self):
+        service = self.manifest["service"]
+        unit_output = "\n".join((
+            f"Id={service['controller_unit']}", "LoadState=loaded", "ActiveState=active",
+            "User=sandbox-credential-controller", "Group=sandbox-credential-controller",
+            f"ExecStart={service['controller_executable']}", "NoNewPrivileges=yes",
+            f"ControlGroup={service['controller_cgroup']}",
+        )) + "\n"
+        self.assertEqual(probes.parse("controller_unit_identity_expected", result(
+            stdout=unit_output), self.manifest)["state"], "passed")
+        wrong_path = unit_output.replace(service["controller_executable"],
+                                         "/tmp/sandbox-credential-controller")
+        self.assertEqual(probes.parse("controller_unit_identity_expected", result(
+            stdout=wrong_path), self.manifest)["state"], "failed")
+        ownership = probes.parse("controller_executable_ownership_expected", result(
+            stdout="501:501:750:4096\n"), self.manifest)
+        self.assertEqual(ownership["state"], "passed")
+
     def test_socket_identity_requires_exact_address_and_process_owner(self):
         address = self.manifest["transport"]["lease_socket"]
         good = (f"u_str LISTEN 0 16 {address} 123 * 0 uid:991 "
@@ -345,6 +376,29 @@ class TestProbeCommandModel(unittest.TestCase):
                                 "value": {**lease["observation"]["value"], "pid": 5252}}
         with self.assertRaises(probes.ProbeError) as raised:
             probes.validate_execution_artifact(artifact, self.manifest)
+        self.assertEqual(raised.exception.code,
+                         "execution_artifact_socket_process_mismatch")
+
+        expanded = fixtures.manifest()
+        expanded["checks"].extend((
+            {"check_id": "controller_process_identity", "category": "process_identity",
+             "required": True, "description": "controller process identity matches"},
+            {"check_id": "controller_socket_owned", "category": "transport",
+             "required": True, "description": "controller socket ownership matches"},
+        ))
+        expanded = manifest_module.validate_manifest(expanded)
+        states = {name: "passed" for name in manifest_module.check_ids(expanded)}
+        artifact = fixtures.execution_artifact(expanded, states)
+        self.assertEqual(len(probes.validate_execution_artifact(artifact, expanded)),
+                         len(artifact))
+        controller_process = next(item for item in artifact
+                                  if item["check_id"] == "controller_process_identity")
+        controller_process["observation"] = {
+            "kind": "process_identity",
+            "value": {**controller_process["observation"]["value"], "pid": 6262},
+        }
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.validate_execution_artifact(artifact, expanded)
         self.assertEqual(raised.exception.code,
                          "execution_artifact_socket_process_mismatch")
 

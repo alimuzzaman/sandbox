@@ -19,14 +19,16 @@ Only things about itself, offline:
   rather than success. That state is sticky, and a valid acceptance must carry
   the exact request, manifest, machine, broker epoch, source revisions, and a
   timestamp within five minutes of the recorded request start;
+- broker and controller unit, cgroup, executable path, executable digest, and
+  configuration digest identities are sealed into that manifest; a basename
+  lookalike from another directory cannot satisfy controller evidence;
 - partial evidence never classifies as `passed_live`, and cleanup trouble
   outranks a clean result;
 - every planned probe is an argv array of allowlisted, manifest-derived tokens
   with a finite timeout and bounded, redacted output, and each declares how it
   proves itself: `exit_zero`, `exit_nonzero`, or `empty_output`. Absence checks
-  use the latter two, because a removed cgroup makes `test -d` exit non-zero
-  and reading that as a failure would report a clean host as bad and a host
-  with leftover state as good;
+  use command-specific typed missing-resource output so a legitimate missing
+  object passes while permission and tool failures remain blocked;
 - `checks.json` must bind every result to the exact catalog category, source,
   expectation, and argv that was planned. Its typed observation is evaluated
   from immutable catalog and manifest predicates. Process UID/argv, socket

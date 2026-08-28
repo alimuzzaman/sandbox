@@ -112,3 +112,6 @@ Persisted records with malformed identity or timestamp fields are classified thr
 stable typed reader errors internally, then withheld like invalid JSON. Paginated and
 date-filtered CLI/MCP responses remain valid JSON and report the complete
 `invalid_record_count`; malformed stored values never escape as raw exceptions.
+Record reads are descriptor-bound, no-follow, regular-file-only, and capped at the
+repository's 1 MiB export ceiling before JSON parsing. Oversized or unsafe filesystem
+entries are withheld and counted without exposing their content.

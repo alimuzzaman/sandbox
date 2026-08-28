@@ -14,7 +14,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from sandbox.feedback.service import (
-    FeedbackRecordError, FeedbackService, FeedbackStore,
+    MAX_RECORD_BYTES, FeedbackRecordError, FeedbackService, FeedbackStore,
 )
 
 
@@ -489,6 +489,47 @@ class TestFeedbackService(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "feedback_record_field_invalid")
         self.assertEqual(caught.exception.field, "created_at")
+
+    def test_oversized_record_is_not_parsed_and_is_counted_as_invalid(self):
+        oversized = self.root / "feedback" / (
+            "20260812T083100Z-" + "d" * 32 + ".json"
+        )
+        oversized.parent.mkdir(parents=True)
+        oversized.write_bytes(b"{" + b"x" * MAX_RECORD_BYTES + b"}")
+
+        with patch("sandbox.feedback.service.json.loads") as loads:
+            payload = self.service.list(1, since="2026-08-12T08:00:00Z")
+
+        loads.assert_not_called()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["feedback"], [])
+        self.assertEqual(payload["data"]["invalid_record_count"], 1)
+        self.assertEqual(json.loads(json.dumps(payload)), payload)
+
+        with self.assertRaises(FeedbackRecordError) as caught:
+            self.service.store._read(oversized)
+        self.assertEqual(caught.exception.code, "feedback_record_too_large")
+
+    def test_symlink_and_non_regular_record_entries_are_counted_without_reading(self):
+        records = self.root / "feedback"
+        records.mkdir(parents=True)
+        outside = self.root / "outside.json"
+        outside.write_text('{"secret":"must-not-be-read"}', encoding="utf-8")
+        symlink = records / ("20260812T083100Z-" + "b" * 32 + ".json")
+        symlink.symlink_to(outside)
+        non_regular = records / ("20260812T083101Z-" + "c" * 32 + ".json")
+        non_regular.mkdir()
+
+        payload = self.service.list(10)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["feedback"], [])
+        self.assertEqual(payload["data"]["invalid_record_count"], 2)
+        self.assertNotIn("must-not-be-read", json.dumps(payload))
+        for path in (symlink, non_regular):
+            with self.assertRaises(FeedbackRecordError) as caught:
+                self.service.store._read(path)
+            self.assertEqual(caught.exception.code, "feedback_record_not_regular")
 
     def test_regression_retention_and_prune_never_delete_without_confirmation(self):
         old_service = FeedbackService(

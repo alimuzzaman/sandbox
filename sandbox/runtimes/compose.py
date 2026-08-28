@@ -16,6 +16,8 @@ from .base import OperationRequest, OperationResult, RuntimeDependencies
 
 _SAFE = re.compile(r"[^a-z0-9-]+")
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+_SAFE_RUNTIME_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_WORKSPACE_FAMILY_MARKER = re.compile(r"-workspace-[0-9a-f]{14}")
 
 # ``BoundedProcessRunner`` already enforces this limit for the normal
 # dependency used by the adapter.  Keep the limit at this seam as well so a
@@ -49,6 +51,30 @@ def _valid_port(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
 
+def node_store_family_id(runtime_id: str) -> str:
+    """Return one exact, collision-preserving Compose node-store family."""
+    if not isinstance(runtime_id, str) or not _SAFE_RUNTIME_ID.fullmatch(runtime_id):
+        raise ValueError("Compose runtime id is invalid for node-store family")
+    markers = tuple(_WORKSPACE_FAMILY_MARKER.finditer(runtime_id))
+    if not markers:
+        return _node_store_family_component(runtime_id)
+    if len(markers) != 1 or markers[0].end() != len(runtime_id):
+        return runtime_id
+    marker = markers[0]
+    family = runtime_id[:marker.start()] + runtime_id[marker.end():]
+    if not family or not _SAFE_RUNTIME_ID.fullmatch(family):
+        raise ValueError("Compose node-store family is ambiguous")
+    return _node_store_family_component(family)
+
+
+def _node_store_family_component(runtime_id: str) -> str:
+    """Fit one canonical runtime identity before the fixed workspace marker."""
+    if len(runtime_id) <= 38:
+        return runtime_id
+    digest = hashlib.sha256(runtime_id.encode()).hexdigest()[:8]
+    return f"{runtime_id[:29].rstrip('-')}-{digest}"
+
+
 class ComposeAdapter:
     """Framework-neutral local Compose runtime.
 
@@ -73,14 +99,52 @@ class ComposeAdapter:
         })
 
     @staticmethod
-    def _runtime_id(root: str, label: str, taken: set[str]) -> str:
-        base = _SAFE.sub("-", Path(root).name.lower()).strip("-") or "project"
+    def _runtime_id(root: str, label: str, taken: set[str], *,
+                    source_family: str | None = None,
+                    require_source_family: bool = False) -> str:
+        root_path = Path(root).resolve(strict=False)
+        base = _SAFE.sub("-", root_path.name.lower()).strip("-") or "project"
         suffix = "" if label == "default" else f"-{_SAFE.sub('-', label.lower()).strip('-')}"
+        markers = tuple(_WORKSPACE_FAMILY_MARKER.finditer(base))
+        workspace_marker = None
+        source_root = root_path
+        if len(markers) == 1 and markers[0].end() == len(base):
+            workspace_marker = markers[0].group(0)
+            source_base = base[:markers[0].start()]
+            if source_base:
+                base = source_base
+                source_root = root_path.parent / source_base
         candidate = f"{base}{suffix}"[:48].strip("-") or "project"
+        digest = hashlib.sha256(
+            f"{source_root.resolve(strict=False)}\0{label}".encode()
+        ).hexdigest()[:8]
+        collision = f"{candidate[:39].rstrip('-')}-{digest}"
+        if workspace_marker is not None:
+            plain = f"{_node_store_family_component(candidate)}{workspace_marker}"
+            collided = f"{_node_store_family_component(collision)}{workspace_marker}"
+            if source_family is not None:
+                if (not _SAFE_RUNTIME_ID.fullmatch(source_family) or
+                        _WORKSPACE_FAMILY_MARKER.search(source_family)):
+                    raise ValueError("registered Compose source family is invalid")
+                return f"{_node_store_family_component(source_family)}{workspace_marker}"
+            if require_source_family:
+                raise ValueError(
+                    "opted-in Compose workspace requires a registered source family"
+                )
+            if collided in taken or collision in taken:
+                return collided
+            if plain in taken:
+                return plain
+            if candidate in taken:
+                # A bare set cannot prove that the occupied candidate belongs
+                # to this workspace's canonical source. Preserve isolation by
+                # using the path-bound collision identity. The invoke path
+                # supplies a registry-pinned source family when one exists.
+                return collided
+            return plain
         if candidate not in taken:
             return candidate
-        digest = hashlib.sha256(f"{Path(root).resolve()}\0{label}".encode()).hexdigest()[:8]
-        return f"{candidate[:39].rstrip('-')}-{digest}"
+        return collision
 
     def _descriptor(self, request: OperationRequest) -> dict[str, Any]:
         descriptor = self.registry.load_project_config(request.project_root, label=request.label)
@@ -142,7 +206,7 @@ class ComposeAdapter:
         path = self._artifact_dir(runtime_id) / "sandbox.override.yaml"
         service = descriptor["service"]
         resources = descriptor.get("resources") or {"cpus": 2.0, "memoryMB": 4096, "pids": 512}
-        path.write_text(
+        content = (
             "services:\n"
             f"  {service}:\n"
             "    ports:\n"
@@ -151,6 +215,22 @@ class ComposeAdapter:
             f"    mem_limit: \"{int(resources['memoryMB'])}m\"\n"
             f"    pids_limit: {int(resources['pids'])}\n"
         )
+        if descriptor.get("node_store") is True:
+            family = node_store_family_id(runtime_id)
+            volume = f"sandbox-nodestore-{family}"
+            modules = f"/sandbox-node/node_modules/{runtime_id}"
+            content += (
+                "    volumes:\n"
+                f"      - \"{volume}:/sandbox-node\"\n"
+                "    environment:\n"
+                "      SANDBOX_NODE_STORE: /sandbox-node/store\n"
+                f"      SANDBOX_NODE_MODULES: {modules}\n"
+                "      npm_config_store_dir: /sandbox-node/store\n"
+                "volumes:\n"
+                f"  {volume}:\n"
+                f"    name: {volume}\n"
+            )
+        path.write_text(content)
         return path
 
     def _compose_args(self, descriptor: dict[str, Any], runtime_id: str, *args: str) -> list[str]:
@@ -178,8 +258,41 @@ class ComposeAdapter:
         descriptor = self._descriptor(request)
         op = request.operation
         record = self._record(request)
-        taken = {str(e.get("instance")) for e in self.registry.registry_all().values() if e.get("instance")}
-        runtime_id = str(record.get("instance")) if record else self._runtime_id(descriptor["root"], request.label, taken)
+        registry_records = tuple(self.registry.registry_all().values())
+        taken = {str(e.get("instance")) for e in registry_records if e.get("instance")}
+        source_family = None
+        root_path = Path(descriptor["root"]).resolve(strict=False)
+        root_markers = tuple(_WORKSPACE_FAMILY_MARKER.finditer(root_path.name.lower()))
+        if len(root_markers) == 1 and root_markers[0].end() == len(root_path.name):
+            source_root = root_path.with_name(root_path.name[:root_markers[0].start()])
+            matches = {
+                str(entry.get("instance"))
+                for entry in registry_records
+                if entry.get("instance")
+                and entry.get("label", "default") == request.label
+                and Path(str(entry.get("root", ""))).resolve(strict=False) == source_root
+            }
+            if len(matches) > 1:
+                raise ValueError("registered Compose source family is ambiguous")
+            if matches:
+                source_family = matches.pop()
+        runtime_id = (
+            str(record.get("instance")) if record else
+            self._runtime_id(
+                descriptor["root"], request.label, taken,
+                source_family=source_family,
+                require_source_family=descriptor.get("node_store") is True,
+            )
+        )
+        if descriptor.get("node_store") is True and len(root_markers) == 1:
+            if source_family is None:
+                raise ValueError(
+                    "opted-in Compose workspace requires a registered source family"
+                )
+            if node_store_family_id(runtime_id) != node_store_family_id(source_family):
+                raise ValueError(
+                    "registered Compose workspace family does not match its source"
+                )
         http_port = int(record.get("http_port")) if record and record.get("http_port") else self._record_port(descriptor, runtime_id)
         overlay = self._overlay(descriptor, runtime_id, http_port)
         project_args = ["--project-name", f"sandbox-{runtime_id}", "--project-directory", descriptor["root"], "--file", descriptor["compose_file"], "--file", str(overlay)]

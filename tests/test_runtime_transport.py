@@ -305,6 +305,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                         return_value={"target_service": service}), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "check_reachable_diagnostic",
+                                  return_value={"reachable": True}), \
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
@@ -337,6 +339,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                         return_value={"target_service": service}), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "check_reachable_diagnostic",
+                                  return_value={"reachable": True}), \
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
@@ -1011,6 +1015,8 @@ class TestStatusJsonRedaction(unittest.TestCase):
                         return_value={"target_service": service}), \
                 mock.patch.object(remote, "deploy_exact_working_tree",
                                   return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "check_reachable_diagnostic",
+                                  return_value={"reachable": True}), \
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \

@@ -21,18 +21,18 @@ Two structural leaks make remote host storage grow with every job. This plan clo
    `SANDBOX_NODE_MODULES`, and `npm_config_store_dir`. The family is the runtime id with the
    `-workspace-<hash>` segment removed, so the source checkout and all of its workspaces
    resolve to the same volume instead of minting a new empty one per directory. Because both
-   the store and the dependency tree live inside that single mount, `link()` does not return
-   `EXDEV` and pnpm hard-links instead of copying. The hosted project consumes the contract by
+   the store and a distinct dependency tree for each canonical runtime live inside that single
+   mount, sibling workspaces cannot overwrite one another's dependency versions, `link()` does
+   not return `EXDEV`, and pnpm can hard-link instead of copying. The hosted project consumes the contract by
    dropping its per-workspace `node_modules` volume and pointing `node_modules` at
    `$SANDBOX_NODE_MODULES`.
 
 **uid resolution (explicit).** Containers keep running as their image account (root). The
 shared store therefore must never land on the host bind: it lives in a Docker-managed named
 volume, so the host-side `cp -a` / `rm -rf` workspace prep that runs as the ordinary operator
-account never meets root-owned content. The current code has no named-store reclaim interface,
-and raw Docker removal is unsupported. A future named-store operation MUST be provided through
-a supported Sandbox CLI/MCP read-only plan plus explicit confirmation, targeting only the
-validated `sandbox-nodestore-<family>` volume; broad prune remains prohibited.
+account never meets root-owned content. T015 supplies a supported Sandbox CLI/MCP read-only
+plan plus explicit confirmation, targeting only the validated
+`sandbox-nodestore-<family>` volume; raw Docker removal and broad prune remain prohibited.
 Switching the service to `--user $(id -u)` was rejected: the runtime command starts with
 `corepack enable`, which writes into the image's global bin directory and fails as a
 non-root user.
@@ -74,9 +74,9 @@ no push-back path exists from the remote
 
 **Gate result**: PASS, no deviations to justify.
 
-Additional constraints honoured: no secret is echoed; the BuildKit `--mount=type=cache,id=pnpm-store`
-build cache is untouched; file scope excludes `sandbox/resources/**`,
-`sandbox/commands/resources.py`, `sandbox/config/manifest.py`, and MCP resource registration.
+Additional constraints honoured: no secret is echoed; the BuildKit
+`--mount=type=cache,id=pnpm-store` build cache is untouched. T015 is the only resource-surface
+extension and remains exact-name, read-only-plan, confirmation-gated, and manifest-registered.
 
 ## Project Structure
 
@@ -108,6 +108,10 @@ sandbox/
 │   └── compose.py             # overlay emits the family-scoped node store contract
 ├── config/
 │   └── compose.py             # parses compose.nodeStore opt-in
+├── resources/
+│   └── node_store.py          # exact-family reclaim plan/apply service
+├── commands/
+│   └── resources.py           # registered CLI seam
 └── application/
     └── workspace_service.py   # local reset copy reuses the python materializer
 

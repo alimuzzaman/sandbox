@@ -9,6 +9,7 @@ import inspect
 import re
 import shlex
 import subprocess
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from sandbox.jobs.models import (normalize_output_page_bytes,
@@ -323,45 +324,17 @@ def _decode_job_page(payload: object) -> dict:
     return payload
 
 
-def workspace_refresh_command(source_path: str, workspace_path: str) -> str:
-    """Refresh a remote copy without invalidating existing bind-mount inodes."""
-    root_script = (
-        "find /workspace -mindepth 2 -maxdepth 2 -exec rm -rf -- {} +; "
-        "find /workspace -mindepth 1 -maxdepth 1 ! -type d -exec rm -f -- {} +"
-    )
-    root_clean = (
-        'docker run --rm --user 0:0 --volume "$workspace:/workspace" '
-        f"alpine:3.20 sh -c {shlex.quote(root_script)}"
-    )
-    top_level_items = '"$workspace"/* "$workspace"/.[!.]* "$workspace"/..?*'
-    clean_contents = (
-        f"for item in {top_level_items}; do "
-        'if [ ! -e "$item" ] && [ ! -L "$item" ]; then continue; fi; '
-        'if [ -d "$item" ] && [ ! -L "$item" ]; then '
-        'find "$item" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
-        'else rm -f -- "$item"; fi; done'
-    )
-    remaining_contents = (
-        'find "$workspace" -mindepth 2 -print -quit; '
-        'find "$workspace" -mindepth 1 -maxdepth 1 ! -type d -print -quit'
-    )
-    prune_stale_dirs = (
-        f"for item in {top_level_items}; do "
-        'if [ ! -e "$item" ] && [ ! -L "$item" ]; then continue; fi; '
-        'if [ -d "$item" ] && [ ! -L "$item" ]; then name=${item##*/}; '
-        'if [ ! -d "$source/$name" ] || [ -L "$source/$name" ]; then '
-        'rmdir -- "$item"; fi; fi; done'
-    )
-    return (
-        f"workspace={shlex.quote(workspace_path)}; source={shlex.quote(source_path)}; "
-        'mkdir -p "$workspace" && '
-        f"{clean_contents} 2>/dev/null || true; "
-        f'if [ -n "$({remaining_contents})" ]; then {root_clean}; fi && '
-        f"{prune_stale_dirs} && "
-        f'if [ -n "$({remaining_contents})" ]; then '
-        "echo 'remote workspace cleanup left contents' >&2; exit 1; fi && "
-        'cp -a "$source/." "$workspace"'
-    )
+def workspace_refresh_command(source_path: str, workspace_path: str, *,
+                              sandbox_root: str | None = None) -> str:
+    """Render the shared materializer with shell-safe argument quoting."""
+    argv = [
+        "python3", "-m", "sandbox.workspaces.checkout", "materialize",
+        "--source", source_path, "--workspace", workspace_path,
+        "--label", "remote",
+    ]
+    if sandbox_root is not None:
+        argv[:0] = ["env", f"PYTHONPATH={sandbox_root}"]
+    return shlex.join(argv)
 
 
 class RemoteJobTransport:
@@ -596,7 +569,10 @@ class RemoteJobTransport:
         workspace_path = f"{source_path}-workspace-{suffix}"
         # Preserve top-level directory inodes already used by nested Compose
         # bind mounts while replacing their contents and pruning stale dirs.
-        command = workspace_refresh_command(source_path, workspace_path)
+        sandbox_root = str(PurePosixPath(self.remote_sb_path(remote)).parent)
+        command = workspace_refresh_command(
+            source_path, workspace_path, sandbox_root=sandbox_root,
+        )
         result = self._run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
             detail = "\n".join(part.strip() for part in (

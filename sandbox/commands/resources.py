@@ -10,7 +10,7 @@ import time
 
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
-from sandbox.resources.context import reclaim_service, resource_service
+from sandbox.resources.context import node_store_service, reclaim_service, resource_service
 from sandbox.resources.models import redact
 from sandbox.resources.monitor import record_path, resolve_policy
 
@@ -106,6 +106,7 @@ def _monitor_invalid_mode(args) -> dict | None:
     invalid = (
         ("--scope", getattr(args, "scope", None) is not None),
         ("--tier", getattr(args, "tier", None) is not None),
+        ("--node-store-family", getattr(args, "node_store_family", None) is not None),
         ("--plan-id", getattr(args, "plan_id", None) is not None),
         ("--confirm", bool(getattr(args, "confirm", False))),
         ("--thorough", bool(getattr(args, "thorough", False))),
@@ -356,6 +357,10 @@ def configure_parser(parser) -> None:
     # job-status/job-output rather than invoking the worker directly.
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-id", default=None)
+    parser.add_argument(
+        "--node-store-family", default=None,
+        help="exact canonical Compose family for named node-store plan/apply",
+    )
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument(
         "--scheduled",
@@ -1139,6 +1144,36 @@ def cmd_resources(_cfg, args) -> None:
                                 "invalid_mode"),
         ), bool(args.json))
         raise SystemExit(1)
+    if getattr(args, "node_store_family", None):
+        from sandbox.resources.service import ResourceError, result
+        if action not in {"plan", "cleanup"} or args.scope or args.tier:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "--node-store-family is exclusive to node-store plan/cleanup",
+                "invalid_mode",
+            ))
+        elif action == "plan" and args.plan_id:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "node-store plan does not accept --plan-id", "invalid_mode",
+            ))
+        elif action == "plan":
+            payload = node_store_service(getattr(args, "remote", None)).plan(
+                args.node_store_family,
+                budget_seconds=args.budget if args.budget is not None else 30,
+            )
+        elif not args.plan_id:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "node-store cleanup requires --plan-id", "plan_not_found",
+            ))
+        else:
+            payload = node_store_service(getattr(args, "remote", None)).apply(
+                args.plan_id, family=args.node_store_family,
+                confirm=bool(args.confirm),
+                budget_seconds=args.budget if args.budget is not None else 60,
+            )
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
     if getattr(args, "tier", None) and action == "status":
         from sandbox.resources.service import ResourceError, result
         _emit(result(

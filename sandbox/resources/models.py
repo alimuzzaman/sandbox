@@ -546,16 +546,20 @@ class CleanupCandidate:
     expected_allocation_state: str | None = None
     expected_allocation_pool: str | None = None
 
-    @classmethod
-    def from_observation(cls, item: ResourceObservation) -> "CleanupCandidate":
-        if item.classification not in {"disposable_cache", "stale_candidate"}:
-            raise ValueError("resource is not cleanup eligible")
+    @staticmethod
+    def evidence_digest_for(item: ResourceObservation) -> str:
         canonical = "\n".join((
             item.resource_id, item.kind, item.locator, item.owner_kind,
             item.owner_id or "", *sorted(item.evidence), *sorted(item.references),
             item.lifecycle or "", repr(item.active_references),
             item.allocation_state or "", item.allocation_pool or "",
         ))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    @classmethod
+    def from_observation(cls, item: ResourceObservation) -> "CleanupCandidate":
+        if item.classification not in {"disposable_cache", "stale_candidate"}:
+            raise ValueError("resource is not cleanup eligible")
         return cls(
             resource_id=item.resource_id,
             kind=item.kind,
@@ -566,7 +570,7 @@ class CleanupCandidate:
             expected_absence=tuple(sorted(item.references)),
             expected_size_bytes=item.size_bytes,
             expected_reclaimable_bytes=item.reclaimable_bytes,
-            evidence_digest=hashlib.sha256(canonical.encode()).hexdigest(),
+            evidence_digest=cls.evidence_digest_for(item),
             expected_lifecycle=item.lifecycle,
             expected_active_references=item.active_references,
             expected_allocation_state=item.allocation_state,

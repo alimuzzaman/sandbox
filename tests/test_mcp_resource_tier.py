@@ -47,6 +47,21 @@ class _ReclaimService:
                 "data": {"tier": tier, "observed_reclaimed_bytes": 0}}
 
 
+class _NodeStoreService:
+    def __init__(self):
+        self.calls = []
+
+    def plan(self, family, *, budget_seconds):
+        self.calls.append(("plan", family, budget_seconds))
+        return {"ok": True, "action": "node_store_plan", "status": "planned",
+                "data": {"plan_id": "a" * 32, "family": family}}
+
+    def apply(self, plan_id, *, family, confirm):
+        self.calls.append(("apply", plan_id, family, confirm))
+        return {"ok": True, "action": "node_store_cleanup", "status": "removed",
+                "data": {"plan_id": plan_id, "family": family}}
+
+
 class _Server:
     @staticmethod
     def tool():
@@ -61,10 +76,28 @@ class TestMcpResourceTier(unittest.TestCase):
         self.resources = resources
         self.scope = _ScopeService()
         self.reclaim = _ReclaimService()
+        self.node_store = _NodeStoreService()
         resources.register(_Server(), ToolDependencies({
             "resource_service_factory": lambda _remote: self.scope,
             "reclaim_service_factory": lambda _remote: self.reclaim,
+            "node_store_service_factory": lambda _remote: self.node_store,
         }))
+
+    def test_node_store_plan_and_apply_use_exact_registered_service(self):
+        planned = self.resources.resource_cleanup_plan(
+            node_store_family="lenzora", remote="fixture", budget_seconds=12,
+        )
+        applied = self.resources.resource_cleanup_apply(
+            plan_id="a" * 32, node_store_family="lenzora",
+            remote="fixture", confirm=True,
+        )
+        self.assertTrue(planned["ok"] and applied["ok"])
+        self.assertEqual(self.node_store.calls, [
+            ("plan", "lenzora", 12),
+            ("apply", "a" * 32, "lenzora", True),
+        ])
+        self.assertEqual(self.scope.calls, [])
+        self.assertEqual(self.reclaim.calls, [])
 
     def test_tier_plan_routes_to_reclaim_service_with_its_public_payload(self):
         payload = self.resources.resource_cleanup_plan(
@@ -140,4 +173,3 @@ class TestMcpResourceTier(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], code)
         self.assertEqual(self.scope.calls, [])
         self.assertEqual(self.reclaim.calls, [])
-

@@ -67,6 +67,16 @@ def _read_docker_launcher_pid(pid_file: Path) -> int | None:
     return pid if prefix == "launch" and pid > 1 else None
 
 
+def _read_docker_handle(pid_file: Path) -> str | None:
+    try:
+        marker = pid_file.read_text().strip()
+    except OSError:
+        return None
+    if marker == "container":
+        return marker
+    return "launch" if _read_docker_launcher_pid(pid_file) is not None else None
+
+
 def _write_new_artifact(path: Path, value: str) -> None:
     """Create one durable marker without replacing another job's evidence."""
     with path.open("x", encoding="utf-8") as handle:
@@ -113,28 +123,41 @@ def _docker_container_running(instance: str, jid: str) -> bool | None:
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode == 0:
-        return result.stdout.strip().lower() == "true"
+        state = result.stdout.strip().lower()
+        if state == "true":
+            return True
+        if state == "false":
+            return False
+        return None
     detail = ((result.stdout or "") + (result.stderr or "")).lower()
     if "no such object" in detail or "no such container" in detail:
         return False
     return None
 
 
-def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool:
-    """Verify the exact host supervisor before treating its PGID as a handle."""
+def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    """Observe the exact host supervisor as running, dead, or unknown."""
     pid = _read_docker_launcher_pid(pid_file)
     if pid is None:
-        return False
+        return None
     try:
         result = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
             check=False, capture_output=True, text=True, timeout=1,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
     fields = (result.stdout or "").strip().split(maxsplit=2)
-    if result.returncode != 0 or len(fields) != 3:
-        return False
+    if result.returncode != 0:
+        # ``ps`` uses exit 1 with no row for an absent process.  Other probe
+        # failures cannot authorize either reconciliation or signalling.
+        return (
+            False
+            if result.returncode == 1 and not fields and not (result.stderr or "").strip()
+            else None
+        )
+    if len(fields) != 3:
+        return None
     try:
         observed_pid, observed_pgid = int(fields[0]), int(fields[1])
     except ValueError:
@@ -147,12 +170,79 @@ def _docker_launcher_running(instance: str, jid: str, pid_file: Path) -> bool:
 
 
 def _docker_job_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    handle = _read_docker_handle(pid_file)
     container = _docker_container_running(instance, jid)
     if container is True:
         return True
-    if _docker_launcher_running(instance, jid, pid_file):
+    if handle == "container":
+        return container
+    if handle == "launch":
+        launcher = _docker_launcher_running(instance, jid, pid_file)
+        if launcher is True:
+            return True
+        # Before the atomic transition to ``container``, absence of the named
+        # container does not prove terminal failure.  The supervisor may still
+        # be between create and publication, and a failed probe is unknown.
+        return None
+    return None
+
+
+def _remove_docker_job_container(instance: str, jid: str) -> None:
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", _job_name(instance, jid)],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _stop_process_group(process: subprocess.Popen) -> bool:
+    """Boundedly stop a process group created by ``start_new_session``."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    try:
+        process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
         return True
-    return container
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _retain_cleanup_unknown(log_file: Path) -> None:
+    """Keep bounded, secret-free evidence when launch cleanup is uncertain."""
+    try:
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write("[sandbox] launch cleanup could not be verified\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+
+
+def _abort_docker_launch(
+    instance: str,
+    jid: str,
+    process: subprocess.Popen,
+    log_file: Path,
+) -> bool:
+    stopped = _stop_process_group(process)
+    _remove_docker_job_container(instance, jid)
+    absent = _docker_container_running(instance, jid) is False
+    if not (stopped and absent):
+        _retain_cleanup_unknown(log_file)
+        return False
+    return True
 
 
 def _job_process_running(instance: str, jid: str, pid_file: Path) -> bool | None:
@@ -235,21 +325,40 @@ handle_file=$3
 temporary_handle=$4
 shift 4
 while [ ! -s "$handle_file" ]; do sleep 0.01; done
-cancel_launch() {
+container_absent() {
+  observation=$(docker inspect --type container "$container_name" 2>&1)
+  code=$?
+  if [ "$code" -eq 0 ]; then return 1; fi
+  case "$observation" in
+    *"No such object"*|*"No such container"*) return 0 ;;
+  esac
+  return 1
+}
+cleanup_and_record() {
+  terminal_code=$1
   docker rm -f -- "$container_name" >/dev/null 2>&1 || :
-  printf '143' > "$status_file"
+  if ! container_absent; then return 1; fi
+  printf '%s' "$terminal_code" > "$status_file" || return 1
   rm -f -- "$temporary_handle"
-  exit 143
+  return 0
+}
+cancel_launch() {
+  trap - TERM INT HUP
+  if cleanup_and_record 143; then exit 143; fi
+  exit 125
 }
 trap cancel_launch TERM INT HUP
 "$@" >/dev/null 2>&1
 code=$?
 if [ "$code" -eq 0 ]; then
-  printf 'container' > "$temporary_handle" && mv -f -- "$temporary_handle" "$handle_file"
+  if printf 'container' > "$temporary_handle" && mv -f -- "$temporary_handle" "$handle_file"; then
+    exit 0
+  fi
+  if cleanup_and_record 1; then exit 1; fi
+  exit 125
 else
-  docker rm -f -- "$container_name" >/dev/null 2>&1 || :
-  printf '%s' "$code" > "$status_file"
-  rm -f -- "$temporary_handle"
+  if cleanup_and_record "$code"; then exit "$code"; fi
+  exit 125
 fi
 """.strip()
         compose_argv = [
@@ -267,21 +376,25 @@ fi
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            try:
-                _write_new_artifact(pid_file, f"launch:{process.pid}")
-            except Exception:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=_JOB_LAUNCH_STOP_SECONDS)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                raise
         except Exception:
             _remove_launch_artifacts(paths)
             try:
                 Path(temporary_handle).unlink(missing_ok=True)
             except OSError:
                 pass
+            raise
+        try:
+            _write_new_artifact(pid_file, f"launch:{process.pid}")
+        except Exception:
+            cleanup_proven = _abort_docker_launch(
+                instance, jid, process, log_file,
+            )
+            if cleanup_proven:
+                _remove_launch_artifacts(paths)
+                try:
+                    Path(temporary_handle).unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise
     return jid
 
@@ -344,32 +457,37 @@ def kill_job(instance: str, jid: str) -> dict:
             time.sleep(0.05)
         terminated = not _herd_group_running(pid)
     else:
+        handle = _read_docker_handle(pid_file)
         launcher_pid = _read_docker_launcher_pid(pid_file)
-        if launcher_pid is not None and _docker_launcher_running(
-            instance, jid, pid_file,
-        ):
+        launcher_state = (
+            _docker_launcher_running(instance, jid, pid_file)
+            if handle == "launch" else False
+        )
+        if launcher_pid is not None and launcher_state is True:
             try:
                 os.killpg(launcher_pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
             deadline = time.monotonic() + _JOB_LAUNCH_STOP_SECONDS
-            while (_docker_launcher_running(instance, jid, pid_file)
-                   and time.monotonic() < deadline):
+            while launcher_state is True and time.monotonic() < deadline:
                 time.sleep(_JOB_LAUNCH_POLL_SECONDS)
-        try:
-            subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
-                           check=False, capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            # The subsequent observations remain authoritative.  A failed or
-            # timed-out removal can never manufacture a successful kill.
-            pass
+                launcher_state = _docker_launcher_running(
+                    instance, jid, pid_file,
+                )
+        _remove_docker_job_container(instance, jid)
         # Do not create a successful cancellation record solely because the
-        # removal command returned.  The follow-up inspect is the proof that
-        # no child process remains in the detached container.
-        terminated = (
-            not _docker_launcher_running(instance, jid, pid_file)
-            and _docker_job_running(instance, jid, pid_file) is False
-        )
+        # removal command returned. Both owner and container observations must
+        # be exact; unknown never becomes terminal.
+        if handle == "launch":
+            launcher_state = _docker_launcher_running(instance, jid, pid_file)
+            terminated = (
+                launcher_state is False
+                and _docker_container_running(instance, jid) is False
+            )
+        elif handle == "container":
+            terminated = _docker_container_running(instance, jid) is False
+        else:
+            terminated = False
     if not terminated:
         return {"job_id": jid, "status": "running", "killed": False,
                 "error": "job termination could not be verified"}

@@ -6,7 +6,8 @@ description: "Task list for Async / Background WP-CLI Jobs"
 
 **Input**: Design documents from `specs/004-async-wp-cli-jobs/`
 
-**Status**: Locally complete. Implemented + live-verified on Docker and Herd. Implementation
+**Status**: Implemented + locally exercised on Docker and Herd; T021 reopened for
+independent review after tri-state cleanup hardening. Implementation
 landed in `sandbox/commands/jobs.py` (core + CLI) and `mcp/wp-server/tools/wp.py` (MCP
 tools), not all in `tools/wp.py` as the original plan guessed.
 
@@ -18,11 +19,15 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 2: Foundational
 
 - [x] T003 Log-slice reader (`offset`/`limit`, `truncated`; `limit=-1` ⇒ whole file) in `job_status`.
-- [x] T004 Launch wrappers — **Docker**: `compose run -d --entrypoint sh wpcli` (the wpcli service is run-style, not `exec`-able; container kill reaps the whole process tree, so no `setsid` needed there); **herd**: `setsid` + backgrounded host `wp`. Each writes `$$`→`.pid`, runs `wp`, `$?`→`.status`; args `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root, same files host + container (gotcha #3).
+- [x] T004 Launch wrappers — **Docker**: Sandbox starts a new-session host
+  supervisor, records its verified handle, and the supervisor starts the exact
+  named `compose run -d --entrypoint sh wpcli` container; **Herd**: Sandbox starts
+  a new-session host wrapper and records the returned Popen PID. WP exit writes
+  `.status`; args are `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root.
 
 ## Phase 3: US1 — Long command doesn't block (P1)
 
-- [x] T005 `./sb wp --async` flag (dest=`run_async`, since `async` is a reserved word) → `launch_job`, prints job_id. **LIVE-VERIFIED**: returns on container-create (~7s, fixed), not on command duration.
+- [x] T005 `./sb wp --async` flag (dest=`run_async`, since `async` is a reserved word) → `launch_job`, prints one job ID after durable supervisor acceptance, not after WP completion.
 - [x] T006 `./sb wp --async <args>` prints job_id + poll/follow/kill hints.
 - [x] T007 **LIVE-VERIFIED**: `sleep(8)` job → job_id returned; command continued detached.
 
@@ -66,12 +71,13 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   logic they call are live-verified.
 - Docker acceptance is the live host supervisor plus durable `launch:<pid>`
   marker; the named container transition continues asynchronously under that
-  supervisor's cleanup ownership.
+  supervisor's cleanup ownership. Owner/container observation is tri-state and
+  cleanup uncertainty never creates terminal status.
 
 ## Phase 9: Convergence
 
-- [x] T021 Redesign Docker async-job acceptance around a live isolated supervisor
-  with durable running evidence and exact named-container cleanup. On 2026-08-28,
-  real `xspeed-released` Docker runs accepted 30-second and 2-second WP-CLI jobs
-  in 1.25s and 1.27s respectively; immediate poll/kill returned running then
-  durable exit 143, and the completion run retained output with exit 0.
+- [ ] T021 Redesign Docker async-job acceptance around a live isolated supervisor
+  with durable running evidence, tri-state observation, and exact named-container
+  cleanup. Local measurements are below two seconds and adversarial tests cover
+  unknown probes/cleanup; keep open until independent review accepts the hardened
+  implementation and its local evidence record.

@@ -21,13 +21,14 @@
 
 ### `wp_cli_job_kill(job_id, *, project_dir)`
 - Herd sends `SIGTERM` to the wrapper process **group**. Docker force-removes
-  the detached job container (and therefore its children). A `143` status is
-  written only after the process group/container is verified gone.
+  the detached job container (and therefore its children). During Docker launch,
+  it also stops the identity-checked supervisor. A `143` status is written only
+  after the applicable owner and exact named container are both observed absent.
 - A cancelled job reports `status:"completed"` with `exit_code:143` (the `.status` file is present = done); "cancelled" is a human-facing interpretation, not a distinct query status (analysis F2).
 - Killing a finished/unknown job → `{ ok, status }` no-op (no error).
-- Polling reconciles a known job whose process/container died before writing
-  `.status` into a durable non-zero completion rather than reporting it as
-  running forever.
+- Polling reconciles only a definitely dead, published execution boundary. A
+  timeout, OS error, malformed observation, or container absence before the
+  `launch`→`container` transition is unknown and remains non-terminal.
 
 ## CLI (`sandbox/commands/`)
 
@@ -66,8 +67,10 @@ container), so the host reader and the wrapper resolve identical files (F7).
 - **Docker**: an isolated host supervisor is the acceptance/cancellation
   boundary while it runs `compose run -d --name <job-name> --entrypoint sh
   wpcli -c 'wp <args> > …log 2>&1; echo $? > …status'`. It traps cancellation,
-  cleans the exact named container, and records launch failure. After successful
-  creation, the named container becomes the cancellation boundary.
+  cleans the exact named container, verifies exact absence, and only then records
+  cancellation or launch failure. Cleanup uncertainty remains observable and
+  retryable. After successful creation, the named container becomes the
+  cancellation boundary.
 - **Herd**: Python spawns `sh -c '<same wrapper>'` from `<wp_root>` with
   `start_new_session=True` and records the returned wrapper PID immediately.
 - Args shell-quoted per token (`shlex.quote`).

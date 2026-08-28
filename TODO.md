@@ -90,10 +90,10 @@ not close the external or human gates listed below.
 
 ### Remote/runtime and migration evidence
 
-- [x] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021 now uses a
-  live isolated Docker launch supervisor with durable acceptance, immediate
-  poll/kill safety, and exact named-container cleanup. Local Docker evidence on
-  2026-08-28 measured 1.25s and 1.27s acceptance; no remote claim is implied.
+- [ ] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021 has measured
+  local Docker samples below two seconds, but the tri-state liveness and exact
+  cleanup hardening remains under independent review. See the checked-in local
+  evidence record; no remote or accepted-proof claim is implied.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and

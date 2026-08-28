@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Locally complete
+**Status**: Implemented locally; T021 under independent review
 
 **Input**: User description: "Steal from Novamira #2 — WP-CLI runs synchronously today and
 long migrations/imports time out or block the agent; add background jobs with a job id and
@@ -19,18 +19,24 @@ either time out or wedge the agent. This feature adds fire-and-forget background
 jobs: a command starts, returns a job identifier immediately, runs detached, and the
 agent polls for incremental output, completion status, and (if needed) cancels it.
 
-Implementation detail (detached container exec vs host nohup, the PID self-report,
-log-slice mechanics) is deferred to `plan.md`.
+Implementation detail (the Docker supervisor-to-container transition, the Herd
+process group, tri-state observation, and log-slice mechanics) is deferred to
+`plan.md`.
 
 ## Clarifications
 
 ### Session 2026-06-22
 
-- Q: Include background-job cancellation in v1? → A: Yes — support cancel/kill. The launched job self-reports its process id so a later call can terminate it; killing a finished/unknown job is a safe no-op.
+- Q: Include background-job cancellation in v1? → A: Yes — support cancel/kill.
+  Sandbox retains an internal, verified cancellation handle; no process identity
+  is accepted from the WP command or returned to callers.
 
 ### Session 2026-08-28
 
 - Q: Does Docker acceptance require the job container itself to finish creating before return? → A: No. Acceptance requires one live, isolated supervisor with a durable running handle that owns the named-container transition and cleanup. It is not a passive queue entry. Poll and kill must work during either launch or container execution, and launch failure must leave no orphan.
+- Q: Can a failed process/container probe be treated as death? → A: No. Docker
+  owner and container observations are tri-state. Unknown remains non-terminal;
+  cancellation is recorded only after exact owner and named-container absence.
 
 ## User Scenarios & Testing *(mandatory)*
 

@@ -13,8 +13,9 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 `.sb-jobs/` (log + status + process handle). Docker acceptance starts an
 isolated host supervisor immediately; it owns the slower named `compose run -d`
 transition and every failure/cancel cleanup. Herd keeps its isolated host
-wrapper. Both paths return only after a durable running handle exists and are
-auto-pruned by age.
+wrapper. Poll and kill use tri-state observations; probe failure never becomes
+terminal state. Both paths return only after a durable running handle exists
+and are auto-pruned by age.
 
 ## Technical Context
 
@@ -57,7 +58,7 @@ No violations — proceed.
 ```text
 specs/004-async-wp-cli-jobs/
 ├── plan.md
-├── research.md          # launch mechanism per driver, pid self-report, prune policy
+├── research.md          # launch mechanism, verified handles, cleanup, prune policy
 ├── data-model.md        # Job + artifacts state machine
 ├── quickstart.md        # live async/poll/kill verification
 ├── contracts/
@@ -86,9 +87,9 @@ No constitution violations — none.
 
 ## Phase 0 — Research
 
-See [research.md](./research.md): detached launch per driver (Docker `exec -d`
-vs herd `nohup`), pid self-report to enable cancel, the file-based state machine,
-and the prune policy.
+See [research.md](./research.md): detached launch per driver (Docker supervisor
+to named container vs Herd new-session wrapper), authority-recorded handles,
+tri-state cleanup evidence, the file-based state machine, and the prune policy.
 
 ## Phase 1 — Design & Contracts
 

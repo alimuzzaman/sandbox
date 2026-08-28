@@ -16,7 +16,7 @@ No database. A Job is three files under `runtime/wp-<instance>/.sb-jobs/`.
 |------|---------|
 | `job_<id>.log` | combined stdout+stderr, appended as it runs |
 | `job_<id>.pid` | internal cancel handle: Herd wrapper PID, Docker `launch:<pid>`, or Docker `container` |
-| `job_<id>.status` | absent ⇒ running; present ⇒ done, contents = exit code (`143` if killed) |
+| `job_<id>.status` | absent ⇒ public non-terminal/running presentation; present ⇒ terminal certainty, contents = exit code (`143` if killed) |
 
 Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
 `.status`), **completed** (`.status` present; exit code = its contents), **not_found**
@@ -26,6 +26,13 @@ not a distinct query status (analysis F2); "cancelled" is the human interpretati
 Transitions: start → accepted/running; Docker launch supervisor → named container;
 process exit → completed; `kill` → verified process group and/or exact named
 container removal → completed(`143`). Age-prune removes terminal jobs' files.
+
+Docker liveness is internally tri-state: running, dead, or unknown. A probe
+timeout/error and an absent container while the handle still says `launch` are
+unknown. Unknown never creates `.status`; poll remains non-terminal and kill
+returns `killed:false`. If marker-write abort cannot prove both supervisor and
+container absence, bounded secret-free cleanup-unknown evidence remains in the
+log instead of being deleted.
 
 ## Query result (`wp_cli_job`)
 

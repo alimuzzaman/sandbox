@@ -17,6 +17,8 @@ the param is `background`, not the reserved word `async`.)
 
 Docker returns after a live isolated launch supervisor and durable running
 handle exist; it does not wait for the slower named WP-CLI container creation.
+The checked-in local measurement transcript is in
+[`evidence/local-docker-timing-2026-08-28.md`](./evidence/local-docker-timing-2026-08-28.md).
 
 ## 2. Poll to completion (incremental)
 
@@ -40,8 +42,12 @@ exit_code `143`. Killing it again → no-op, no error.
 
 ## 5. Driver parity
 
-Repeat steps 1–3 on a **herd** instance (host `nohup` path) and confirm identical
+Repeat steps 1–3 on a **herd** instance (host new-session wrapper) and confirm identical
 behavior.
+
+If Docker process/container observation is unavailable, polling must remain
+non-terminal and kill must report that termination could not be verified. Never
+interpret that result as completion or retry the WP command under a new job ID.
 
 ## 6. Safety
 

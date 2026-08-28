@@ -12,12 +12,14 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 from sandbox.resources.context import PlanStore
 from sandbox.resources.models import CleanupPlan, StorageTarget
-from sandbox.resources.reclaim_service import ReclaimService
+from sandbox.resources.reclaim_service import ReclaimService, _RemoteReclaimProvider
 from sandbox.resources.remote import LocalProbeAdapter
+from sandbox.services.process import ProcessResult
 
 
 DAY = 86400
@@ -121,6 +123,26 @@ class ServiceCase(unittest.TestCase):
 
 
 class TestPlanning(ServiceCase):
+    def test_remote_reclaim_inventory_does_not_request_deep_attribution(self):
+        class RecordingAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def observe(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(capacity={"total_bytes": 1}, reclaim={"entries": []})
+
+        adapter = RecordingAdapter()
+        payload = _RemoteReclaimProvider(adapter).inventory(
+            budget_seconds=12, directory_cache="cache_only",
+        )
+
+        self.assertEqual(payload["reclaim"], {"entries": []})
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertFalse(adapter.calls[0]["deep"])
+        self.assertFalse(adapter.calls[0]["thorough"])
+        self.assertEqual(adapter.calls[0]["directory_cache"], "cache_only")
+
     def test_plan_has_no_side_effects_on_the_host(self):
         provider = FakeProvider()
         payload = self.service(provider).plan("safe")
@@ -490,6 +512,35 @@ class ProbeCase(unittest.TestCase):
                       if item["name"] == "seen-workspace-1")
         self.assertTrue(record["is_workspace"])
         self.assertIsNotNone(record["mtime"])
+
+    def test_local_reclaim_inventory_does_not_request_deep_attribution(self):
+        calls = []
+
+        def runner(request, timeout):
+            calls.append((request, timeout))
+            return ProcessResult(
+                ("probe",), 0,
+                json.dumps({
+                    "identity": "a" * 24,
+                    "capacity": {"total_bytes": 1},
+                    "reclaim": {"entries": []},
+                    "stage": "final",
+                }) + "\n",
+                "",
+            )
+
+        payload = LocalProbeAdapter(runner=runner).observe_reclaim(
+            budget_seconds=12, directory_cache="cache_only",
+        )
+
+        self.assertEqual(payload["reclaim"], {"entries": []})
+        self.assertEqual(len(calls), 1)
+        request, timeout = calls[0]
+        self.assertEqual(request["action"], "observe")
+        self.assertFalse(request["deep"])
+        self.assertFalse(request["thorough"])
+        self.assertEqual(request["directory_cache"], "cache_only")
+        self.assertEqual(timeout, 17)
 
 
 if __name__ == "__main__":

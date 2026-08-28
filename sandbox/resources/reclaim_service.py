@@ -824,7 +824,10 @@ class _RemoteReclaimProvider:
                   directory_cache: str | None) -> dict:
         snapshot = self.adapter.observe(
             thorough=False, budget_seconds=budget_seconds, progress=None,
-            focus=None, deep=True,
+            # Reclaim authority comes from lifecycle, workspace, engine, and
+            # deployment evidence. Deep capacity attribution is status-only
+            # work and must not consume the planning deadline first.
+            focus=None, deep=False,
             directory_cache=directory_cache or "auto",
         )
         return {

@@ -404,6 +404,11 @@ is the separate, deployment-storage path: it classifies every entry of
 and writes a deletion manifest before it removes anything. The two are mutually
 exclusive on one invocation.
 
+Reclaim planning spends its finite probe budget only on the lifecycle,
+workspace, container-engine, and deployment evidence that can authorize or
+refuse a candidate. It does not run the separate capacity deep-attribution
+pass; use `resources status --deep` when that diagnostic is needed.
+
 ### Lifecycle classes
 
 Every deployment entry gets exactly one class, first match wins:

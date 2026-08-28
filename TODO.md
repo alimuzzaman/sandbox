@@ -25,6 +25,7 @@ Sources reconciled in this pass:
 | Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Accepted locally; not merged into dirty `latest` |
 | Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Accepted locally; not merged into dirty `latest` |
 | Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Accepted locally; not merged into dirty `latest` |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` accepted; not merged into dirty `latest` |
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work accepted; remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work accepted; remote and human gates remain |
 
@@ -219,7 +220,9 @@ verified.
   under-privileged refusal (`T012`), the external MCP handshake (`T014`), and
   Herd `.test` execute-php/connect/gating/crash/file round-trip (`T022`).
 - [ ] Spec 006: add the `SANDBOX_INSTRUCTIONS` startup catalog snapshot
-  enrichment still marked pending in `T007`.
+  enrichment still marked pending in `T007`. Local `T007` work is accepted on
+  `codex/finish-spec006` at `7595d2d03d2d7d71046138d5cbac151074261713`;
+  this row remains unchecked until the branch is merged into dirty `latest`.
 - [ ] Spec 013: rerun the six Plugin Check quickstart cases after the
   absolute-path/`.distignore` fixes (`T029`), despite the task checkbox being
   retained for historical implementation evidence.
@@ -362,7 +365,7 @@ promote the unproven native adapter, or authorize a provider deployment.
 
 ## Remaining blockers
 
-- The five accepted branches above are not merged into dirty `latest`.
+- The six accepted branches above are not merged into dirty `latest`.
 - Active Spec 033 work overlaps CLI, MCP, durable jobs, transport, hosting, and
   documentation; preserve that concurrent boundary during integration.
 - The feedback ledger still has 96 blocked records. Closed states do not imply

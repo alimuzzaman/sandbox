@@ -15,6 +15,7 @@ The ordered table below is retained unchanged as a historical 611-record snapsho
 | Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Accepted locally; not merged into dirty `latest` |
 | Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Accepted locally; not merged into dirty `latest` |
 | Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Accepted locally; not merged into dirty `latest` |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` accepted; not merged into dirty `latest` |
 | Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work accepted; remote evidence remains |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work accepted; remote and human gates remain |
 
@@ -22,7 +23,7 @@ None of these branches is merged into dirty `latest`. Their acceptance does not 
 
 ## Current remaining blockers
 
-- Integrate the five accepted branches without overwriting concurrent Spec 033 work in dirty `latest`.
+- Integrate the six accepted branches without overwriting concurrent Spec 033 work in dirty `latest`.
 - Preserve the active Spec 033 boundary across CLI, MCP, durable jobs, transport, hosting, and documentation.
 - Reassess the 96 blocked feedback records against current code after integration; closed records are not implementation authority.
 - Complete remote revision, capacity, workspace-index, and live-host acceptance evidence.

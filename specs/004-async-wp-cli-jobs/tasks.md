@@ -84,7 +84,8 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 - [ ] T021 Redesign Docker async-job acceptance around a live isolated supervisor
   with durable running evidence, tri-state observation, receipt-bound whole-group
   cleanup, and exact named-container cleanup. Post-hardening local measurements
-  are mixed (1.26s and 2.13s), so SC-001 is not consistently proven. Adversarial
-  tests cover unknown probes, residual group members, marker failures, cleanup
-  retry, and PID-reuse refusal; keep open pending a consistently passing timing
-  gate and independent review.
+  include a six-run consecutive pass at 1.09–1.26s, but the same architecture
+  also has a retained 2.13s miss, so SC-001 is not deterministic/proven.
+  Adversarial tests cover unknown probes, residual group members, marker failures,
+  cleanup retry, PID-reuse refusal, and the open timing ledger; keep open pending
+  a consistently passing timing gate and independent review.

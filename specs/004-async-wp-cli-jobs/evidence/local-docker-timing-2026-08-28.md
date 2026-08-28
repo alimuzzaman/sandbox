@@ -49,3 +49,24 @@ After cleanup-receipt and whole-PGID hardening, two further supported runs retur
 The 2.13-second observation misses SC-001. T021 therefore remains open: this
 local evidence does not prove the strict target consistently even though the
 second same-build sample passed.
+
+## Final bounded variance pass from `45c6549`
+
+Six consecutive supported launches used a 30-second WP command. Every job was
+immediately polled as `running`, killed through `./sb job --kill`, and re-polled
+as `completed (exit 143)`:
+
+| Sample | Job ID | Real seconds | Cleanup result |
+|---:|---|---:|---|
+| 1 | `1191ef4ca2277d20` | 1.26 | running → killed → exit 143 |
+| 2 | `4485cc7e9548bf10` | 1.11 | running → killed → exit 143 |
+| 3 | `7f42ccc036c1d102` | 1.16 | running → killed → exit 143 |
+| 4 | `f959f70104df0a0b` | 1.16 | running → killed → exit 143 |
+| 5 | `7c94bc771cf84adf` | 1.09 | running → killed → exit 143 |
+| 6 | `9b078102e96fabaf` | 1.11 | running → killed → exit 143 |
+
+This pass is encouraging but does not erase the retained 2.13-second miss from
+the same supervisor-based launch architecture. The remaining variance includes
+host interpreter/process scheduling and filesystem durability work. Replacing it
+with a persistent executor would add a new daemon lifecycle, authentication,
+recovery, and ownership contract; that is not a safe bounded T021 adjustment.

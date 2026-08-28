@@ -253,6 +253,32 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertEqual(status.read_text(), "1")
         self.assertFalse(receipt.exists())
 
+    def test_cleanup_receipt_pid_reuse_never_signals_mismatched_groups(self):
+        for kind, pid in (("herd", 5959), ("docker", 6060)):
+            with self.subTest(kind=kind):
+                jid = ("b" if kind == "herd" else "c") * 16
+                log, status, _ = self._paths(jid)
+                log.touch()
+                receipt = self.job_dir / f"job_{jid}.cleanup"
+                value = f"{kind}-cleanup-v1|{pid}|{pid}"
+                if kind == "docker":
+                    value += f"|sb-job-{self.instance}-{jid}"
+                receipt.write_text(value)
+                with patch.object(jobs, "wp_dir", return_value=self.root), \
+                        patch.object(jobs, "_is_herd_instance", return_value=kind == "herd"), \
+                        patch.object(jobs, "_herd_launcher_running", return_value=False), \
+                        patch.object(jobs, "_docker_supervisor_running", return_value=False), \
+                        patch.object(jobs, "_herd_group_running", return_value=True), \
+                        patch.object(jobs, "_remove_docker_job_container"), \
+                        patch.object(jobs, "_docker_container_running", return_value=False), \
+                        patch.object(jobs.os, "killpg") as killpg:
+                    result = jobs.job_status(self.instance, jid)
+
+                killpg.assert_not_called()
+                self.assertEqual(result["status"], "running")
+                self.assertTrue(receipt.exists())
+                self.assertFalse(status.exists())
+
     def test_immediate_poll_treats_verified_docker_supervisor_as_running(self):
         jid = "4" * 16
         log, _, handle = self._paths(jid)
@@ -334,6 +360,26 @@ class TestWpCliJobs(unittest.TestCase):
         self.assertTrue(result["killed"])
         self.assertEqual(status.read_text(), "143")
 
+    def test_docker_launch_kill_refuses_reused_supervisor_pgid(self):
+        jid = "f" * 16
+        log, status, handle = self._paths(jid)
+        log.touch()
+        handle.write_text("launch:6161")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "_docker_job_running", return_value=True), \
+                patch.object(jobs, "_docker_launcher_running", return_value=False), \
+                patch.object(jobs, "_herd_group_running", return_value=True), \
+                patch.object(jobs, "_remove_docker_job_container"), \
+                patch.object(jobs, "_docker_container_running", return_value=False), \
+                patch.object(jobs.os, "killpg") as killpg:
+            result = jobs.kill_job(self.instance, jid)
+
+        killpg.assert_not_called()
+        self.assertEqual(result["status"], "running")
+        self.assertFalse(result["killed"])
+        self.assertFalse(status.exists())
+
     def test_unknown_kill_is_a_noop_without_creating_artifacts(self):
         jid = "b" * 16
         with patch.object(jobs, "wp_dir", return_value=self.root):
@@ -361,6 +407,7 @@ class TestWpCliJobs(unittest.TestCase):
         pid.write_text("4242")
         with patch.object(jobs, "wp_dir", return_value=self.root), \
                 patch.object(jobs, "_is_herd_instance", return_value=True), \
+                patch.object(jobs, "_herd_launcher_running", return_value=True), \
                 patch.object(jobs, "_herd_group_running", side_effect=[True, False, False]), \
                 patch.object(jobs.os, "killpg") as killpg:
             result = jobs.kill_job(self.instance, jid)
@@ -368,6 +415,23 @@ class TestWpCliJobs(unittest.TestCase):
         killpg.assert_called_once_with(4242, jobs.signal.SIGTERM)
         self.assertTrue(result["killed"])
         self.assertEqual(status.read_text(), "143")
+
+    def test_normal_herd_kill_refuses_pid_reuse_identity_mismatch(self):
+        jid = "d" * 16
+        log, status, pid = self._paths(jid)
+        log.touch()
+        pid.write_text("6262")
+        with patch.object(jobs, "wp_dir", return_value=self.root), \
+                patch.object(jobs, "_is_herd_instance", return_value=True), \
+                patch.object(jobs, "_herd_group_running", return_value=True), \
+                patch.object(jobs, "_herd_launcher_running", return_value=False), \
+                patch.object(jobs.os, "killpg") as killpg:
+            result = jobs.kill_job(self.instance, jid)
+
+        killpg.assert_not_called()
+        self.assertEqual(result["status"], "running")
+        self.assertFalse(result["killed"])
+        self.assertFalse(status.exists())
 
     def test_kill_verifies_docker_container_removal_before_recording_cancelled(self):
         jid = "e" * 16

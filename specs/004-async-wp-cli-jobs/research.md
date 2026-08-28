@@ -35,6 +35,8 @@
 - **Rationale**: no PID is public or accepted from the WP command. The host owns
   the Popen identity and checks PID, PGID, and exact job name before signalling.
   Leader exit alone is insufficient: the entire PGID must be observed absent.
+  A stored PID/PGID is not current identity proof: mismatch or unknown identity
+  refuses signalling even when that numeric group exists, preventing PID-reuse kills.
 - **Alternatives**: `exec wp` (makes `$$`==wp but then can't capture the exit code); parse `docker top` (brittle); no-cancel (rejected — clarification put cancel in v1).
 
 ## Decision: file-based state machine (no DB/registry)

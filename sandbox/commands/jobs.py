@@ -366,6 +366,10 @@ def _retry_cleanup_receipt(instance: str, jid: str, kind: str, pid: int) -> bool
         group = _herd_group_running(pid)
         if group is None:
             return False
+        if state is False:
+            # The original wrapper is gone. A live group at this reused PGID
+            # is not receipt-owned and must never be signalled.
+            return group is False
         stopped = group is False or _stop_owned_group(
             pid, lambda: _herd_group_running(pid),
         )
@@ -376,9 +380,12 @@ def _retry_cleanup_receipt(instance: str, jid: str, kind: str, pid: int) -> bool
     group = _herd_group_running(pid)
     if group is None:
         return False
-    stopped = group is False or _stop_owned_group(
-        pid, lambda: _herd_group_running(pid),
-    )
+    if state is False:
+        stopped = group is False
+    else:
+        stopped = group is False or _stop_owned_group(
+            pid, lambda: _herd_group_running(pid),
+        )
     _remove_docker_job_container(instance, jid)
     return stopped and _docker_container_running(instance, jid) is False
 
@@ -615,6 +622,9 @@ def kill_job(instance: str, jid: str) -> dict:
         if pid is None:
             return {"job_id": jid, "status": "running", "killed": False,
                     "error": "job process group is not available"}
+        if _herd_launcher_running(jid, pid) is not True:
+            return {"job_id": jid, "status": "running", "killed": False,
+                    "error": "job process identity could not be verified"}
         terminated = _stop_owned_group(
             pid, lambda: _herd_group_running(pid),
         )
@@ -634,10 +644,8 @@ def kill_job(instance: str, jid: str) -> dict:
             group = _herd_group_running(launcher_pid)
             if group is False:
                 group_stopped = True
-            elif group is True:
-                group_stopped = _stop_owned_group(
-                    launcher_pid, lambda: _herd_group_running(launcher_pid),
-                )
+            # If a group still exists after exact supervisor mismatch, the
+            # PGID may have been reused. Refuse rather than signal it.
         _remove_docker_job_container(instance, jid)
         # Do not create a successful cancellation record solely because the
         # removal command returned. Both owner and container observations must

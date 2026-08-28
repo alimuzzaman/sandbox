@@ -17,7 +17,9 @@
 - Before publishing that normal handle, Sandbox durably records a private,
   validated cleanup receipt binding PID/PGID and the exact Docker container name.
   A marker-publication failure retains this ownership until status/kill proves
-  the whole group and container absent; callers cannot supply the receipt.
+  the whole group and container absent; callers cannot supply the receipt. The
+  receipt never authorizes a signal by itself: exact current launcher identity
+  must also match, otherwise cleanup remains refused/non-terminal.
 
 ### `wp_cli_job(job_id, offset=0, limit=1048576, *, project_dir)`
 - Validates `job_id`; returns `{ ok, job_id, status, exit_code?, stdout, bytes_read, truncated }`.

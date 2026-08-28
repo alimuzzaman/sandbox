@@ -34,7 +34,9 @@ unknown. Unknown never creates `.status`; poll remains non-terminal and kill
 returns `killed:false`. If marker-write abort cannot prove the entire owned group
 and, for Docker, container absent, the validated cleanup receipt plus bounded
 secret-free log evidence remain. Later poll/kill retries that exact cleanup and
-records terminal failure only after full absence is proven.
+records terminal failure only after full absence is proven. Every retry first
+revalidates the exact current launcher command, PID, and PGID; mismatch/unknown
+preserves the receipt and refuses to signal a possibly reused numeric group.
 
 ## Query result (`wp_cli_job`)
 

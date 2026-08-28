@@ -75,7 +75,8 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   cleanup uncertainty never creates terminal status. Both drivers stage a
   validated PID/PGID cleanup receipt before normal marker publication; retained
   receipts let status/kill retry whole-group cleanup, plus exact Docker container
-  cleanup, without caller-supplied ownership.
+  cleanup, without caller-supplied ownership. Fresh launcher identity must match
+  before every group signal; PID reuse or unknown identity remains non-terminal.
 
 ## Phase 9: Convergence
 
@@ -83,5 +84,6 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   with durable running evidence, tri-state observation, receipt-bound whole-group
   cleanup, and exact named-container cleanup. Post-hardening local measurements
   are mixed (1.26s and 2.13s), so SC-001 is not consistently proven. Adversarial
-  tests cover unknown probes, residual group members, marker failures, and cleanup
-  retry; keep open pending a consistently passing timing gate and independent review.
+  tests cover unknown probes, residual group members, marker failures, cleanup
+  retry, and PID-reuse refusal; keep open pending a consistently passing timing
+  gate and independent review.

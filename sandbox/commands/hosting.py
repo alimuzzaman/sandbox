@@ -993,9 +993,11 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         validated, secret_values, pushed_commit_sha=sha,
     )
     client = cloudflare.Client()
-    remote.reset_target_to(entry, target, sha)
-    if not require_clean:
-        remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
+    remote.update_target_to(
+        entry, target, sha,
+        project_root=None if require_clean else validated["project_root"],
+        diff_text=diff, untracked=untracked,
+    )
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     apply_log = f"{runtime_dir}/apply.log"
     stream_progress = None

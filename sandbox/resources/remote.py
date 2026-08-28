@@ -589,9 +589,9 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
                 errors=(), capacity_accounted=False, lifecycle=None,
                 active_references=(), allocation_state=None,
                 allocation_pool=None, cleanup_eligible=False,
-                last_observed=None):
+                last_observed=None, engine_identity=None):
     value = {
-        "resource_id": rid(kind, locator),
+        "resource_id": rid(kind, locator + ("\0" + engine_identity if engine_identity else "")),
         "kind": kind,
         "locator": locator,
         "display_name": display,
@@ -2699,22 +2699,27 @@ def scan():
             ("instance_or_job_registry",)
             if owner_protected or project in protected_projects else ()
         )
+        volume_evidence = (
+            tuple(owner_evidence)
+            if (
+                active or project in active_projects
+                or project in protected_projects
+            ) else
+            tuple((*owner_evidence, "registry_and_job_absence"))
+            if lifecycle_complete else
+            tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
+        ) if project else ("ownership_unverified",)
+        engine_identity = str(volume.get("CreatedAt") or "")
+        if engine_identity:
+            volume_evidence = tuple((*volume_evidence, "engine_volume_identity"))
         resources.append(observation(
             "volume", name, name, owner_kind, owner_id,
             classification, state, measured_size,
             measured_size if classification == "stale_candidate" else 0,
             references,
-            (
-                tuple(owner_evidence)
-                if (
-                    active or project in active_projects
-                    or project in protected_projects
-                ) else
-                tuple((*owner_evidence, "registry_and_job_absence"))
-                if lifecycle_complete else
-                tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
-            ) if project else ("ownership_unverified",),
+            volume_evidence,
             (error,) if error else (),
+            engine_identity=engine_identity,
         ))
     for network in inventory["networks"]:
         network_id = network.get("Id")
@@ -3129,6 +3134,7 @@ def inside(path, root):
 def remove():
     kind = REQUEST.get("kind")
     locator = str(REQUEST.get("locator") or "")
+    expected_identity = REQUEST.get("expected_resource_id")
     if kind == "network":
         # A network locator alone cannot prove inactive leases, containers, or
         # jobs.  Keep network recovery in the confirmation-gated workspace
@@ -3151,6 +3157,32 @@ def remove():
         if kind == "download_cache":
             path.mkdir(parents=True, exist_ok=True)
         return {"status": "removed", "reason": "removed"}
+    if kind == "volume":
+        if not isinstance(expected_identity, str) or not re.fullmatch(
+            r"volume-[0-9a-f]{20}", expected_identity
+        ):
+            return {"status": "failed", "reason": "volume_identity_required"}
+        code, out, _err = run(["docker", "volume", "inspect", locator], 20)
+        if code != 0:
+            return {
+                "status": "timed_out" if code == 124 else "failed",
+                "reason": "cleanup_timed_out" if code == 124 else "volume_identity_unavailable",
+            }
+        try:
+            inspected = json.loads(out)
+            if not isinstance(inspected, list) or len(inspected) != 1:
+                raise ValueError
+            current = inspected[0]
+            if not isinstance(current, dict) or current.get("Name") != locator:
+                raise ValueError
+            created_at = current.get("CreatedAt")
+            if not isinstance(created_at, str) or not created_at:
+                return {"status": "failed", "reason": "volume_identity_unavailable"}
+            current_identity = rid("volume", locator + "\0" + created_at)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"status": "failed", "reason": "volume_identity_unavailable"}
+        if current_identity != expected_identity:
+            return {"status": "failed", "reason": "volume_identity_changed"}
     commands = {
         "volume": ["docker", "volume", "rm", locator],
         "container": ["docker", "container", "rm", locator],
@@ -3573,6 +3605,7 @@ class RemoteResourceAdapter:
             "action": "remove",
             "kind": candidate.kind,
             "locator": candidate.locator,
+            "expected_resource_id": candidate.resource_id,
             "budget_seconds": 60,
         }, 62)
         if response.returncode == 124:

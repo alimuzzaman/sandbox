@@ -961,7 +961,9 @@ class LocalResourceAdapter:
                     if size_state == "measured":
                         classification = "stale_candidate"
             resources.append(ResourceObservation(
-                resource_id=_resource_id("volume", name),
+                resource_id=_resource_id(
+                    "volume", name + "\0" + str(volume.get("CreatedAt") or ""),
+                ),
                 kind="volume", locator=name, display_name=name,
                 owner_kind=owner_kind, owner_id=owner_id,
                 classification=classification,
@@ -974,9 +976,10 @@ class LocalResourceAdapter:
                     if workspace_owner.active else
                     workspace_owner.references if workspace_owner.protected else ()
                 ),
-                evidence=tuple(dict.fromkeys(
-                    workspace_owner.evidence if owner else ("ownership_unverified",)
-                )),
+                evidence=tuple(dict.fromkeys((
+                    *(workspace_owner.evidence if owner else ("ownership_unverified",)),
+                    *(("engine_volume_identity",) if volume.get("CreatedAt") else ()),
+                ))),
                 errors=(error,) if error else (),
             ))
         for network in inventory.get("networks", ()):
@@ -1494,10 +1497,11 @@ class LocalResourceAdapter:
                 candidate.resource_id, "already_absent", "already_absent",
                 candidate.expected_size_bytes, False, now,
             )
-        refreshed = CleanupCandidate.from_observation(current)
         if (
-            refreshed.locator_digest != candidate.locator_digest
-            or refreshed.evidence_digest != candidate.evidence_digest
+            hashlib.sha256(current.locator.encode()).hexdigest()
+            != candidate.locator_digest
+            or CleanupCandidate.evidence_digest_for(current)
+            != candidate.evidence_digest
         ):
             return CleanupItemOutcome(
                 candidate.resource_id, "skipped", "evidence_changed",

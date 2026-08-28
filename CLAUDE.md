@@ -48,6 +48,15 @@ checks happen before side effects; shared services own mechanisms, adapters own
 runtime policy. Compatibility facades are rollback controls and require parity
 evidence plus explicit human approval before removal.
 
+**Shared checkout/node-store changes.** Follow
+`specs/044-shared-node-store-and-git-dedup/contracts/workspace-materialization.md` and
+`specs/044-shared-node-store-and-git-dedup/contracts/node-store-overlay.md`. Keep every
+mutable Git entry private, run source-integrity and legacy byte-identity gates, and leave
+old workspaces usable. Node-store opt-in is project-owned and explicit; share only the package
+store and keep one dependency-tree child per canonical runtime. Reclaim requires a
+read-only exact-family plan plus confirmed apply; never infer a family, emit wildcard/broad
+reclaim, take unapproved remote action, or turn estimates into measurement claims.
+
 ---
 
 ## Plugin code rules

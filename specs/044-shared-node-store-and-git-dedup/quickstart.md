@@ -1,8 +1,7 @@
 # Quickstart: proving shared node storage and history-safe workspaces
 
-This guide is a validation plan for the implementation described by Spec 044. The new
-materializer, node-store opt-in, tests, and documentation are not implemented yet, so the
-commands below are release-gate scenarios rather than evidence of a passing feature.
+This guide validates the locally implemented Spec 044 seams. Local tests are not remote
+release evidence, so the live commands below remain unexecuted release-gate scenarios.
 
 ## Preconditions and guardrails
 
@@ -18,7 +17,7 @@ commands below are release-gate scenarios rather than evidence of a passing feat
 
 ## 1. Local static and focused checks (no host mutation)
 
-After the implementation adds the planned seams, run the focused tests:
+Run the focused local tests:
 
 ```bash
 python -m unittest \
@@ -30,8 +29,8 @@ Expected assertions include private Git metadata inodes, hardlinked eligible obj
 files, cross-device/plain-copy fallback, marker-file rewriting, source integrity after each
 workspace operation, strict `compose.nodeStore` normalization, family equality/difference,
 one explicit named volume, exact environment values, legacy overlay byte identity, and
-read-only/confirmation-gated reclaim. A test runner that cannot import a planned module is a
-bootstrap failure, not feature evidence.
+read-only/confirmation-gated reclaim. An import failure is a bootstrap failure, not feature
+evidence.
 
 Run the repository's static checks on the changed implementation and docs:
 
@@ -113,7 +112,7 @@ through the supported runtime/remote command. The evidence must show:
 ```text
 sandbox-nodestore-<one-family-id>:/sandbox-node
 SANDBOX_NODE_STORE=/sandbox-node/store
-SANDBOX_NODE_MODULES=/sandbox-node/node_modules
+SANDBOX_NODE_MODULES=/sandbox-node/node_modules/<canonical-runtime-id>
 npm_config_store_dir=/sandbox-node/store
 ```
 
@@ -148,10 +147,9 @@ cleanup.
 
 ## 6. Named shared-store reclaim (explicit confirmation only)
 
-There is no named-store reclaim interface in the current Sandbox code. Raw Docker inspection,
-process listing, or volume removal is unsupported by the Sandbox workflow and must not be used
-as a workaround. The implementation must first add a supported Sandbox CLI/MCP surface (see
-T015 in `tasks.md`) with two explicit phases:
+The supported Sandbox CLI/MCP surface added by T015 has two explicit phases. Raw Docker
+inspection, process listing, or volume removal remains unsupported and must not be used as a
+workaround:
 
 1. **Read-only plan**: accept a validated family id, resolve the exact
    `sandbox-nodestore-<family>` name, report existence/size and running-container mounts,
@@ -161,7 +159,8 @@ T015 in `tasks.md`) with two explicit phases:
    disposable store. A missing volume is reported as `already_absent`; a race or mount refuses
    the apply.
 
-Do not attempt this section until that supported interface exists and its tests/evidence pass.
+Use `sb resources plan --node-store-family <family> --json`, then only after human review use
+`sb resources cleanup --node-store-family <family> --plan-id <id> --confirm --json`.
 Never use `docker volume prune`, a wildcard, an inferred family, or a reclaim call from
 `ensure`, `status`, job cleanup, capacity pressure, or workspace destroy. A follow-up install
 must repopulate the missing store; the evidence must report `already_absent`/repopulated

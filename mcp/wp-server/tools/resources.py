@@ -5,6 +5,7 @@ from __future__ import annotations
 
 _service_factory = None
 _reclaim_service_factory = None
+_node_store_service_factory = None
 
 
 def _service(remote: str | None):
@@ -17,6 +18,12 @@ def _reclaim_service(remote: str | None):
     if _reclaim_service_factory is None:
         raise RuntimeError("reclaim service dependency is not configured")
     return _reclaim_service_factory(remote)
+
+
+def _node_store_service(remote: str | None):
+    if _node_store_service_factory is None:
+        raise RuntimeError("node-store service dependency is not configured")
+    return _node_store_service_factory(remote)
 
 
 def _refusal(action: str, message: str, code: str, *, status: str = "failed") -> dict:
@@ -81,19 +88,25 @@ def resource_cleanup_plan(
     remote: str | None = None,
     thorough: bool = True,
     budget_seconds: float = 60,
+    node_store_family: str | None = None,
 ) -> dict:
     """Create a read-only scope or tier cleanup plan.
 
     Exactly one of ``scope`` (the legacy cache/stale planner) and ``tier``
     (safe/tmp/all reclamation) is required.
     """
-    if scope is not None and tier is not None:
+    modes = sum(value is not None for value in (scope, tier, node_store_family))
+    if modes > 1:
         return _refusal(
             "plan", "scope and tier are mutually exclusive", "invalid_mode",
         )
-    if scope is None and tier is None:
+    if modes == 0:
         return _refusal(
-            "plan", "scope or tier is required", "invalid_scope",
+            "plan", "scope, tier, or node_store_family is required", "invalid_scope",
+        )
+    if node_store_family is not None:
+        return _node_store_service(remote).plan(
+            node_store_family, budget_seconds=budget_seconds,
         )
     if tier is not None:
         invalid = _valid_tier(tier, action="plan")
@@ -114,6 +127,7 @@ def resource_cleanup_apply(
     tier: str | None = None,
     remote: str | None = None,
     confirm: bool = False,
+    node_store_family: str | None = None,
 ) -> dict:
     """Apply one scope plan or plan-and-apply a reclamation tier.
 
@@ -125,6 +139,15 @@ def resource_cleanup_apply(
         return _refusal(
             "cleanup", "resource cleanup requires explicit confirmation",
             "confirmation_required", status="refused",
+        )
+    if node_store_family is not None:
+        if tier is not None or plan_id is None:
+            return _refusal(
+                "cleanup", "node_store_family requires one plan_id and no tier",
+                "invalid_mode", status="refused",
+            )
+        return _node_store_service(remote).apply(
+            plan_id, family=node_store_family, confirm=True,
         )
     if plan_id is not None and tier is not None:
         return _refusal(
@@ -146,9 +169,10 @@ def resource_cleanup_apply(
 
 def register(server, dependencies) -> None:
     """Register resource tools against an explicitly supplied service factory."""
-    global _service_factory, _reclaim_service_factory
+    global _service_factory, _reclaim_service_factory, _node_store_service_factory
     _service_factory = dependencies.require("resource_service_factory")
     _reclaim_service_factory = dependencies.require("reclaim_service_factory")
+    _node_store_service_factory = dependencies.require("node_store_service_factory")
     for function in (
         resource_status,
         resource_cleanup_plan,

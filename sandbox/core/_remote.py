@@ -48,6 +48,7 @@ import sys
 import time
 import selectors
 import os
+from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -363,9 +364,12 @@ def deploy_exact_working_tree(
         source_root=source_root,
         push_timeout=push_timeout,
     )
-    reset_target_to(remote, target, pushed_sha)
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
-    applied = apply_uncommitted(remote, target, root, diff_text, untracked) if resolved_source is None else 0
+    applied = update_target_to(
+        remote, target, pushed_sha,
+        project_root=root if resolved_source is None else None,
+        diff_text=diff_text, untracked=untracked,
+    )
     dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
@@ -977,7 +981,14 @@ def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
 
     source = deployed_path or deploy_target_path(remote, project_root)
     target = remote_workspace_path(remote, project_root, workspace_label)
-    command = workspace_refresh_command(source, target)
+    sandbox_home, marker, _relative = source.partition("/deploy-src/")
+    sandbox_root = (
+        f"{sandbox_home}/sb-src" if marker and sandbox_home
+        else posixpath.dirname(remote_sb_path(remote))
+    )
+    command = workspace_refresh_command(
+        source, target, sandbox_root=sandbox_root,
+    )
     result = ssh_run(remote, command, timeout=120)
     if result.returncode != 0:
         raise RuntimeError("could not prepare remote workspace")
@@ -1565,7 +1576,33 @@ def push_commits(
     return source_commit
 
 
-def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
+@contextmanager
+def _remote_materialization_lock(remote: dict, target_path: str):
+    """Serialize exact source mutation with workspace materialization."""
+    from sandbox.workspaces.checkout import materialization_lock_name
+
+    parent = posixpath.dirname(target_path.rstrip("/"))
+    lock_path = posixpath.join(parent, materialization_lock_name(target_path))
+    acquired = ssh_run(
+        remote, f"mkdir -- {shlex.quote(lock_path)}", timeout=10,
+    )
+    if acquired.returncode != 0:
+        raise RuntimeError("remote source materialization lock is busy")
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        released = ssh_run(
+            remote, f"rmdir -- {shlex.quote(lock_path)}", timeout=10,
+        )
+        if released.returncode != 0 and not failed:
+            raise RuntimeError("remote source materialization lock release failed")
+
+
+def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
     """Reset the VPS working tree to the just-pushed commit BEFORE applying
     the uncommitted layer -- this is what makes each deploy REPLACE rather
     than stack (spec FR-007): any diff a previous deploy applied is wiped
@@ -1607,6 +1644,11 @@ def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
             f"could not reset the VPS working tree to {sha}: "
             f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
+
+
+def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
+    with _remote_materialization_lock(remote, target_path):
+        _reset_target_to_unlocked(remote, target_path, sha)
 
 
 def capture_uncommitted(project_root) -> tuple[str, list[str]]:
@@ -1782,7 +1824,7 @@ def validate_deploy_include_paths(project_root, paths) -> list[str]:
     return selected
 
 
-def apply_uncommitted(remote: dict, target_path: str, project_root,
+def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str],
                        include_paths: list[str] | None = None) -> int:
     """Applies the dirty working tree on top of a just-reset clean tree by
@@ -1882,6 +1924,31 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
             )
         applied += len(existing)
     return applied
+
+
+def apply_uncommitted(remote: dict, target_path: str, project_root,
+                      diff_text: str, untracked: list[str],
+                      include_paths: list[str] | None = None) -> int:
+    with _remote_materialization_lock(remote, target_path):
+        return _apply_uncommitted_unlocked(
+            remote, target_path, project_root, diff_text, untracked,
+            include_paths,
+        )
+
+
+def update_target_to(remote: dict, target_path: str, sha: str, *,
+                     project_root=None, diff_text: str = "",
+                     untracked: list[str] | None = None,
+                     include_paths: list[str] | None = None) -> int:
+    """Reset and publish one dirty overlay under one source lock."""
+    with _remote_materialization_lock(remote, target_path):
+        _reset_target_to_unlocked(remote, target_path, sha)
+        if project_root is None:
+            return 0
+        return _apply_uncommitted_unlocked(
+            remote, target_path, project_root, diff_text,
+            list(untracked or ()), include_paths,
+        )
 
 
 DEFAULT_MCP_PORT = 9174

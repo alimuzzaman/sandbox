@@ -735,6 +735,55 @@ directory. These artifacts are not imported by the remote Python CLI/MCP service
 excluding them keeps the supported upload within its bounded transfer window. Project
 source deployment remains a separate operation.
 
+## Shared Git history and opt-in Node package storage
+
+New remote job workspaces copy their worktree and mutable Git metadata privately. Eligible
+content-addressed files below `.git/objects` are hard-linked when the filesystem allows it.
+Cross-device, unsupported, and permission failures fall back to a complete private copy.
+Old-layout workspaces remain valid and reset through their legacy lifecycle until they have
+a materialization receipt; Sandbox does not migrate or delete them automatically.
+
+Generic Compose projects may explicitly opt in with `compose.nodeStore: true` in their
+project-owned configuration. Sandbox never infers this from package files or scripts. The
+generated overlay mounts exactly one Docker-managed volume named
+`sandbox-nodestore-<canonical-family>` at `/sandbox-node` and exports:
+
+```text
+SANDBOX_NODE_STORE=/sandbox-node/store
+SANDBOX_NODE_MODULES=/sandbox-node/node_modules/<canonical-runtime-id>
+npm_config_store_dir=/sandbox-node/store
+```
+
+Each runtime gets a distinct dependency-tree child while the package store remains
+family-shared. The project remains responsible for pointing its dependency tree at
+`$SANDBOX_NODE_MODULES` and removing any project-owned per-workspace dependency mount. The
+BuildKit package cache is unchanged. A consumer that ignores these variables keeps its legacy
+behavior. `compose.nodeStore: false` restores byte-identical legacy overlay generation.
+
+Use this reversible migration order for one reviewed family:
+
+1. Record the source revision, current overlay, named volumes, used-space observations, and
+   source `git status --porcelain`, `git diff --exit-code`, and `git fsck --full` results.
+2. Stop only the selected family, update its project-owned dependency-tree setting, set
+   `compose.nodeStore: true`, and inspect the generated Compose configuration.
+3. Start two disposable sibling workspaces. Confirm the same exact family volume, the three
+   paths above, successful installs, and no store/module content on the host bind.
+4. Keep the old layout until the measured cutover is accepted. Roll back by stopping the
+   family, setting `nodeStore` false, restoring the project-owned dependency mount/command,
+   and starting it again before considering reclaim.
+
+Named reclaim is separate and confirmation-gated:
+
+```sh
+./sb resources plan --node-store-family <canonical-family> --json
+./sb resources cleanup --node-store-family <canonical-family> --plan-id <plan-id> --confirm --json
+```
+
+Apply rechecks running mounts and removes only the exact planned name. A missing volume is an
+idempotent `already_absent` result. Never infer a family, use wildcards, automate this from
+ensure/status/destroy, or use broad volume pruning. Package data is repopulatable by a later
+install, not backed up or losslessly recoverable.
+
 ## 9. Troubleshooting a failed `host apply`
 
 **Read the error, not the exit code of a pipe.** `sb host apply` exits non-zero on

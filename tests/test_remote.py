@@ -636,19 +636,23 @@ class TestDeployTargetPath(unittest.TestCase):
         self.assertNotIn(".workspace-", path)
 
     @patch("sandbox.core._remote.remote_workspace_path",
-           return_value="/srv/deploy/project-workspace-label")
+           return_value="/srv/sandbox/deploy-src/project-workspace-label")
     @patch("sandbox.core._remote.ssh_run", return_value=_completed())
     def test_workspace_prepare_preserves_reusable_bind_mount_directories(
             self, run, _workspace):
         path = sr.prepare_remote_workspace(
             {}, "/local/path/project", "label",
-            deployed_path="/srv/deploy/project")
+            deployed_path="/srv/sandbox/deploy-src/project")
 
-        self.assertEqual(path, "/srv/deploy/project-workspace-label")
+        self.assertEqual(path, "/srv/sandbox/deploy-src/project-workspace-label")
         command = run.call_args.args[1]
-        self.assertIn('find "$item" -mindepth 1 -maxdepth 1', command)
-        self.assertIn('rmdir -- "$item"', command)
-        self.assertNotIn("rm -rf /srv/deploy/project-workspace-label", command)
+        argv = shlex.split(command)
+        self.assertEqual(argv[:2], ["env", "PYTHONPATH=/srv/sandbox/sb-src"])
+        self.assertEqual(argv[2:6], [
+            "python3", "-m", "sandbox.workspaces.checkout", "materialize",
+        ])
+        self.assertIn("/srv/sandbox/deploy-src/project", argv)
+        self.assertIn("/srv/sandbox/deploy-src/project-workspace-label", argv)
 
     @patch("subprocess.run")
     def test_resolves_using_project_slug_and_remote_sandbox_home(self, mock_run):
@@ -1136,8 +1140,10 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         mock_run.return_value = _completed(returncode=0)
         sr.reset_target_to({"ssh": "ubuntu@1.2.3.4"},
                             "/home/ubuntu/sandbox/deploy-src/proj", "abc1234")
-        cmd_arg = mock_run.call_args[0][0]
-        joined = " ".join(cmd_arg)
+        joined = next(
+            " ".join(call.args[0]) for call in mock_run.call_args_list
+            if "git reset --hard abc1234" in " ".join(call.args[0])
+        )
         self.assertIn("git reset --hard abc1234", joined)
         self.assertIn("git clean -fd", joined)
         # order matters: reset must come before clean
@@ -1153,8 +1159,12 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             "abc1234",
         )
 
-        command = mock_ssh_run.call_args.args[1]
-        timeout = mock_ssh_run.call_args.kwargs["timeout"]
+        reset_call = next(
+            call for call in mock_ssh_run.call_args_list
+            if "git reset --hard abc1234" in call.args[1]
+        )
+        command = reset_call.args[1]
+        timeout = reset_call.kwargs["timeout"]
         self.assertIn(
             "exec timeout --signal=TERM --kill-after=15s 120s sh -c",
             command,
@@ -1165,7 +1175,10 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
 
     @patch("sandbox.core._remote.ssh_run")
     def test_reset_reports_remote_supervisor_timeout(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(returncode=124)
+        mock_ssh_run.side_effect = [
+            _completed(returncode=0), _completed(returncode=124),
+            _completed(returncode=0),
+        ]
 
         with self.assertRaisesRegex(RuntimeError, "remote reset timed out after 120s"):
             sr.reset_target_to(
@@ -1198,8 +1211,9 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             self.assertEqual(mock_run.call_args_list[2][0][0][:3], ["tar", "-czf", "-"])
             self.assertIn("a.php", mock_run.call_args_list[2][0][0])
             self.assertIn("b.php", mock_run.call_args_list[2][0][0])
-            mock_ssh_run.assert_called_once()
-            self.assertEqual(mock_ssh_run.call_args.kwargs["input_data"], b"archive")
+            transfer = next(call for call in mock_ssh_run.call_args_list
+                            if call.kwargs.get("input_data") is not None)
+            self.assertEqual(transfer.kwargs["input_data"], b"archive")
 
     @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")
@@ -1217,8 +1231,10 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             tar_args = mock_run.call_args[0][0]
             self.assertEqual(tar_args[:3], ["tar", "-czf", "-"])
             self.assertIn("b.php", tar_args)
-            mock_ssh_run.assert_called_once()
-            self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", mock_ssh_run.call_args[0][1])
+            transfers = [call for call in mock_ssh_run.call_args_list
+                         if call.kwargs.get("input_data") is not None]
+            self.assertEqual(len(transfers), 1)
+            self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", transfers[0].args[1])
 
     def test_explicit_deploy_include_expands_ignored_build_directory(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1247,7 +1263,10 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             )
             self.assertEqual(applied, 1)
             self.assertIn("vendor/autoload.php", mock_run.call_args[0][0])
-            mock_ssh_run.assert_called_once()
+            self.assertEqual(len([
+                call for call in mock_ssh_run.call_args_list
+                if call.kwargs.get("input_data") is not None
+            ]), 1)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_dirty_archive_excludes_sidecars_and_preserves_dotfiles_bytes(self, mock_ssh_run):
@@ -1274,7 +1293,10 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             self.assertEqual(applied, 3)
             self.assertIn("skipped 2", diagnostic.getvalue())
             self.assertNotIn("._root-sidecar", diagnostic.getvalue())
-            archive_bytes = mock_ssh_run.call_args.kwargs["input_data"]
+            archive_bytes = next(
+                call.kwargs["input_data"] for call in mock_ssh_run.call_args_list
+                if call.kwargs.get("input_data") is not None
+            )
             with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
                 members = {
                     member.name[2:] if member.name.startswith("./") else member.name
@@ -1293,20 +1315,23 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
                 self.assertEqual(files["nested/.env"], b"NESTED=keep")
                 self.assertEqual(files["ordinary.bin"], b"\x00\x01\xfe\xff")
 
+    @patch("sandbox.core._remote.ssh_run")
     @patch("sandbox.core._remote.ssh_run_batch")
     @patch("subprocess.run")
-    def test_apply_removes_deleted_tracked_files(self, mock_run, mock_ssh_run):
+    def test_apply_removes_deleted_tracked_files(self, mock_run, mock_ssh_run_batch,
+                                                 mock_ssh_run):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="gone.php\n"),  # git diff --name-only
             _completed(returncode=0, stdout="gone.php\n"),  # git diff deleted
         ]
         mock_ssh_run.return_value = _completed(returncode=0)
+        mock_ssh_run_batch.return_value = _completed(returncode=0)
         applied = sr.apply_uncommitted(
             {"ssh": "ubuntu@1.2.3.4"}, "/home/ubuntu/sandbox/deploy-src/proj",
             "/local/proj", "diff --git a/gone.php b/gone.php\n", [],
         )
         self.assertEqual(applied, 1)
-        rm_cmd = mock_ssh_run.call_args[0][1][0]
+        rm_cmd = mock_ssh_run_batch.call_args[0][1][0]
         self.assertIn("rm -f --", rm_cmd)
         self.assertIn("gone.php", rm_cmd)
 
@@ -2539,9 +2564,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="latest"), \
                      patch.object(sr, "push_commits", return_value="a" * 40) as push, \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch("builtins.print"):
                     deploy_cmd.cmd_deploy(None, args)
                 self.assertEqual(push.call_args.kwargs["push_timeout"], 900)
@@ -2680,9 +2704,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
                      patch.object(sr, "push_commits", return_value="abc123"), \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0) as mock_overlay, \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0) as mock_overlay, \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
@@ -2703,8 +2726,9 @@ class TestDeployEnsureExpose(unittest.TestCase):
                 )
                 mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
                 mock_overlay.assert_called_once_with(
-                    sr.get_remote("myvps"), "/remote/demo", root, "",
-                    ["sandbox.config.json"],
+                    sr.get_remote("myvps"), "/remote/demo", "abc123",
+                    project_root=root, diff_text="",
+                    untracked=["sandbox.config.json"],
                 )
                 mock_apply.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo"
@@ -2781,12 +2805,12 @@ class TestDeployEnsureExpose(unittest.TestCase):
                  patch.object(sr, "resolve_source_ref", return_value="a" * 40), \
                  patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                  patch.object(sr, "push_commits", return_value="a" * 40), \
-                 patch.object(sr, "reset_target_to"), \
-                 patch.object(sr, "apply_uncommitted", return_value=1) as overlay, \
+                 patch.object(sr, "update_target_to", return_value=1) as overlay, \
                  patch("builtins.print"):
                 deploy_cmd.cmd_deploy(None, args)
             overlay.assert_called_once_with(
-                entry, "/remote/demo", root, "", ["sandbox.config.json"],
+                entry, "/remote/demo", "a" * 40, project_root=root,
+                untracked=["sandbox.config.json"],
             )
 
     def _expose_with_aliases(self, *, alias_arg, project_aliases=None,
@@ -2821,9 +2845,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
                      patch.object(sr, "push_commits", return_value="abc123"), \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst), \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst), \
@@ -2908,9 +2931,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
                      patch.object(sr, "push_commits", return_value="abc123"), \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst), \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst), \
@@ -2946,9 +2968,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
                      patch.object(sr, "push_commits", return_value="abc123"), \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value={"status": "ready"}), \
                      patch("builtins.print") as mock_print:
@@ -2976,9 +2997,8 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
                      patch.object(sr, "push_commits", return_value="abc123"), \
-                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=instance), \
                      patch.object(sr, "activate_remote_plugin") as activate, \

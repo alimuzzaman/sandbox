@@ -16,7 +16,7 @@ shell renderer.
 | `workspace_path` | absolute path string / `Path` | Sibling or otherwise caller-authorized target; must not resolve to `source_path`. |
 | `source_identity` | string or null | Optional deployment identity (`sha256:<64 hex>` when supplied); never used to derive a path. |
 | `workspace_label` | string | Existing workspace label grammar; used only by the caller to derive the deterministic sibling path. |
-| `lock_key` | string | Canonical source identity for the per-source materialization lock; no path separators or secrets. |
+| `lock_key` | string | Internally derived canonical source identity for the per-source materialization lock; callers cannot supply or override it. |
 
 Preconditions are checked before any cleanup. A rejected request leaves both source and
 workspace unchanged. The materializer does not discover a project from package files and does
@@ -36,7 +36,7 @@ of truth for project identity.
 | `history_mode` | enum | `hardlinked`, `copied`, or `none` when no usable Git history exists. |
 | `hardlinked_files` | non-negative integer | Count of regular immutable object/pack files linked to source; zero for copied/none. |
 | `copied_git_entries` | non-negative integer | Count of Git entries copied by value. |
-| `fallback_reason` | enum or null | `null` for hardlinked/none; bounded reason such as `git_marker_file`, `cross_device`, `unsupported`, `permission`, `malformed_marker`, or `source_unreadable`. |
+| `fallback_reason` | enum or null | `null` for hardlinked/none; bounded reason such as `git_marker_file`, `cross_device`, `unsupported`, or `permission`. Malformed/unreadable Git markers are refusals. |
 | `source_mutation_check` | enum | `not_run` until a caller performs the integrity seam; never `passed` without observed evidence. |
 | `lock` | object | `{key, acquired, released}`; a busy lock is an error, not a successful receipt. |
 
@@ -119,7 +119,7 @@ services:
       - sandbox-nodestore-<family_id>:/sandbox-node
     environment:
       SANDBOX_NODE_STORE: /sandbox-node/store
-      SANDBOX_NODE_MODULES: /sandbox-node/node_modules
+      SANDBOX_NODE_MODULES: /sandbox-node/node_modules/<canonical-runtime-id>
       npm_config_store_dir: /sandbox-node/store
 volumes:
   sandbox-nodestore-<family_id>:

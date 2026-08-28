@@ -327,10 +327,14 @@ class TestHostingManifest(unittest.TestCase):
                     diff_text, untracked,
                 )
             self.assertEqual(applied, 2)
-            command = ssh.call_args.args[1]
+            transfer_call = next(
+                call for call in ssh.call_args_list
+                if call.kwargs.get("input_data") is not None
+            )
+            command = transfer_call.args[1]
             self.assertIn("tar -xzf - -C /srv/deploy/example-site", command)
             self.assertNotIn("/srv/deploy/example-site/site", command)
-            archive = tarfile.open(fileobj=io.BytesIO(ssh.call_args.kwargs["input_data"]), mode="r:gz")
+            archive = tarfile.open(fileobj=io.BytesIO(transfer_call.kwargs["input_data"]), mode="r:gz")
             names = {name for name in archive.getnames() if not name.startswith("._")}
             self.assertEqual(names, {"compose.yml", "local.yml"})
 
@@ -1255,9 +1259,8 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.remote, "push_commits", side_effect=push) as pushed, \
              patch.object(hosting_cmd.hosting, "render_env_file", side_effect=render), \
              patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd.remote, "reset_target_to", side_effect=lambda *_: events.append("reset")), \
+             patch.object(hosting_cmd.remote, "update_target_to", side_effect=lambda *_args, **_kwargs: events.append("reset")), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", side_effect=lambda *_: (events.append("capture") or ("", []))), \
-             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose", side_effect=lambda *_: events.append("compose")) as compose, \
              patch.object(hosting_cmd, "_verify_remote_health"), \
@@ -1270,7 +1273,6 @@ class TestHostingManifest(unittest.TestCase):
             )
 
         self.assertEqual(events[:6], ["secrets", "push", "capture", "render", "reset", "compose"])
-        apply_overlay.assert_not_called()
         self.assertEqual(
             pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
         )
@@ -1295,7 +1297,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value="abc123"), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "reset_target_to") as reset, \
+             patch.object(hosting_cmd.remote, "update_target_to") as reset, \
              patch.object(hosting_cmd, "_run_compose") as compose, \
              patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
             with self.assertRaisesRegex(hosting.HostingError, "lowercase 40-hex"):
@@ -1319,8 +1321,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("diff --git a/x b/x\n", ["new.txt"])), \
              patch.object(hosting_cmd.hosting, "render_env_file") as render, \
-             patch.object(hosting_cmd.remote, "reset_target_to") as reset, \
-             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
+             patch.object(hosting_cmd.remote, "update_target_to") as reset, \
              patch.object(hosting_cmd, "_run_compose") as compose, \
              patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
             with self.assertRaisesRegex(hosting.HostingError, "changed while the source was being pushed"):
@@ -1330,7 +1331,6 @@ class TestHostingManifest(unittest.TestCase):
 
         render.assert_not_called()
         reset.assert_not_called()
-        apply_overlay.assert_not_called()
         compose.assert_not_called()
         save_state.assert_not_called()
         self.assertEqual(state, {"version": 1, "hosts": {}})
@@ -1357,8 +1357,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=overlay), \
              patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd.remote, "reset_target_to"), \
-             patch.object(hosting_cmd.remote, "apply_uncommitted") as apply_overlay, \
+             patch.object(hosting_cmd.remote, "update_target_to") as apply_overlay, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose"), \
              patch.object(hosting_cmd, "_verify_remote_health"), \
@@ -1370,7 +1369,9 @@ class TestHostingManifest(unittest.TestCase):
             )
 
         apply_overlay.assert_called_once_with(
-            {}, "/srv/source", validated["project_root"], overlay[0], overlay[1],
+            {}, "/srv/source", revision,
+            project_root=validated["project_root"],
+            diff_text=overlay[0], untracked=overlay[1],
         )
 
     @patch("sandbox.commands.hosting.time.sleep")
@@ -1398,15 +1399,14 @@ class TestHostingManifest(unittest.TestCase):
     @patch("sandbox.commands.hosting._run_compose")
     @patch("sandbox.commands.hosting._read_remote_optional", return_value=None)
     @patch("sandbox.commands.hosting._origin_certificate")
-    @patch("sandbox.commands.hosting.remote.apply_uncommitted")
+    @patch("sandbox.commands.hosting.remote.update_target_to")
     @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.reset_target_to")
     @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
     @patch("sandbox.commands.hosting.cloudflare.Client")
     def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(
-        self, client_type, _source, _home, _push, _reset, _capture, _uncommitted,
+        self, client_type, _source, _home, _push, _capture, _update,
         origin_certificate, _read_caddy, _compose, _health, configure_caddy,
         verify_edge, save_state,
     ):
@@ -1469,15 +1469,14 @@ class TestHostingManifest(unittest.TestCase):
     @patch("sandbox.commands.hosting._run_compose")
     @patch("sandbox.commands.hosting._read_remote_optional", return_value="old caddy")
     @patch("sandbox.commands.hosting._origin_certificate")
-    @patch("sandbox.commands.hosting.remote.apply_uncommitted")
+    @patch("sandbox.commands.hosting.remote.update_target_to")
     @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.reset_target_to")
     @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
     @patch("sandbox.commands.hosting.cloudflare.Client")
     def test_public_acme_apply_restores_dns_and_caddy_when_certificate_verification_fails(
-        self, client_type, _source, _home, _push, _reset, _capture, _uncommitted,
+        self, client_type, _source, _home, _push, _capture, _update,
         origin_certificate, _read_caddy, _compose, _health, _configure,
         _verify_edge, restore_caddy, save_state,
     ):
@@ -1637,10 +1636,9 @@ class TestRemotePreviewIdentity(unittest.TestCase):
                  patch.object(preview.remote, "ensure_deploy_repo",
                               return_value="/srv/demo"), \
                  patch.object(preview.remote, "push_commits", return_value="abc123"), \
-                 patch.object(preview.remote, "reset_target_to"), \
+                 patch.object(preview.remote, "update_target_to") as overlay, \
                  patch.object(preview.remote, "capture_uncommitted",
                               return_value=("", [])), \
-                 patch.object(preview.remote, "apply_uncommitted") as overlay, \
                  patch.object(preview.remote, "ensure_remote_instance",
                               side_effect=RuntimeError("stop after overlay")), \
                  patch.object(preview.remote, "delete_remote_instance_for_label"), \
@@ -1648,7 +1646,8 @@ class TestRemotePreviewIdentity(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     preview.cmd_preview(None, args)
             overlay.assert_called_once_with(
-                entry, "/srv/demo", root, "", ["sandbox.config.json"],
+                entry, "/srv/demo", "abc123", project_root=root,
+                diff_text="", untracked=["sandbox.config.json"],
             )
 
     def test_preview_rolls_back_a_partial_instance_when_ensure_fails(self):
@@ -1669,9 +1668,8 @@ class TestRemotePreviewIdentity(unittest.TestCase):
              patch.object(preview, "preview_identity", return_value=("preview-id", "preview-label")), \
              patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
              patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "update_target_to"), \
              patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "apply_uncommitted"), \
              patch.object(preview.remote, "ensure_remote_instance", side_effect=RuntimeError("bootstrap failed")), \
              patch.object(preview.remote, "delete_remote_instance_for_label") as cleanup, \
              patch.object(preview, "die", side_effect=SystemExit):
@@ -1704,9 +1702,8 @@ class TestRemotePreviewIdentity(unittest.TestCase):
              patch.object(preview.remote, "ensure_deploy_repo",
                           return_value="/srv/demo"), \
              patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "update_target_to"), \
              patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "apply_uncommitted"), \
              patch.object(preview.remote, "ensure_remote_instance",
                           return_value=instance), \
              patch.object(preview.remote, "reconcile_remote_instance",
@@ -1749,9 +1746,8 @@ class TestRemotePreviewIdentity(unittest.TestCase):
              patch.object(preview.remote, "current_branch", return_value="latest"), \
              patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
              patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "update_target_to"), \
              patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "apply_uncommitted"), \
              patch.object(preview.remote, "ensure_remote_instance", return_value=instance), \
              patch.object(preview.remote, "reconcile_remote_instance",
                           return_value=instance) as reconciled, \

@@ -808,6 +808,23 @@ host-ingress guide.
 
 ---
 
+## Shared remote workspace storage
+
+Remote job workspaces share only immutable Git object files by hard link; their worktree,
+refs, index, logs, and configuration stay private, with a complete-copy fallback for older or
+unsupported layouts. Generic Compose projects can explicitly set `compose.nodeStore: true`
+to receive one family-scoped `sandbox-nodestore-<family>` volume at `/sandbox-node`, with the
+store and dependency-tree paths inside that same mount. Projects without the opt-in keep the
+legacy overlay byte-for-byte, and BuildKit caches are separate and unchanged. The package
+store is family-shared; each canonical runtime receives its own dependency-tree child so
+sibling workspaces with different dependency versions do not share mutable `node_modules`.
+
+Shared stores are never removed automatically. Use `sb resources plan
+--node-store-family <canonical-family>` first, review its exact volume, size, and running
+mounts, then apply that named plan only with `--confirm`. Wildcards, inferred families, and
+broad volume pruning are unsupported. See [remote hosting](docs/remote-hosting.md) for the
+compatibility, migration, and rollback checklist.
+
 ## Bringing your own CLAUDE.md and skills
 
 Three attach points, all automatic:

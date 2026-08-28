@@ -225,5 +225,13 @@ echo "ok\n";
             self.assertEqual(result.stdout, "ok\n")
 
 
+class DiscoveryPhpDependencyGuardTests(unittest.TestCase):
+    def test_missing_php_is_an_intentional_skip(self):
+        case = DiscoveryPhpHarnessTests(methodName="test_discovery_contract_and_security_boundary")
+        with patch("shutil.which", return_value=None):
+            with self.assertRaisesRegex(unittest.SkipTest, "php binary unavailable"):
+                case.setUp()
+
+
 if __name__ == "__main__":
     unittest.main()

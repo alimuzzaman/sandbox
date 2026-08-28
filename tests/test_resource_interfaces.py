@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import signal
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -20,10 +21,12 @@ class RecordingService:
         self, *, thorough, budget_seconds, progress=None, deep=False,
         cancelled=False,
     ):
+        terminal_status = getattr(cancelled, "terminal_status", lambda: None)()
+        cancelled_value = terminal_status is not None or cancelled is True
         self.calls.append(
             ("status", thorough, deep, budget_seconds)
-            if not cancelled else
-            ("status", thorough, deep, budget_seconds, cancelled)
+            if not cancelled_value else
+            ("status", thorough, deep, budget_seconds, True)
         )
         deep_payload = {}
         if deep:
@@ -146,7 +149,7 @@ class RecordingService:
             }
         return {
             "schema_version": 1, "ok": True, "action": "status",
-            "status": "cancelled" if cancelled else "complete",
+            "status": terminal_status or ("cancelled" if cancelled is True else "complete"),
             "target": {"kind": "local", "name": "local"},
             "data": {
                 "budget_seconds": budget_seconds,
@@ -215,6 +218,13 @@ class RecordingService:
 
 
 class TestResourceInterfaces(unittest.TestCase):
+    def test_cli_sigint_sets_the_same_request_signal_without_raising(self):
+        from sandbox.commands import resources
+
+        with resources._status_cancellation(False) as cancellation:
+            signal.raise_signal(signal.SIGINT)
+            self.assertEqual(cancellation.terminal_status(), "cancelled")
+
     def parser(self):
         from sandbox.commands.resources import configure_parser
         parser = argparse.ArgumentParser()

@@ -16,7 +16,9 @@ from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
 from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
-from sandbox.resources.models import CleanupCandidate, NetworkLifecycle
+from sandbox.resources.models import (
+    CleanupCandidate, NetworkLifecycle, ResourceCancellationSignal,
+)
 
 
 class TestRemoteResourceAdapter(unittest.TestCase):
@@ -357,6 +359,26 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIsNone(snapshot.capacity)
         self.assertEqual(snapshot.category_outcomes[0]["status"], "cancelled")
+
+    def test_remote_disconnect_signal_is_shared_and_total_loss_is_explicit(self):
+        signal = ResourceCancellationSignal()
+
+        def service(_remote, _command, *, input_data=None, timeout=0,
+                    cancellation=None):
+            self.assertIs(cancellation, signal)
+            signal.disconnect()
+            return ProcessResult(("control",), 1, "", "connection lost")
+
+        snapshot = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            service_request=service,
+            clock=lambda: NOW,
+        ).observe(thorough=True, budget_seconds=2, cancelled=signal)
+        self.assertIsNone(snapshot.capacity)
+        self.assertEqual(snapshot.category_outcomes, ({
+            "category": "remote_probe", "status": "disconnected",
+        },))
 
     def test_remote_nonzero_interruption_retains_delivered_valid_payload(self):
         payload = {

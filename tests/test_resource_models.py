@@ -7,12 +7,24 @@ from sandbox.resources.models import (
     CleanupCandidate,
     CleanupPlan,
     ResourceObservation,
+    ResourceCancellationSignal,
+    ResourceRequest,
     StorageTarget,
 )
 from tests.resource_fixtures import NOW, observation, target
 
 
 class TestResourceModels(unittest.TestCase):
+    def test_request_owns_exact_first_terminal_cancellation_signal(self):
+        signal = ResourceCancellationSignal()
+        request = ResourceRequest(15, signal)
+        self.assertIs(request.cancellation, signal)
+        self.assertTrue(signal.disconnect())
+        self.assertFalse(signal.cancel())
+        self.assertEqual(request.terminal_status(), "disconnected")
+        with self.assertRaises(ValueError):
+            ResourceRequest(15, lambda: True)
+
     def test_target_identity_is_required_and_kind_is_bounded(self):
         self.assertEqual(target().to_dict()["identity"], "host-fixture")
         with self.assertRaises(ValueError):

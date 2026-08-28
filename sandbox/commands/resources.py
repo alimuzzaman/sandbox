@@ -6,12 +6,15 @@ import argparse
 import json
 import math
 import shlex
+import signal
+import threading
 import time
+from contextlib import contextmanager
 
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
 from sandbox.resources.context import node_store_service, reclaim_service, resource_service
-from sandbox.resources.models import redact
+from sandbox.resources.models import resource_cancellation_signal, redact
 from sandbox.resources.monitor import record_path, resolve_policy
 
 
@@ -20,6 +23,26 @@ from sandbox.resources.monitor import record_path, resolve_policy
 # deadline so a synchronous caller receives a typed result before its own
 # requested budget expires.
 _REMOTE_PLAN_TRANSPORT_GRACE_SECONDS = 5.0
+
+
+@contextmanager
+def _status_cancellation(initial=False):
+    """Own one request signal and translate SIGINT without killing evidence."""
+    request_signal = resource_cancellation_signal(initial)
+    installed = threading.current_thread() is threading.main_thread()
+    previous = None
+    if installed:
+        previous = signal.getsignal(signal.SIGINT)
+
+        def cancel_request(_signum, _frame):
+            request_signal.cancel()
+
+        signal.signal(signal.SIGINT, cancel_request)
+    try:
+        yield request_signal
+    finally:
+        if installed:
+            signal.signal(signal.SIGINT, previous)
 
 
 def _remaining_status_budget(args, requested_budget: float) -> float:
@@ -1239,11 +1262,9 @@ def cmd_resources(_cfg, args) -> None:
             status_kwargs["directory_cache"] = (
                 "cache_only" if fast else "refresh"
             )
-        if args.cancelled:
-            status_kwargs["cancelled"] = True
-        payload = service.status(
-            **status_kwargs,
-        )
+        with _status_cancellation(args.cancelled) as cancellation:
+            status_kwargs["cancelled"] = cancellation
+            payload = service.status(**status_kwargs)
         _restore_requested_budget(payload, requested_budget)
     elif action == "plan":
         if args.cancelled:

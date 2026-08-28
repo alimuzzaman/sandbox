@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import subprocess
 from typing import Callable
@@ -3407,7 +3408,9 @@ class RemoteResourceAdapter:
             )
         return snapshot.target
 
-    def _request(self, entry: dict, request: dict, timeout: float) -> ProcessResult:
+    def _request(
+        self, entry: dict, request: dict, timeout: float, *, cancellation=False,
+    ) -> ProcessResult:
         """Submit a typed service request; never open SSH in production.
 
         ``service_request`` is an injected HTTP transport seam for tests and
@@ -3416,11 +3419,21 @@ class RemoteResourceAdapter:
         if self._service_request is not None:
             execute = self._service_request
             try:
-                result = execute(
-                    entry, "POST /resources",
-                    input_data=json.dumps(request, separators=(",", ":")),
-                    timeout=max(int(timeout), 1),
-                )
+                kwargs = {
+                    "input_data": json.dumps(request, separators=(",", ":")),
+                    "timeout": max(int(timeout), 1),
+                }
+                try:
+                    parameters = inspect.signature(execute).parameters.values()
+                    accepts_cancellation = any(
+                        item.name == "cancellation" or item.kind == item.VAR_KEYWORD
+                        for item in parameters
+                    )
+                except (TypeError, ValueError):
+                    accepts_cancellation = False
+                if accepts_cancellation:
+                    kwargs["cancellation"] = cancellation
+                result = execute(entry, "POST /resources", **kwargs)
             except subprocess.TimeoutExpired as exc:
                 return ProcessResult(("control-http",), 124, "", str(exc))
             return ProcessResult(
@@ -3439,16 +3452,18 @@ class RemoteResourceAdapter:
                              json.dumps(result, separators=(",", ":")), "")
 
     @staticmethod
-    def _cancelled(signal) -> bool:
-        if isinstance(signal, bool):
-            return signal
-        probe = getattr(signal, "is_set", None)
-        if not callable(probe) and callable(signal):
-            probe = signal
-        try:
-            return bool(probe()) if callable(probe) else False
-        except Exception:
-            return False
+    def _terminal(signal) -> str | None:
+        from sandbox.resources.models import ResourceCancellationSignal
+
+        if type(signal) is bool:
+            return "cancelled" if signal else None
+        if type(signal) is not ResourceCancellationSignal:
+            return None
+        return signal.terminal_status()
+
+    @classmethod
+    def _cancelled(cls, signal) -> bool:
+        return cls._terminal(signal) == "cancelled"
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
@@ -3456,10 +3471,11 @@ class RemoteResourceAdapter:
         cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         entry = self._entry()
-        if self._cancelled(cancelled):
+        initial_terminal = self._terminal(cancelled)
+        if initial_terminal is not None:
             return ProviderSnapshot(
                 self.target(), None, (),
-                ({"category": "remote_probe", "status": "cancelled"},),
+                ({"category": "remote_probe", "status": initial_terminal},),
             )
         if progress:
             progress("remote_probe")
@@ -3473,11 +3489,12 @@ class RemoteResourceAdapter:
             "deep": bool(deep),
             "cancelled": self._cancelled(cancelled),
             "directory_cache": directory_cache or "auto",
-        }, budget_seconds + 5)
+        }, budget_seconds + 5, cancellation=cancelled)
         payload = _salvage_payload(response.stdout)
         if payload is None:
-            status = (
-                "timed_out" if response.returncode == 124 else "unavailable"
+            status = self._terminal(cancelled) or (
+                "timed_out" if response.returncode == 124 else
+                "disconnected" if response.returncode != 0 else "unavailable"
             )
             return ProviderSnapshot(
                 self.target(), None, (),
@@ -3491,8 +3508,8 @@ class RemoteResourceAdapter:
         self._target = target
         outcomes = list(payload.get("category_outcomes") or ())
         terminal = None
-        if self._cancelled(cancelled):
-            terminal = "cancelled"
+        if self._terminal(cancelled) is not None:
+            terminal = self._terminal(cancelled)
         elif response.returncode == 124:
             terminal = "timed_out"
         elif response.returncode != 0:

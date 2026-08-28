@@ -68,13 +68,14 @@ def resource_status(
                 "fast and refresh are mutually exclusive", "invalid_mode",
             ),
         )
+    from sandbox.resources.models import resource_cancellation_signal
+
     kwargs = {
         "thorough": (thorough or deep) and not fast,
         "budget_seconds": budget_seconds,
         "deep": deep or fast or refresh,
     }
-    if cancelled:
-        kwargs["cancelled"] = True
+    kwargs["cancelled"] = resource_cancellation_signal(cancelled)
     if fast or refresh:
         kwargs["directory_cache"] = "cache_only" if fast else "refresh"
     return _service(remote).status(

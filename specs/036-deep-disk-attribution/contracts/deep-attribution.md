@@ -12,6 +12,9 @@ sb resources status [--remote NAME] --deep [--budget SECONDS] [--cancelled] [--j
 - `--deep` is valid only for `status`; plan and cleanup contracts are unchanged.
 - `--cancelled` is valid only for `status` and expresses a pre-cancelled
   non-interactive request for automation tests; it has no cleanup effect.
+- An interactive `SIGINT` marks the same request-owned cancellation signal.
+  Collectors stop starting new phases, terminate and reap an owned child, and
+  return completed evidence with explicit `cancelled` coverage.
 - Human output shows capacity, both drift dimensions, selected capabilities,
   coverage/limitations, safe mount topology, and ranked findings.
 
@@ -31,7 +34,9 @@ resource_status(
 the prior response shape. `cancelled=true` is the matching MCP cancellation
 test seam; a pre-cancelled supporting provider returns structured cancelled
 status/evidence, while a legacy provider returns `request_cancelled` without
-starting collection.
+starting collection. The MCP adapter translates this reviewed boolean seam
+once into the same typed signal used by CLI, service, adapters, and collectors;
+the public MCP schema is unchanged.
 
 ## Additive status data
 

@@ -137,7 +137,7 @@ class TestAcceptanceManifest(unittest.TestCase):
             item["required"] = False
         with self.assertRaises(manifest_module.ManifestError) as raised:
             manifest_module.validate_manifest(optional_only)
-        self.assertEqual(raised.exception.code, "no_required_check")
+        self.assertEqual(raised.exception.code, "check_requirement_mismatch")
 
         empty = fixtures.manifest()
         empty["artifacts"] = []
@@ -200,6 +200,42 @@ class TestAcceptanceManifest(unittest.TestCase):
         self.assertEqual(len(manifest_module.required_check_ids(document)), 7)
         self.assertEqual(manifest_module.artifact_names(document),
                          ("checks.json", "cleanup.json"))
+
+    def test_catalog_types_and_artifacts_are_not_manifest_choices(self):
+        cases = []
+        wrong_category = fixtures.manifest()
+        wrong_category["checks"][0]["category"] = "cleanup"
+        cases.append((wrong_category, "check_category_mismatch"))
+        wrong_requirement = fixtures.manifest()
+        wrong_requirement["checks"][0]["required"] = False
+        cases.append((wrong_requirement, "check_requirement_mismatch"))
+        unknown = fixtures.manifest()
+        unknown["checks"][0]["check_id"] = "invented_live_proof"
+        cases.append((unknown, "check_unsupported"))
+        overbound = fixtures.manifest()
+        overbound["artifacts"][0]["max_bytes"] = 262145
+        cases.append((overbound, "artifact_bound_too_large"))
+        missing = fixtures.manifest()
+        missing["artifacts"].pop()
+        cases.append((missing, "artifact_catalog_incomplete"))
+        for document, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(manifest_module.ManifestError) as raised:
+                    manifest_module.validate_manifest(document)
+                self.assertEqual(raised.exception.code, code)
+
+    def test_cleanup_must_cover_exact_catalog_derived_identities(self):
+        for field, mutation in (
+            ("sockets", lambda value: value.pop()),
+            ("units", lambda value: value.append("foreign.service")),
+            ("interfaces", lambda value: value.__setitem__(0, "other0")),
+        ):
+            with self.subTest(field=field):
+                document = fixtures.manifest()
+                mutation(document["cleanup"][field])
+                with self.assertRaises(manifest_module.ManifestError) as raised:
+                    manifest_module.validate_manifest(document)
+                self.assertEqual(raised.exception.code, "cleanup_coverage_mismatch")
 
 
 if __name__ == "__main__":

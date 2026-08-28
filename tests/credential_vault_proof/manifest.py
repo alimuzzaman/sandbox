@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from . import catalog as catalog_module
 from . import scanner
 
 
@@ -267,8 +268,15 @@ def validate_manifest(document: Any) -> dict[str, Any]:
         _text(item["check_id"], _CHECK_ID, f"{place}.check_id")
         if item["category"] not in CHECK_CATEGORIES:
             raise _refuse("field_invalid", f"{place}.category")
+        definition = catalog_module.CHECKS.get(item["check_id"])
+        if definition is None:
+            raise _refuse("check_unsupported", f"{place}.check_id")
+        if item["category"] != definition.category:
+            raise _refuse("check_category_mismatch", f"{place}.category")
         if not isinstance(item["required"], bool):
             raise _refuse("field_invalid", f"{place}.required")
+        if item["required"] != definition.required:
+            raise _refuse("check_requirement_mismatch", f"{place}.required")
         if not isinstance(item["description"], str) or not item["description"] \
                 or len(item["description"]) > MAX_STRING:
             raise _refuse("field_invalid", f"{place}.description")
@@ -293,7 +301,28 @@ def validate_manifest(document: Any) -> dict[str, Any]:
                      minimum=1, maximum=4 * 1024 * 1024)
         if item["name"] in seen_artifacts:
             raise _refuse("list_duplicate", f"{place}.name")
+        definition = catalog_module.ARTIFACTS.get(item["name"])
+        if definition is None:
+            raise _refuse("artifact_unsupported", f"{place}.name")
+        if item["max_bytes"] > definition.maximum_bytes:
+            raise _refuse("artifact_bound_too_large", f"{place}.max_bytes")
         seen_artifacts.add(item["name"])
+    if seen_artifacts != set(catalog_module.ARTIFACTS):
+        raise _refuse("artifact_catalog_incomplete", "artifacts")
+
+    # Cleanup must cover every identity created by this exact plan. A caller
+    # cannot omit the controller socket or add a foreign cleanup target.
+    exact_cleanup = {
+        "units": tuple(service["units"]),
+        "sockets": (transport["lease_socket"], transport["controller_socket"]),
+        "interfaces": (transport["guest_interface"],),
+        "cgroups": (service["cgroup"],),
+        "nftables_objects": (kernel["nftables_table"],),
+        "paths": catalog_module.EXPECTED_CLEANUP_PATHS,
+    }
+    for name, expected in exact_cleanup.items():
+        if tuple(cleanup[name]) != expected:
+            raise _refuse("cleanup_coverage_mismatch", f"cleanup.{name}")
     return document
 
 

@@ -72,7 +72,8 @@ def manifest(**overrides: Any) -> dict[str, Any]:
         },
         "cleanup": {
             "units": ["sandbox-credential-broker@sb-0123456789ab.service"],
-            "sockets": ["@sandbox-credential-broker-lease-0001"],
+            "sockets": ["@sandbox-credential-broker-lease-0001",
+                        "@sandbox-credential-broker-control-0001"],
             "interfaces": ["ve-sb01234567"],
             "cgroups": ["/sandbox.slice/credential-broker/sb-0123456789ab"],
             "nftables_objects": ["sandbox-native-sb0123456789ab"],
@@ -105,8 +106,21 @@ def manifest(**overrides: Any) -> dict[str, Any]:
     return document
 
 
-def acceptance(**overrides: Any) -> dict[str, Any]:
-    value = {"accepted": True, "job_id": "job-fixture-0001"}
+def acceptance(*, manifest_document: Any = None, request_id: str = "cv-proof-0001",
+               accepted_at: str = "2026-09-01T10:01:00Z", **overrides: Any
+               ) -> dict[str, Any]:
+    document = manifest_document or manifest()
+    from .manifest import manifest_digest
+
+    value = {
+        "accepted": True, "job_id": "job-fixture-0001",
+        "request_id": request_id, "manifest_digest": manifest_digest(document),
+        "machine_id": document["target"]["machine_id"],
+        "broker_epoch": document["target"]["broker_epoch"],
+        "git_sha": document["source"]["git_sha"],
+        "sandbox_revision": document["source"]["sandbox_revision"],
+        "accepted_at": accepted_at,
+    }
     value.update(overrides)
     return value
 
@@ -144,7 +158,29 @@ def events(check_states: Any, *, start_at: str = "2026-09-01T10:00:00Z"
     return document
 
 
+def execution_artifact(manifest_document: Any, check_states: Any
+                       ) -> list[dict[str, Any]]:
+    from .probes import plan
+
+    return [{
+        "check_id": entry["check_id"], "category": entry["category"],
+        "source": entry["kind"], "expectation": entry["expectation"],
+        "argv": list(entry["argv"]), "state": check_states.get(entry["check_id"],
+                                                               "passed"),
+        "code": "observed",
+    } for entry in plan(manifest_document)]
+
+
+def cleanup_artifact(manifest_document: Any) -> dict[str, Any]:
+    from .cleanup import verify
+
+    observations = list(cleanup_observations(manifest_document))
+    result = verify(manifest_document, observations)
+    return {"observations": observations, "state": result["state"]}
+
+
 __all__ = [
     "BROKER_EPOCH", "GIT_SHA", "HOST_LABEL", "MACHINE_ID", "SANDBOX_REVISION",
-    "SYNTHETIC_MARKER", "acceptance", "cleanup_observations", "events", "manifest",
+    "SYNTHETIC_MARKER", "acceptance", "cleanup_artifact", "cleanup_observations",
+    "events", "execution_artifact", "manifest",
 ]

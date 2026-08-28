@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import stat
+from datetime import datetime, timezone
 from typing import Any
 
+from . import cleanup as cleanup_module
+from . import probes as probes_module
 from . import scanner
 from .ledger import CLASSIFICATIONS, validate_record
 from .manifest import canonical_json, manifest_digest, validate_manifest
@@ -27,6 +31,7 @@ from .manifest import canonical_json, manifest_digest, validate_manifest
 
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4096
+MAX_EVIDENCE_AGE_SECONDS = 24 * 60 * 60
 
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
@@ -57,21 +62,57 @@ def _refuse(code: str, location: str = "bundle") -> BundleError:
     return BundleError(code, location)
 
 
+def _validate_ancestors(path: Path) -> None:
+    absolute = path.absolute()
+    for ancestor in (absolute, *absolute.parents):
+        try:
+            details = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise _refuse("artifact_ancestor_unreadable", path.name) from exc
+        if stat.S_ISLNK(details.st_mode):
+            if ancestor == absolute:
+                raise _refuse("artifact_symlink", path.name)
+            if details.st_uid == os.getuid():
+                raise _refuse("artifact_ancestor_symlink", path.name)
+            continue
+        if ancestor != absolute and not stat.S_ISDIR(details.st_mode):
+            raise _refuse("artifact_ancestor_invalid", path.name)
+
+
 def _read(path: Path, *, limit: int) -> bytes:
-    if path.is_symlink():
-        raise _refuse("artifact_symlink", path.name)
+    _validate_ancestors(path)
     try:
-        details = path.lstat()
-    except OSError as exc:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError as exc:
         raise _refuse("artifact_missing", path.name) from exc
-    if not stat.S_ISREG(details.st_mode):
-        raise _refuse("artifact_not_regular", path.name)
-    if details.st_size > limit:
-        raise _refuse("artifact_oversize", path.name)
+    except OSError as exc:
+        code = "artifact_symlink" if path.is_symlink() else "artifact_unreadable"
+        raise _refuse(code, path.name) from exc
     try:
-        return path.read_bytes()
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            raise _refuse("artifact_not_regular", path.name)
+        if details.st_size > limit:
+            raise _refuse("artifact_oversize", path.name)
+        chunks = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(65536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > limit:
+            raise _refuse("artifact_oversize", path.name)
+        return b"".join(chunks)
+    except BundleError:
+        raise
     except OSError as exc:
         raise _refuse("artifact_unreadable", path.name) from exc
+    finally:
+        os.close(descriptor)
 
 
 def _json(raw: bytes, location: str) -> Any:
@@ -136,6 +177,28 @@ def _artifact_expectations(manifest: dict[str, Any]) -> dict[str, dict[str, Any]
     return {item["name"]: item for item in manifest["artifacts"]}
 
 
+def validate_artifact_payload(name: str, raw: bytes, manifest: dict[str, Any]) -> Any:
+    """Validate one bounded retained artifact before it enters the ledger."""
+    expectations = _artifact_expectations(manifest)
+    expected = expectations.get(name)
+    if expected is None:
+        raise _refuse("artifact_unplanned", name[:64])
+    if len(raw) > min(expected["max_bytes"], MAX_ARTIFACT_BYTES):
+        raise _refuse("artifact_oversize", name)
+    findings = scanner.scan_text(raw.decode("utf-8", errors="replace"), location=name)
+    if findings:
+        raise _refuse("secret_like_material", findings[0]["location"])
+    document = _json(raw, name)
+    try:
+        if name == "checks.json":
+            return probes_module.validate_execution_artifact(document, manifest)
+        if name == "cleanup.json":
+            return cleanup_module.validate_artifact(document, manifest)
+    except (probes_module.ProbeError, cleanup_module.CleanupError) as exc:
+        raise _refuse(exc.code, exc.location) from exc
+    raise _refuse("artifact_unplanned", name)
+
+
 def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None,
                     now: Any = None) -> dict[str, Any]:
     """Validate one bundle directory against its manifest and ledger record."""
@@ -163,6 +226,8 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
         raise _refuse("run_not_terminal", "run.json")
     if record["job"]["state"] != "accepted":
         raise _refuse("acceptance_unknown", "run.json")
+    if not record["started_at"] <= record["job"]["accepted_at"] <= record["terminal_at"]:
+        raise _refuse("acceptance_timestamp_invalid", "run.json")
     if record["provenance"] != "live_authorized_host":
         raise _refuse("provenance_not_live", "run.json")
 
@@ -178,6 +243,10 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     unplanned = tuple(sorted(recorded - planned))
     if unplanned:
         raise _refuse("check_unplanned", unplanned[0])
+    pending = tuple(sorted(name for name, state in record["checks"].items()
+                           if state == "pending"))
+    if pending:
+        raise _refuse("check_incomplete", pending[0])
 
     events_raw = _read(path / "events.json", limit=1024 * 1024)
     events = validate_events(_json(events_raw, "events.json"),
@@ -202,6 +271,7 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
             raise _refuse("fake_evidence_marker", marker)
 
     expectations = _artifact_expectations(accepted)
+    decoded_artifacts: dict[str, Any] = {}
     for name, expected in expectations.items():
         member = path / name
         raw = _read(member, limit=min(expected["max_bytes"], MAX_ARTIFACT_BYTES))
@@ -213,6 +283,17 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
             raise _refuse("artifact_unrecorded", name)
         if recorded != observed:
             raise _refuse("artifact_digest_mismatch", name)
+        decoded_artifacts[name] = _json(raw, name)
+
+    try:
+        executions = probes_module.validate_execution_artifact(
+            decoded_artifacts["checks.json"], accepted)
+        cleanup_result = cleanup_module.validate_artifact(
+            decoded_artifacts["cleanup.json"], accepted)
+    except (probes_module.ProbeError, cleanup_module.CleanupError) as exc:
+        raise _refuse(exc.code, exc.location) from exc
+    if cleanup_result["state"] != record["cleanup_state"]:
+        raise _refuse("cleanup_artifact_state_mismatch", "cleanup.json")
 
     # Walk the whole tree, not just the top level: a nested directory was an
     # unwatched place to park an artifact nobody planned.
@@ -232,11 +313,14 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
     # The event record and the ledger must tell the same story.
     terminal = {item["check_id"]: item["state"] for item in events
                 if item["state"] in TERMINAL_EVENT_STATES}
+    executed = {item["check_id"]: item["state"] for item in executions}
     for check_id, state in record["checks"].items():
         if state == "pending":
             raise _refuse("check_incomplete", check_id)
         if terminal.get(check_id) != state:
             raise _refuse("result_contradiction", check_id)
+        if executed.get(check_id) != state:
+            raise _refuse("execution_artifact_result_mismatch", check_id)
 
     required = tuple(item["check_id"] for item in accepted["checks"] if item["required"])
     failed = tuple(name for name in required if record["checks"].get(name) == "failed")
@@ -255,6 +339,12 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
             raise _refuse("timestamp_invalid", "now")
         if record["terminal_at"] > now:
             raise _refuse("evidence_from_the_future", "run.json")
+        current = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+        terminal = datetime.strptime(record["terminal_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+        if (current - terminal).total_seconds() > MAX_EVIDENCE_AGE_SECONDS:
+            raise _refuse("evidence_stale", "run.json")
     return {
         "ok": True,
         "code": "bundle_verified",
@@ -271,5 +361,7 @@ def validate_bundle(root: Any, *, manifest: Any, expected_request_id: Any = None
 
 __all__ = [
     "BundleError", "EVENT_STATES", "FAKE_MARKERS", "MAX_ARTIFACT_BYTES",
-    "TERMINAL_EVENT_STATES", "validate_bundle", "validate_events",
+    "MAX_EVIDENCE_AGE_SECONDS",
+    "TERMINAL_EVENT_STATES", "validate_artifact_payload", "validate_bundle",
+    "validate_events",
 ]

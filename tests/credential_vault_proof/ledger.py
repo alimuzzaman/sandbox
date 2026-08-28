@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
+from datetime import datetime, timezone
 from typing import Any
 
 from . import scanner
@@ -51,8 +53,13 @@ _RECORD_FIELDS = frozenset({
 })
 _TARGET_FIELDS = frozenset({"machine_id", "broker_epoch", "host_label"})
 _EXPECTED_FIELDS = frozenset({"git_sha", "sandbox_revision"})
-_JOB_FIELDS = frozenset({"state", "job_id"})
+_JOB_FIELDS = frozenset({"state", "job_id", "accepted_at"})
+_ACCEPTANCE_FIELDS = frozenset({
+    "accepted", "job_id", "request_id", "manifest_digest", "machine_id",
+    "broker_epoch", "git_sha", "sandbox_revision", "accepted_at",
+})
 PROVENANCE = frozenset({"live_authorized_host", "local_injected_fake"})
+MAX_ACCEPTANCE_DELAY_SECONDS = 300
 
 
 class LedgerError(ValueError):
@@ -98,7 +105,12 @@ def validate_record(document: Any) -> dict[str, Any]:
         raise _refuse("schema_unknown_key", "job")
     if job["job_id"] is not None:
         _identity(job["job_id"], _JOB_ID, "job.job_id")
-    if job["state"] == "accepted" and job["job_id"] is None:
+    if job["accepted_at"] is not None:
+        _identity(job["accepted_at"], _TIMESTAMP, "job.accepted_at")
+    if job["state"] == "accepted" \
+            and (job["job_id"] is None or job["accepted_at"] is None):
+        raise _refuse("acceptance_contradiction", "job")
+    if job["state"] != "accepted" and job["accepted_at"] is not None:
         raise _refuse("acceptance_contradiction", "job")
     _identity(document["started_at"], _TIMESTAMP, "started_at")
     if document["terminal_at"] is not None:
@@ -167,27 +179,93 @@ class ProofRunLedger:
         _identity(request_id, _REQUEST_ID, "request_id")
         return self.root / f"{request_id}.json"
 
+    def _validate_ancestors(self) -> None:
+        """Reject caller-owned symlink ancestors and foreign directory owners."""
+        absolute = self.root.absolute()
+        for ancestor in reversed((absolute, *absolute.parents)):
+            try:
+                details = ancestor.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise _refuse("ledger_ancestor_unreadable", str(ancestor)) from exc
+            if stat.S_ISLNK(details.st_mode):
+                # macOS exposes /var as a root-owned compatibility symlink. It
+                # is not caller-replaceable; caller-owned symlink hops are.
+                if ancestor == absolute or details.st_uid == os.getuid():
+                    raise _refuse("ledger_ancestor_symlink", str(ancestor))
+                continue
+            if not stat.S_ISDIR(details.st_mode):
+                raise _refuse("ledger_ancestor_not_directory", str(ancestor))
+            if details.st_uid not in {0, os.getuid()}:
+                raise _refuse("ledger_ancestor_foreign_owner", str(ancestor))
+
+    def _root_ready_for_read(self) -> bool:
+        self._validate_ancestors()
+        try:
+            details = self.root.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise _refuse("ledger_root_unreadable", str(self.root)) from exc
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise _refuse("ledger_root_invalid", str(self.root))
+        if details.st_uid != os.getuid():
+            raise _refuse("ledger_root_foreign_owner", str(self.root))
+        if stat.S_IMODE(details.st_mode) & 0o077:
+            raise _refuse("ledger_root_permissions", str(self.root))
+        return True
+
+    def _ensure_root(self) -> None:
+        self._validate_ancestors()
+        try:
+            self.root.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except FileNotFoundError as exc:
+            raise _refuse("ledger_parent_missing", str(self.root.parent)) from exc
+        except OSError as exc:
+            raise _refuse("ledger_unavailable", str(self.root)) from exc
+        details = self.root.lstat()
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise _refuse("ledger_root_invalid", str(self.root))
+        if details.st_uid != self.owner_uid:
+            raise _refuse("ledger_root_foreign_owner", str(self.root))
+        if stat.S_IMODE(details.st_mode) & 0o077:
+            raise _refuse("ledger_root_permissions", str(self.root))
+
     def read(self, request_id: str) -> dict[str, Any] | None:
         """Return one record, refusing anything unsafe rather than repairing it."""
-        path = self._path(request_id)
-        if not path.exists() and not path.is_symlink():
+        if not self._root_ready_for_read():
             return None
-        if path.is_symlink():
-            raise _refuse("record_symlink", str(path))
+        path = self._path(request_id)
         try:
-            details = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            code = "record_symlink" if path.is_symlink() else "record_unreadable"
+            raise _refuse(code, str(path)) from exc
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode):
+                raise _refuse("record_not_regular", str(path))
+            if details.st_uid != self.owner_uid:
+                raise _refuse("record_foreign_owner", str(path))
+            if details.st_size > MAX_RECORD_BYTES:
+                raise _refuse("record_oversize", str(path))
+            raw = b""
+            while len(raw) <= MAX_RECORD_BYTES:
+                chunk = os.read(descriptor, min(65536, MAX_RECORD_BYTES + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
+        except LedgerError:
+            raise
         except OSError as exc:
             raise _refuse("record_unreadable", str(path)) from exc
-        if not stat.S_ISREG(details.st_mode):
-            raise _refuse("record_not_regular", str(path))
-        if details.st_uid != self.owner_uid:
-            raise _refuse("record_foreign_owner", str(path))
-        if details.st_size > MAX_RECORD_BYTES:
-            raise _refuse("record_oversize", str(path))
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            raise _refuse("record_unreadable", str(path)) from exc
+        finally:
+            os.close(descriptor)
         try:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -199,20 +277,49 @@ class ProofRunLedger:
 
     def _write(self, record: dict[str, Any]) -> dict[str, Any]:
         validate_record(record)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._ensure_root()
         path = self._path(record["request_id"])
         payload = canonical_json(record).encode("ascii") + b"\n"
         if len(payload) > MAX_RECORD_BYTES:
             raise _refuse("record_oversize", str(path))
-        temporary = path.with_suffix(".json.tmp")
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600,
-        )
+        temporary = self.root / f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
-            os.write(descriptor, payload)
+            descriptor = os.open(temporary, flags, 0o600)
+        except FileExistsError as exc:
+            raise _refuse("record_temp_conflict", str(path)) from exc
+        except OSError as exc:
+            raise _refuse("record_temp_unavailable", str(path)) from exc
+        try:
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise _refuse("record_write_incomplete", str(path))
+                written += count
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temporary, path)
+        try:
+            if path.is_symlink():
+                raise _refuse("record_symlink", str(path))
+            try:
+                os.replace(temporary, path)
+            except OSError as exc:
+                raise _refuse("record_replace_failed", str(path)) from exc
+            directory = os.open(self.root, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                try:
+                    os.fsync(directory)
+                except OSError as exc:
+                    raise _refuse("ledger_sync_failed", str(self.root)) from exc
+            finally:
+                os.close(directory)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
         return record
 
     def open_run(self, *, request_id: str, manifest: dict[str, Any],
@@ -230,7 +337,7 @@ class ProofRunLedger:
             "manifest_digest": digest,
             "target": dict(manifest["target"]),
             "expected": dict(manifest["source"]),
-            "job": {"state": "pending", "job_id": None},
+            "job": {"state": "pending", "job_id": None, "accepted_at": None},
             "started_at": started_at,
             "terminal_at": None,
             "checks": {name: "pending" for name in
@@ -255,21 +362,47 @@ class ProofRunLedger:
         record = self.read(request_id)
         if record is None:
             raise _refuse("run_unknown", request_id)
+        if record["job"]["state"] == "unknown" \
+                or record["classification"] == "acceptance_unknown":
+            if not acceptance:
+                return record
+            raise _refuse("acceptance_unknown_sticky", "job")
         job_id = None
         state = "unknown"
-        if isinstance(acceptance, dict):
+        if isinstance(acceptance, dict) and frozenset(acceptance) == _ACCEPTANCE_FIELDS:
             candidate = acceptance.get("job_id")
-            if isinstance(candidate, str) and _JOB_ID.fullmatch(candidate):
+            expected = {
+                "request_id": record["request_id"],
+                "manifest_digest": record["manifest_digest"],
+                "machine_id": record["target"]["machine_id"],
+                "broker_epoch": record["target"]["broker_epoch"],
+                "git_sha": record["expected"]["git_sha"],
+                "sandbox_revision": record["expected"]["sandbox_revision"],
+            }
+            provenance_matches = all(acceptance.get(key) == value
+                                     for key, value in expected.items())
+            accepted_at = acceptance.get("accepted_at")
+            fresh = False
+            if isinstance(accepted_at, str) and _TIMESTAMP.fullmatch(accepted_at):
+                start = datetime.strptime(record["started_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                observed = datetime.strptime(accepted_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                delay = (observed - start).total_seconds()
+                fresh = 0 <= delay <= MAX_ACCEPTANCE_DELAY_SECONDS
+            if provenance_matches and fresh and isinstance(candidate, str) \
+                    and _JOB_ID.fullmatch(candidate):
                 accepted = acceptance.get("accepted")
-                state = "accepted" if accepted is not False else "refused"
+                state = "accepted" if accepted is True else "refused"
                 job_id = candidate if state == "accepted" else None
-            elif acceptance.get("accepted") is False:
-                state = "refused"
         if record["job"]["state"] == "accepted":
             if state != "accepted" or job_id != record["job"]["job_id"]:
                 raise _refuse("acceptance_conflict", "job")
             return record
-        record["job"] = {"state": state, "job_id": job_id}
+        record["job"] = {
+            "state": state, "job_id": job_id,
+            "accepted_at": acceptance.get("accepted_at") if state == "accepted" else None,
+        }
         if state == "unknown":
             record["classification"] = "acceptance_unknown"
         return self._write(record)
@@ -307,12 +440,18 @@ class ProofRunLedger:
         record["checks"][check_id] = state
         return self._write(record)
 
-    def record_artifact(self, request_id: str, name: str, digest: str) -> dict[str, Any]:
+    def record_artifact(self, request_id: str, name: str, digest: str, *,
+                        manifest: dict[str, Any]) -> dict[str, Any]:
         record = self.read(request_id)
         if record is None:
             raise _refuse("run_unknown", request_id)
         _identity(name, _ARTIFACT, "name")
         _identity(digest, _DIGEST, "digest")
+        from .manifest import artifact_names, manifest_digest
+        if manifest_digest(manifest) != record["manifest_digest"]:
+            raise _refuse("manifest_digest_mismatch", "manifest")
+        if name not in artifact_names(manifest):
+            raise _refuse("artifact_unknown", name)
         previous = record["artifacts"].get(name)
         if previous is not None and previous != digest:
             raise _refuse("artifact_conflict", name)

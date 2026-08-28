@@ -41,13 +41,17 @@ class TestHarnessLifecycle(unittest.TestCase):
                              started_at=START, provenance=provenance)
         decision = self.ledger.should_launch(REQUEST)
         self.assertTrue(decision["launch"])
-        self.ledger.record_acceptance(REQUEST, fixtures.acceptance())
+        self.ledger.record_acceptance(REQUEST, fixtures.acceptance(
+            manifest_document=self.manifest, request_id=REQUEST))
         self.assertFalse(self.ledger.should_launch(REQUEST)["launch"])
 
         for entry in probes.plan(self.manifest):
+            returncode = 1 if entry["expectation"] == "exit_nonzero" else 0
+            stdout = "" if entry["expectation"] == "empty_output" else "observed\n"
             parsed = probes.parse(entry["check_id"], {
-                "returncode": 0, "stdout": "observed\n", "stderr": "",
-                "timed_out": False, "expected": ["observed"],
+                "returncode": returncode, "stdout": stdout, "stderr": "",
+                "timed_out": False,
+                "expected": [] if entry["expectation"] != "exit_zero" else ["observed"],
             }, self.manifest)
             self.ledger.record_check(REQUEST, entry["check_id"], parsed["state"])
 
@@ -58,16 +62,21 @@ class TestHarnessLifecycle(unittest.TestCase):
 
         bundle_root = self.root / "bundle"
         bundle_root.mkdir(exist_ok=True)
+        states = self.ledger.read(REQUEST)["checks"]
         for name in manifest_module.artifact_names(self.manifest):
-            payload = manifest_module.canonical_json({"artifact": name}).encode()
+            value = (fixtures.execution_artifact(self.manifest, states)
+                     if name == "checks.json" else
+                     fixtures.cleanup_artifact(self.manifest))
+            payload = manifest_module.canonical_json(value).encode()
             (bundle_root / name).write_bytes(payload)
             self.ledger.record_artifact(REQUEST, name,
-                                        hashlib.sha256(payload).hexdigest())
+                                        hashlib.sha256(payload).hexdigest(),
+                                        manifest=self.manifest)
 
         record = self.ledger.finalize(
             REQUEST, required=manifest_module.required_check_ids(self.manifest),
             terminal_at=END)
-        states = {name: "passed" for name in record["checks"]}
+        states = dict(record["checks"])
         (bundle_root / "events.json").write_text(
             manifest_module.canonical_json(fixtures.events(states)))
         (bundle_root / "run.json").write_text(

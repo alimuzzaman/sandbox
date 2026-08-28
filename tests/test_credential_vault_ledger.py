@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -49,7 +51,8 @@ class LedgerTestCase(unittest.TestCase):
 class TestProofRunLedger(LedgerTestCase):
     def test_a_new_run_starts_pending_with_every_check_unresolved(self):
         record = self.open_run()
-        self.assertEqual(record["job"], {"state": "pending", "job_id": None})
+        self.assertEqual(record["job"], {"state": "pending", "job_id": None,
+                                         "accepted_at": None})
         self.assertEqual(set(record["checks"].values()), {"pending"})
         self.assertEqual(record["cleanup_state"], "pending")
         self.assertIsNone(record["classification"])
@@ -88,7 +91,7 @@ class TestProofRunLedger(LedgerTestCase):
     def test_an_explicit_refusal_is_not_an_unknown_acceptance(self):
         self.open_run()
         record = self.ledger.record_acceptance(
-            REQUEST, {"accepted": False, "job_id": "job-fixture-0001"},
+            REQUEST, fixtures.acceptance(accepted=False),
         )
         self.assertEqual(record["job"]["state"], "refused")
         self.assertIsNone(record["job"]["job_id"])
@@ -130,9 +133,11 @@ class TestProofRunLedger(LedgerTestCase):
         with self.assertRaises(ledger_module.LedgerError) as raised:
             self.ledger.record_check(REQUEST, "not_a_planned_check", "passed")
         self.assertEqual(raised.exception.code, "check_unknown")
-        self.ledger.record_artifact(REQUEST, "checks.json", "a" * 64)
+        self.ledger.record_artifact(REQUEST, "checks.json", "a" * 64,
+                                    manifest=self.manifest)
         with self.assertRaises(ledger_module.LedgerError) as raised:
-            self.ledger.record_artifact(REQUEST, "checks.json", "b" * 64)
+            self.ledger.record_artifact(REQUEST, "checks.json", "b" * 64,
+                                        manifest=self.manifest)
         self.assertEqual(raised.exception.code, "artifact_conflict")
 
     def test_cleanup_failure_can_never_be_walked_back(self):
@@ -208,6 +213,84 @@ class TestProofRunLedger(LedgerTestCase):
             terminal_at=END,
         )
         self.assertEqual(record["classification"], "acceptance_unknown")
+
+    def test_acceptance_unknown_is_sticky_against_later_success(self):
+        self.open_run()
+        first = self.ledger.record_acceptance(REQUEST, {})
+        self.assertEqual(first["classification"], "acceptance_unknown")
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            self.ledger.record_acceptance(REQUEST, fixtures.acceptance())
+        self.assertEqual(raised.exception.code, "acceptance_unknown_sticky")
+        self.assertEqual(self.ledger.read(REQUEST)["job"]["state"], "unknown")
+
+    def test_acceptance_requires_exact_fresh_request_provenance(self):
+        cases = (
+            {"request_id": "cv-proof-other"},
+            {"manifest_digest": "f" * 64},
+            {"machine_id": "sb-ffffffffffff"},
+            {"accepted_at": "2026-09-01T10:06:00Z"},
+            {"accepted_at": "2026-09-01T09:59:59Z"},
+        )
+        for index, overrides in enumerate(cases):
+            with self.subTest(overrides=tuple(overrides)):
+                request_id = f"cv-proof-fresh-{index}"
+                self.open_run(request_id=request_id)
+                acceptance = fixtures.acceptance(
+                    manifest_document=self.manifest, request_id=request_id)
+                acceptance.update(overrides)
+                record = self.ledger.record_acceptance(request_id, acceptance)
+                self.assertEqual(record["classification"], "acceptance_unknown")
+
+    def test_caller_owned_symlink_ancestor_and_temp_collision_are_refused(self):
+        real = Path(self.temporary.name) / "real"
+        real.mkdir(mode=0o700)
+        linked = Path(self.temporary.name) / "linked"
+        linked.symlink_to(real, target_is_directory=True)
+        unsafe = ledger_module.ProofRunLedger(linked / "ledger")
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            unsafe.open_run(request_id=REQUEST, manifest=self.manifest,
+                            started_at=START)
+        self.assertEqual(raised.exception.code, "ledger_ancestor_symlink")
+
+        self.root.mkdir(mode=0o700)
+        temporary = self.root / f".{REQUEST}.json.{os.getpid()}.fixed.tmp"
+        temporary.write_text("occupied")
+        with mock.patch.object(ledger_module.secrets, "token_hex", return_value="fixed"):
+            with self.assertRaises(ledger_module.LedgerError) as raised:
+                self.open_run()
+        self.assertEqual(raised.exception.code, "record_temp_conflict")
+        self.assertEqual(temporary.read_text(), "occupied")
+
+    def test_write_is_owner_only_atomic_and_syncs_file_and_directory(self):
+        with mock.patch.object(ledger_module.os, "replace",
+                               wraps=ledger_module.os.replace) as replace, \
+                mock.patch.object(ledger_module.os, "fsync",
+                                  wraps=ledger_module.os.fsync) as fsync:
+            self.open_run()
+        replace.assert_called_once()
+        self.assertGreaterEqual(fsync.call_count, 2)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((self.root / f"{REQUEST}.json").stat().st_mode),
+                         0o600)
+
+    def test_an_overpermissive_ledger_directory_is_refused(self):
+        self.root.mkdir(mode=0o700)
+        self.root.chmod(0o755)
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            self.open_run()
+        self.assertEqual(raised.exception.code, "ledger_root_permissions")
+
+    def test_artifact_recording_is_bound_to_the_run_manifest(self):
+        self.open_run()
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            self.ledger.record_artifact(REQUEST, "unplanned.json", "a" * 64,
+                                        manifest=self.manifest)
+        self.assertEqual(raised.exception.code, "artifact_unknown")
+        other = fixtures.manifest(manifest_id="credential-vault-proof-other")
+        with self.assertRaises(ledger_module.LedgerError) as raised:
+            self.ledger.record_artifact(REQUEST, "checks.json", "a" * 64,
+                                        manifest=other)
+        self.assertEqual(raised.exception.code, "manifest_digest_mismatch")
 
     def test_records_are_canonical_owner_only_and_refuse_tampering(self):
         self.open_run()

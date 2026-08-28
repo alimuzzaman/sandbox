@@ -112,6 +112,28 @@ class TestProbeCommandModel(unittest.TestCase):
         self.assertEqual([item["check_id"] for item in entries],
                          list(manifest_module.check_ids(self.manifest)))
 
+    def test_execution_artifact_is_bound_to_exact_typed_plan(self):
+        states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
+        original = fixtures.execution_artifact(self.manifest, states)
+        self.assertEqual(len(probes.validate_execution_artifact(
+            original, self.manifest)), len(original))
+        for field, value, code in (
+            ("category", "cleanup", "execution_artifact_category_mismatch"),
+            ("source", "guest_probe", "execution_artifact_source_mismatch"),
+            ("expectation", "empty_output",
+             "execution_artifact_expectation_mismatch"),
+            ("argv", ["/usr/bin/uname", "-r"], "execution_artifact_argv_mismatch"),
+        ):
+            with self.subTest(field=field):
+                document = [dict(item) for item in original]
+                document[0][field] = value
+                with self.assertRaises(probes.ProbeError) as raised:
+                    probes.validate_execution_artifact(document, self.manifest)
+                self.assertEqual(raised.exception.code, code)
+        with self.assertRaises(probes.ProbeError) as raised:
+            probes.validate_execution_artifact(original[:-1], self.manifest)
+        self.assertEqual(raised.exception.code, "execution_artifact_incomplete")
+
     def test_parsing_requires_the_exact_result_schema(self):
         for completed in ({}, {"returncode": 0}, result(extra=1),
                           result(returncode="0"), result(timed_out="no")):

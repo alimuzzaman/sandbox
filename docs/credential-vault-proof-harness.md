@@ -10,11 +10,15 @@ a live check, and it is not evidence.
 Only things about itself, offline:
 
 - an acceptance manifest is exact, canonical, bounded, and secret-free, and its
-  digest binds the whole execution plan;
+  digest binds the whole execution plan. Check category, execution source,
+  requiredness, pass expectation, artifact type, and artifact ceiling come
+  from the immutable harness catalog rather than caller text;
 - a revision mismatch refuses before any test action;
 - one request identity owns one run, a retry consults the ledger before it
   launches, and an empty or malformed job acceptance is `acceptance_unknown`
-  rather than success;
+  rather than success. That state is sticky, and a valid acceptance must carry
+  the exact request, manifest, machine, broker epoch, source revisions, and a
+  timestamp within five minutes of the recorded request start;
 - partial evidence never classifies as `passed_live`, and cleanup trouble
   outranks a clean result;
 - every planned probe is an argv array of allowlisted, manifest-derived tokens
@@ -23,8 +27,11 @@ Only things about itself, offline:
   use the latter two, because a removed cgroup makes `test -d` exit non-zero
   and reading that as a failure would report a clean host as bad and a host
   with leftover state as good;
-- a completed bundle is refused when it is stale, copied, mixed-revision,
-  contradictory, incomplete, or carries fake markers;
+- `checks.json` must bind every result to the exact catalog category, source,
+  expectation, and argv that was planned; `cleanup.json` must observe every
+  exact planned resource once and no extra resource;
+- a completed bundle is refused when it is over 24 hours old, copied,
+  mixed-revision, contradictory, incomplete, or carries fake markers;
 - a resource that cannot be proven ours is retained, never removed;
 - the report keeps local harness behaviour and live evidence visibly apart.
 
@@ -69,7 +76,9 @@ Every local test uses injected fakes. A run whose provenance is
    request identity.
 4. **poll the ledger** — a retry calls `should_launch` first. The ledger, not
    the operator's memory, decides whether anything may start.
-5. **collect** — `record-artifact` for each planned artifact, then `finalize`.
+5. **collect** — `record-artifact` for each planned artifact, using the same
+   manifest. Recording uses the declared byte ceiling and validates the typed
+   artifact before its digest enters the ledger; then `finalize`.
 6. **validate** — `validate-bundle` against the same manifest. This is where
    copied, stale, mixed-revision, or contradictory evidence dies.
 7. **clean up** — verify absence with the cleanup verifier. A foreign or
@@ -85,7 +94,10 @@ Every local test uses injected fakes. A run whose provenance is
   stable code, and the small set of expected observations that matched.
 - The no-leak scanner runs over the evidence directory before a bundle is
   accepted. A finding names a code and an offset, never the matched text.
-- Ledger records are owner-only, canonical, and bounded. Symlinked,
+- Ledger records are owner-only, canonical, and bounded. The ledger refuses
+  unsafe directory ancestors and permissions, reads with `O_NOFOLLOW`, and
+  writes through a unique `O_EXCL`/`O_NOFOLLOW` owner-only temporary file,
+  followed by file sync, atomic replace, and directory sync. Symlinked,
   foreign-owned, oversized, corrupt, or non-canonical records are refused
   rather than repaired.
 - No credential, source reference, header, body, operation ID, lease ID, or

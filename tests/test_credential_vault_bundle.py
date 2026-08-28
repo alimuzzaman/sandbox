@@ -44,7 +44,10 @@ class BundleTestCase(unittest.TestCase):
         }
         recorded = {}
         for name in artifacts:
-            payload = json.dumps({"artifact": name}, sort_keys=True).encode()
+            value = (fixtures.execution_artifact(self.manifest, states)
+                     if name == "checks.json" else
+                     fixtures.cleanup_artifact(self.manifest))
+            payload = manifest_module.canonical_json(value).encode()
             (self.root / name).write_bytes(payload)
             recorded[name] = hashlib.sha256(payload).hexdigest()
         record = {
@@ -53,7 +56,8 @@ class BundleTestCase(unittest.TestCase):
             "manifest_digest": manifest_module.manifest_digest(self.manifest),
             "target": dict(self.manifest["target"]),
             "expected": dict(self.manifest["source"]),
-            "job": job or {"state": "accepted", "job_id": "job-fixture-0001"},
+            "job": job or {"state": "accepted", "job_id": "job-fixture-0001",
+                           "accepted_at": "2026-09-01T10:01:00Z"},
             "started_at": START,
             "terminal_at": terminal_at,
             "checks": dict(states),
@@ -128,7 +132,7 @@ class TestBundleValidator(BundleTestCase):
         self.assert_refused("fake_evidence_marker")
 
     def test_an_unknown_acceptance_is_refused_as_evidence(self):
-        self.build(job={"state": "unknown", "job_id": None},
+        self.build(job={"state": "unknown", "job_id": None, "accepted_at": None},
                    classification="acceptance_unknown")
         self.assert_refused("acceptance_unknown")
 
@@ -188,14 +192,13 @@ class TestBundleValidator(BundleTestCase):
         self.assert_refused("result_contradiction")
 
     def test_an_incomplete_check_is_refused(self):
-        # A pending check has no terminal event, so the event validator catches
-        # it first; either refusal is a refusal, and both are exercised here.
+        # Ledger incompleteness is refused before event or artifact parsing.
         states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
         first = next(iter(states))
         states[first] = "pending"
         events = fixtures.events({k: v for k, v in states.items() if v != "pending"})
         self.build(check_states=states, events=events)
-        self.assert_refused("events_terminal_missing")
+        self.assert_refused("check_incomplete")
 
         self.setUp()
         full = fixtures.events({name: "passed" for name in states})
@@ -204,7 +207,7 @@ class TestBundleValidator(BundleTestCase):
 
     def test_success_with_incomplete_cleanup_is_refused(self):
         self.build(cleanup="incomplete", classification="passed_live")
-        self.assert_refused("cleanup_contradiction")
+        self.assert_refused("cleanup_artifact_state_mismatch")
 
     def test_a_pass_that_contains_a_failed_required_check_is_refused(self):
         states = {name: "passed" for name in manifest_module.check_ids(self.manifest)}
@@ -236,7 +239,7 @@ class TestBundleValidator(BundleTestCase):
     def test_evidence_dated_after_now_is_refused(self):
         self.build()
         self.assert_refused("evidence_from_the_future", now="2026-08-01T00:00:00Z")
-        self.assertTrue(self.validate(now="2026-12-01T00:00:00Z")["ok"])
+        self.assertTrue(self.validate(now="2026-09-02T00:00:00Z")["ok"])
 
     def test_symlinked_or_oversize_artifacts_are_refused(self):
         self.build()
@@ -257,6 +260,41 @@ class TestBundleValidator(BundleTestCase):
         result = self.validate()
         self.assertEqual(result["classification"], "failed_live")
         self.assertEqual(result["required_failed"], ("lease_socket_owned",))
+
+    def test_recorded_execution_metadata_cannot_claim_a_different_source_or_argv(self):
+        for field, value, code in (
+            ("source", "guest_probe", "execution_artifact_source_mismatch"),
+            ("argv", ["/usr/bin/uname", "-r"],
+             "execution_artifact_argv_mismatch"),
+        ):
+            with self.subTest(field=field):
+                self.setUp()
+                record = self.build()
+                path = self.root / "checks.json"
+                document = json.loads(path.read_text())
+                document[0][field] = value
+                raw = manifest_module.canonical_json(document).encode()
+                path.write_bytes(raw)
+                record["artifacts"]["checks.json"] = hashlib.sha256(raw).hexdigest()
+                (self.root / "run.json").write_text(
+                    manifest_module.canonical_json(record) + "\n")
+                self.assert_refused(code)
+
+    def test_cleanup_artifact_must_cover_every_exact_resource(self):
+        record = self.build()
+        path = self.root / "cleanup.json"
+        document = json.loads(path.read_text())
+        document["observations"].pop()
+        raw = manifest_module.canonical_json(document).encode()
+        path.write_bytes(raw)
+        record["artifacts"]["cleanup.json"] = hashlib.sha256(raw).hexdigest()
+        (self.root / "run.json").write_text(
+            manifest_module.canonical_json(record) + "\n")
+        self.assert_refused("cleanup_artifact_coverage_mismatch")
+
+    def test_old_evidence_is_refused_even_when_every_digest_matches(self):
+        self.build()
+        self.assert_refused("evidence_stale", now="2026-09-03T12:00:01Z")
 
 
 if __name__ == "__main__":

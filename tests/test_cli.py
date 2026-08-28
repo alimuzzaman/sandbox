@@ -844,6 +844,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("--source-ref", r.stdout)
         self.assertIn("--deploy-timeout", r.stdout)
 
+    def test_remote_help_exposes_bounded_runtime_upload_timeout(self):
+        r = run_sb("remote", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--upload-timeout", r.stdout)
+        self.assertIn("1-7200", r.stdout)
+
     def test_wp_payload_stdout_is_clean_and_diagnostics_use_stderr(self):
         import sandbox.commands.wp as command
 

@@ -27,7 +27,9 @@ from sandbox.services.redaction import redact_text
 _PROVISION_LOG_SCHEMA_VERSION = 1
 _PROVISION_LOG_EVENT_LIMIT = 32
 _PROVISION_LOG_DETAIL_LIMIT = 1_000
-_RUNTIME_SOURCE_STAGE_TIMEOUT = 300
+_RUNTIME_SOURCE_PACKAGE_TIMEOUT = 300
+_RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT = 300
+_RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX = 7200
 
 
 class RemoteRuntimeSourceTimeout(RuntimeError):
@@ -341,7 +343,10 @@ def _cmd_service(args, as_json: bool) -> None:
             public_url = entry.get("control_url") if transport == "https" else None
             observed = sr.remote_mcp_service_status(entry)
             if confirmed:
-                _upload_runtime_source(entry["ssh"])
+                upload_timeout = _runtime_source_upload_timeout_arg(args)
+                _upload_runtime_source(
+                    entry["ssh"], upload_timeout=upload_timeout
+                )
             plan = sr.migrate_remote_mcp_service(
                 entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
                 public_url, confirm=confirmed,
@@ -481,10 +486,31 @@ def _cmd_remove(args, as_json: bool) -> None:
         info(f"no remote named '{name}' was registered")
 
 
-def _upload_runtime_source(ssh_target: str) -> None:
+def _normalize_runtime_source_upload_timeout(value: object) -> int:
+    if (type(value) is not int
+            or not 1 <= value <= _RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX):
+        raise ValueError(
+            "runtime source upload timeout must be an integer from 1 to "
+            f"{_RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX} seconds"
+        )
+    return value
+
+
+def _runtime_source_upload_timeout_arg(args) -> int:
+    values = vars(args) if hasattr(args, "__dict__") else {}
+    value = values.get(
+        "upload_timeout", _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT
+    )
+    return _normalize_runtime_source_upload_timeout(value)
+
+
+def _upload_runtime_source(
+        ssh_target: str, *, upload_timeout: int = _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT
+) -> None:
     """Stage this checkout onto the VPS so provisioning never depends on
     GitHub reachability or repo visibility. Fresh VPS validation caught that
     cloning alimuzzaman/sandbox anonymously can fail for private/internal repos."""
+    upload_timeout = _normalize_runtime_source_upload_timeout(upload_timeout)
     excludes = [
         ".git",
         ".cli-venv",
@@ -523,13 +549,13 @@ def _upload_runtime_source(ssh_target: str) -> None:
     sr.emit_appledouble_skip_diagnostic(skipped, context="runtime-source")
     print(
         "staging Sandbox runtime source archive "
-        f"(bounded {_RUNTIME_SOURCE_STAGE_TIMEOUT}s)...",
+        f"(bounded {_RUNTIME_SOURCE_PACKAGE_TIMEOUT}s)...",
         file=sys.stderr,
     )
     try:
         tar_res = subprocess.run(
             tar_cmd, cwd=str(ROOT), capture_output=True,
-            timeout=_RUNTIME_SOURCE_STAGE_TIMEOUT, check=False,
+            timeout=_RUNTIME_SOURCE_PACKAGE_TIMEOUT, check=False,
             # BSD tar synthesizes AppleDouble members for macOS metadata unless
             # this environment switch is set. GNU tar ignores it.
             env={**os.environ, "COPYFILE_DISABLE": "1"},
@@ -537,7 +563,7 @@ def _upload_runtime_source(ssh_target: str) -> None:
     except subprocess.TimeoutExpired as exc:
         raise RemoteRuntimeSourceTimeout(
             "runtime source packaging timed out after "
-            f"{_RUNTIME_SOURCE_STAGE_TIMEOUT}s; the remote was not contacted"
+            f"{_RUNTIME_SOURCE_PACKAGE_TIMEOUT}s; the remote was not contacted"
         ) from exc
     if tar_res.returncode != 0:
         raise RuntimeError(
@@ -548,18 +574,18 @@ def _upload_runtime_source(ssh_target: str) -> None:
     print(
         "runtime source archive ready "
         f"({len(archive)} bytes); uploading to remote "
-        f"(bounded {_RUNTIME_SOURCE_STAGE_TIMEOUT}s)...",
+        f"(bounded {upload_timeout}s)...",
         file=sys.stderr,
     )
     try:
         ssh_res = sr.ssh_process(
             ssh_target, remote_cmd, input_data=archive,
-            timeout=_RUNTIME_SOURCE_STAGE_TIMEOUT,
+            timeout=upload_timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise RemoteRuntimeSourceTimeout(
             "runtime source upload timed out after "
-            f"{_RUNTIME_SOURCE_STAGE_TIMEOUT}s; remote completion is unknown; "
+            f"{upload_timeout}s; remote completion is unknown; "
             "inspect the remote before retrying"
         ) from exc
     if ssh_res.returncode != 0:
@@ -638,10 +664,14 @@ def _cmd_provision(args, as_json: bool) -> None:
         else:
             print(f"'{name}' provisioning is planned; re-run with --confirm to install and start its MCP service")
         return
+    try:
+        upload_timeout = _runtime_source_upload_timeout_arg(args)
+    except ValueError as exc:
+        die(str(exc))
     journal = _new_provision_log(name, control_transport)
     try:
         _record_provision_event(journal, "runtime_staging")
-        _upload_runtime_source(ssh_target)
+        _upload_runtime_source(ssh_target, upload_timeout=upload_timeout)
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
@@ -740,7 +770,8 @@ def _cmd_up(args, as_json: bool) -> None:
             print(f"'{name}' MCP service start is planned; re-run with --confirm")
         return
     try:
-        _upload_runtime_source(entry["ssh"])
+        upload_timeout = _runtime_source_upload_timeout_arg(args)
+        _upload_runtime_source(entry["ssh"], upload_timeout=upload_timeout)
         observed = sr.remote_mcp_service_status(entry)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)

@@ -36,12 +36,19 @@ the source of truth for the remote deploy repository and the instance it
 ensures. The global `--instance` selector is rejected for this command rather
 than silently ignored; use the intended project directory explicitly.
 
-The Git push budget defaults to 120 seconds. For a large first-time transfer,
+The remote-home preflight and Git push budget both default to 120 seconds. The
+home is resolved once before any deploy-target mutation. For a large first-time transfer,
 set a bounded value explicitly with `--deploy-timeout SECONDS` (1-3600). Remote
 test/job submissions derive the same budget from their job deadline, retaining
 a 120-second minimum and a 3600-second cap. A push timeout is reported as a
 handled, command-free error; inspect the remote deployment state before replaying
 because the final state is unknown.
+
+Runtime source uploads used by confirmed `remote provision`, `remote up`, and
+`remote service migrate` default to 300 seconds. Set their SSH upload budget
+with `--upload-timeout SECONDS` (1-7200); the local package budget remains fixed
+at 300 seconds. An upload timeout has unknown completion and is never retried
+automatically.
 
 If the managed remote branch has moved independently, deploy fails with the stable
 `remote_branch_diverged` error code. Sandbox never force-pushes that branch. Inspect
@@ -679,7 +686,7 @@ reference. Summary:
 |---|---|
 | `./sb remote add <name> <ssh_url>` | Register a VPS target |
 | `./sb remote list` | Show configured remotes + reachability + provisioned status |
-| `./sb remote provision <name> --control-host <host> --confirm` | Fully automated install + start the remote MCP server over public HTTPS |
+| `./sb remote provision <name> --control-host <host> --confirm [--upload-timeout <seconds>]` | Fully automated install + start the remote MCP server over public HTTPS |
 | `./sb remote provision <name> --control tailscale --confirm` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
 | `./sb remote service <name> --json` | Read-only status shorthand; equivalent to `service status <name>` |

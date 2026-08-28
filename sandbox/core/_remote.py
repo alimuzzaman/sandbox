@@ -89,6 +89,19 @@ class RemotePushTimeout(RuntimeError):
         )
 
 
+class RemoteHomeResolutionTimeout(RuntimeError):
+    """Safe failure when deploy preflight cannot resolve the remote home."""
+
+    error_code = "remote_home_resolution_timeout"
+
+    def __init__(self, timeout_seconds: int) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            "remote Sandbox home resolution timed out after "
+            f"{timeout_seconds} seconds; no deploy mutation was attempted"
+        )
+
+
 class RemoteBranchDiverged(RuntimeError):
     """Safe, actionable failure when the managed remote branch moved ahead.
 
@@ -125,7 +138,7 @@ def _is_remote_branch_diverged(result) -> bool:
 
 def normalize_remote_push_timeout(value: object) -> int:
     """Validate one bounded local Git-push timeout in seconds."""
-    if (isinstance(value, bool) or not isinstance(value, int)
+    if (type(value) is not int
             or not 1 <= value <= REMOTE_PUSH_TIMEOUT_MAX_SECONDS):
         raise ValueError(
             "remote push timeout must be an integer from 1 to "
@@ -355,7 +368,7 @@ def deploy_exact_working_tree(
     if network_capacity.get("ok") is not True:
         raise NetworkCapacityAdmissionError(network_capacity)
     resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
-    target = ensure_deploy_repo(remote, root)
+    target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     branch = current_branch(root) if resolved_source is None else None
     pushed_sha = push_commits(
         remote, root, target, branch,
@@ -935,24 +948,51 @@ def deploy_target_slug(project_root) -> str:
     return sc._project_slug(None, root.name)
 
 
-def resolve_sandbox_home(remote: dict) -> str:
+def validate_remote_sandbox_home(value: object) -> str:
+    """Validate one canonical, bounded absolute POSIX Sandbox home."""
+    if type(value) is not str or not 1 <= len(value) <= 4096:
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if value == "/" or not value.startswith("/") or value.endswith("/"):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    components = value.split("/")[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if posixpath.normpath(value) != value:
+        raise ValueError("resolved remote Sandbox home is invalid")
+    return value
+
+
+def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     """The REAL, expanded absolute path of $SANDBOX_HOME on the remote --
     resolved once via SSH rather than left as a literal shell variable,
     since a git push URL needs a real path, not something only a remote
     shell would expand."""
-    res = ssh_run(remote, "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=15)
-    if res.returncode != 0 or not (res.stdout or "").strip():
+    timeout = normalize_remote_push_timeout(timeout)
+    try:
+        res = ssh_run(
+            remote, "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteHomeResolutionTimeout(timeout) from exc
+    if res.returncode != 0 or type(res.stdout) is not str or not res.stdout:
         raise RuntimeError(
             f"could not resolve $SANDBOX_HOME on remote: "
             f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
-    return res.stdout.strip()
+    raw_home = res.stdout[:-1] if res.stdout.endswith("\n") else res.stdout
+    return validate_remote_sandbox_home(raw_home)
 
 
-def deploy_target_path(remote: dict, project_root) -> str:
+def deploy_target_path(remote: dict, project_root, *, sandbox_home: str | None = None,
+                       home_timeout: int = 15) -> str:
     """The REAL, resolved absolute VPS-side path for a project's deploy-target
     git repo: <resolved $SANDBOX_HOME>/deploy-src/<canonical-project-slug>."""
-    home = resolve_sandbox_home(remote)
+    home = sandbox_home
+    if home is None:
+        home = resolve_sandbox_home(remote, timeout=home_timeout)
+    home = validate_remote_sandbox_home(home)
     slug = deploy_target_slug(project_root)
     return f"{home}/deploy-src/{slug}"
 
@@ -989,17 +1029,22 @@ def remote_sb_path(remote: dict) -> str:
     return f"{resolve_sandbox_home(remote)}/sb-src/sb"
 
 
-def ensure_deploy_repo(remote: dict, project_root) -> str:
+def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None = None,
+                       home_timeout: int = 15) -> str:
     """Lazily create the deploy-target git repo on first deploy to this remote
     (NOT during `provision`, which is machine-level, not project-level). Safe
     to call every deploy -- a no-op if the repo already exists. Sets
     receive.denyCurrentBranch=updateInstead so a push directly updates the
     checked-out working tree, no bare-repo indirection needed. Returns the
     resolved absolute path (see deploy_target_path)."""
-    target = deploy_target_path(remote, project_root)
+    target = deploy_target_path(
+        remote, project_root, sandbox_home=sandbox_home,
+        home_timeout=home_timeout,
+    )
+    quoted_target = shlex.quote(target)
     cmd = (
-        f"mkdir -p {target} && "
-        f"cd {target} && "
+        f"mkdir -p {quoted_target} && "
+        f"cd {quoted_target} && "
         f"if [ ! -d .git ]; then git init -q && "
         f"git config receive.denyCurrentBranch updateInstead; fi"
     )

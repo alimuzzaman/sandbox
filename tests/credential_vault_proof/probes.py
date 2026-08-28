@@ -11,6 +11,8 @@ output that a future authorized run will hand back.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -305,8 +307,168 @@ def plan(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 
 
 _EXECUTION_FIELDS = frozenset({
-    "check_id", "category", "source", "expectation", "argv", "state", "code",
+    "check_id", "category", "source", "expectation", "argv", "result",
+    "observation",
 })
+_RESULT_FIELDS = frozenset({
+    "returncode", "timed_out", "stderr_empty", "raw_result_digest",
+})
+
+
+def _expected_text(check_id: str, manifest: dict[str, Any]) -> str | None:
+    values = {
+        "os_release_supported": manifest["platform"]["os_release"].removeprefix("ubuntu-"),
+        "kernel_release_expected": manifest["platform"]["kernel_release"],
+        "architecture_expected": manifest["platform"]["architecture"],
+        "sandbox_revision_expected": manifest["source"]["sandbox_revision"],
+        "service_account_expected": str(manifest["service"]["service_uid"]),
+    }
+    return values.get(check_id)
+
+
+def _contains_expectations(check_id: str, manifest: dict[str, Any]
+                           ) -> tuple[str, ...] | None:
+    return {
+        "broker_process_identity": (str(manifest["service"]["service_uid"]),
+                                    manifest["service"]["executable"]),
+        "controller_process_identity": (str(manifest["service"]["controller_uid"]),),
+        "cgroup_identity_expected": (f"ControlGroup={manifest['service']['cgroup']}",),
+        "lease_socket_owned": (manifest["transport"]["lease_socket"],),
+        "controller_socket_owned": (manifest["transport"]["controller_socket"],),
+        "guest_listener_bound": (manifest["transport"]["host_address"],
+                                 str(manifest["transport"]["guest_port"])),
+        "veth_identity_expected": (manifest["transport"]["guest_interface"],),
+        "veth_address_expected": (manifest["transport"]["guest_interface"],
+                                  manifest["transport"]["guest_address"]),
+        "route_table_expected": (manifest["transport"]["guest_interface"],),
+        "nftables_default_drop": (manifest["kernel"]["nftables_table"],
+                                  manifest["kernel"]["nftables_policy"]),
+        "apparmor_profile_enforced": (manifest["kernel"]["apparmor_profile"],
+                                      manifest["kernel"]["apparmor_mode"]),
+    }.get(check_id)
+
+
+def _normalize(check_id: str, stdout: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Produce only catalog-derived, secret-free typed observations."""
+    exact = _expected_text(check_id, manifest)
+    if exact is not None:
+        return {"kind": "exact_text", "value": exact if stdout.strip() == exact else None}
+    if check_id == "unit_identity_expected":
+        required = {
+            f"Id={_unit(manifest)}", "LoadState=loaded", "ActiveState=active",
+            "User=sandbox-credential-broker", "Group=sandbox-credential-broker",
+            "NoNewPrivileges=yes", f"ControlGroup={manifest['service']['cgroup']}",
+        }
+        lines = set(stdout.splitlines())
+        executable = manifest["service"]["executable"]
+        return {"kind": "unit_identity", "value": {
+            "lines": sorted(required & lines),
+            "exec_start": (f"ExecStart={executable}" if any(
+                line.startswith("ExecStart=") and executable in line for line in lines)
+                else None),
+        }}
+    if check_id == "unit_ownership_expected":
+        fields = dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+        matched = fields.get("UID") == str(manifest["service"]["service_uid"]) \
+            and fields.get("GID") == str(manifest["service"]["service_gid"]) \
+            and fields.get("MainPID", "").isdigit() and int(fields["MainPID"]) > 1
+        return {"kind": "unit_ownership", "value": {
+            key: fields[key] for key in ("UID", "GID", "MainPID") if key in fields
+        } if matched else {}}
+    contains = _contains_expectations(check_id, manifest)
+    if contains is not None:
+        return {"kind": "contains_all", "value": [item for item in contains
+                                                     if item in stdout]}
+    if catalog_module.CHECKS[check_id].source != "host_command":
+        try:
+            value = json.loads(stdout)
+        except json.JSONDecodeError:
+            value = None
+        expected = {"check_id": check_id, "observed": True}
+        return {"kind": "typed_source", "value": expected if value == expected else None}
+    if check_id == "unit_absent_after_cleanup":
+        value = "LoadState=not-found"
+        return {"kind": "unit_absent", "value": value if stdout.strip() == value else None}
+    if expectation_kind(check_id) == "empty_output":
+        return {"kind": "empty_output", "value": "" if not stdout.strip() else None}
+    if expectation_kind(check_id) == "exit_nonzero":
+        return {"kind": "not_found_exit", "value": None}
+    # A catalogued host check without a typed predicate cannot contribute a
+    # pass. This is safer than treating arbitrary non-empty output as proof.
+    return {"kind": "predicate_unavailable", "value": None}
+
+
+def _observation_kind(check_id: str, manifest: dict[str, Any]) -> str:
+    return _normalize(check_id, "", manifest)["kind"]
+
+
+def _observation_matches(check_id: str, observation: dict[str, Any],
+                         manifest: dict[str, Any]) -> bool:
+    kind, value = observation["kind"], observation["value"]
+    exact = _expected_text(check_id, manifest)
+    if kind == "exact_text":
+        return value == exact
+    if kind == "unit_identity":
+        required = sorted({
+            f"Id={_unit(manifest)}", "LoadState=loaded", "ActiveState=active",
+            "User=sandbox-credential-broker", "Group=sandbox-credential-broker",
+            "NoNewPrivileges=yes", f"ControlGroup={manifest['service']['cgroup']}",
+        })
+        return isinstance(value, dict) and value.get("lines") == required \
+            and isinstance(value.get("exec_start"), str) \
+            and manifest["service"]["executable"] in value["exec_start"]
+    if kind == "unit_ownership":
+        return isinstance(value, dict) \
+            and value.get("UID") == str(manifest["service"]["service_uid"]) \
+            and value.get("GID") == str(manifest["service"]["service_gid"]) \
+            and str(value.get("MainPID", "")).isdigit() \
+            and int(value["MainPID"]) > 1
+    if kind == "contains_all":
+        expected = _contains_expectations(check_id, manifest)
+        return isinstance(value, list) and value == list(expected or ())
+    if kind == "typed_source":
+        return value == {"check_id": check_id, "observed": True}
+    if kind == "unit_absent":
+        return value == "LoadState=not-found"
+    if kind == "empty_output":
+        return value == ""
+    if kind == "not_found_exit":
+        return value is None
+    return False
+
+
+def _outcome(check_id: str, result: dict[str, Any], observation: dict[str, Any],
+             manifest: dict[str, Any]
+             ) -> tuple[str, str]:
+    if result["timed_out"]:
+        return "blocked", "probe_timeout"
+    if observation.get("kind") == "secret_output":
+        return "blocked", "secret_like_output"
+    if not result["stderr_empty"]:
+        return "blocked", "probe_stderr"
+    rc = result["returncode"]
+    expectation = expectation_kind(check_id)
+    if expectation == "exit_nonzero":
+        if rc == 1 and _observation_matches(check_id, observation, manifest):
+            return "passed", "observed_absent"
+        if rc in {126, 127} or rc < 0 or rc > 1:
+            return "blocked", "probe_unavailable"
+        return "failed", "resource_still_present"
+    if expectation == "empty_output" and rc != 0:
+        return "blocked", "probe_unavailable"
+    if rc in {126, 127} or rc < 0:
+        return "blocked", "probe_unavailable"
+    if rc != 0:
+        return "failed", "probe_nonzero_exit"
+    if observation.get("kind") == "predicate_unavailable":
+        return "blocked", "typed_predicate_unavailable"
+    if not _observation_matches(check_id, observation, manifest):
+        code = "resource_still_present" if expectation == "empty_output" \
+            or check_id == "unit_absent_after_cleanup" else "observation_mismatch"
+        return "failed", code
+    code = "observed_absent" if expectation != "exit_zero" \
+        or check_id == "unit_absent_after_cleanup" else "observed"
+    return "passed", code
 
 
 def validate_execution_artifact(document: Any, manifest: dict[str, Any]
@@ -333,12 +495,32 @@ def validate_execution_artifact(document: Any, manifest: dict[str, Any]
         if not isinstance(item["argv"], list) \
                 or tuple(item["argv"]) != expected["argv"]:
             raise _refuse("execution_artifact_argv_mismatch", location)
-        if item["state"] not in {"passed", "failed", "blocked", "skipped"}:
-            raise _refuse("execution_artifact_state_invalid", location)
-        if not isinstance(item["code"], str) \
-                or not re.fullmatch(r"[a-z0-9_.-]{1,64}", item["code"]):
-            raise _refuse("execution_artifact_code_invalid", location)
-        observed[check_id] = item
+        result = item["result"]
+        if not isinstance(result, dict) or frozenset(result) != _RESULT_FIELDS \
+                or isinstance(result["returncode"], bool) \
+                or not isinstance(result["returncode"], int) \
+                or not isinstance(result["timed_out"], bool) \
+                or not isinstance(result["stderr_empty"], bool) \
+                or not isinstance(result["raw_result_digest"], str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", result["raw_result_digest"]):
+            raise _refuse("execution_artifact_result_invalid", location)
+        observation = item["observation"]
+        if not isinstance(observation, dict) or frozenset(observation) != {
+                "kind", "value"} or not isinstance(observation["kind"], str):
+            raise _refuse("execution_artifact_observation_invalid", location)
+        try:
+            encoded_observation = json.dumps(observation, sort_keys=True,
+                                             separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise _refuse("execution_artifact_observation_invalid", location) from exc
+        if len(encoded_observation.encode()) > 4096 \
+                or scanner.scan_document(observation, location=location):
+            raise _refuse("execution_artifact_observation_invalid", location)
+        if observation["kind"] != _observation_kind(check_id, manifest):
+            raise _refuse("execution_artifact_observation_kind_mismatch", location)
+        # Recompute from typed metadata. State/code are intentionally absent.
+        state, code = _outcome(check_id, result, observation, manifest)
+        observed[check_id] = {**item, "state": state, "code": code}
     if set(observed) != set(planned):
         raise _refuse("execution_artifact_incomplete", "checks.json")
     return tuple(observed[name] for name in planned)
@@ -368,57 +550,30 @@ def parse(check_id: Any, completed: Any, manifest: dict[str, Any]) -> dict[str, 
         raise _refuse("check_unknown", str(check_id)[:64])
     if not isinstance(completed, dict) \
             or frozenset(completed) != frozenset({"returncode", "stdout", "stderr",
-                                                  "timed_out", "expected"}):
+                                                  "timed_out"}):
         raise _refuse("result_schema_invalid", check_id)
     limit = min(manifest["bounds"]["max_output_bytes"], MAX_OUTPUT_BYTES)
     stdout = _bounded_output(completed["stdout"], limit)
-    _bounded_output(completed["stderr"], limit)
+    stderr = _bounded_output(completed["stderr"], limit)
     if not isinstance(completed["timed_out"], bool):
         raise _refuse("result_schema_invalid", check_id)
     if not isinstance(completed["returncode"], int) \
             or isinstance(completed["returncode"], bool):
         raise _refuse("result_schema_invalid", check_id)
-    expected = completed["expected"]
-    if not isinstance(expected, list) or len(expected) > MAX_OBSERVATIONS \
-            or any(not isinstance(item, str) or len(item) > 256 for item in expected):
-        raise _refuse("result_schema_invalid", check_id)
     findings = scanner.scan_text(stdout, location=f"{check_id}.stdout")
-    if findings:
-        return {"check_id": check_id, "state": "blocked",
-                "code": "secret_like_output", "observations": (),
-                "findings": tuple(item["code"] for item in findings)}
-    if completed["timed_out"]:
-        return {"check_id": check_id, "state": "blocked", "code": "probe_timeout",
-                "observations": (), "findings": ()}
-    matched = tuple(item for item in expected if item in stdout)
-    expectation = expectation_kind(check_id)
-    if expectation == "exit_nonzero":
-        # The resource is proven gone because the command could not find it.
-        if completed["returncode"] == 0:
-            return {"check_id": check_id, "state": "failed",
-                    "code": "resource_still_present", "observations": matched,
-                    "findings": ()}
-        return {"check_id": check_id, "state": "passed", "code": "observed_absent",
-                "observations": (), "findings": ()}
-    if expectation == "empty_output":
-        if completed["returncode"] != 0:
-            return {"check_id": check_id, "state": "blocked",
-                    "code": "probe_nonzero_exit", "observations": (), "findings": ()}
-        if stdout.strip():
-            return {"check_id": check_id, "state": "failed",
-                    "code": "resource_still_present", "observations": matched,
-                    "findings": ()}
-        return {"check_id": check_id, "state": "passed", "code": "observed_absent",
-                "observations": (), "findings": ()}
-    if completed["returncode"] != 0:
-        return {"check_id": check_id, "state": "failed", "code": "probe_nonzero_exit",
-                "observations": matched, "findings": ()}
-    if len(matched) != len(expected):
-        return {"check_id": check_id, "state": "failed",
-                "code": "expected_observation_missing", "observations": matched,
-                "findings": ()}
-    return {"check_id": check_id, "state": "passed", "code": "observed",
-            "observations": matched, "findings": ()}
+    observation = ({"kind": "secret_output", "value": None} if findings else
+                   _normalize(check_id, stdout, manifest))
+    raw = {"returncode": completed["returncode"], "stdout": stdout,
+           "stderr": stderr, "timed_out": completed["timed_out"]}
+    result = {
+        "returncode": completed["returncode"], "timed_out": completed["timed_out"],
+        "stderr_empty": not stderr, "raw_result_digest": hashlib.sha256(
+            json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }
+    state, code = _outcome(check_id, result, observation, manifest)
+    return {"check_id": check_id, "state": state, "code": code,
+            "observation": observation, "result": result,
+            "findings": tuple(item["code"] for item in findings)}
 
 
 __all__ = [

@@ -45,15 +45,11 @@ class TestHarnessLifecycle(unittest.TestCase):
             manifest_document=self.manifest, request_id=REQUEST))
         self.assertFalse(self.ledger.should_launch(REQUEST)["launch"])
 
-        for entry in probes.plan(self.manifest):
-            returncode = 1 if entry["expectation"] == "exit_nonzero" else 0
-            stdout = "" if entry["expectation"] == "empty_output" else "observed\n"
-            parsed = probes.parse(entry["check_id"], {
-                "returncode": returncode, "stdout": stdout, "stderr": "",
-                "timed_out": False,
-                "expected": [] if entry["expectation"] != "exit_zero" else ["observed"],
-            }, self.manifest)
-            self.ledger.record_check(REQUEST, entry["check_id"], parsed["state"])
+        planned_states = {name: "passed" for name in
+                          manifest_module.check_ids(self.manifest)}
+        checks_artifact = fixtures.execution_artifact(self.manifest, planned_states)
+        for parsed in probes.validate_execution_artifact(checks_artifact, self.manifest):
+            self.ledger.record_check(REQUEST, parsed["check_id"], parsed["state"])
 
         verified = cleanup_module.verify(
             self.manifest, fixtures.cleanup_observations(self.manifest))
@@ -64,7 +60,7 @@ class TestHarnessLifecycle(unittest.TestCase):
         bundle_root.mkdir(exist_ok=True)
         states = self.ledger.read(REQUEST)["checks"]
         for name in manifest_module.artifact_names(self.manifest):
-            value = (fixtures.execution_artifact(self.manifest, states)
+            value = (checks_artifact
                      if name == "checks.json" else
                      fixtures.cleanup_artifact(self.manifest))
             payload = manifest_module.canonical_json(value).encode()

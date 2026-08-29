@@ -1200,3 +1200,7 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   artifact used for both digest and upload, restricted commit-only reconciliation to clean
   source, scrubbed Git selectors during hosting boundary lookup, retained full classified
   reconciliation evidence, and removed raw mismatched revision values from state/status.
+- The legacy migration follow-up accepts only the known v1 empty-overlay digest as clean,
+  refuses unknown/dirty same-revision receipts before target reset, and separates hosting's
+  4,096-file/64 MiB snapshot bound from public deploy's preserved 10,000-file/512 MiB
+  admission contract. These are local code/test claims, not live deployment evidence.

@@ -222,6 +222,19 @@ def cmd_deploy(cfg, args) -> None:
             sr.resolve_source_ref(root, source_ref)
             if source_ref is not None else None
         )
+        descriptor_files = sr.deploy_project_descriptor_files(root)
+        if resolved_source is None:
+            diff_text, untracked = sr.capture_uncommitted(root)
+        else:
+            diff_text, untracked = "", []
+        untracked = list(dict.fromkeys([
+            *untracked, *descriptor_files, *include_paths,
+        ]))
+        overlay_snapshot = sr.snapshot_dirty_overlay(
+            root, diff_text, untracked,
+            max_files=sr.DEPLOY_SNAPSHOT_MAX_FILES,
+            max_bytes=sr.DEPLOY_SNAPSHOT_MAX_BYTES,
+        )
         target = sr.ensure_deploy_repo(
             entry, root, home_timeout=deploy_timeout
         )
@@ -235,19 +248,15 @@ def cmd_deploy(cfg, args) -> None:
             push_timeout=deploy_timeout,
             allow_detached=resolved_source is None and branch is None,
         )
-        descriptor_files = sr.deploy_project_descriptor_files(root)
         if resolved_source is None:
-            diff_text, untracked = sr.capture_uncommitted(root)
             # The canonical project descriptor is runtime intent, not a
             # machine override. Carry it even when a checkout keeps it out of
             # Git; without it a ready remote fast-path cannot reconstruct the
             # deployed plugin bind mount.
-            untracked = list(dict.fromkeys([
-                *untracked, *descriptor_files, *include_paths,
-            ]))
             applied = sr.update_target_to(
                 entry, target, pushed_sha, project_root=root,
                 diff_text=diff_text, untracked=untracked,
+                overlay_snapshot=overlay_snapshot,
             )
         else:
             # The commit remains immutable; the primary Sandbox descriptor is
@@ -258,6 +267,7 @@ def cmd_deploy(cfg, args) -> None:
                 entry, target, pushed_sha,
                 project_root=root if descriptor_files or include_paths else None,
                 untracked=[*descriptor_files, *include_paths],
+                overlay_snapshot=overlay_snapshot,
             )
         # Pro plugins are a HOST-level catalog, not project state: mirror them
         # before the instance boots so its On-Demand page lists the same slugs

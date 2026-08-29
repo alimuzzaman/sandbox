@@ -1883,6 +1883,7 @@ class TestHostingManifest(unittest.TestCase):
             return {}, []
 
         with patch.object(hosting_cmd, "_secret_status", side_effect=resolve_secrets), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", side_effect=push) as pushed, \
@@ -1902,7 +1903,7 @@ class TestHostingManifest(unittest.TestCase):
                 validated, {}, "myvps", runtime, state, False, "main",
             )
 
-        self.assertEqual(events[:6], ["secrets", "push", "capture", "render", "reset", "compose"])
+        self.assertEqual(events[:6], ["secrets", "capture", "push", "render", "reset", "compose"])
         self.assertEqual(
             pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
         )
@@ -1922,6 +1923,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = hosting.desired_runtime(validated, "myvps")
         state = {"version": 1, "hosts": {}}
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="d" * 40), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value="abc123"), \
@@ -1945,20 +1947,22 @@ class TestHostingManifest(unittest.TestCase):
         runtime = hosting.desired_runtime(validated, "myvps")
         state = {"version": 1, "hosts": {}}
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision) as pushed, \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("diff --git a/x b/x\n", ["new.txt"])), \
              patch.object(hosting_cmd.hosting, "render_env_file") as render, \
              patch.object(hosting_cmd.remote, "update_target_to") as reset, \
              patch.object(hosting_cmd, "_run_compose") as compose, \
              patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
-            with self.assertRaisesRegex(hosting.HostingError, "changed while the source was being pushed"):
+            with self.assertRaisesRegex(hosting.HostingError, "working tree changed before source staging"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
 
         render.assert_not_called()
+        pushed.assert_not_called()
         reset.assert_not_called()
         compose.assert_not_called()
         save_state.assert_not_called()
@@ -1982,6 +1986,7 @@ class TestHostingManifest(unittest.TestCase):
         overlay_identity = "sha256:" + "d" * 64
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2022,6 +2027,7 @@ class TestHostingManifest(unittest.TestCase):
         state = {"version": 1, "hosts": {}}
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2075,6 +2081,7 @@ class TestHostingManifest(unittest.TestCase):
         }
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2138,6 +2145,7 @@ class TestHostingManifest(unittest.TestCase):
         }
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2184,8 +2192,10 @@ class TestHostingManifest(unittest.TestCase):
         }}}
         snapshot = {"identity": identity, "digest": "e" * 64,
                     "archive": b"artifact", "deleted": [], "files": 1}
+        original_state = json.loads(json.dumps(state))
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2193,7 +2203,7 @@ class TestHostingManifest(unittest.TestCase):
                           return_value=("diff", ["new.txt"])), \
              patch.object(hosting_cmd.remote, "snapshot_dirty_overlay",
                           return_value=snapshot), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd.remote, "update_target_to") as update_source, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_observe_host_runtime") as observe, \
              patch.object(hosting_cmd, "_run_compose") as compose, \
@@ -2201,16 +2211,68 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_configure_host_caddy") as edge, \
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            with self.assertRaisesRegex(RuntimeError, "refusing Compose or initializer replay"):
+             patch.object(hosting_cmd.hosting, "save_host_state") as save:
+            with self.assertRaisesRegex(RuntimeError, "legacy dirty or unknown"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
 
         observe.assert_not_called()
+        update_source.assert_not_called()
         compose.assert_not_called()
         runtime_health.assert_not_called()
         edge.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(state, original_state)
+
+    def test_legacy_dirty_or_missing_identity_policy_switch_refuses_before_mutation(self):
+        revision = "c" * 40
+        with self._write(_public_acme_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        digest_runtime = dict(runtime)
+        digest_runtime["environment"] = hosting.render_env_file(
+            validated, {}, pushed_commit_sha=revision,
+        )
+        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        key = hosting.state_key("myvps", validated)
+        cases = ({}, {
+            "source_state_identity": "sha256:" + "d" * 64,
+            "source_state_clean": False,
+        })
+        for source_receipt in cases:
+            with self.subTest(source_receipt=source_receipt):
+                state = {"version": 1, "hosts": {key: {
+                    "recorded_revision": revision,
+                    "observed_runtime_revision": revision,
+                    "config_digest": digest,
+                    "runtime": {"state": "ready"}, "edge": {"state": "pending"},
+                    **source_receipt,
+                }}}
+                original_state = json.loads(json.dumps(state))
+                with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+                     patch.object(hosting_cmd, "_resolve_host_source_commit",
+                                  return_value=revision), \
+                     patch.object(hosting_cmd.remote, "resolve_sandbox_home",
+                                  return_value="/srv/sandbox"), \
+                     patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+                     patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+                     patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(hosting_cmd.remote, "update_target_to") as update_source, \
+                     patch.object(hosting_cmd, "_observe_host_runtime") as observe, \
+                     patch.object(hosting_cmd, "_run_compose") as compose, \
+                     patch.object(hosting_cmd, "_release_host_apply_reservation"), \
+                     patch.object(hosting_cmd.hosting, "save_host_state") as save:
+                    with self.assertRaisesRegex(RuntimeError, "legacy dirty or unknown"):
+                        hosting_cmd._apply_host(
+                            validated, {}, "myvps", runtime, state, False, "main",
+                        )
+                update_source.assert_not_called()
+                observe.assert_not_called()
+                compose.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(state, original_state)
 
     def test_changed_source_with_same_saved_config_runs_full_recreate(self):
         old_revision, revision = "3" * 40, "4" * 40
@@ -2234,6 +2296,7 @@ class TestHostingManifest(unittest.TestCase):
         client.upsert_address.return_value = {"id": "record-1"}
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2279,8 +2342,9 @@ class TestHostingManifest(unittest.TestCase):
         state = {"version": 1, "hosts": {key: {
             "commit": revision, "recorded_revision": revision,
             "observed_runtime_revision": revision, "config_digest": digest,
-            "source_state_identity": _clean_source_identity(),
-            "source_state_clean": True,
+            "source_state_identity": "sha256:" + hashlib.sha256(
+                b"sandbox-dirty-overlay-v1\0"
+            ).hexdigest(),
             "runtime": {"state": "ready"}, "edge": {"state": "pending"},
         }}}
         client = MagicMock()
@@ -2288,6 +2352,7 @@ class TestHostingManifest(unittest.TestCase):
         client.upsert_address.return_value = {"id": "record-1"}
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
@@ -2341,12 +2406,13 @@ class TestHostingManifest(unittest.TestCase):
     @patch("sandbox.commands.hosting._origin_certificate")
     @patch("sandbox.commands.hosting.remote.update_target_to")
     @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
+    @patch("sandbox.commands.hosting.remote.push_commits", return_value="a" * 40)
+    @patch("sandbox.commands.hosting._resolve_host_source_commit", return_value="a" * 40)
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
     @patch("sandbox.commands.hosting.cloudflare.Client")
     def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(
-        self, client_type, _source, _home, _push, _capture, _update,
+        self, client_type, _source, _home, _resolve_commit, _push, _capture, _update,
         origin_certificate, _read_caddy, _compose, _observe, _health, configure_caddy,
         verify_edge, save_state,
     ):
@@ -2412,12 +2478,13 @@ class TestHostingManifest(unittest.TestCase):
     @patch("sandbox.commands.hosting._origin_certificate")
     @patch("sandbox.commands.hosting.remote.update_target_to")
     @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
+    @patch("sandbox.commands.hosting.remote.push_commits", return_value="a" * 40)
+    @patch("sandbox.commands.hosting._resolve_host_source_commit", return_value="a" * 40)
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
     @patch("sandbox.commands.hosting.cloudflare.Client")
     def test_public_acme_apply_restores_dns_and_caddy_when_certificate_verification_fails(
-        self, client_type, _source, _home, _push, _capture, _update,
+        self, client_type, _source, _home, _resolve_commit, _push, _capture, _update,
         origin_certificate, _read_caddy, _compose, _observe, _health, _configure,
         _verify_edge, restore_caddy, save_state,
     ):

@@ -198,6 +198,10 @@ topology and health. Dirty-allowed source identity includes a bounded digest of 
 single immutable artifact and deletion set whose exact bytes are transferred. Since that
 digest is not observable inside the runtime, dirty receipts cannot select commit-only
 reconciliation or edge-only replay.
+Legacy unknown/dirty same-revision receipts refuse before target reset; only the known v1
+empty-overlay digest may migrate to clean evidence. Hosting uses a 4,096-file/64 MiB
+artifact envelope. Public deploy retains its separately admitted 10,000-file/512 MiB
+include envelope and validates it before remote admission or mutation.
 A staged unverified retry reconciles from observation or refuses without rerunning an
 initializer. Unknown service health is `unverified`, not ready. Remote
 Compose/source observation uses one bounded session with a strict shared deadline,

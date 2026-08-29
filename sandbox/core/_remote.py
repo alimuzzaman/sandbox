@@ -370,11 +370,12 @@ def deploy_exact_working_tree(
     push_timeout = normalize_remote_push_timeout(
         REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
     )
-    # Admission is intentionally the first remote operation.  In particular,
-    # it must precede ensure_deploy_repo(), git push, reset, dirty-overlay
-    # upload, and any subsequent workspace/instance staging.  A partial or
-    # unavailable probe is a bounded refusal; it is never converted into a
-    # count-based or disk-space-based guess.
+    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
+    diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
+    overlay = snapshot_dirty_overlay(root, diff_text, untracked)
+    # Source and artifact limits are validated locally before admission. The
+    # capacity probe remains the first remote operation and must precede
+    # ensure_deploy_repo(), push, reset, upload, and workspace staging.
     admitted_remote_name = remote_name
     if not (isinstance(admitted_remote_name, str)
             and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", admitted_remote_name)):
@@ -386,7 +387,6 @@ def deploy_exact_working_tree(
     )
     if network_capacity.get("ok") is not True:
         raise NetworkCapacityAdmissionError(network_capacity)
-    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     branch = current_branch(root) if resolved_source is None else None
     pushed_sha = push_commits(
@@ -395,8 +395,6 @@ def deploy_exact_working_tree(
         source_root=source_root,
         push_timeout=push_timeout,
     )
-    diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
-    overlay = snapshot_dirty_overlay(root, diff_text, untracked)
     applied = update_target_to(
         remote, target, pushed_sha,
         project_root=root if resolved_source is None else None,
@@ -1806,12 +1804,14 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     return diff_text, untracked
 
 
-_DIRTY_IDENTITY_MAX_FILES = 4096
-_DIRTY_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
+DEPLOY_SNAPSHOT_MAX_FILES = 10_000
+DEPLOY_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024
 
 
 def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
-                           include_paths: list[str] | None = None) -> dict:
+                           include_paths: list[str] | None = None, *,
+                           max_files: int = DEPLOY_SNAPSHOT_MAX_FILES,
+                           max_bytes: int = DEPLOY_SNAPSHOT_MAX_BYTES) -> dict:
     """Build one immutable bounded artifact and identity for an overlay."""
     root = Path(project_root).resolve()
     names = set(untracked)
@@ -1844,7 +1844,7 @@ def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
     names = set(filtered_names)
     deleted = set(filtered_deleted)
     names.difference_update(deleted)
-    if len(names) + len(deleted) > _DIRTY_IDENTITY_MAX_FILES:
+    if len(names) + len(deleted) > max_files:
         raise ValueError("dirty deployment identity exceeds the file limit")
     for relative in deleted:
         path = Path(relative)
@@ -1872,7 +1872,7 @@ def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _DIRTY_IDENTITY_MAX_BYTES:
+                    if total > max_bytes:
                         raise ValueError("dirty deployment identity exceeds the byte limit")
                     content.extend(chunk)
             info = tarfile.TarInfo(relative)

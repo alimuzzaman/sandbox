@@ -24,7 +24,7 @@ import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1139,6 +1139,55 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
 
         self.assertRegex(first, r"^sha256:[0-9a-f]{64}$")
         self.assertNotEqual(first, second)
+
+    def test_public_deploy_snapshot_accepts_host_plus_file_and_byte_envelopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = [f"empty-{index}" for index in range(4097)]
+            for name in names:
+                (root / name).touch()
+            snapshot = sr.snapshot_dirty_overlay(root, "", names)
+            self.assertEqual(snapshot["files"], 4097)
+            with self.assertRaisesRegex(ValueError, "file limit"):
+                sr.snapshot_dirty_overlay(root, "", names, max_files=4096)
+            for index in range(4097, 10_001):
+                name = f"empty-{index}"
+                (root / name).touch()
+                names.append(name)
+            with self.assertRaisesRegex(ValueError, "file limit"):
+                sr.snapshot_dirty_overlay(root, "", names)
+
+        with tempfile.TemporaryDirectory() as directory:
+            large = Path(directory, "large.bin")
+            with large.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            snapshot = sr.snapshot_dirty_overlay(directory, "", ["large.bin"])
+            self.assertEqual(snapshot["files"], 1)
+
+        self.assertEqual(sr.DEPLOY_SNAPSHOT_MAX_FILES, 10_000)
+        self.assertEqual(sr.DEPLOY_SNAPSHOT_MAX_BYTES, 512 * 1024 * 1024)
+
+    def test_snapshot_byte_limit_refuses_before_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "payload.bin").write_bytes(b"ab")
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                sr.snapshot_dirty_overlay(
+                    directory, "", ["payload.bin"], max_bytes=1,
+                )
+
+    def test_snapshot_limit_refusal_precedes_remote_capacity_admission(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(sr, "capture_uncommitted", return_value=("", ["payload"])), \
+             patch.object(sr, "snapshot_dirty_overlay",
+                          side_effect=ValueError("dirty deployment identity exceeds the file limit")), \
+             patch.object(sr, "remote_network_capacity_admission") as admission, \
+             patch.object(sr, "ensure_deploy_repo") as ensure:
+            with self.assertRaisesRegex(ValueError, "file limit"):
+                sr.deploy_exact_working_tree(
+                    {"ssh": "example.test", "_remote_name": "myvps"}, directory,
+                )
+        admission.assert_not_called()
+        ensure.assert_not_called()
 
     @patch("sandbox.core._remote.ssh_run")
     def test_dirty_transfer_uses_the_exact_immutable_hashed_artifact(self, ssh_run):
@@ -3049,6 +3098,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo", "abc123",
                     project_root=root, diff_text="",
                     untracked=["sandbox.config.json"],
+                    overlay_snapshot=ANY,
                 )
                 mock_apply.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo"
@@ -3131,6 +3181,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
             overlay.assert_called_once_with(
                 entry, "/remote/demo", "a" * 40, project_root=root,
                 untracked=["sandbox.config.json"],
+                overlay_snapshot=ANY,
             )
 
     def _expose_with_aliases(self, *, alias_arg, project_aliases=None,

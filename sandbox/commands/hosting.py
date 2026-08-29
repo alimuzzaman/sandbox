@@ -42,6 +42,8 @@ _HOST_OBSERVATION_MAX_CONFIGURED_SERVICES = 64
 _HOST_OBSERVATION_MAX_PHASES = 2 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
+_HOST_SOURCE_SNAPSHOT_MAX_FILES = 4096
+_HOST_SOURCE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 
 
 def _host_sync_watch_signature(source_root: str) -> str:
@@ -1246,6 +1248,22 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     return "full_recreate"
 
 
+def _legacy_source_replay_must_refuse(previous: dict, requested_revision: str,
+                                      config_digest: str) -> bool:
+    recorded = previous.get("recorded_revision") or previous.get("commit")
+    staged = previous.get("staged_revision")
+    unresolved = ((previous.get("edge") or {}).get("state") == "pending"
+                  or (previous.get("runtime") or {}).get("state") in {
+                      "pending", "unverified",
+                  })
+    return (
+        previous.get("source_state_clean") is not True
+        and previous.get("config_digest") == config_digest
+        and requested_revision in {recorded, staged}
+        and unresolved
+    )
+
+
 def _safe_source_revision_receipt(source: dict | None) -> dict:
     source = source if isinstance(source, dict) else {}
     state = source.get("state")
@@ -1673,12 +1691,37 @@ def _validate_apply_source(validated: dict) -> str:
     return branch
 
 
+def _resolve_host_source_commit(project_root: str) -> str:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=project_root,
+        env=remote.git_environment(), capture_output=True, text=True, check=False,
+    )
+    commit = (head.stdout or "").strip().lower()
+    if head.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise RuntimeError("could not resolve the hosting source commit")
+    return commit
+
+
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
                 progress=None) -> dict:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
+    base_commit = _resolve_host_source_commit(validated["project_root"])
+    diff, untracked = remote.capture_uncommitted(validated["project_root"])
+    require_clean = validated["deploy"]["require_clean"]
+    if require_clean and (diff or untracked):
+        raise hosting.HostingError(
+            f"{validated['environment']} working tree changed before source staging"
+        )
+    source_snapshot = remote.snapshot_dirty_overlay(
+        validated["project_root"], diff, untracked,
+        max_files=_HOST_SOURCE_SNAPSHOT_MAX_FILES,
+        max_bytes=_HOST_SOURCE_SNAPSHOT_MAX_BYTES,
+    )
+    source_state_identity = source_snapshot["identity"]
+    source_state_clean = not bool(diff or untracked)
     home = remote.resolve_sandbox_home(entry)
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -1702,30 +1745,36 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     )
     sha = remote.push_commits(
         entry, validated["project_root"], target, branch,
+        resolved_sha=base_commit,
         source_root=source_root if nested_source else None,
     )
-    diff, untracked = remote.capture_uncommitted(validated["project_root"])
-    require_clean = validated["deploy"]["require_clean"]
-    if require_clean and (diff or untracked):
-        raise hosting.HostingError(
-            f"{validated['environment']} working tree changed while the source was being pushed"
-        )
-    source_snapshot = remote.snapshot_dirty_overlay(
-        validated["project_root"], diff, untracked,
-    )
-    source_state_identity = source_snapshot["identity"]
-    source_state_clean = not bool(diff or untracked)
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
     key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})
-    if require_clean:
-        # Older clean receipts predate these fields. Their staged commit is
-        # still exact because clean hosting never transferred a dirty overlay.
+    legacy_clean = "sha256:" + hashlib.sha256(
+        b"sandbox-dirty-overlay-v1\0"
+    ).hexdigest()
+    if (previous_entry.get("source_state_clean") is not True
+            and previous_entry.get("source_state_identity") == legacy_clean
+            and source_state_clean):
+        # v1's empty-overlay digest is explicit historical clean proof.
         previous_entry["source_state_identity"] = source_state_identity
         previous_entry["source_state_clean"] = True
     config_digest = _host_config_digest(validated, runtime)
+    if _legacy_source_replay_must_refuse(previous_entry, sha, config_digest):
+        try:
+            _release_host_apply_reservation(entry, reservation)
+        except Exception as cleanup_error:
+            raise hosting.HostingError(
+                "legacy source receipt is not safe to replay and rollback-space "
+                f"cleanup failed: {cleanup_error}"
+            ) from cleanup_error
+        raise RuntimeError(
+            "legacy dirty or unknown source identity cannot be replayed at the same "
+            "revision/config; refusing before target reset, Compose, or initializer mutation"
+        )
     client = cloudflare.Client()
     remote.update_target_to(
         entry, target, sha,

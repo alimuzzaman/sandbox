@@ -489,6 +489,12 @@ Because that digest is not runtime-observable, dirty receipts never use commit-o
 record reconciliation or edge-only replay. A clean staged `unverified` receipt is
 observed and reconciled or refused; a dirty one is refused unless a real source change
 requires full convergence. Missing observation alone never reruns Compose initializers.
+Legacy missing/unknown or explicitly dirty receipts at the same revision/config refuse
+before target reset. Only the historical v1 empty-overlay digest is migrated as proven
+clean; changing a manifest from dirty-allowed to clean does not rewrite prior evidence.
+Hosting bounds its source artifact to 4,096 files and 64 MiB. This is intentionally
+narrower than public `sb deploy --include`, whose existing 10,000-file/512 MiB admission
+contract is validated before any remote admission or mutation.
 The Caddy fragment transaction holds one host-global lock, compares the desired and
 installed fragment digests, and skips validation/reload when both the fragment and
 aggregate import are unchanged. A real change runs separate 30-second validation,

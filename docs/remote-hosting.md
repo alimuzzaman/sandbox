@@ -415,7 +415,14 @@ be combined with `--environment` and is rejected for mutating or remote actions.
 it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandbox
 checks the local Git branch and clean-tree policy declared for the target environment.
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
-Compose/init health checks, validates Caddy, and updates only declared DNS records.
+Compose/init health checks, converges Caddy, and updates only declared DNS records.
+The Caddy fragment transaction holds one host-global lock, compares the desired and
+installed fragment digests, and skips validation/reload when both the fragment and
+aggregate import are unchanged. A real change runs separate 30-second validation,
+reload, and active-service observation phases. Their sanitized phase/digest receipts
+are appended to the mode-0600 apply log. Rollback restores the exact previous fragment
+(or its previous absence) and records `rollback_complete`; any failed restore is
+reported as `rollback_incomplete` rather than being presented as recovery.
 `logs` reads a bounded snapshot from the hosted web service and declared background
 services; it does not hold an SSH stream open. If a declared service is absent from
 the deployed Compose configuration, the output includes a bounded `[missing service:
@@ -481,8 +488,11 @@ latest output tail rather than reducing a failed build to a bare timeout message
 
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
+manifest-declared services, configured Compose services, running service rows,
 per-service Compose state/health, free disk, image metadata, derived source-revision
-checks, and the protected apply-log path. Missing remote evidence is reported as
+checks for every declared long-lived service, and the protected apply-log path. A
+declared service missing from either Compose configuration or the running set is
+topology drift and makes readiness `degraded`. Missing remote evidence is reported as
 `unavailable` or `degraded`; the command never mutates the host or prints secrets.
 
 An environment may also protect its public origin with Basic Auth:

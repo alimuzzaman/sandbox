@@ -92,6 +92,41 @@ class TestWriteWpEnvPort(unittest.TestCase):
             self.assertEqual(data["instance"], "proj-e2e-w0")
 
 
+class TestShardReadiness(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.config = self.root / "playwright.config.js"
+        self.config.write_text("module.exports = {}\n")
+        self.entry = {"url": "https://fixture.tst", "wordpress_port": 8080,
+                      "instance": "fixture-e2e-w0"}
+        self.spec = {"index": 0, "total": 1}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_unreachable_canonical_url_fails_before_playwright(self):
+        with patch.object(e2e, "_wait_reachable", return_value=False), \
+                patch.object(e2e.subprocess, "run") as run:
+            result = e2e._run_shard(
+                self.entry, self.spec, self.root, self.config, None, [], 60, False,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("canonical instance URL", result["error"])
+        run.assert_not_called()
+
+    def test_reachable_canonical_url_allows_playwright_and_retains_output(self):
+        completed = SimpleNamespace(returncode=1, stdout="stdout", stderr="stderr")
+        with patch.object(e2e, "_wait_reachable", return_value=True) as ready, \
+                patch.object(e2e.subprocess, "run", return_value=completed):
+            result = e2e._run_shard(
+                self.entry, self.spec, self.root, self.config, None, [], 60, False,
+            )
+        ready.assert_called_once_with(self.entry, timeout=30)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["output"], "stdout\nstderr")
+
+
 class TestDurableRemoteE2EShards(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -782,7 +782,8 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
 
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
-                 runtime: dict, progress=None, apply_log: str | None = None) -> None:
+                 runtime: dict, progress=None, apply_log: str | None = None,
+                 *, force_recreate: bool = True) -> None:
     override = f"{runtime_dir}/compose.override.yml"
     env_file = f"{runtime_dir}/environment.env"
     _write_remote_text(entry, override, runtime["compose_override"], "0600")
@@ -807,19 +808,30 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     build_flag = " --build" if build else ""
     if progress is not None:
         progress(
-            f"Compose build/recreate started (timeout {build_timeout}s; "
+            f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} started "
+            f"(timeout {build_timeout}s; "
             f"build={'enabled' if build else 'disabled'})"
         )
     # Replace the image's anonymous application volume on each deployment so
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
-    _build_checked(
-        entry, prefix,
-        f"{prefix} up -d{build_flag} --force-recreate --renew-anon-volumes --remove-orphans {service_args}",
-        service_args, timeout=build_timeout, progress=progress, log_path=apply_log,
+    converge_flags = (
+        f"{build_flag} --force-recreate --renew-anon-volumes"
+        if force_recreate else ""
     )
+    command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
+    if force_recreate:
+        _build_checked(
+            entry, prefix, command, service_args, timeout=build_timeout,
+            progress=progress, log_path=apply_log,
+        )
+    else:
+        _remote_checked(
+            entry, command, timeout=build_timeout,
+            progress=progress, log_path=apply_log,
+        )
     if progress is not None:
-        progress("Compose build/recreate completed")
+        progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in validated["compose"].get("init_services", []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
@@ -847,42 +859,24 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
 def _verify_remote_derived_environment(entry: dict, validated: dict,
                                        source_dir: str, runtime_dir: str,
                                        expected_sha: str, progress=None,
-                                       log_path: str | None = None) -> None:
+                                       log_path: str | None = None,
+                                       *, observation: dict | None = None) -> dict:
     """Fail closed when a running service did not receive the pushed revision."""
     derived = validated["deploy"].get("derived_environment", {})
     if not derived:
-        return
-    prefix = _compose_prefix(
-        validated, source_dir,
-        f"{runtime_dir}/compose.override.yml",
-        f"{runtime_dir}/environment.env",
+        return {"state": "not_declared", "checks": []}
+    observation = observation or _observe_host_runtime(
+        validated, entry, source_dir, runtime_dir,
     )
-    services = [
-        validated["compose"]["service"],
-        *validated["compose"].get("background_services", []),
-    ]
-    for service_name in services:
-        service = shlex.quote(service_name)
-        for key, provider in sorted(derived.items()):
-            if provider != "pushed_commit_sha":
-                continue
-            probe = shlex.quote(f'printf "%s\\n" "${key}"')
-            output = _remote_checked(
-                entry,
-                f"{prefix} exec -T {service} sh -c {probe}",
-                timeout=30, progress=progress, log_path=log_path,
-            )
-            revisions = {
-                line.strip() for line in output.splitlines()
-                if re.fullmatch(r"[0-9a-f]{40}", line.strip())
-            }
-            observed = next(iter(revisions)) if len(revisions) == 1 else ""
-            if observed != expected_sha:
-                state = "missing" if not observed else "mismatch"
-                raise RuntimeError(
-                    f"deployed service {service_name} source revision check failed "
-                    f"for {key} (state={state})"
-                )
+    classified = _classify_host_observation(validated, observation, expected_sha)
+    source = classified["source_revision"]
+    if source["state"] != "ready":
+        failed = next((item for item in source["checks"] if item["state"] != "match"), {})
+        raise RuntimeError(
+            f"deployed service {failed.get('service', 'unknown')} source revision check failed "
+            f"for {failed.get('key', 'unknown')} (state={failed.get('state', 'unavailable')})"
+        )
+    return classified
 
 
 def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
@@ -931,6 +925,190 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
     return "".join(chunks)
 
 
+def _host_observation_command(prefix: str, services: list[str],
+                              revision_keys: list[str], deadline_seconds: int) -> str:
+    """Build one remote observer with one monotonic total deadline."""
+    payload = base64.b64encode(json.dumps({
+        "prefix": prefix, "services": services,
+        "revision_keys": revision_keys, "deadline_seconds": deadline_seconds,
+    }, separators=(",", ":")).encode()).decode()
+    program = "\n".join((
+        "import base64,json,subprocess,sys,time",
+        "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline_seconds']",
+        "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[]}",
+        "def run(phase,command):",
+        " remaining=max(0.1,end-time.monotonic())",
+        " try:q=subprocess.run(command,shell=True,text=True,capture_output=True,timeout=remaining,check=False)",
+        " except subprocess.TimeoutExpired:r['phases'].append({'phase':phase,'state':'timeout'});return None",
+        " if q.returncode:r['phases'].append({'phase':phase,'state':'unavailable'});return None",
+        " r['phases'].append({'phase':phase,'state':'complete'});return q.stdout",
+        "configured=run('compose_config',p['prefix']+\" --profile '*' config --services\")",
+        "if configured is not None:r['configured_services']=[x.strip() for x in configured.splitlines() if x.strip()]",
+        "rows=run('compose_runtime',p['prefix']+' ps --format json')",
+        "if rows is not None:",
+        " try:parsed=json.loads(rows)",
+        " except Exception:parsed=None",
+        " if isinstance(parsed,list):r['rows'].extend(x for x in parsed if isinstance(x,dict))",
+        " elif isinstance(parsed,dict):r['rows'].append(parsed)",
+        " else:",
+        "  for line in rows.splitlines():",
+        "   try:item=json.loads(line)",
+        "   except Exception:continue",
+        "   if isinstance(item,dict):r['rows'].append(item)",
+        "for service in p['services']:",
+        " if not p['revision_keys']:continue",
+        " output=run('source_revision:'+service,p['prefix']+' exec -T '+service+' env')",
+        " values={}",
+        " if output is not None:",
+        "  for line in output.splitlines():",
+        "   key,sep,value=line.partition('=')",
+        "   if sep and key in p['revision_keys']:values[key]=value",
+        " for key in p['revision_keys']:r['revision_checks'].append({'service':service,'key':key,'observed':values.get(key)})",
+        "r['complete']=all(x['state']=='complete' for x in r['phases'])",
+        "print(json.dumps(r,separators=(',',':')))",
+    ))
+    return shlex.join(["python3", "-c", program, payload])
+
+
+def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
+                          runtime_dir: str, *, deadline_seconds: int = 60) -> dict:
+    if not isinstance(deadline_seconds, int) or isinstance(deadline_seconds, bool) \
+            or not 1 <= deadline_seconds <= 300:
+        raise ValueError("host observation deadline must be between 1 and 300 seconds")
+    services = [validated["compose"]["service"],
+                *validated["compose"].get("background_services", [])]
+    revision_keys = sorted(
+        key for key, provider in validated["deploy"].get("derived_environment", {}).items()
+        if provider == "pushed_commit_sha"
+    )
+    prefix = _compose_prefix(validated, source_dir,
+                             f"{runtime_dir}/compose.override.yml",
+                             f"{runtime_dir}/environment.env")
+    raw = _remote_checked(
+        entry, _host_observation_command(prefix, services, revision_keys, deadline_seconds),
+        timeout=deadline_seconds + 5,
+    )
+    try:
+        receipt = json.loads((raw or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        receipt = {"schema_version": 1, "complete": False,
+                   "configured_services": [], "rows": [], "revision_checks": [],
+                   "phases": [{"phase": "observation", "state": "unavailable"}]}
+    if not isinstance(receipt, dict):
+        raise RuntimeError("remote host observation returned an invalid receipt")
+    for key, default in (("complete", False), ("configured_services", []),
+                         ("rows", []), ("revision_checks", []), ("phases", [])):
+        receipt.setdefault(key, default)
+    return receipt
+
+
+def _classify_host_observation(validated: dict, observation: dict,
+                               expected_revision: str | None = None) -> dict:
+    services = [validated["compose"]["service"],
+                *validated["compose"].get("background_services", [])]
+    configured_all = {str(item) for item in observation.get("configured_services", []) if item}
+    configured = [service for service in services if service in configured_all]
+    rows = [item for item in observation.get("rows", []) if isinstance(item, dict)]
+    observed = {str(item.get("Service")): item for item in rows if item.get("Service")}
+    running = [service for service in services
+               if (observed.get(service) or {}).get("State") == "running"]
+    missing_from_compose = sorted(set(services).difference(configured))
+    missing_from_runtime = sorted(set(services).difference(running))
+    topology = {"state": "degraded" if missing_from_compose or missing_from_runtime else "ready",
+                "declared_services": services, "compose_services": configured,
+                "running_services": running, "missing_from_compose": missing_from_compose,
+                "missing_from_runtime": missing_from_runtime}
+    service_rows = [{"service": service,
+                     "state": (observed.get(service) or {}).get("State") or "unknown",
+                     "health": (observed.get(service) or {}).get("Health") or "unknown"}
+                    for service in services]
+    if not observation.get("complete"):
+        health = {"state": "unavailable", "reason": "remote observation was partial"}
+    elif not configured or not rows:
+        health = {"state": "unknown", "reason": "Compose returned incomplete service evidence"}
+    elif topology["state"] != "ready":
+        health = {"state": "degraded", "reason": "declared service topology differs from Compose/runtime"}
+    elif any(item["state"] != "running" for item in service_rows):
+        health = {"state": "degraded", "reason": "one or more services are not running"}
+    elif any(item["health"] == "unknown" for item in service_rows):
+        health = {"state": "unverified", "reason": "one or more running services have unknown health"}
+    elif any(item["health"] != "healthy" for item in service_rows):
+        health = {"state": "degraded", "reason": "one or more services are not healthy"}
+    else:
+        health = {"state": "ready"}
+    checks, revisions = [], set()
+    for raw in observation.get("revision_checks", []):
+        if not isinstance(raw, dict):
+            continue
+        observed_revision = raw.get("observed")
+        item = {"service": raw.get("service"), "key": raw.get("key"),
+                "provider": "pushed_commit_sha",
+                "observed": observed_revision or None, "expected": expected_revision}
+        item["state"] = ("match" if expected_revision and observed_revision == expected_revision
+                         else "missing" if not observed_revision else "mismatch")
+        if isinstance(observed_revision, str) and re.fullmatch(r"[0-9a-f]{40}", observed_revision):
+            revisions.add(observed_revision)
+        checks.append(item)
+    return {"complete": bool(observation.get("complete")), "services": service_rows,
+            "topology": topology, "health": health,
+            "source_revision": {"state": "not_declared" if not checks else
+                                "ready" if all(item["state"] == "match" for item in checks)
+                                else "degraded", "checks": checks},
+            "observed_runtime_revision": next(iter(revisions)) if len(revisions) == 1 else None,
+            "phases": observation.get("phases", [])}
+
+
+def _host_config_digest(validated: dict, runtime: dict) -> str:
+    payload = {
+        "compose": validated["compose"],
+        "compose_override": runtime.get("compose_override"),
+        "environment": runtime.get("environment"),
+        "services": [validated["compose"]["service"],
+                     *validated["compose"].get("background_services", [])],
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dict,
+                                   revision: str, config_digest: str, *,
+                                   entry: dict | None = None,
+                                   source_dir: str = "/unresolved/source",
+                                   runtime_dir: str = "/unresolved/runtime",
+                                   observation: dict | None = None) -> bool:
+    """Repair only the local receipt when exact runtime evidence is complete."""
+    key = hosting.state_key(remote_name, validated)
+    record = state.setdefault("hosts", {}).get(key)
+    if not isinstance(record, dict) or record.get("config_digest") != config_digest:
+        return False
+    if observation is None:
+        observation = _observe_host_runtime(
+            validated, entry or {}, source_dir, runtime_dir,
+        )
+    if "topology" in observation and "health" in observation:
+        classified = observation
+    else:
+        classified = _classify_host_observation(validated, observation, revision)
+    proven = (
+        classified.get("complete") is True
+        and (classified.get("topology") or {}).get("state") == "ready"
+        and (classified.get("health") or {}).get("state") == "ready"
+        and classified.get("observed_runtime_revision") == revision
+    )
+    if not proven:
+        return False
+    record.update({
+        "commit": revision,
+        "recorded_revision": revision,
+        "observed_runtime_revision": revision,
+        "runtime": {"state": "ready", "observation": classified.get("phases", [])},
+    })
+    record.setdefault("edge", {"state": "pending"})
+    hosting.save_host_state(state)
+    return True
+
+
 def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
                          state: dict) -> dict:
     """Read deployed revision and bounded Compose health without mutation."""
@@ -945,6 +1123,12 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "environment": validated["environment"],
         "remote": remote_name,
         "deployed_revision": recorded.get("commit"),
+        "requested_revision": recorded.get("requested_revision"),
+        "staged_revision": recorded.get("staged_revision"),
+        "recorded_revision": recorded.get("recorded_revision") or recorded.get("commit"),
+        "observed_runtime_revision": recorded.get("observed_runtime_revision"),
+        "runtime": recorded.get("runtime") or {"state": "unknown"},
+        "edge": recorded.get("edge") or {"state": "unknown"},
         "state_record": "present" if recorded else "missing",
         "services": [],
         "topology": {
@@ -964,75 +1148,14 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         home = remote.resolve_sandbox_home(entry)
         source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
         runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
-        prefix = _compose_prefix(
-            validated, source_dir,
-            f"{runtime_dir}/compose.override.yml",
-            f"{runtime_dir}/environment.env",
+        observation = _observe_host_runtime(validated, entry, source_dir, runtime_dir)
+        classified = _classify_host_observation(
+            validated, observation, recorded.get("commit") or recorded.get("staged_revision"),
         )
-        configured_raw = _remote_checked(
-            # Profile-gated long-lived workers are still deployment authority.
-            # Wildcard profile expansion makes them visible without requiring
-            # the manifest to duplicate Compose profile names.
-            entry, f"{prefix} --profile {shlex.quote('*')} config --services", timeout=60,
-        )
-        configured_all = {
-            line.strip() for line in (configured_raw or "").splitlines()
-            if line.strip()
-        }
-        # Topology readiness concerns the declared web/background authority.
-        # Init jobs and dependency services (for example DB/Redis) may also be
-        # present under wildcard profiles but are not long-lived targets here.
-        configured = [service for service in services if service in configured_all]
-        raw = _remote_checked(entry, f"{prefix} ps --format json", timeout=60)
-        rows = []
-        for line in (raw or "").splitlines():
-            try:
-                item = json.loads(line)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if isinstance(item, dict):
-                rows.append(item)
-        observed = {str(item.get("Service")): item for item in rows
-                    if item.get("Service")}
-        running = [
-            service for service in services
-            if (observed.get(service) or {}).get("State") == "running"
-        ]
-        missing_from_compose = sorted(set(services).difference(configured))
-        missing_from_runtime = sorted(set(services).difference(running))
-        result["topology"] = {
-            "state": "degraded" if missing_from_compose or missing_from_runtime else "ready",
-            "declared_services": services,
-            "compose_services": configured,
-            "running_services": running,
-            "missing_from_compose": missing_from_compose,
-            "missing_from_runtime": missing_from_runtime,
-        }
-        for service in services:
-            item = observed.get(service) or {}
-            result["services"].append({
-                "service": service,
-                "state": item.get("State") or "unknown",
-                "health": item.get("Health") or "unknown",
-            })
-        if not configured:
-            result["health"] = {
-                "state": "unknown",
-                "reason": "Compose returned no configured service names",
-            }
-        elif not rows:
-            result["health"] = {"state": "unknown", "reason": "Compose returned no service rows"}
-        elif result["topology"]["state"] == "ready" and all(
-                 item["state"] == "running" and item["health"] in {"healthy", "unknown"}
-                 for item in result["services"]):
-            result["health"] = {"state": "ready"}
-        else:
-            reason = (
-                "declared service topology differs from Compose/runtime"
-                if result["topology"]["state"] == "degraded"
-                else "one or more services are not running/healthy"
-            )
-            result["health"] = {"state": "degraded", "reason": reason}
+        result.update({key: classified[key] for key in (
+            "services", "topology", "health", "source_revision",
+            "observed_runtime_revision", "phases",
+        )})
     except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
         result["health"] = {"state": "unavailable", "reason": remote.redact_text(str(exc))[:500]}
     return result
@@ -1045,7 +1168,7 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
     result["disk"] = {"state": "unavailable", "free_mb": None}
     result["images"] = []
     result["image_state"] = {"state": "unavailable", "reason": "image metadata not observed"}
-    result["source_revision"] = {"state": "not_declared", "checks": []}
+    result.setdefault("source_revision", {"state": "not_declared", "checks": []})
     result["apply_log"] = None
     if not entry.get("provisioned"):
         result["disk"]["reason"] = "remote is not provisioned"
@@ -1093,36 +1216,9 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
                 "reason": remote.redact_text(str(exc))[:500],
             }
 
-        derived = validated["deploy"].get("derived_environment", {})
-        services = [
-            validated["compose"]["service"],
-            *validated["compose"].get("background_services", []),
-        ]
-        checks = []
-        for service_name in services:
-            for key, provider in sorted(derived.items()):
-                check = {"service": service_name, "key": key,
-                         "provider": provider, "state": "unavailable"}
-                service = shlex.quote(service_name)
-                command = f"{prefix} exec -T {service} sh -c {shlex.quote(f'printf %s "${key}"')}"
-                try:
-                    observed = _remote_checked(entry, command, timeout=30).strip()
-                    check["observed"] = observed or None
-                    if provider == "pushed_commit_sha" and observed:
-                        expected = result.get("deployed_revision")
-                        check["expected"] = expected
-                        check["state"] = "match" if expected == observed else "mismatch"
-                    elif not observed:
-                        check["state"] = "missing"
-                except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
-                    check["reason"] = remote.redact_text(str(exc))[:500]
-                checks.append(check)
-        if checks:
-            result["source_revision"] = {
-                "state": "ready" if all(item["state"] == "match" for item in checks)
-                else "degraded",
-                "checks": checks,
-            }
+        # Source-revision and service-health evidence already came from the
+        # single bounded status observer.  Diagnose adds disk and image facts;
+        # it must not multiply SSH calls by service and environment key.
     except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
         result["health"] = {
             "state": "unavailable",
@@ -1182,45 +1278,43 @@ def _ensure_host_source(entry: dict, home: str, project: str) -> str:
     return target
 
 
-def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> None:
+def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
     port = runtime["loopback_port"]
     path = runtime["healthcheck"]["path"]
     minimum, maximum = min(runtime["healthcheck"]["statuses"]), max(runtime["healthcheck"]["statuses"])
-    command = (
-        "curl -fsS --max-time 15 -o /dev/null -w '%{http_code}' "
-        f"http://127.0.0.1:{port}{shlex.quote(path)}"
+    payload = base64.b64encode(json.dumps({
+        "url": f"http://127.0.0.1:{port}{path}",
+        "minimum": minimum, "maximum": maximum, "deadline": 60,
+    }, separators=(",", ":")).encode()).decode()
+    program = "\n".join((
+        "import base64,json,subprocess,sys,time",
+        "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline'];attempt=0",
+        "r={'schema_version':1,'complete':False,'status':None,'phases':[]}",
+        "while time.monotonic()<end:",
+        " attempt+=1;remaining=max(1,int(end-time.monotonic()))",
+        " q=subprocess.run(['curl','-fsS','--max-time',str(min(15,remaining)),'-o','/dev/null','-w','%{http_code}',p['url']],text=True,capture_output=True,check=False)",
+        " try:code=int((q.stdout or '').strip())",
+        " except ValueError:code=None",
+        " if q.returncode==0 and code is not None and p['minimum']<=code<=p['maximum']:",
+        "  r['complete']=True;r['status']=code;r['phases'].append({'phase':'health','state':'ready','attempt':attempt});break",
+        " r['phases'].append({'phase':'health','state':'pending','attempt':attempt});time.sleep(min(2,max(0,end-time.monotonic())))",
+        "print(json.dumps(r,separators=(',',':')))",
+    ))
+    result = remote.ssh_run(
+        entry, shlex.join(["python3", "-c", program, payload]), timeout=65,
     )
-    last_error = "no response"
-    # A recreated Compose service can reset its loopback connection between
-    # `up -d` returning and its healthcheck becoming green. Treat that short
-    # startup window as pending, not as a failed deployment.
-    for attempt in range(30):
-        result = remote.ssh_run(entry, command, timeout=30)
-        output = (result.stdout or "").strip()
-        if result.returncode == 0:
-            try:
-                code = int(output)
-            except ValueError:
-                last_error = "remote healthcheck returned a non-status response"
-            else:
-                if minimum <= code <= maximum:
-                    return
-                last_error = f"remote healthcheck returned {code}, expected {minimum}-{maximum}"
-        else:
-            last_error = (result.stderr or output or "remote healthcheck command failed").strip()[:500]
-        if attempt == 0 or (attempt + 1) % 5 == 0:
-            message = (
-                f"remote healthcheck pending ({min((attempt + 1) * 2, 60)}s/60s): "
-                f"{remote.redact_text(last_error)}"
-            )
-            if progress is None:
-                info(message)
-            else:
-                progress(message)
-        time.sleep(2)
-    raise RuntimeError(
-        f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds: {last_error}"
-    )
+    try:
+        receipt = json.loads((result.stdout or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        receipt = {"schema_version": 1, "complete": False, "status": None,
+                   "phases": [{"phase": "health", "state": "unavailable"}]}
+    if receipt.get("complete") is not True:
+        raise RuntimeError(
+            f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds"
+        )
+    if progress is not None:
+        progress("remote healthcheck passed")
+    return receipt
 
 
 def _verify_edge(
@@ -1323,7 +1417,7 @@ def _validate_apply_source(validated: dict) -> str:
     if policy["require_clean"]:
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=validated["project_root"],
-            capture_output=True, text=True, check=False,
+            env=remote.git_environment(), capture_output=True, text=True, check=False,
         )
         if status.returncode != 0:
             raise RuntimeError("could not inspect the deployment working tree")
@@ -1374,6 +1468,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
+    key = runtime["key"]
+    previous_entry = dict(state["hosts"].get(key) or {})
+    config_digest = _host_config_digest(validated, runtime)
     client = cloudflare.Client()
     remote.update_target_to(
         entry, target, sha,
@@ -1382,6 +1479,15 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     )
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     apply_log = f"{runtime_dir}/apply.log"
+    state["hosts"][key] = {
+        **previous_entry,
+        "requested_revision": sha,
+        "staged_revision": sha,
+        "config_digest": config_digest,
+        "runtime": {"state": "pending"},
+        "edge": {"state": "pending"},
+    }
+    hosting.save_host_state(state)
     stream_progress = None
     if progress is not None:
         def stream_progress(message: str) -> None:
@@ -1390,8 +1496,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 if secret:
                     safe = safe.replace(secret, "[REDACTED]")
             progress(safe)
-    key = runtime["key"]
-    previous_entry = dict(state["hosts"].get(key) or {})
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
     caddy_path = f"/etc/caddy/conf.d/{caddy_name}.caddy"
     previous_caddy = _read_remote_optional(entry, caddy_path)
@@ -1431,17 +1535,48 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if stream_progress is not None:
             stream_progress(f"source reset to {sha}")
             stream_progress(f"apply log: {apply_log}")
-        _run_compose(
-            entry, validated, target, runtime_dir, runtime,
-            stream_progress, apply_log,
-        )
-        _verify_remote_health(entry, runtime, stream_progress)
-        _verify_remote_derived_environment(
-            entry, validated, target, runtime_dir, sha,
-            stream_progress, apply_log,
-        )
-        if stream_progress is not None:
-            stream_progress("remote healthcheck passed")
+        runtime_current = False
+        if previous_entry.get("config_digest") == config_digest:
+            try:
+                observation = _observe_host_runtime(
+                    validated, entry, target, runtime_dir,
+                )
+                runtime_current = _reconcile_exact_runtime_state(
+                    validated, remote_name, state, sha, config_digest,
+                    entry=entry, source_dir=target, runtime_dir=runtime_dir,
+                    observation=observation,
+                )
+            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
+                runtime_current = False
+        if not runtime_current:
+            _run_compose(
+                entry, validated, target, runtime_dir, runtime,
+                stream_progress, apply_log,
+                force_recreate=previous_entry.get("config_digest") != config_digest,
+            )
+            health_receipt = _verify_remote_health(entry, runtime, stream_progress)
+            observation = _observe_host_runtime(validated, entry, target, runtime_dir)
+            classified = _classify_host_observation(validated, observation, sha)
+            if classified["topology"]["state"] != "ready" \
+                    or classified["health"]["state"] != "ready":
+                raise RuntimeError("remote runtime topology/health is not fully proven ready")
+            _verify_remote_derived_environment(
+                entry, validated, target, runtime_dir, sha,
+                stream_progress, apply_log, observation=observation,
+            )
+            record = state["hosts"][key]
+            record.update({
+                "commit": sha,
+                "recorded_revision": sha,
+                "observed_runtime_revision": classified.get("observed_runtime_revision"),
+                "runtime": {
+                    "state": "ready",
+                    "health": health_receipt,
+                    "observation": classified.get("phases", []),
+                },
+                "edge": {"state": "pending"},
+            })
+            hosting.save_host_state(state)
         proxied = validated["cloudflare"]["proxied"]
         cert_path = key_path = None
         certificate = None
@@ -1506,14 +1641,27 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         _verify_edge(validated["routes"], **verify_kwargs)
         _release_host_apply_reservation(entry, reservation)
         reservation = None
-        state["hosts"][key] = {"loopback_port": runtime["loopback_port"], "compose_project": runtime["compose_project"],
-                               "certificate": certificate, "records": changes, "commit": sha,
-                               "caddy_name": caddy_name}
+        state["hosts"][key].update({
+            "loopback_port": runtime["loopback_port"],
+            "compose_project": runtime["compose_project"],
+            "certificate": certificate,
+            "records": changes,
+            "commit": sha,
+            "recorded_revision": sha,
+            "caddy_name": caddy_name,
+            "edge": {"state": "ready"},
+        })
         hosting.save_host_state(state)
 
     hosting.apply_with_rollback(apply, rollback)
     result = {
         "commit": sha,
+        "requested_revision": sha,
+        "staged_revision": sha,
+        "recorded_revision": state["hosts"][key].get("recorded_revision"),
+        "observed_runtime_revision": state["hosts"][key].get("observed_runtime_revision"),
+        "runtime": state["hosts"][key].get("runtime"),
+        "edge": state["hosts"][key].get("edge"),
         "derived_environment": runtime.get("derived_environment", []),
     }
     if progress is not None:

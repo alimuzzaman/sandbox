@@ -635,6 +635,29 @@ class TestDeployTargetPath(unittest.TestCase):
         self.assertTrue(path.startswith("/srv/deploy/project-workspace-"))
         self.assertNotIn(".workspace-", path)
 
+    @patch("subprocess.run")
+    def test_source_revision_scrubs_inherited_repository_git_environment(self, run):
+        revision = "a" * 40
+        run.side_effect = [
+            _completed(returncode=0, stdout=revision + "\n"),
+            _completed(returncode=0),
+            _completed(returncode=0),
+        ]
+        inherited = {
+            "GIT_DIR": "/foreign/repository/.git",
+            "GIT_WORK_TREE": "/foreign/repository",
+            "GIT_INDEX_FILE": "/foreign/repository/index",
+            "PRESERVE_ME": "value",
+        }
+        with patch.dict(os.environ, inherited, clear=True):
+            resolved = sr.resolve_source_ref("/selected/source", "refs/tags/v1")
+
+        self.assertEqual(resolved, revision)
+        for call in run.call_args_list:
+            environment = call.kwargs["env"]
+            self.assertEqual(environment["PRESERVE_ME"], "value")
+            self.assertFalse(any(key.startswith("GIT_") for key in environment))
+
     @patch("sandbox.core._remote.remote_workspace_path",
            return_value="/srv/sandbox/deploy-src/project-workspace-label")
     @patch("sandbox.core._remote.ssh_run", return_value=_completed())

@@ -181,3 +181,15 @@ configured target. Zero or multiple eligible targets fail rather than silently
 switching machines. `deploy` continues to require explicit `--remote`. Every
 human and JSON result includes the selected remote name and source of selection
 (`explicit`, `profile`, or `single-configured`) without secret fields.
+## Hosting deployment convergence evidence
+
+`host apply`, `host status`, and `host diagnose` retain four distinct revision facts:
+the requested source, staged/pending receipt, locally recorded successful revision, and
+observed runtime revision. Missing observation never collapses these into one nullable
+`deployed_revision`. The legacy field remains for compatibility.
+
+Runtime convergence and public-edge observation are separate phases. Exact runtime
+revision plus the full declared healthy topology may reconcile a stale local record
+without a Compose mutation when the saved configuration digest also matches. Unknown
+service health is `unverified`, not ready. Remote Compose/source observation uses one
+bounded session with a shared deadline and retains phase-level partial evidence.

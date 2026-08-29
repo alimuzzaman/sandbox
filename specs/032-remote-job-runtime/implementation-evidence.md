@@ -1174,3 +1174,16 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Job `afb859d68372daae541e8b410fb5e187` reached its authoritative terminal
   state. This closes T157 for the selected reachable remote; T156 remains a
   separate controlled 100-disconnect requirement.
+
+## Deployment evidence convergence — 2026-08-29
+
+- Sandbox Git revision and source-staging commands now discard inherited `GIT_*`
+  repository selectors before resolving or pushing a source. The selected checkout is
+  therefore authoritative even when a caller exports a foreign `GIT_DIR` or
+  `GIT_WORK_TREE`.
+- Hosted Compose observation now returns a phase receipt from one bounded remote session.
+  It distinguishes requested, staged, recorded, and observed runtime revisions; treats
+  unknown health as unverified; and retains runtime success when edge observation remains
+  pending.
+- This entry records local unit/static implementation evidence only. It is not a live
+  remote deployment or a claim that an existing remote runtime was repaired.

@@ -472,6 +472,14 @@ it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandb
 checks the local Git branch and clean-tree policy declared for the target environment.
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
 Compose/init health checks, converges Caddy, and updates only declared DNS records.
+Sandbox records the requested source, staged source receipt, recorded revision, and
+observed runtime revision separately. The staged receipt is saved before runtime
+observation, and exact runtime/topology evidence is saved before edge verification.
+An observation timeout therefore leaves explicit `runtime: pending` evidence; an edge
+timeout leaves `runtime: ready` with `edge: pending` instead of erasing the successful
+runtime convergence. A later apply repairs only the local record when the exact runtime
+revision, fully healthy declared topology, and matching configuration digest are proven.
+It does not recreate containers merely to repair that record.
 The Caddy fragment transaction holds one host-global lock, compares the desired and
 installed fragment digests, and skips validation/reload when both the fragment and
 aggregate import are unchanged. A real change runs separate 30-second validation,
@@ -528,6 +536,10 @@ then deploys config, secrets, and routing onto the image the remote already has,
 skips the explicit `init_services` build. Compose still builds a service that has no
 image at all, so a first deploy works either way, and new application code only ships
 once the image is rebuilt.
+When the configuration digest is already current but runtime topology needs convergence,
+Sandbox uses a targeted idempotent `compose up` for the declared services. A changed
+source/configuration still uses the full recreate path. Unknown Compose health is reported
+as `unverified`, never `ready`.
 
 For a deliberate cold or large build, set `compose.build_timeout_seconds` to a bounded
 value from 60 through 7200 (default `900`). The value applies to the Compose `up` and
@@ -547,6 +559,10 @@ For a one-command, read-only failure explanation use
 manifest-declared services, profile-aware configured Compose services, running service
 rows, per-service Compose state/health, free disk, image metadata, derived source-revision
 checks for every declared long-lived service, and the protected apply-log path. A
+single bounded remote observer collects configured services, runtime rows, and all
+declared source-revision keys under one total deadline. Completed phases and partial or
+unknown evidence survive a later probe failure; diagnose does not open one SSH session
+per service/key. A
 declared service missing from either Compose configuration or the running set is
 topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
 services are excluded from this long-lived topology comparison. Missing remote evidence

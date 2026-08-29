@@ -318,7 +318,7 @@ def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
     requested = source_ref.strip()
     resolved = subprocess.run(
         ["git", "rev-parse", "--verify", f"{requested}^{{commit}}"],
-        cwd=str(root), capture_output=True, text=True, check=False,
+        cwd=str(root), env=git_environment(), capture_output=True, text=True, check=False,
     )
     commit = (resolved.stdout or "").strip().lower()
     if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -330,6 +330,23 @@ def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
             "with local changes"
         )
     return commit
+
+
+def git_environment(*, overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """Return an environment isolated from a caller's repository selection.
+
+    Hooks and tools commonly export ``GIT_DIR``, ``GIT_WORK_TREE`` and related
+    repository-local variables.  Those values must never select the Sandbox
+    checkout or a deployment source.  Transport settings are added only by
+    the exact call that owns them.
+    """
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    if overrides:
+        environment.update(overrides)
+    return environment
 
 
 def deploy_exact_working_tree(
@@ -1498,7 +1515,7 @@ def current_branch(project_root, *, allow_detached: bool = False) -> str | None:
     HEAD -- deploy needs a named branch to push to."""
     res = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=str(project_root), capture_output=True, text=True, check=False,
+        cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
     )
     branch = (res.stdout or "").strip()
     if res.returncode != 0 or not branch:
@@ -1529,7 +1546,7 @@ def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Pa
     source = Path(source_root).resolve()
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=False,
+        env=git_environment(), capture_output=True, text=True, check=False,
     )
     checkout = (result.stdout or "").strip()
     if result.returncode != 0 or not checkout:
@@ -1544,7 +1561,7 @@ def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Pa
     prefix = PurePosixPath(*relative.parts).as_posix()
     split = subprocess.run(
         ["git", "subtree", "split", f"--prefix={prefix}", commit],
-        cwd=str(checkout_path), capture_output=True, text=True, check=False,
+        cwd=str(checkout_path), env=git_environment(), capture_output=True, text=True, check=False,
     )
     split_sha = next(
         (line.strip().lower() for line in reversed((split.stdout or "").splitlines())
@@ -1589,7 +1606,7 @@ def push_commits(
     elif source_commit is None:
         head_res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(project_root), capture_output=True, text=True, check=False,
+            cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
         )
         source_commit = (head_res.stdout or "").strip().lower()
         if head_res.returncode != 0:
@@ -1626,8 +1643,7 @@ def push_commits(
         git_ssh = git_ssh_command(remote, multiplex=False)
     else:
         git_ssh = git_ssh_command(remote)
-    env = os.environ.copy()
-    env["GIT_SSH_COMMAND"] = git_ssh
+    env = git_environment(overrides={"GIT_SSH_COMMAND": git_ssh})
     try:
         res = subprocess.run(
             ["git", "push", push_url, source_spec],
@@ -1745,12 +1761,12 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     # when the target is expected to be the declared source root.
     diff_res = subprocess.run(
         ["git", "diff", "--relative", "HEAD"],
-        cwd=str(project_root), capture_output=True, text=True, check=False,
+        cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
     )
     diff_text = diff_res.stdout or ""
     status_res = subprocess.run(
         ["git", "status", "--short", "--untracked-files=all"],
-        cwd=str(project_root), capture_output=True, text=True, check=False,
+        cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
     )
     untracked = []
     status_entries = []
@@ -1914,7 +1930,7 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
     if diff_text.strip():
         changed_res = subprocess.run(
             ["git", "diff", "--name-only", "--relative", "HEAD"],
-            cwd=str(project_root), capture_output=True, text=True, check=False,
+            cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
         )
         if changed_res.returncode != 0:
             raise RuntimeError(
@@ -1923,7 +1939,7 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
             )
         deleted_res = subprocess.run(
             ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
-            cwd=str(project_root), capture_output=True, text=True, check=False,
+            cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
         )
         if deleted_res.returncode != 0:
             raise RuntimeError(

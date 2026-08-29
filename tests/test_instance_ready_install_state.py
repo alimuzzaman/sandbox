@@ -99,6 +99,44 @@ class TestWpCoreInstallState(unittest.TestCase):
 
 
 class TestReadyEnsureInstallState(unittest.TestCase):
+    def test_refresh_heals_clean_url_companions_when_base_url_is_current(self):
+        state = mock.Mock()
+        existing = {
+            "instance": "fixture",
+            "url": "https://fixture.tst",
+            "login_url": "http://localhost:8088/?sandbox_autologin=stale",
+            "admin_url": "http://localhost:8088/wp-admin/",
+        }
+        refreshed = {
+            **existing,
+            "login_url": "https://fixture.tst/?sandbox_autologin=token",
+            "admin_url": "https://fixture.tst/wp-admin/",
+        }
+        state.registry_put.return_value = refreshed
+        with mock.patch.object(_instances, "resolve_instances", return_value={
+                "fixture": {"wordpress_port": 8088, "domain": "fixture.tst", "tld": "tst"},
+            }), mock.patch.object(_instances, "site_url",
+                                  return_value="https://fixture.tst"), \
+             mock.patch.object(_instances, "_local_yaml", return_value={
+                 "instances": {"fixture": {
+                     "domain": "fixture.tst", "tld": "tst",
+                     "autologin_token": "token",
+                 }},
+             }):
+            result = _instances._refresh_registered_url(
+                state, "/project", "default", existing, {},
+            )
+
+        self.assertEqual(result, refreshed)
+        self.assertEqual(
+            state.registry_put.call_args.kwargs["login_url"],
+            "https://fixture.tst/?sandbox_autologin=token",
+        )
+        self.assertEqual(
+            state.registry_put.call_args.kwargs["admin_url"],
+            "https://fixture.tst/wp-admin/",
+        )
+
     def _ready_patches(self, state):
         return (
             mock.patch.object(_instances, "_core", return_value=state),
@@ -138,6 +176,54 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         warn.assert_called_once()
         self.assertEqual(warn.call_args.args[2]["wpVersion"], "6.8.2")
         state.registry_put.assert_not_called()
+
+    def test_ready_localhost_retries_only_its_clean_url_route(self):
+        state = _State()
+        existing = state.registry_get("/project")
+        refreshed = {**existing, "url": "https://fixture.tst"}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(_instances, "_core", return_value=state))
+            stack.enter_context(mock.patch.object(
+                _instances, "_desired_source_mounts", return_value=["/plugins"],
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "attest_source_mounts", return_value={"ok": True},
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_instance_reachable", return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "wpcli", return_value=_Result(0),
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+            ))
+            stack.enter_context(mock.patch.object(
+                _instances, "resolve_instances", return_value={"fixture": dict(existing)},
+            ))
+            stack.enter_context(mock.patch.object(_instances, "_warn_version_drift"))
+            stack.enter_context(mock.patch.object(
+                _instances, "_proxy_sudoers_installed", return_value=True,
+            ))
+            secure = stack.enter_context(mock.patch.object(
+                _instances, "_secure_at_create", return_value=True,
+            ))
+            load = stack.enter_context(mock.patch.object(
+                _instances, "load_config", return_value={"secured": True},
+            ))
+            heal = stack.enter_context(mock.patch.object(
+                _instances, "_auto_heal_wp_url", return_value=True,
+            ))
+            refresh = stack.enter_context(mock.patch.object(
+                _instances, "_refresh_registered_url", return_value=refreshed,
+            ))
+            result = _instances.ensure_instance({}, "/project")
+
+        self.assertEqual(result["url"], "https://fixture.tst")
+        secure.assert_called_once_with({}, "fixture")
+        load.assert_called_once_with()
+        heal.assert_called_once_with("fixture")
+        self.assertEqual(refresh.call_args.args[-1], {"secured": True})
 
     def test_unreachable_ready_uses_existing_recovery_without_install_probe(self):
         """A cold ready record keeps the historical up/install recovery path."""

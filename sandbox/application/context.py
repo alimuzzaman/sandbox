@@ -851,7 +851,7 @@ def runtime_service(cfg):
             return {"ok": False, "mutated": False,
                     "error": {"code": "unknown_instance", "message": "no provisioned instance exists"}}
         instance = str(entry["instance"])
-        instance_cfg = sc.resolve_instances(cfg).get(instance) or {}
+        instance_cfg = core.resolve_instances(cfg).get(instance) or {}
         if instance_cfg.get("server") == "herd":
             return {"ok": False, "mutated": False,
                     "error": {"code": "unsupported_runtime", "message": "host-served instances cannot be suspended"}}

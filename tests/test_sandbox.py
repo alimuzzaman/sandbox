@@ -519,6 +519,25 @@ class TestProxyTransportHealth(unittest.TestCase):
         self.assertEqual([item["hostname"] for item in health["routes"]],
                          ["current.tst"])
 
+    def test_exact_route_health_allows_one_bounded_activation_window(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "current": {"domain": "current.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries", return_value=[]), \
+             mock.patch.object(domains_core, "_proxy_container_running", return_value=True), \
+             mock.patch.object(domains_core, "_caddyfile_readable_in_container", return_value=True), \
+             mock.patch.object(domains_core, "_caddyfile_has_route", return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               return_value=True) as serving, \
+             mock.patch.object(domains_core, "PROXY_CADDYFILE") as caddyfile:
+            caddyfile.exists.return_value = True
+            caddyfile.read_text.return_value = "route"
+            health = domains_core.sandbox_caddy_health(
+                {}, domains=("current.tst",),
+            )
+
+        self.assertTrue(health["ok"])
+        self.assertEqual(serving.call_args.kwargs["timeout"], 5.0)
+
     def test_exact_route_health_reason_is_shared_with_human_detail(self):
         observed = {
             "ok": False, "state": "degraded", "routes": [], "mutated": False,
@@ -635,6 +654,7 @@ class TestProxyMountAndReload(unittest.TestCase):
         self.assertFalse(ok_)
         self.assertIn("caddy reload failed", detail)
         self.assertIn("recreate also failed", detail)
+
 
 
 class TestProxyHealthChecks(unittest.TestCase):

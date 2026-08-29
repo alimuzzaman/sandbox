@@ -198,6 +198,18 @@ class ActivationHTTPTests(unittest.TestCase):
         self.assertEqual(self.app.handle("GET", "/v1/activate", {}).status, 404)
         self.assertEqual(len(self.calls), 1)
 
+    def test_http_header_names_are_case_insensitive(self):
+        canonicalized = {
+            "X-Sandbox-Route-Id": self.route.route_id,
+            "authorization": f"Bearer {self.route.token}",
+            "content-length": "0",
+        }
+        self.assertEqual(
+            self.app.handle("GET", "/v1/activate", canonicalized).status,
+            204,
+        )
+        self.assertEqual(len(self.calls), 1)
+
     def test_failure_is_sanitized_retryable_and_never_cached(self):
         from sandbox.activation import ActivationService
         from sandbox.activation.catalog import build_catalog

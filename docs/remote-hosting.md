@@ -488,11 +488,13 @@ latest output tail rather than reducing a failed build to a bare timeout message
 
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
-manifest-declared services, configured Compose services, running service rows,
-per-service Compose state/health, free disk, image metadata, derived source-revision
+manifest-declared services, profile-aware configured Compose services, running service
+rows, per-service Compose state/health, free disk, image metadata, derived source-revision
 checks for every declared long-lived service, and the protected apply-log path. A
 declared service missing from either Compose configuration or the running set is
-topology drift and makes readiness `degraded`. Missing remote evidence is reported as
+topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
+services are excluded from this long-lived topology comparison. Missing remote evidence
+is reported as
 `unavailable` or `degraded`; the command never mutates the host or prints secrets.
 
 An environment may also protect its public origin with Basic Auth:

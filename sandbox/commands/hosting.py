@@ -763,12 +763,19 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
             f"{runtime_dir}/environment.env",
         )
         configured_raw = _remote_checked(
-            entry, f"{prefix} config --services", timeout=60,
+            # Profile-gated long-lived workers are still deployment authority.
+            # Wildcard profile expansion makes them visible without requiring
+            # the manifest to duplicate Compose profile names.
+            entry, f"{prefix} --profile {shlex.quote('*')} config --services", timeout=60,
         )
-        configured = sorted({
+        configured_all = {
             line.strip() for line in (configured_raw or "").splitlines()
             if line.strip()
-        })
+        }
+        # Topology readiness concerns the declared web/background authority.
+        # Init jobs and dependency services (for example DB/Redis) may also be
+        # present under wildcard profiles but are not long-lived targets here.
+        configured = [service for service in services if service in configured_all]
         raw = _remote_checked(entry, f"{prefix} ps --format json", timeout=60)
         rows = []
         for line in (raw or "").splitlines():
@@ -780,10 +787,10 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
                 rows.append(item)
         observed = {str(item.get("Service")): item for item in rows
                     if item.get("Service")}
-        running = sorted(
-            service for service, item in observed.items()
-            if item.get("State") == "running"
-        )
+        running = [
+            service for service in services
+            if (observed.get(service) or {}).get("State") == "running"
+        ]
         missing_from_compose = sorted(set(services).difference(configured))
         missing_from_runtime = sorted(set(services).difference(running))
         result["topology"] = {

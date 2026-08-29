@@ -922,6 +922,31 @@ class TestHostingManifest(unittest.TestCase):
             "missing_from_runtime": [],
         })
 
+    def test_host_status_includes_profiled_declared_services_without_counting_init_or_db(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n"
+            "      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        rows = '{"Service":"web","State":"running","Health":"healthy"}\n' \
+            '{"Service":"worker","State":"running","Health":"healthy"}\n' \
+            '{"Service":"db","State":"running","Health":"healthy"}\n'
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=[
+                 "web\nworker\nmigrate\ndb\n", rows,
+             ]) as checked:
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", {"version": 1, "hosts": {}},
+            )
+        self.assertIn("--profile '*' config --services", checked.call_args_list[0].args[1])
+        self.assertEqual(result["health"], {"state": "ready"})
+        self.assertEqual(result["topology"]["compose_services"], ["web", "worker"])
+        self.assertEqual(result["topology"]["running_services"], ["web", "worker"])
+        self.assertNotIn("migrate", result["topology"]["compose_services"])
+        self.assertNotIn("db", result["topology"]["running_services"])
+
     def test_host_status_marks_manifest_service_missing_from_compose_as_degraded(self):
         manifest = _manifest().replace(
             "      service: web\n",

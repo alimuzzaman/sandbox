@@ -995,6 +995,33 @@ class TestStatusJsonRedaction(unittest.TestCase):
             else:
                 self.assertEqual(observed["output"], stdout)
 
+    def test_remote_logs_forward_bounded_snapshot_options_and_follow_opt_in(self):
+        import sandbox.commands.lifecycle as commands
+        import sandbox.core._remote as remote
+
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="outer-workspace",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        args = types.SimpleNamespace(
+            remote="fixture-remote", local=False, project_dir="/tmp/project",
+            workspace="outer-workspace", lines=75, since="2026-08-26T00:00:00Z",
+            follow=True,
+        )
+        result = types.SimpleNamespace(returncode=0, stdout="wp: ready\n", stderr="")
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "remote_workspace_path",
+                                  return_value="/srv/staged-project"), \
+                mock.patch.object(remote, "remote_sb_path",
+                                  return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+            commands._remote_lifecycle({}, args, "logs")
+        command = ssh_run.call_args.args[1]
+        self.assertIn("logs --local --project-dir /srv/staged-project --lines 75", command)
+        self.assertIn("--since 2026-08-26T00:00:00Z --follow", command)
+
     def test_remote_ensure_requests_json_and_returns_instance_record(self):
         """Remote ensure must carry the instance record, not a bare ok flag.
 
@@ -1034,6 +1061,35 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertIn("--create", command)
         self.assertEqual(ensured["url"], "http://localhost:8201")
         self.assertEqual(ensured["instance"], "fixture-master")
+        self.assertEqual(ensured["target"]["remote"], "fixture-remote")
+
+    def test_remote_ensure_empty_output_is_a_typed_failure(self):
+        import sandbox.commands.lifecycle as commands
+        from sandbox.core import _remote as remote
+
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = types.SimpleNamespace(remote="fixture-remote", local=False,
+                                     project_dir="/tmp/project", workspace="default")
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(commands, "_remote_ensure_reachability",
+                                  return_value=None), \
+                mock.patch.object(remote, "deploy_exact_working_tree",
+                                  return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "check_reachable_diagnostic",
+                                  return_value={"reachable": True}), \
+                mock.patch.object(remote, "prepare_remote_workspace",
+                                  return_value="/srv/project-workspace"), \
+                mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result):
+            ensured = commands._remote_lifecycle({}, args, "ensure")
+        self.assertFalse(ensured["ok"])
+        self.assertEqual(ensured["error"]["code"], "remote_empty_output")
         self.assertEqual(ensured["target"]["remote"], "fixture-remote")
 
 if __name__ == "__main__":

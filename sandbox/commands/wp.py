@@ -223,6 +223,53 @@ def _run_plugin_deactivate_allow_missing(argv: list[str], instance: str) -> None
     }, sort_keys=True))
 
 
+def _stage_host_package_paths(
+    argv: list[str], instance: str, project_root: str | Path | None = None,
+) -> tuple[list[str], list[Path]]:
+    """Expose supported host file paths through the Docker download-cache mount."""
+    supported = {
+        ("plugin", "install"),
+        ("theme", "install"),
+        ("media", "import"),
+        ("eval-file",),
+    }
+    command = (
+        tuple(argv[:2])
+        if argv[:2] in (["plugin", "install"], ["theme", "install"], ["media", "import"])
+        else tuple(argv[:1])
+    )
+    if _is_herd_instance(instance) or len(argv) < 2 or command not in supported:
+        return list(argv), []
+    staged: list[Path] = []
+    rewritten = list(argv)
+    cache = Path(RUNTIME_DIR) / "dl-cache" / "wp-http"
+    base = Path(project_root).expanduser() if project_root else Path.cwd()
+    operand_start = 1 if command == ("eval-file",) else 2
+    for index, token in enumerate(argv[operand_start:], start=operand_start):
+        if token == "--" or token.startswith("-"):
+            continue
+        source = Path(token).expanduser()
+        if not source.is_absolute():
+            source = (base / source).resolve()
+        try:
+            if not source.is_file() or source.is_symlink():
+                continue
+            size = source.stat().st_size
+            if size <= 0 or size > 512 * 1024 * 1024:
+                raise ValueError("local file must be a regular file no larger than 512 MiB")
+            cache.mkdir(parents=True, exist_ok=True)
+            temporary = cache / f".sandbox-host-package-{os.getpid()}-{len(staged)}"
+            shutil.copyfile(source, temporary)
+            temporary.chmod(0o644)
+            staged.append(temporary)
+            rewritten[index] = f"/sandbox-dl-cache/{temporary.name}"
+        except (OSError, ValueError) as exc:
+            for path in staged:
+                path.unlink(missing_ok=True)
+            die(f"could not stage local file for the container: {exc}")
+    return rewritten, staged
+
+
 def cmd_wp(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
     if error is not None:
@@ -261,6 +308,9 @@ def cmd_wp(cfg, args) -> None:
         print(f"  follow: ./sb job {jid} --follow", file=sys.stderr)
         print(f"  kill:   ./sb job {jid} --kill", file=sys.stderr)
         return
+    pt, staged_packages = _stage_host_package_paths(
+        pt, args.resolved_instance, getattr(args, "project_dir", None),
+    )
     # Keep direct command namespaces (including out-of-tree callers/tests)
     # aligned with the parser's bounded synchronous default.
     timeout = getattr(args, "timeout", 60)
@@ -279,6 +329,9 @@ def cmd_wp(cfg, args) -> None:
             "unknown—inspect state before retrying, or use --async for long work",
             code=124,
         )
+    finally:
+        for path in staged_packages:
+            path.unlink(missing_ok=True)
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
     returncode = int(getattr(result, "returncode", 0) or 0)

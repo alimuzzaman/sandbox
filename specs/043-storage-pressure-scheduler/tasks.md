@@ -126,6 +126,10 @@ parallel.
   and confirmation-gated lifecycle behavior are documented; live evidence remains T023.
 - [X] **T022** Update `README.md`, `CLAUDE.md` (gotcha 23 subsection only), and
   `skills/sandbox-cli/SKILL.md` with the two new actions and the off-by-default rule. DONE.
-- [ ] **T023** Verify read-only against the real `scaleway-sandbox`: `resources monitor
+- [X] **T023** Verify read-only against the real `scaleway-sandbox`: `resources monitor
   --dry-run`, `resources schedule` (renders only), and an unconfirmed activation refusal.
-  Record the evidence. No deletion; no timer activated.
+  Record the evidence. No deletion; no timer activated. DONE 2026-08-29: the monitor
+  measured capacity but reported partial reclaim inventory, the launchd plan rendered with
+  `enabled: false`, and activation without confirmation refused `protected_operation`.
+  See `live-evidence-2026-08-29.md`; this is command-path proof, not complete inventory
+  health.

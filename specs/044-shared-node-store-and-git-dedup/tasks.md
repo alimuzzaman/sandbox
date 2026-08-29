@@ -59,6 +59,14 @@ the planning package.
 - [ ] T016 [US1] Execute the real remote history gate from `specs/044-shared-node-store-and-git-dedup/quickstart.md` against the configured remote after implementation; acceptance: preserve finite-timeout job IDs and read-only output showing the measured SC-001 used-space delta, source integrity after reset/discard/unpack/test/build, source survival after temporary workspace removal, and any fallback reason. If evidence is absent, report the gate as unverified rather than successful.
 - [ ] T017 [US2] Execute the real remote node-store/permission gate from `specs/044-shared-node-store-and-git-dedup/quickstart.md`; acceptance: preserve two-family-workspace and control overlays, exact named-volume/mount/env observations, concurrent-install exit statuses, and ordinary-operator preparation/removal evidence. No deployment, DNS/ACME, secret access, or unrelated cleanup is allowed.
 - [ ] T018 [US3] After T015 exists and its tests pass, run the supported Sandbox CLI/MCP read-only named-store plan and, only after independent human confirmation, its exact disposable-volume apply described in `specs/044-shared-node-store-and-git-dedup/contracts/node-store-overlay.md`; acceptance: the plan records exact family/name, size/existence, and running mounts; apply rejects missing confirmation/raced mounts and never invokes `docker volume prune`, wildcard removal, or automatic cleanup. Leave this task unchecked until confirmation evidence exists.
+
+2026-08-29 live-gate review: T016-T018 remain open. The current T016 helper does not
+exercise the required reset/discard/unpack/test/build sequence, and the T017 fixture is
+static overlay evidence rather than two live sibling workspaces with concurrent installs
+and ordinary-operator permission proof. Host memory was reported at 96.93%, so no heavy
+overlapping remote fixture was improvised. T018 had neither a proven disposable family
+from T017 nor an exact independently confirmed apply plan; no reclaim plan or apply ran.
+See `live-gate-blockers-2026-08-29.md`.
 - [x] T019 Run focused tests plus `git diff --check` on `sandbox/workspaces/checkout.py`, `sandbox/transports/remote_jobs.py`, `sandbox/application/workspace_service.py`, `sandbox/config/compose.py`, `sandbox/runtimes/compose.py`, `sandbox/commands/resources.py`, `mcp/wp-server/tools/resources.py`, `tests/test_workspace_git_dedup.py`, `tests/test_compose_node_store.py`, `docs/remote-hosting.md`, `README.md`, and `CLAUDE.md`; acceptance: no unchecked task is marked complete by automation, no claim of implementation/measurement/performance appears without evidence, and unresolved failures are reported with their bounded cause.
 
 ## Dependencies and execution order

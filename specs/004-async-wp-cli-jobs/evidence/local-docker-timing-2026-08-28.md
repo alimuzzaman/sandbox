@@ -70,3 +70,20 @@ the same supervisor-based launch architecture. The remaining variance includes
 host interpreter/process scheduling and filesystem durability work. Replacing it
 with a persistent executor would add a new daemon lifecycle, authentication,
 recovery, and ownership contract; that is not a safe bounded T021 adjustment.
+
+## Independent disposable-instance replay — 2026-08-29
+
+A fresh local Docker WordPress project was created under the isolated live-gates
+worktree with `./sb init`, and `wp core is-installed` passed through the supported
+CLI. Two serialized 30-second jobs were launched and immediately observed and
+cancelled through `./sb job`:
+
+| Sample | Job ID | Real seconds | Cleanup result |
+|---:|---|---:|---|
+| 1 | `b4db50c56a08f23d` | 1.69 | running -> killed -> exit 143 |
+| 2 | `e6e2ece137d15e3d` | 3.13 | running -> killed -> exit 143 |
+
+The second launch misses SC-001. The sample set stopped at that retained miss;
+T021 remains open. `./sb instance delete sandbox-codex-remain --yes --local`
+then removed the exact disposable containers, network, database volume, runtime,
+machine override, and registry row.

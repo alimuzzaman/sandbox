@@ -78,3 +78,15 @@ Drive, recovery, commit, or push action occurred.
   status-envelope, and remote-ensure fixture failures are therefore cleared.
   T041 remains open only for a bounded remote-resource acceptance and the
   optional MCP transport environment; this is not an archive-path failure.
+
+## Remaining acceptance replay — 2026-08-29
+
+- The optional MCP transport module was run with its dedicated environment and a
+  120-second process bound: all 12 tests passed in 0.013 seconds.
+- The previously omitted `tests.test_resource_remote` module was run separately
+  with a 300-second process bound. Many individual cases reported `ok`, but the
+  module emitted very large probe payloads and did not reach a terminal unittest
+  summary before the bound expired. This is incomplete evidence, not a pass or
+  failure verdict for the module.
+- T041 therefore remains open for a bounded terminal remote-resource result. The
+  optional MCP transport environment is no longer an open part of the gate.

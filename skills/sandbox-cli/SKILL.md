@@ -429,6 +429,12 @@ attested, `sb ensure` returns `instance_mount_drift` or
 state, then use the explicit `sb apply --project-dir .`; do not retry ensure as
 a substitute for reconciliation. Herd has no Docker mount attestation.
 
+If a registered Compose instance is stopped, resume it with
+`sb up --instance NAME --json` before retrying ensure. A missing managed network
+returns a nonzero, typed `stale_container_network` JSON envelope with the exact
+targeted `down`/`up` recovery command; machine callers must branch on that code,
+not parse the human message.
+
 After source-mount attestation and canonical reachability, `sb ensure` also
 runs a bounded, read-only `wp core is-installed` check. A successful result
 keeps the ready fast path. Only an empty `rc=1` result followed by a successful

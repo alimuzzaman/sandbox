@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -39,6 +40,51 @@ class TestStaleNetworkRecovery(unittest.TestCase):
 
         self.assertIs(returned, result)
         self.assertEqual(output.getvalue(), "db Started\n")
+
+    def test_missing_network_json_is_one_typed_failure(self):
+        output = io.StringIO()
+        errors = io.StringIO()
+        result = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Error response from daemon: network sandbox-demo_default not found",
+        )
+        with patch.object(lifecycle, "compose", return_value=result), \
+             contextlib.redirect_stdout(output), \
+             contextlib.redirect_stderr(errors), \
+             self.assertRaises(SystemExit) as raised:
+            lifecycle._compose_up(
+                "demo", ("wp", "db", "mailpit"), quiet=True, json_output=True,
+            )
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(errors.getvalue(), "")
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["error"]["code"], "stale_container_network")
+        self.assertEqual(payload["instance"], "demo")
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            payload["recovery"]["command"],
+            "./sb down --instance demo && ./sb up --instance demo",
+        )
+
+    def test_unrelated_json_failure_is_bounded_and_typed(self):
+        output = io.StringIO()
+        result = SimpleNamespace(
+            returncode=17,
+            stdout="",
+            stderr="service failed " + ("x" * 1000),
+        )
+        with patch.object(lifecycle, "compose", return_value=result), \
+             contextlib.redirect_stdout(output), \
+             self.assertRaises(SystemExit) as raised:
+            lifecycle._compose_up("demo", ("wp",), quiet=True, json_output=True)
+
+        self.assertEqual(raised.exception.code, 17)
+        self.assertLessEqual(len(output.getvalue()), 750)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["error"]["code"], "compose_up_failed")
+        self.assertFalse(payload["mutated"])
 
     def test_unrelated_failure_is_bounded(self):
         output = io.StringIO()

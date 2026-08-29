@@ -381,6 +381,10 @@ _FAILURE_MARKERS = (
 # this -- it lives in containerd-overlayfs/metadata_v2.db, not cache.db.
 _STALE_SNAPSHOT_MARKER = "failed to stat active key during commit"
 _HOST_APPLY_ROLLBACK_RESERVE_MB = 32
+_CADDY_LOCK_WAIT_SECONDS = 30
+_CADDY_PHASE_TIMEOUT_SECONDS = 30
+_CADDY_TRANSACTION_TIMEOUT_SECONDS = 150
+_CADDY_LOCK_PATH = "/run/lock/sandbox-hosting-caddy.lock"
 
 
 def _remote_failure_message(text: str, limit: int = 2000) -> str:
@@ -566,34 +570,152 @@ def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_pa
     return " ".join(shlex.quote(part) for part in parts)
 
 
-def _configure_host_caddy(entry: dict, name: str, content: str, previous: str | None = None) -> None:
-    path = f"/etc/caddy/conf.d/{name}.caddy"
-    temporary = f"/tmp/{name}.caddy"
-    _write_remote_text(entry, temporary, content, "0644")
-    command = (
-        "set -e; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
-        "$SUDO install -d -m 0755 /etc/caddy/conf.d; "
-        "if [ ! -f /etc/caddy/Caddyfile ]; then "
-        "printf '%s\\n' 'import /etc/caddy/conf.d/*.caddy' | $SUDO tee /etc/caddy/Caddyfile >/dev/null; "
-        "elif ! $SUDO grep -q 'import /etc/caddy/conf.d/\\*.caddy' /etc/caddy/Caddyfile; then "
-        "printf '\\n%s\\n' 'import /etc/caddy/conf.d/*.caddy' | $SUDO tee -a /etc/caddy/Caddyfile >/dev/null; fi; "
-        f"$SUDO install -m 0644 {shlex.quote(temporary)} {shlex.quote(path)}; "
-        "$SUDO caddy validate --config /etc/caddy/Caddyfile; $SUDO systemctl reload caddy"
+def _caddy_transaction_command(path: str, temporary: str | None, digest: str,
+                               *, operation: str, remove: bool) -> str:
+    """Build one locked Caddy transaction with bounded observable phases.
+
+    One remote shell owns the host-global flock for the entire fragment
+    install, aggregate validation, reload, and service observation sequence.
+    Keeping the phases in one session prevents another host apply from
+    interleaving between validation and reload while each external command is
+    still independently bounded by ``timeout``.
+    """
+    script = f"""set -eu
+path=$1
+temporary=$2
+desired_digest=$3
+operation=$4
+remove_fragment=$5
+phase() {{
+  printf '[Sandbox] caddy phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired_digest"
+}}
+finish() {{
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ "$operation" = rollback ]; then
+    phase rollback rollback_incomplete
+  fi
+  trap - EXIT
+  exit "$rc"
+}}
+trap finish EXIT
+install -d -m 0755 /etc/caddy/conf.d
+import_changed=0
+if [ ! -f /etc/caddy/Caddyfile ]; then
+  printf '%s\\n' 'import /etc/caddy/conf.d/*.caddy' > /etc/caddy/Caddyfile
+  import_changed=1
+elif ! grep -q 'import /etc/caddy/conf.d/\\*.caddy' /etc/caddy/Caddyfile; then
+  printf '\\n%s\\n' 'import /etc/caddy/conf.d/*.caddy' >> /etc/caddy/Caddyfile
+  import_changed=1
+fi
+current_digest=absent
+if [ -f "$path" ]; then
+  current_digest=$(sha256sum "$path" | awk '{{print $1}}')
+fi
+if [ "$remove_fragment" = 1 ]; then
+  desired_state=absent
+else
+  desired_state=$desired_digest
+fi
+if [ "$current_digest" = "$desired_state" ]; then
+  phase digest unchanged
+else
+  phase digest changed
+fi
+if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ]; then
+  if [ "$temporary" != - ]; then rm -f "$temporary"; fi
+  if [ "$operation" = apply ]; then
+    phase noop unchanged
+  fi
+  if ! timeout {_CADDY_PHASE_TIMEOUT_SECONDS} systemctl is-active --quiet caddy; then
+    phase observe failed
+    exit 72
+  fi
+  phase observe active
+  if [ "$operation" = rollback ]; then
+    phase rollback rollback_complete
+  fi
+  exit 0
+fi
+if [ "$remove_fragment" = 1 ]; then
+  rm -f "$path"
+else
+  install -m 0644 "$temporary" "$path"
+  rm -f "$temporary"
+fi
+phase install passed
+if ! timeout {_CADDY_PHASE_TIMEOUT_SECONDS} caddy validate --config /etc/caddy/Caddyfile; then
+  phase validate failed
+  exit 70
+fi
+phase validate passed
+if ! timeout {_CADDY_PHASE_TIMEOUT_SECONDS} systemctl reload caddy; then
+  phase reload failed
+  exit 71
+fi
+phase reload passed
+if ! timeout {_CADDY_PHASE_TIMEOUT_SECONDS} systemctl is-active --quiet caddy; then
+  phase observe failed
+  exit 72
+fi
+phase observe active
+if [ "$operation" = apply ]; then
+  phase complete changed
+else
+  phase rollback rollback_complete
+fi
+"""
+    temporary_value = temporary or "-"
+    return (
+        "set -eu; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        "$SUDO install -d -m 0755 /run/lock; "
+        f"$SUDO flock -w {_CADDY_LOCK_WAIT_SECONDS} {shlex.quote(_CADDY_LOCK_PATH)} "
+        f"sh -c {shlex.quote(script)} sandbox-caddy "
+        f"{shlex.quote(path)} {shlex.quote(temporary_value)} {shlex.quote(digest)} "
+        f"{shlex.quote(operation)} {'1' if remove else '0'}"
     )
-    _remote_checked(entry, command)
 
 
-def _restore_host_caddy(entry: dict, name: str, previous: str | None) -> None:
+def _configure_host_caddy(entry: dict, name: str, content: str,
+                          previous: str | None = None, *,
+                          log_path: str | None = None) -> dict:
     path = f"/etc/caddy/conf.d/{name}.caddy"
-    if previous is None:
-        command = (
-            "set -e; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
-            f"$SUDO rm -f {shlex.quote(path)}; $SUDO caddy validate --config /etc/caddy/Caddyfile; "
-            "$SUDO systemctl reload caddy"
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    temporary = f"/tmp/{name}.{digest}.caddy"
+    _write_remote_text(entry, temporary, content, "0644")
+    output = _remote_checked(
+        entry,
+        _caddy_transaction_command(
+            path, temporary, digest, operation="apply", remove=False,
+        ),
+        timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
+        log_path=log_path,
+    )
+    state = "unchanged" if "phase=noop state=unchanged" in output else "changed"
+    return {"state": state, "digest": digest}
+
+
+def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
+                        log_path: str | None = None) -> dict:
+    path = f"/etc/caddy/conf.d/{name}.caddy"
+    digest = "absent"
+    temporary = None
+    if previous is not None:
+        digest = hashlib.sha256(previous.encode()).hexdigest()
+        temporary = f"/tmp/{name}.rollback.{digest}.caddy"
+        _write_remote_text(entry, temporary, previous, "0644")
+    try:
+        _remote_checked(
+            entry,
+            _caddy_transaction_command(
+                path, temporary, digest, operation="rollback",
+                remove=previous is None,
+            ),
+            timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
+            log_path=log_path,
         )
-        _remote_checked(entry, command)
-        return
-    _configure_host_caddy(entry, name, previous)
+    except Exception as exc:
+        raise hosting.HostingError(f"rollback_incomplete: Caddy restore failed: {exc}") from exc
+    return {"state": "rollback_complete", "digest": digest}
 
 
 def _read_remote_optional(entry: dict, path: str) -> str | None:
@@ -820,6 +942,14 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "deployed_revision": recorded.get("commit"),
         "state_record": "present" if recorded else "missing",
         "services": [],
+        "topology": {
+            "state": "unavailable",
+            "declared_services": services,
+            "compose_services": [],
+            "running_services": [],
+            "missing_from_compose": services,
+            "missing_from_runtime": services,
+        },
         "health": {"state": "unavailable", "reason": "remote status not observed"},
     }
     if not entry.get("provisioned"):
@@ -834,6 +964,13 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
             f"{runtime_dir}/compose.override.yml",
             f"{runtime_dir}/environment.env",
         )
+        configured_raw = _remote_checked(
+            entry, f"{prefix} config --services", timeout=60,
+        )
+        configured = sorted({
+            line.strip() for line in (configured_raw or "").splitlines()
+            if line.strip()
+        })
         raw = _remote_checked(entry, f"{prefix} ps --format json", timeout=60)
         rows = []
         for line in (raw or "").splitlines():
@@ -845,6 +982,20 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
                 rows.append(item)
         observed = {str(item.get("Service")): item for item in rows
                     if item.get("Service")}
+        running = sorted(
+            service for service, item in observed.items()
+            if item.get("State") == "running"
+        )
+        missing_from_compose = sorted(set(services).difference(configured))
+        missing_from_runtime = sorted(set(services).difference(running))
+        result["topology"] = {
+            "state": "degraded" if missing_from_compose or missing_from_runtime else "ready",
+            "declared_services": services,
+            "compose_services": configured,
+            "running_services": running,
+            "missing_from_compose": missing_from_compose,
+            "missing_from_runtime": missing_from_runtime,
+        }
         for service in services:
             item = observed.get(service) or {}
             result["services"].append({
@@ -852,13 +1003,24 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
                 "state": item.get("State") or "unknown",
                 "health": item.get("Health") or "unknown",
             })
-        if not rows:
+        if not configured:
+            result["health"] = {
+                "state": "unknown",
+                "reason": "Compose returned no configured service names",
+            }
+        elif not rows:
             result["health"] = {"state": "unknown", "reason": "Compose returned no service rows"}
-        elif all(item["state"] == "running" and item["health"] in {"healthy", "unknown"}
+        elif result["topology"]["state"] == "ready" and all(
+                 item["state"] == "running" and item["health"] in {"healthy", "unknown"}
                  for item in result["services"]):
             result["health"] = {"state": "ready"}
         else:
-            result["health"] = {"state": "degraded", "reason": "one or more services are not running/healthy"}
+            reason = (
+                "declared service topology differs from Compose/runtime"
+                if result["topology"]["state"] == "degraded"
+                else "one or more services are not running/healthy"
+            )
+            result["health"] = {"state": "degraded", "reason": reason}
     except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
         result["health"] = {"state": "unavailable", "reason": remote.redact_text(str(exc))[:500]}
     return result
@@ -920,23 +1082,29 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
             }
 
         derived = validated["deploy"].get("derived_environment", {})
+        services = [
+            validated["compose"]["service"],
+            *validated["compose"].get("background_services", []),
+        ]
         checks = []
-        for key, provider in sorted(derived.items()):
-            check = {"key": key, "provider": provider, "state": "unavailable"}
-            service = shlex.quote(validated["compose"]["service"])
-            command = f"{prefix} exec -T {service} sh -c {shlex.quote(f'printf %s "${key}"')}"
-            try:
-                observed = _remote_checked(entry, command, timeout=30).strip()
-                check["observed"] = observed or None
-                if provider == "pushed_commit_sha" and observed:
-                    expected = result.get("deployed_revision")
-                    check["expected"] = expected
-                    check["state"] = "match" if expected == observed else "mismatch"
-                elif not observed:
-                    check["state"] = "missing"
-            except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
-                check["reason"] = remote.redact_text(str(exc))[:500]
-            checks.append(check)
+        for service_name in services:
+            for key, provider in sorted(derived.items()):
+                check = {"service": service_name, "key": key,
+                         "provider": provider, "state": "unavailable"}
+                service = shlex.quote(service_name)
+                command = f"{prefix} exec -T {service} sh -c {shlex.quote(f'printf %s "${key}"')}"
+                try:
+                    observed = _remote_checked(entry, command, timeout=30).strip()
+                    check["observed"] = observed or None
+                    if provider == "pushed_commit_sha" and observed:
+                        expected = result.get("deployed_revision")
+                        check["expected"] = expected
+                        check["state"] = "match" if expected == observed else "mismatch"
+                    elif not observed:
+                        check["state"] = "missing"
+                except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+                    check["reason"] = remote.redact_text(str(exc))[:500]
+                checks.append(check)
         if checks:
             result["source_revision"] = {
                 "state": "ready" if all(item["state"] == "match" for item in checks)
@@ -1238,7 +1406,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             except Exception as exc:
                 failures.append(f"SSL mode restore for {zone_id}: {exc}")
         try:
-            _restore_host_caddy(entry, caddy_name, previous_caddy)
+            _restore_host_caddy(
+                entry, caddy_name, previous_caddy, log_path=apply_log,
+            )
         except Exception as exc:
             failures.append(f"Caddy restore: {exc}")
         if failures:
@@ -1274,7 +1444,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         runtime["caddyfile"] = hosting.caddyfile(
             validated, runtime["loopback_port"], cert_path, key_path, basic_hash,
         )
-        _configure_host_caddy(entry, caddy_name, runtime["caddyfile"])
+        _configure_host_caddy(
+            entry, caddy_name, runtime["caddyfile"], previous_caddy,
+            log_path=apply_log,
+        )
         zones: dict[str, dict] = {}
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]

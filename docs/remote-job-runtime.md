@@ -8,6 +8,9 @@ child pipes.
 
 ## Normal operation
 
+The examples use the repository launcher (`./sb`). From another checkout, use
+the installed `sb` command; the command surface and selectors are the same.
+
 Use a finite timeout for every long-running command, a reusable workspace for
 development, and isolated labels for matrix cells:
 
@@ -18,7 +21,12 @@ development, and isolated labels for matrix cells:
 ./sb job-status JOB --json
 ./sb job-output JOB --stream combined --cursor CURSOR --max-bytes 65536
 ./sb job-output JOB --stream stderr --tail-bytes 8192 --wait-seconds 2
+./sb job-metrics JOB --remote NAME --limit 500 --json
 ```
+
+`job-output --stream` is for retained `combined`, `stdout`, and `stderr` logs.
+Resource samples are a separate bounded control-plane document retrieved with
+`job-metrics`; use `job-status` for the live health summary.
 
 If local `job-status` returns `job_not_found`, it has not inferred a remote.
 Run `./sb remote list`, then repeat the same observation with the explicit
@@ -42,6 +50,11 @@ semantics and add `rendered_bytes` as the exact UTF-8 size of the final returned
 `data` string. This includes replacement characters and profile filtering; for
 base64 pages it counts the returned base64 text bytes.
 
+Remote follow bounds the health/status check after every output page. If remote
+process-identity inspection does not answer within five seconds, follow stops
+with a redacted status-unknown recovery envelope. Resume with `job-status` or a
+non-follow `job-output` read.
+
 Remote E2E submits a durable matrix parent with one isolated workspace leaf per
 Playwright shard. Each leaf runs exactly one `--shard=i/N` coordinator, so its
 status, output, retry, and failure retention remain independently observable.
@@ -54,6 +67,11 @@ bounded human error) and exits non-zero. The envelope marks acceptance as
 retry is safe. A malformed or truncated control response is never echoed from
 stdout as an error detail, so retained job pages cannot become traceback text.
 Inspect remote job state before replaying the request.
+
+Queued jobs expose advisory scheduler evidence in `job-status --json` and the
+acceptance envelope. `queue.position` follows durable acceptance order, while
+`queue.blocking_jobs` contains bounded opaque job IDs and workspace labels.
+Terminal or expired leases are reaped on the next admission.
 
 Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test

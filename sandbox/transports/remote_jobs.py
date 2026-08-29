@@ -744,9 +744,9 @@ class RemoteJobTransport:
                 f"remote job control operation failed: {_error_detail(payload, result)}")
         return payload
 
-    def status(self, remote_name: str, job_id: str) -> dict:
+    def status(self, remote_name: str, job_id: str, *, timeout: int = 25) -> dict:
         try:
-            result = self.control(remote_name, ["job-status", job_id])
+            result = self.control(remote_name, ["job-status", job_id], timeout=timeout)
             result["target"] = {"kind": "remote", "remote": remote_name,
                                 "workspace": result.get("workspace_label")}
             return result

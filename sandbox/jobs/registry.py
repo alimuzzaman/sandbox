@@ -547,6 +547,9 @@ class JobRepository:
             timing = {}
             if target is Lifecycle.QUEUED: timing["queued_at"] = now
             if target is Lifecycle.RUNNING: timing["started_at"] = now
+            if target is Lifecycle.RUNNING:
+                fields.setdefault("queue_reason", None)
+                fields.setdefault("queue_position", None)
             if target.value in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
                 timing["finished_at"] = now
                 fields.setdefault("health", Health.TERMINAL.value)

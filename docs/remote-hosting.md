@@ -489,9 +489,12 @@ Because that digest is not runtime-observable, dirty receipts never use commit-o
 record reconciliation or edge-only replay. A clean staged `unverified` receipt is
 observed and reconciled or refused; a dirty one is refused unless a real source change
 requires full convergence. Missing observation alone never reruns Compose initializers.
-Legacy missing/unknown or explicitly dirty receipts at the same revision/config refuse
-before target reset. Only the historical v1 empty-overlay digest is migrated as proven
-clean; changing a manifest from dirty-allowed to clean does not rewrite prior evidence.
+Source receipts persist `source_state_identity_version: 2`. At the same revision/config,
+legacy missing/unknown identity evidence and an unchanged known v2 dirty artifact refuse
+before target reset regardless of runtime/edge phase. A different known v2 dirty artifact
+is a real source change and takes full convergence. Only the historical unversioned v1
+empty-overlay digest is migrated as proven clean; changing a manifest from dirty-allowed
+to clean does not rewrite other prior evidence.
 Hosting bounds its source artifact to 4,096 files and 64 MiB. This is intentionally
 narrower than public `sb deploy --include`, whose existing 10,000-file/512 MiB admission
 contract is validated before any remote admission or mutation.

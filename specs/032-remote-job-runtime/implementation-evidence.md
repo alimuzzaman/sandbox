@@ -1204,3 +1204,8 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   refuses unknown/dirty same-revision receipts before target reset, and separates hosting's
   4,096-file/64 MiB snapshot bound from public deploy's preserved 10,000-file/512 MiB
   admission contract. These are local code/test claims, not live deployment evidence.
+- The final receipt follow-up adds explicit source-identity version 2. Legacy unknown and
+  unchanged known-dirty same-revision/config receipts refuse before reset/observation/
+  Compose/initializers regardless of phase, while a different known v2 dirty artifact is
+  treated as a real source change and takes full convergence. Only the exact unversioned
+  v1 empty-overlay proof migrates. These remain local code/test claims.

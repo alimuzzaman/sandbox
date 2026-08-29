@@ -44,6 +44,7 @@ _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
 _HOST_SOURCE_SNAPSHOT_MAX_FILES = 4096
 _HOST_SOURCE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+_SOURCE_STATE_IDENTITY_VERSION = 2
 
 
 def _host_sync_watch_signature(source_root: str) -> str:
@@ -1248,19 +1249,32 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     return "full_recreate"
 
 
-def _legacy_source_replay_must_refuse(previous: dict, requested_revision: str,
-                                      config_digest: str) -> bool:
+def _source_replay_must_refuse(previous: dict, requested_revision: str,
+                               config_digest: str, source_state_identity: str,
+                               source_state_clean: bool) -> bool:
+    """Refuse unprovable or unchanged dirty replay before runtime mutation."""
     recorded = previous.get("recorded_revision") or previous.get("commit")
     staged = previous.get("staged_revision")
-    unresolved = ((previous.get("edge") or {}).get("state") == "pending"
-                  or (previous.get("runtime") or {}).get("state") in {
-                      "pending", "unverified",
-                  })
+    requested = previous.get("requested_revision")
+    same_deployment = (
+        previous.get("config_digest") == config_digest
+        and requested_revision in {recorded, staged, requested}
+    )
+    if not same_deployment:
+        return False
+    previous_identity = previous.get("source_state_identity")
+    known_current_identity = (
+        previous.get("source_state_identity_version") == _SOURCE_STATE_IDENTITY_VERSION
+        and isinstance(previous_identity, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", previous_identity) is not None
+        and isinstance(previous.get("source_state_clean"), bool)
+    )
+    if not known_current_identity:
+        return True
     return (
-        previous.get("source_state_clean") is not True
-        and previous.get("config_digest") == config_digest
-        and requested_revision in {recorded, staged}
-        and unresolved
+        previous.get("source_state_clean") is False
+        and source_state_clean is False
+        and previous_identity == source_state_identity
     )
 
 
@@ -1318,7 +1332,8 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
     key = hosting.state_key(remote_name, validated)
     record = state.setdefault("hosts", {}).get(key)
     if not isinstance(record, dict) or record.get("config_digest") != config_digest \
-            or record.get("source_state_clean") is not True:
+            or record.get("source_state_clean") is not True \
+            or record.get("source_state_identity_version") != _SOURCE_STATE_IDENTITY_VERSION:
         return False
     if observation is None:
         observation = _observe_host_runtime(
@@ -1758,22 +1773,26 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     ).hexdigest()
     if (previous_entry.get("source_state_clean") is not True
             and previous_entry.get("source_state_identity") == legacy_clean
+            and previous_entry.get("source_state_identity_version") is None
             and source_state_clean):
         # v1's empty-overlay digest is explicit historical clean proof.
         previous_entry["source_state_identity"] = source_state_identity
         previous_entry["source_state_clean"] = True
+        previous_entry["source_state_identity_version"] = _SOURCE_STATE_IDENTITY_VERSION
     config_digest = _host_config_digest(validated, runtime)
-    if _legacy_source_replay_must_refuse(previous_entry, sha, config_digest):
+    if _source_replay_must_refuse(
+            previous_entry, sha, config_digest,
+            source_state_identity, source_state_clean):
         try:
             _release_host_apply_reservation(entry, reservation)
         except Exception as cleanup_error:
             raise hosting.HostingError(
-                "legacy source receipt is not safe to replay and rollback-space "
+                "source receipt is not safe to replay and rollback-space "
                 f"cleanup failed: {cleanup_error}"
             ) from cleanup_error
         raise RuntimeError(
-            "legacy dirty or unknown source identity cannot be replayed at the same "
-            "revision/config; refusing before target reset, Compose, or initializer mutation"
+            "source identity cannot be safely replayed at the same revision/config; "
+            "refusing before target reset, observation, Compose, or initializer mutation"
         )
     client = cloudflare.Client()
     remote.update_target_to(
@@ -1790,6 +1809,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "staged_revision": sha,
         "source_state_identity": source_state_identity,
         "source_state_clean": source_state_clean,
+        "source_state_identity_version": _SOURCE_STATE_IDENTITY_VERSION,
         "config_digest": config_digest,
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},

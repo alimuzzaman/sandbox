@@ -50,35 +50,15 @@ diagnostic counts, not a deduplication instruction.
 
 ## Source-root manifest
 
-The identifiers below retain only the project class and final encoded worktree
-suffix. The common home-directory and Claude-store path components are omitted.
-Dates are day-level to keep the manifest compact. `dup-lines` means exact JSONL
-line repeats beyond the first in that root; `dup-UUID` has the same meaning for
-UUID-bearing records.
+The durable manifest retains only approved source classes. It does not retain
+encoded project names, worktree suffixes, or path components. `dup-lines` means
+exact JSONL line repeats beyond the first in the class. `dup-UUID` has the same
+meaning for UUID-bearing records.
 
-| source ID | files | records | date span (UTC) | malformed | dup-lines | dup-UUID |
-| --- | ---: | ---: | --- | ---: | ---: | ---: |
-| sandbox | 28 | 13,990 | 2026-07-22 to 2026-08-22 | 0 | 668 | 0 |
-| t3/lenzora-3c344294 | 1 | 1,294 | 2026-08-05 | 0 | 57 | 0 |
-| t3/templately-backend-a60c354e | 1 | 120 | 2026-08-10 | 0 | 1 | 0 |
-| t3/templately-frontend-3e9fbd00 | 1 | 506 | 2026-07-27 | 0 | 28 | 0 |
-| t3/templately-01c8b61e | 2 | 284 | 2026-07-28 to 2026-07-29 | 0 | 3 | 0 |
-| t3/templately-1cbaceb5 | 1 | 134 | 2026-08-04 to 2026-08-05 | 0 | 0 | 0 |
-| t3/templately-211b010b | 1 | 1,260 | 2026-08-02 to 2026-08-03 | 0 | 74 | 0 |
-| t3/templately-2ac4d684 | 1 | 70 | 2026-08-02 | 0 | 0 | 0 |
-| t3/templately-339ea762 | 1 | 381 | 2026-07-26 | 0 | 0 | 0 |
-| t3/templately-360e3021 | 2 | 6,820 | 2026-07-29 to 2026-08-11 | 0 | 427 | 6 |
-| t3/templately-47a0738f | 1 | 2,080 | 2026-08-02 to 2026-08-03 | 0 | 92 | 0 |
-| t3/templately-5ceae060 | 14 | 1,219 | 2026-07-24 to 2026-08-04 | 0 | 141 | 0 |
-| t3/templately-66c0ae9a | 1 | 87 | 2026-07-26 | 0 | 0 | 0 |
-| t3/templately-68386d36 | 1 | 1,038 | 2026-08-06 | 0 | 35 | 0 |
-| t3/templately-71342f34 | 1 | 863 | 2026-08-13 to 2026-08-16 | 0 | 46 | 0 |
-| t3/templately-868a77b4 | 1 | 1,196 | 2026-07-28 | 0 | 40 | 0 |
-| t3/templately-9bd38e3f | 1 | 2,464 | 2026-07-29 | 0 | 126 | 0 |
-| t3/templately-ab31667d | 1 | 1,406 | 2026-08-24 | 0 | 104 | 0 |
-| t3/templately-bc25cd0d | 1 | 602 | 2026-08-03 | 0 | 3 | 0 |
-| t3/templately-f2930199 | 2 | 840 | 2026-08-20 | 0 | 34 | 0 |
-| t3/templately-ff1d192a | 1 | 373 | 2026-07-29 | 0 | 9 | 0 |
+| source label | roots | files | records | date span (UTC) | malformed | dup-lines | dup-UUID |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| `CLAUDE-SANDBOX` | 1 | 28 | 13,990 | 2026-07-22 to 2026-08-22 | 0 | 668 | 0 |
+| `CLAUDE-T3-WORKTREE` | 20 | 36 | 23,037 | 2026-07-24 to 2026-08-24 | 0 | 1,220 | 6 |
 
 ## Schema families and variants
 
@@ -139,8 +119,9 @@ tool was used outside the selected files.
 
 After filtering prose and assignment text, there were 929 lexical `sb`/`./sb`
 executable-token hits: 343 in the Sandbox root and 586 in T3 roots. The
-extractor encountered 193 shell tokenization errors, so these are lower-bound
-and approximate counts rather than execution telemetry.
+extractor encountered 193 shell tokenization errors. These are approximate
+candidate hits, not execution telemetry. False positives and false negatives are
+possible.
 
 | normalized signature | hits |
 | --- | ---: |

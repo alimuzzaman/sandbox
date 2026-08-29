@@ -282,3 +282,17 @@ lifecycle
 (T022), authorized live extension (T029), and independent release review (T031)
 remain blocked. No support tier or evidence ID may be promoted from this local
 result.
+
+## Latest live-proof attempt
+
+The 2026-08-29 `scaleway-sandbox` attempt is recorded in
+[`evidence/live-proof-attempt-2026-08-29.md`](./evidence/live-proof-attempt-2026-08-29.md).
+The remote runtime was brought to exact accepted revision parity through the
+supported lifecycle and independently reverified. A revision-bound durable
+Ubuntu preflight then refused seven missing managed-native prerequisites, and a
+public fake-metadata Credential Vault action remained blocked without mutation.
+The exact source still deliberately leaves the eight v2 helper lifecycle verbs
+uninstalled. No hostile/exhaustion matrix or credential-bearing action ran.
+The run also found and fixed one platform-dependent missing-`SO_PASSCRED` test;
+the bounded Linux rerun passed all 626 Credential Vault tests. T003, T022, T029,
+and T031 therefore remain open, with support unchanged.

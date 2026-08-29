@@ -622,12 +622,13 @@ class TestCredentialControllerServiceV2(unittest.TestCase):
             owner_factory=lambda: "broker-session-0123456789",
             socket_factory=lambda *_args: FakeListener(),
         )
-        with self.assertRaisesRegex(ControllerServiceV2Error,
-                                    "controller_listener_start_refused"):
-            endpoint.start(
-                platform="linux", enabled=True, effective_uid=BROKER.uid,
-                self_observer=self_observer_for(),
-            )
+        with mock.patch.object(broker.socket, "SO_PASSCRED", None, create=True):
+            with self.assertRaisesRegex(ControllerServiceV2Error,
+                                        "controller_listener_start_refused"):
+                endpoint.start(
+                    platform="linux", enabled=True, effective_uid=BROKER.uid,
+                    self_observer=self_observer_for(),
+                )
         endpoint = broker.LinuxControllerV2Listener(
             CONFIG, epoch_factory=lambda: BROKER_EPOCH,
             owner_factory=lambda: "broker-session-0123456789",

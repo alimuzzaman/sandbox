@@ -461,6 +461,32 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         for secret in ("remote-login", "remote-token", "remote-password"):
             self.assertNotIn(secret, serialized)
 
+    def test_cli_ensure_remote_failure_exits_nonzero_in_json_and_human_modes(self):
+        import sandbox.commands.instances_cmd as commands
+
+        remote_result = {
+            "ok": False,
+            "error": {"code": "remote_failed", "message": "token=hidden failure"},
+        }
+        for as_json in (True, False):
+            args = types.SimpleNamespace(
+                project_dir="/tmp/project", label="default", create=False,
+                json=as_json, local=False,
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with self.subTest(json=as_json), \
+                    mock.patch("sandbox.commands.lifecycle._remote_lifecycle",
+                               return_value=remote_result), \
+                    contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr), \
+                    self.assertRaises(SystemExit) as raised:
+                commands.cmd_ensure({}, args)
+            self.assertEqual(raised.exception.code, 1)
+            serialized = stdout.getvalue() + stderr.getvalue()
+            self.assertNotIn("token=hidden", serialized)
+            self.assertIn("[REDACTED]", serialized)
+
     def test_cli_ensure_json_redacts_managed_native_success_credentials(self):
         import sandbox.commands.instances_cmd as commands
 

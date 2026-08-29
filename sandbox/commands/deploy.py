@@ -225,11 +225,15 @@ def cmd_deploy(cfg, args) -> None:
         target = sr.ensure_deploy_repo(
             entry, root, home_timeout=deploy_timeout
         )
-        branch = sr.current_branch(root) if resolved_source is None else None
+        branch = (
+            sr.current_branch(root, allow_detached=True)
+            if resolved_source is None else None
+        )
         pushed_sha = sr.push_commits(
             entry, root, target, branch,
             source_ref=source_ref, resolved_sha=resolved_source,
             push_timeout=deploy_timeout,
+            allow_detached=resolved_source is None and branch is None,
         )
         descriptor_files = sr.deploy_project_descriptor_files(root)
         if resolved_source is None:
@@ -345,6 +349,7 @@ def cmd_deploy(cfg, args) -> None:
         result = {"ok": False, "remote": remote_name,
                  "remote_selection": "explicit",
                  "source_ref": source_ref, "resolved_commit": None,
+                 "source_mode": "immutable" if source_ref else None,
                  "error_code": _deploy_error_code(e, source_ref),
                  "pushed_commit": None, "uncommitted_files_applied": 0,
                  "instance": None, "url": None,
@@ -359,6 +364,10 @@ def cmd_deploy(cfg, args) -> None:
     result = {"ok": True, "remote": remote_name,
              "remote_selection": "explicit",
              "source_ref": source_ref, "resolved_commit": pushed_sha,
+             "source_mode": (
+                 "immutable" if resolved_source is not None
+                 else "detached" if branch is None else "branch"
+             ),
              "pushed_commit": pushed_sha,
              "source_immutable": resolved_source is not None,
              "uncommitted_files_applied": applied, "instance": instance,
@@ -372,7 +381,8 @@ def cmd_deploy(cfg, args) -> None:
         if source_ref is not None:
             print(f"  pushed source-ref {source_ref!r} ({pushed_sha[:12]}) -> {remote_name}")
         else:
-            print(f"  pushed HEAD ({pushed_sha[:7]}) -> {remote_name}")
+            source_label = "detached HEAD" if branch is None else "HEAD"
+            print(f"  pushed {source_label} ({pushed_sha[:7]}) -> {remote_name}")
             print(f"  applied {applied} uncommitted file(s)")
         if include_paths:
             print(f"  explicitly included {len(include_paths)} ignored artifact file(s)")

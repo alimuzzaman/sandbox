@@ -600,12 +600,24 @@ class TestHostingManifest(unittest.TestCase):
                 hosting.validate_manifest(directory)
 
     def test_runtime_is_namespaced_and_uses_loopback_only(self):
-        with self._write(_manifest()) as directory:
+        manifest = _manifest().replace(
+            "      container_port: 8080\n",
+            "      container_port: 8080\n"
+            "      init_services: [migrate]\n"
+            "      background_services: [worker, scheduler]\n",
+        )
+        with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
         runtime = hosting.desired_runtime(validated, "myvps")
         self.assertEqual(runtime["compose_project"], "sandbox-host-example-site-production")
         self.assertIn('127.0.0.1:', runtime["compose_override"])
         self.assertIn(f"reverse_proxy 127.0.0.1:{runtime['loopback_port']}", runtime["caddyfile"])
+        self.assertEqual(runtime["services"], [
+            {"name": "web", "role": "primary"},
+            {"name": "migrate", "role": "init"},
+            {"name": "worker", "role": "background"},
+            {"name": "scheduler", "role": "background"},
+        ])
         self.assertNotIn("derived_environment", runtime)
 
     def test_host_sync_dispatches_before_host_plan_or_apply(self):

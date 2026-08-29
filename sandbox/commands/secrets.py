@@ -57,7 +57,8 @@ def configure_parser(parser) -> None:
     run.add_argument("--secret", action="append", dest="secrets", metavar="KEY=DEST",
                      help="bind one key to one child environment name; repeatable")
     run.add_argument("--destination", default="SANDBOX_SECRET")
-    run.add_argument("--timeout-seconds", type=int, default=300)
+    run.add_argument("--timeout-seconds", type=int, default=300,
+                     help="maximum child lifetime (1-1800 seconds; default 300)")
     run.add_argument("--project-dir", default=".")
     run.add_argument("command", nargs="+")
 

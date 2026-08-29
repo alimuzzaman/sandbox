@@ -780,9 +780,18 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
     state = state or {"version": 1, "hosts": {}}
     key = state_key(remote_name, validated)
     port = allocate_loopback_port(state, key)
+    compose = validated["compose"]
+    services = [
+        {"name": compose["service"], "role": "primary"},
+        *({"name": name, "role": "init"}
+          for name in compose.get("init_services", [])),
+        *({"name": name, "role": "background"}
+          for name in compose.get("background_services", [])),
+    ]
     runtime = {
         "key": key,
         "compose_project": compose_project_name(validated),
+        "services": services,
         "loopback_port": port,
         "compose_override": compose_override(validated, port),
         "caddyfile": caddyfile(validated, port, redact_basic_auth=True),

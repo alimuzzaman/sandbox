@@ -35,6 +35,14 @@ _HOST_SYNC_WATCH_EXCLUDES = frozenset({
     "storage", "__pycache__", ".venv", "venv",
 })
 
+_HOST_OBSERVATION_MAX_SERVICES = 16
+_HOST_OBSERVATION_MAX_KEYS = 16
+_HOST_OBSERVATION_MAX_ROWS = 64
+_HOST_OBSERVATION_MAX_CONFIGURED_SERVICES = 64
+_HOST_OBSERVATION_MAX_PHASES = 2 + _HOST_OBSERVATION_MAX_SERVICES
+_HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
+_HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
+
 
 def _host_sync_watch_signature(source_root: str) -> str:
     """Metadata-only fingerprint; content screening stays in SyncService."""
@@ -783,7 +791,27 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
-                 *, force_recreate: bool = True) -> None:
+                 *, force_recreate: bool = True,
+                 runtime_convergence_proof: dict | None = None) -> None:
+    proof = runtime_convergence_proof or {}
+    revisions = [proof.get(key) for key in (
+        "requested_revision", "recorded_revision", "observed_runtime_revision",
+    )]
+    targeted_proven = (
+        len(set(revisions)) == 1
+        and isinstance(revisions[0], str)
+        and re.fullmatch(r"[0-9a-f]{40}", revisions[0]) is not None
+        and isinstance(proof.get("requested_config_digest"), str)
+        and proof.get("requested_config_digest") == proof.get("recorded_config_digest")
+        and proof.get("topology_state") == "ready"
+        and proof.get("health_state") == "ready"
+        and proof.get("source_revision_state") == "ready"
+    )
+    if not force_recreate and not targeted_proven:
+        raise RuntimeError(
+            "targeted Compose convergence requires exact source, config, and "
+            "topology proof with ready health"
+        )
     override = f"{runtime_dir}/compose.override.yml"
     env_file = f"{runtime_dir}/environment.env"
     _write_remote_text(entry, override, runtime["compose_override"], "0600")
@@ -832,7 +860,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         )
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
-    for init_service in validated["compose"].get("init_services", []):
+    for init_service in (
+            validated["compose"].get("init_services", []) if force_recreate else []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
         # is never run from a previous deployment's image.
@@ -928,43 +957,77 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
 def _host_observation_command(prefix: str, services: list[str],
                               revision_keys: list[str], deadline_seconds: int) -> str:
     """Build one remote observer with one monotonic total deadline."""
+    if len(services) > _HOST_OBSERVATION_MAX_SERVICES:
+        raise ValueError("host observation exceeds the declared service limit")
+    if len(revision_keys) > _HOST_OBSERVATION_MAX_KEYS:
+        raise ValueError("host observation exceeds the revision-key limit")
+    revision_commands = []
+    for service in services:
+        script = "; ".join(
+            f"printf '%s=%s\\n' {shlex.quote(key)} \"${{{key}-}}\""
+            for key in revision_keys
+        )
+        revision_commands.append({
+            "service": service,
+            "command": (
+                f"{prefix} exec -T {shlex.quote(service)} sh -c {shlex.quote(script)}"
+            ),
+        })
     payload = base64.b64encode(json.dumps({
         "prefix": prefix, "services": services,
         "revision_keys": revision_keys, "deadline_seconds": deadline_seconds,
+        "revision_commands": revision_commands,
     }, separators=(",", ":")).encode()).decode()
     program = "\n".join((
         "import base64,json,subprocess,sys,time",
+        f"MAX_OUTPUT_BYTES={_HOST_OBSERVATION_MAX_OUTPUT_BYTES}",
+        f"MAX_ROWS={_HOST_OBSERVATION_MAX_ROWS}",
+        f"MAX_CONFIGURED={_HOST_OBSERVATION_MAX_CONFIGURED_SERVICES}",
+        f"MAX_PHASES={_HOST_OBSERVATION_MAX_PHASES}",
         "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline_seconds']",
-        "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[]}",
+        "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[],'bounded':True}",
+        "expired=False",
         "def run(phase,command):",
-        " remaining=max(0.1,end-time.monotonic())",
+        " global expired",
+        " remaining=end-time.monotonic()",
+        " if remaining<=0:",
+        "  expired=True",
+        "  if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':'deadline'})",
+        "  return None",
         " try:q=subprocess.run(command,shell=True,text=True,capture_output=True,timeout=remaining,check=False)",
-        " except subprocess.TimeoutExpired:r['phases'].append({'phase':phase,'state':'timeout'});return None",
-        " if q.returncode:r['phases'].append({'phase':phase,'state':'unavailable'});return None",
-        " r['phases'].append({'phase':phase,'state':'complete'});return q.stdout",
+        " except subprocess.TimeoutExpired:",
+        "  expired=True",
+        "  if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':'timeout'})",
+        "  return None",
+        " raw=(q.stdout or '').encode('utf-8','replace');truncated=len(raw)>MAX_OUTPUT_BYTES",
+        " output=raw[:MAX_OUTPUT_BYTES].decode('utf-8','replace')",
+        " state='partial' if truncated else ('unavailable' if q.returncode else 'complete')",
+        " if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':state,'bytes':len(output.encode('utf-8')),'truncated':truncated})",
+        " return output",
         "configured=run('compose_config',p['prefix']+\" --profile '*' config --services\")",
-        "if configured is not None:r['configured_services']=[x.strip() for x in configured.splitlines() if x.strip()]",
-        "rows=run('compose_runtime',p['prefix']+' ps --format json')",
+        "if configured is not None:r['configured_services']=[x.strip() for x in configured.splitlines() if x.strip()][:MAX_CONFIGURED]",
+        "rows=None if expired else run('compose_runtime',p['prefix']+' ps --format json')",
         "if rows is not None:",
         " try:parsed=json.loads(rows)",
         " except Exception:parsed=None",
-        " if isinstance(parsed,list):r['rows'].extend(x for x in parsed if isinstance(x,dict))",
+        " if isinstance(parsed,list):r['rows'].extend([x for x in parsed if isinstance(x,dict)][:MAX_ROWS])",
         " elif isinstance(parsed,dict):r['rows'].append(parsed)",
         " else:",
         "  for line in rows.splitlines():",
+        "   if len(r['rows'])>=MAX_ROWS:break",
         "   try:item=json.loads(line)",
         "   except Exception:continue",
         "   if isinstance(item,dict):r['rows'].append(item)",
-        "for service in p['services']:",
-        " if not p['revision_keys']:continue",
-        " output=run('source_revision:'+service,p['prefix']+' exec -T '+service+' env')",
+        "for probe in p['revision_commands']:",
+        " if expired or not p['revision_keys']:break",
+        " service=probe['service'];output=run('source_revision:'+service,probe['command'])",
         " values={}",
         " if output is not None:",
         "  for line in output.splitlines():",
         "   key,sep,value=line.partition('=')",
         "   if sep and key in p['revision_keys']:values[key]=value",
         " for key in p['revision_keys']:r['revision_checks'].append({'service':service,'key':key,'observed':values.get(key)})",
-        "r['complete']=all(x['state']=='complete' for x in r['phases'])",
+        "r['complete']=bool(r['phases']) and not expired and all(x['state']=='complete' for x in r['phases'])",
         "print(json.dumps(r,separators=(',',':')))",
     ))
     return shlex.join(["python3", "-c", program, payload])
@@ -988,6 +1051,10 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
         entry, _host_observation_command(prefix, services, revision_keys, deadline_seconds),
         timeout=deadline_seconds + 5,
     )
+    if len((raw or "").encode("utf-8", "replace")) > _HOST_OBSERVATION_MAX_RECEIPT_BYTES:
+        return {"schema_version": 1, "complete": False, "bounded": True,
+                "configured_services": [], "rows": [], "revision_checks": [],
+                "phases": [{"phase": "observation", "state": "receipt_too_large"}]}
     try:
         receipt = json.loads((raw or "").strip())
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -999,6 +1066,18 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
     for key, default in (("complete", False), ("configured_services", []),
                          ("rows", []), ("revision_checks", []), ("phases", [])):
         receipt.setdefault(key, default)
+    def bounded_list(value, limit):
+        return list(value)[:limit] if isinstance(value, list) else []
+    receipt["configured_services"] = bounded_list(
+        receipt["configured_services"], _HOST_OBSERVATION_MAX_CONFIGURED_SERVICES,
+    )
+    receipt["rows"] = bounded_list(receipt["rows"], _HOST_OBSERVATION_MAX_ROWS)
+    receipt["revision_checks"] = bounded_list(
+        receipt["revision_checks"],
+        _HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS,
+    )
+    receipt["phases"] = bounded_list(receipt["phases"], _HOST_OBSERVATION_MAX_PHASES)
+    receipt["bounded"] = True
     return receipt
 
 
@@ -1006,9 +1085,18 @@ def _classify_host_observation(validated: dict, observation: dict,
                                expected_revision: str | None = None) -> dict:
     services = [validated["compose"]["service"],
                 *validated["compose"].get("background_services", [])]
-    configured_all = {str(item) for item in observation.get("configured_services", []) if item}
+    configured_values = observation.get("configured_services", [])
+    configured_values = configured_values if isinstance(configured_values, list) else []
+    row_values = observation.get("rows", [])
+    row_values = row_values if isinstance(row_values, list) else []
+    check_values = observation.get("revision_checks", [])
+    check_values = check_values if isinstance(check_values, list) else []
+    phase_values = observation.get("phases", [])
+    phase_values = phase_values if isinstance(phase_values, list) else []
+    configured_all = {str(item) for item in configured_values if item}
     configured = [service for service in services if service in configured_all]
-    rows = [item for item in observation.get("rows", []) if isinstance(item, dict)]
+    rows = [item for item in row_values[:_HOST_OBSERVATION_MAX_ROWS]
+            if isinstance(item, dict)]
     observed = {str(item.get("Service")): item for item in rows if item.get("Service")}
     running = [service for service in services
                if (observed.get(service) or {}).get("State") == "running"]
@@ -1036,8 +1124,9 @@ def _classify_host_observation(validated: dict, observation: dict,
         health = {"state": "degraded", "reason": "one or more services are not healthy"}
     else:
         health = {"state": "ready"}
-    checks, revisions = [], set()
-    for raw in observation.get("revision_checks", []):
+    checks = []
+    for raw in check_values[
+            :_HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS]:
         if not isinstance(raw, dict):
             continue
         observed_revision = raw.get("observed")
@@ -1046,16 +1135,26 @@ def _classify_host_observation(validated: dict, observation: dict,
                 "observed": observed_revision or None, "expected": expected_revision}
         item["state"] = ("match" if expected_revision and observed_revision == expected_revision
                          else "missing" if not observed_revision else "mismatch")
-        if isinstance(observed_revision, str) and re.fullmatch(r"[0-9a-f]{40}", observed_revision):
-            revisions.add(observed_revision)
         checks.append(item)
+    expected_pairs = {
+        (service, key)
+        for service in services
+        for key, provider in validated["deploy"].get("derived_environment", {}).items()
+        if provider == "pushed_commit_sha"
+    }
+    actual_pairs = {(item["service"], item["key"]) for item in checks}
+    source_ready = (bool(expected_pairs) and actual_pairs == expected_pairs
+                    and len(checks) == len(expected_pairs) and all(
+        item["state"] == "match" and item["observed"] == expected_revision
+        for item in checks
+    ))
     return {"complete": bool(observation.get("complete")), "services": service_rows,
             "topology": topology, "health": health,
-            "source_revision": {"state": "not_declared" if not checks else
-                                "ready" if all(item["state"] == "match" for item in checks)
+            "source_revision": {"state": "not_declared" if not expected_pairs else
+                                "ready" if source_ready
                                 else "degraded", "checks": checks},
-            "observed_runtime_revision": next(iter(revisions)) if len(revisions) == 1 else None,
-            "phases": observation.get("phases", [])}
+            "observed_runtime_revision": expected_revision if source_ready else None,
+            "phases": phase_values[:_HOST_OBSERVATION_MAX_PHASES]}
 
 
 def _host_config_digest(validated: dict, runtime: dict) -> str:
@@ -1069,6 +1168,67 @@ def _host_config_digest(validated: dict, runtime: dict) -> str:
     return "sha256:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _source_revision_evidence_ready(validated: dict, classified: dict,
+                                    revision: str) -> bool:
+    expected = {
+        (service, key)
+        for service in [validated["compose"]["service"],
+                        *validated["compose"].get("background_services", [])]
+        for key, provider in validated["deploy"].get("derived_environment", {}).items()
+        if provider == "pushed_commit_sha"
+    }
+    source = classified.get("source_revision") or {}
+    checks = source.get("checks") if isinstance(source.get("checks"), list) else []
+    actual = {(item.get("service"), item.get("key")) for item in checks
+              if isinstance(item, dict)}
+    return (
+        bool(expected)
+        and source.get("state") == "ready"
+        and actual == expected
+        and len(checks) == len(expected)
+        and all(
+            item.get("state") == "match"
+            and item.get("expected") == revision
+            and item.get("observed") == revision
+            for item in checks if isinstance(item, dict)
+        )
+    )
+
+
+def _runtime_apply_decision(*, previous: dict, requested_revision: str,
+                            config_digest: str, exact_runtime_proven: bool) -> str:
+    """Choose only full convergence, proven edge replay, or refusal."""
+    recorded = previous.get("recorded_revision") or previous.get("commit")
+    observed = previous.get("observed_runtime_revision")
+    same_identity = recorded == requested_revision and observed == requested_revision
+    same_config = previous.get("config_digest") == config_digest
+    edge_pending = (previous.get("edge") or {}).get("state") == "pending"
+    if same_identity and same_config and exact_runtime_proven:
+        return "edge_only"
+    if edge_pending and same_identity and same_config:
+        return "refuse"
+    if recorded == requested_revision and same_config:
+        return "refuse"
+    return "full_recreate"
+
+
+def _persist_runtime_observation(state: dict, key: str, classified: dict,
+                                 *, runtime_state: str) -> None:
+    record = state["hosts"][key]
+    record["observed_runtime_revision"] = classified.get("observed_runtime_revision")
+    record["runtime"] = {
+        "state": runtime_state,
+        "health": classified.get("health") or {"state": "unavailable"},
+        "topology": classified.get("topology") or {"state": "unavailable"},
+        "source_revision": classified.get("source_revision") or {
+            "state": "unavailable", "checks": [],
+        },
+        "observation": list(classified.get("phases") or [])[:_HOST_OBSERVATION_MAX_PHASES],
+    }
+    record["edge"] = {"state": "pending"}
+    hosting.save_host_state(state)
 
 
 def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dict,
@@ -1095,6 +1255,7 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
         and (classified.get("topology") or {}).get("state") == "ready"
         and (classified.get("health") or {}).get("state") == "ready"
         and classified.get("observed_runtime_revision") == revision
+        and _source_revision_evidence_ready(validated, classified, revision)
     )
     if not proven:
         return False
@@ -1291,13 +1452,19 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
         "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline'];attempt=0",
         "r={'schema_version':1,'complete':False,'status':None,'phases':[]}",
         "while time.monotonic()<end:",
-        " attempt+=1;remaining=max(1,int(end-time.monotonic()))",
-        " q=subprocess.run(['curl','-fsS','--max-time',str(min(15,remaining)),'-o','/dev/null','-w','%{http_code}',p['url']],text=True,capture_output=True,check=False)",
+        " remaining=end-time.monotonic()",
+        " if remaining<=0:break",
+        " attempt+=1",
+        " try:q=subprocess.run(['curl','-fsS','--max-time',str(min(15,remaining)),'-o','/dev/null','-w','%{http_code}',p['url']],text=True,capture_output=True,timeout=remaining,check=False)",
+        " except subprocess.TimeoutExpired:r['phases'].append({'phase':'health','state':'timeout','attempt':attempt});break",
         " try:code=int((q.stdout or '').strip())",
         " except ValueError:code=None",
         " if q.returncode==0 and code is not None and p['minimum']<=code<=p['maximum']:",
         "  r['complete']=True;r['status']=code;r['phases'].append({'phase':'health','state':'ready','attempt':attempt});break",
-        " r['phases'].append({'phase':'health','state':'pending','attempt':attempt});time.sleep(min(2,max(0,end-time.monotonic())))",
+        " r['phases'].append({'phase':'health','state':'pending','attempt':attempt})",
+        " remaining=end-time.monotonic()",
+        " if remaining<=0:break",
+        " time.sleep(min(2,remaining))",
         "print(json.dumps(r,separators=(',',':')))",
     ))
     result = remote.ssh_run(
@@ -1535,47 +1702,96 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if stream_progress is not None:
             stream_progress(f"source reset to {sha}")
             stream_progress(f"apply log: {apply_log}")
-        runtime_current = False
-        if previous_entry.get("config_digest") == config_digest:
+        classified = None
+        evidence_error = None
+        recorded_before = previous_entry.get("recorded_revision") or previous_entry.get("commit")
+        may_replay = (
+            previous_entry.get("config_digest") == config_digest
+            and recorded_before == sha
+            and previous_entry.get("observed_runtime_revision") == sha
+        )
+        exact_runtime_proven = False
+        if may_replay:
             try:
                 observation = _observe_host_runtime(
                     validated, entry, target, runtime_dir,
                 )
-                runtime_current = _reconcile_exact_runtime_state(
-                    validated, remote_name, state, sha, config_digest,
-                    entry=entry, source_dir=target, runtime_dir=runtime_dir,
-                    observation=observation,
+                classified = _classify_host_observation(validated, observation, sha)
+                exact_runtime_proven = (
+                    classified.get("complete") is True
+                    and classified["topology"]["state"] == "ready"
+                    and classified["health"]["state"] == "ready"
+                    and classified.get("observed_runtime_revision") == sha
+                    and _source_revision_evidence_ready(validated, classified, sha)
                 )
-            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
-                runtime_current = False
-        if not runtime_current:
+            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+                evidence_error = exc
+        decision = _runtime_apply_decision(
+            previous=previous_entry,
+            requested_revision=sha,
+            config_digest=config_digest,
+            exact_runtime_proven=exact_runtime_proven,
+        )
+        if decision == "refuse":
+            if classified is not None:
+                _persist_runtime_observation(
+                    state, key, classified, runtime_state="unverified",
+                )
+            detail = f": {evidence_error}" if evidence_error is not None else ""
+            raise RuntimeError(
+                "existing runtime identity/topology is not fully proven; refusing "
+                f"Compose or initializer replay{detail}"
+            )
+        if decision == "edge_only":
+            if not _reconcile_exact_runtime_state(
+                    validated, remote_name, state, sha, config_digest,
+                    observation=classified):
+                raise RuntimeError("exact runtime reconciliation evidence was rejected")
+        else:
             _run_compose(
                 entry, validated, target, runtime_dir, runtime,
                 stream_progress, apply_log,
-                force_recreate=previous_entry.get("config_digest") != config_digest,
+                force_recreate=True,
             )
             health_receipt = _verify_remote_health(entry, runtime, stream_progress)
-            observation = _observe_host_runtime(validated, entry, target, runtime_dir)
+            try:
+                observation = _observe_host_runtime(validated, entry, target, runtime_dir)
+            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+                observation = {
+                    "schema_version": 1,
+                    "complete": False,
+                    "bounded": True,
+                    "configured_services": [],
+                    "rows": [],
+                    "revision_checks": [],
+                    "phases": [{"phase": "observation", "state": "unavailable"}],
+                }
+                classified = _classify_host_observation(validated, observation, sha)
+                _persist_runtime_observation(
+                    state, key, classified, runtime_state="unverified",
+                )
+                raise RuntimeError(f"runtime observation failed: {exc}") from exc
             classified = _classify_host_observation(validated, observation, sha)
-            if classified["topology"]["state"] != "ready" \
-                    or classified["health"]["state"] != "ready":
-                raise RuntimeError("remote runtime topology/health is not fully proven ready")
-            _verify_remote_derived_environment(
-                entry, validated, target, runtime_dir, sha,
-                stream_progress, apply_log, observation=observation,
+            runtime_ready = (
+                classified["topology"]["state"] == "ready"
+                and classified["health"]["state"] == "ready"
             )
+            source_required = bool(validated["deploy"].get("derived_environment"))
+            source_ready = (
+                not source_required
+                or _source_revision_evidence_ready(validated, classified, sha)
+            )
+            if not runtime_ready or not source_ready:
+                _persist_runtime_observation(
+                    state, key, classified, runtime_state="unverified",
+                )
+                raise RuntimeError(
+                    "remote runtime source/topology/health is not fully proven ready"
+                )
+            _persist_runtime_observation(state, key, classified, runtime_state="ready")
             record = state["hosts"][key]
-            record.update({
-                "commit": sha,
-                "recorded_revision": sha,
-                "observed_runtime_revision": classified.get("observed_runtime_revision"),
-                "runtime": {
-                    "state": "ready",
-                    "health": health_receipt,
-                    "observation": classified.get("phases", []),
-                },
-                "edge": {"state": "pending"},
-            })
+            record.update({"commit": sha, "recorded_revision": sha})
+            record["runtime"]["loopback_health"] = health_receipt
             hosting.save_host_state(state)
         proxied = validated["cloudflare"]["proxied"]
         cert_path = key_path = None

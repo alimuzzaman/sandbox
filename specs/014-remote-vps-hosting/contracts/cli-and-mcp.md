@@ -189,7 +189,12 @@ observed runtime revision. Missing observation never collapses these into one nu
 `deployed_revision`. The legacy field remains for compatibility.
 
 Runtime convergence and public-edge observation are separate phases. Exact runtime
-revision plus the full declared healthy topology may reconcile a stale local record
-without a Compose mutation when the saved configuration digest also matches. Unknown
-service health is `unverified`, not ready. Remote Compose/source observation uses one
-bounded session with a shared deadline and retains phase-level partial evidence.
+revision for every declared service/key plus the full declared healthy topology may
+reconcile a stale local record without a Compose mutation when the saved configuration
+digest also matches. An `edge: pending` replay with that evidence is edge-only; missing
+evidence refuses without Compose or initializer replay. A changed source always takes the
+full recreate path. Targeted convergence also requires exact identity/config plus ready
+topology and health. Unknown service health is `unverified`, not ready. Remote
+Compose/source observation uses one bounded session with a strict shared deadline,
+allowlisted revision keys, bounded fan-out/output, and retained phase-level partial
+evidence. Partial evidence is persisted before a failed apply returns.

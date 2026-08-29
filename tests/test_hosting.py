@@ -1,8 +1,10 @@
 """Offline coverage for managed Compose hosting and Cloudflare intent."""
+import base64
 import json
 import hashlib
 import io
 import subprocess
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -813,19 +815,48 @@ class TestHostingManifest(unittest.TestCase):
     @patch("sandbox.commands.hosting._remote_checked")
     def test_current_config_uses_targeted_idempotent_compose_convergence(
             self, remote_checked, _write):
-        with self._write(_manifest()) as directory:
+        with self._write(_manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n",
+        )) as directory:
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
 
         hosting_cmd._run_compose(
             {}, validated, "/srv/example", "/srv/runtime", runtime,
             force_recreate=False,
+            runtime_convergence_proof={
+                "requested_revision": "a" * 40,
+                "recorded_revision": "a" * 40,
+                "observed_runtime_revision": "a" * 40,
+                "requested_config_digest": "sha256:digest",
+                "recorded_config_digest": "sha256:digest",
+                "topology_state": "ready",
+                "health_state": "ready",
+                "source_revision_state": "ready",
+            },
         )
 
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertTrue(any("up -d --remove-orphans web" in command for command in commands))
         self.assertFalse(any("--force-recreate" in command for command in commands))
         self.assertFalse(any("--renew-anon-volumes" in command for command in commands))
+        self.assertFalse(any("run --rm migrate" in command for command in commands))
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_targeted_compose_refuses_without_exact_runtime_proof(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+
+        with self.assertRaisesRegex(RuntimeError, "requires exact source, config, and topology"):
+            hosting_cmd._run_compose(
+                {}, validated, "/srv/example", "/srv/runtime", runtime,
+                force_recreate=False,
+            )
+
+        remote_checked.assert_not_called()
 
     @patch("sandbox.commands.hosting.remote.ssh_stream")
     def test_logged_remote_commands_use_stream_transport(self, ssh_stream):
@@ -1035,6 +1066,10 @@ class TestHostingManifest(unittest.TestCase):
             "topology": {"state": "ready"},
             "health": {"state": "ready"},
             "observed_runtime_revision": revision,
+            "source_revision": {"state": "ready", "checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": revision, "expected": revision, "state": "match",
+            }]},
         }
 
         with patch.object(hosting_cmd, "_observe_host_runtime", return_value=observation), \
@@ -1052,6 +1087,166 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(record["observed_runtime_revision"], revision)
         self.assertEqual(record["runtime"]["state"], "ready")
         self.assertEqual(record["edge"]["state"], "pending")
+
+    def test_record_reconcile_rejects_ready_aggregate_with_a_missing_service_key(self):
+        revision = "8" * 40
+        manifest = _manifest_with_derived_revision().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {
+            hosting.state_key("myvps", validated): {
+                "config_digest": "digest-1", "edge": {"state": "pending"},
+            },
+        }}
+        malicious_subset = {
+            "complete": True, "topology": {"state": "ready"},
+            "health": {"state": "ready"}, "observed_runtime_revision": revision,
+            "source_revision": {"state": "ready", "checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": revision, "expected": revision, "state": "match",
+            }]},
+        }
+
+        with patch.object(hosting_cmd.hosting, "save_host_state") as save:
+            reconciled = hosting_cmd._reconcile_exact_runtime_state(
+                validated, "myvps", state, revision, "digest-1",
+                observation=malicious_subset,
+            )
+
+        self.assertFalse(reconciled)
+        save.assert_not_called()
+
+    def test_record_reconcile_rejects_mixed_service_revision_checks(self):
+        revision = "9" * 40
+        manifest = _manifest_with_derived_revision().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {
+            hosting.state_key("myvps", validated): {"config_digest": "digest-1"},
+        }}
+        checks = [
+            {"service": "web", "key": "LENZORA_SOURCE_REVISION",
+             "observed": revision, "expected": revision, "state": "match"},
+            {"service": "worker", "key": "LENZORA_SOURCE_REVISION",
+             "observed": "a" * 40, "expected": revision, "state": "mismatch"},
+        ]
+        observation = {
+            "complete": True, "topology": {"state": "ready"},
+            "health": {"state": "ready"}, "observed_runtime_revision": revision,
+            "source_revision": {"state": "ready", "checks": checks},
+        }
+
+        self.assertFalse(hosting_cmd._reconcile_exact_runtime_state(
+            validated, "myvps", state, revision, "digest-1", observation=observation,
+        ))
+
+    def test_same_config_changed_source_requires_full_recreate(self):
+        decision = hosting_cmd._runtime_apply_decision(
+            previous={
+                "config_digest": "digest-1", "recorded_revision": "a" * 40,
+                "observed_runtime_revision": "a" * 40, "edge": {"state": "ready"},
+            },
+            requested_revision="b" * 40,
+            config_digest="digest-1",
+            exact_runtime_proven=False,
+        )
+        self.assertEqual(decision, "full_recreate")
+
+    def test_edge_pending_replay_requires_exact_runtime_or_refuses(self):
+        previous = {
+            "config_digest": "digest-1", "recorded_revision": "a" * 40,
+            "observed_runtime_revision": "a" * 40, "edge": {"state": "pending"},
+        }
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision="a" * 40,
+            config_digest="digest-1", exact_runtime_proven=True,
+        ), "edge_only")
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision="a" * 40,
+            config_digest="digest-1", exact_runtime_proven=False,
+        ), "refuse")
+
+    def test_observer_uses_allowlisted_keys_and_bounds_payload(self):
+        command = hosting_cmd._host_observation_command(
+            "docker compose", ["web"], ["SOURCE_REVISION"], 60,
+        )
+        argv = shlex.split(command)
+        program = argv[2]
+        payload = json.loads(base64.b64decode(argv[3]))
+        self.assertNotIn(" exec -T '+service+' env", program)
+        self.assertEqual(payload["revision_keys"], ["SOURCE_REVISION"])
+        self.assertNotIn("SECRET_TOKEN", command)
+        self.assertIn("MAX_OUTPUT_BYTES", program)
+        self.assertIn("remaining<=0", program)
+
+    def test_observer_stops_scheduling_at_expired_total_deadline(self):
+        command = hosting_cmd._host_observation_command(
+            "false", ["web"], ["SOURCE_REVISION"], 0,
+        )
+        result = subprocess.run(
+            shlex.split(command), capture_output=True, text=True, check=False,
+        )
+        receipt = json.loads(result.stdout)
+        self.assertFalse(receipt["complete"])
+        self.assertEqual(receipt["phases"][0]["state"], "deadline")
+        self.assertEqual(len(receipt["phases"]), 1)
+
+    def test_observer_caps_phase_output_and_marks_partial(self):
+        noisy = shlex.join([sys.executable, "-c", "print('x' * 70000)"])
+        command = hosting_cmd._host_observation_command(noisy, [], [], 5)
+        result = subprocess.run(
+            shlex.split(command), capture_output=True, text=True, check=False,
+        )
+        receipt = json.loads(result.stdout)
+        self.assertFalse(receipt["complete"])
+        self.assertTrue(receipt["bounded"])
+        self.assertEqual(receipt["phases"][0]["state"], "partial")
+        self.assertLessEqual(
+            receipt["phases"][0]["bytes"],
+            hosting_cmd._HOST_OBSERVATION_MAX_OUTPUT_BYTES,
+        )
+        self.assertLessEqual(
+            len(result.stdout.encode()), hosting_cmd._HOST_OBSERVATION_MAX_RECEIPT_BYTES,
+        )
+
+    def test_observer_rejects_service_and_key_fanout_above_bounds(self):
+        with self.assertRaisesRegex(ValueError, "service limit"):
+            hosting_cmd._host_observation_command(
+                "docker compose",
+                [f"service-{index}" for index in range(
+                    hosting_cmd._HOST_OBSERVATION_MAX_SERVICES + 1
+                )],
+                [], 60,
+            )
+        with self.assertRaisesRegex(ValueError, "revision-key limit"):
+            hosting_cmd._host_observation_command(
+                "docker compose", ["web"],
+                [f"KEY_{index}" for index in range(
+                    hosting_cmd._HOST_OBSERVATION_MAX_KEYS + 1
+                )],
+                60,
+            )
+
+    def test_classification_caps_hostile_rows_and_phases(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        observation = {
+            "complete": False,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}] * 500,
+            "revision_checks": [],
+            "phases": [{"phase": f"phase-{index}", "state": "complete"}
+                       for index in range(500)],
+        }
+        classified = hosting_cmd._classify_host_observation(validated, observation)
+        self.assertLessEqual(len(classified["phases"]), hosting_cmd._HOST_OBSERVATION_MAX_PHASES)
+        self.assertEqual(len(classified["services"]), 1)
 
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.remote.ssh_run")
@@ -1696,7 +1891,7 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
              patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "observation timeout"):
+            with self.assertRaisesRegex(RuntimeError, "runtime observation failed: observation timeout"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
@@ -1704,10 +1899,164 @@ class TestHostingManifest(unittest.TestCase):
         record = state["hosts"][hosting.state_key("myvps", validated)]
         self.assertEqual(record["requested_revision"], revision)
         self.assertEqual(record["staged_revision"], revision)
-        self.assertEqual(record["runtime"]["state"], "pending")
+        self.assertEqual(record["runtime"]["state"], "unverified")
+        self.assertEqual(record["runtime"]["observation"], [
+            {"phase": "observation", "state": "unavailable"},
+        ])
         self.assertEqual(record["edge"]["state"], "pending")
         self.assertNotIn("commit", record)
-        save.assert_called_once_with(state)
+        self.assertGreaterEqual(save.call_count, 2)
+
+    def test_partial_observation_receipt_is_persisted_before_apply_raises(self):
+        revision = "1" * 40
+        with self._write(_public_acme_manifest().replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n"
+            "      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        state = {"version": 1, "hosts": {}}
+        partial = {
+            "schema_version": 1, "complete": False,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [{"service": "web", "key": "LENZORA_SOURCE_REVISION",
+                                 "observed": None}],
+            "phases": [
+                {"phase": "compose_config", "state": "complete"},
+                {"phase": "source_revision:web", "state": "timeout"},
+            ],
+        }
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_run_compose"), \
+             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
+             patch.object(hosting_cmd, "_observe_host_runtime", return_value=partial), \
+             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
+             patch.object(hosting_cmd, "_restore_host_caddy"), \
+             patch.object(hosting_cmd.hosting, "save_host_state") as save:
+            with self.assertRaisesRegex(RuntimeError, "not fully proven ready"):
+                hosting_cmd._apply_host(
+                    validated, {}, "myvps", runtime, state, False, "main",
+                )
+
+        record = state["hosts"][hosting.state_key("myvps", validated)]
+        self.assertEqual(record["requested_revision"], revision)
+        self.assertEqual(record["staged_revision"], revision)
+        self.assertIsNone(record["observed_runtime_revision"])
+        self.assertNotIn("recorded_revision", record)
+        self.assertEqual(record["runtime"]["state"], "unverified")
+        self.assertEqual(record["runtime"]["observation"], partial["phases"])
+        self.assertEqual(record["edge"]["state"], "pending")
+        self.assertGreaterEqual(save.call_count, 2)
+
+    def test_changed_source_with_same_saved_config_runs_full_recreate(self):
+        old_revision, revision = "3" * 40, "4" * 40
+        with self._write(_public_acme_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        digest_runtime = dict(runtime)
+        digest_runtime["environment"] = hosting.render_env_file(
+            validated, {}, pushed_commit_sha=revision,
+        )
+        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {key: {
+            "commit": old_revision, "recorded_revision": old_revision,
+            "observed_runtime_revision": old_revision, "config_digest": digest,
+            "runtime": {"state": "ready"}, "edge": {"state": "ready"},
+        }}}
+        client = MagicMock()
+        client.records.return_value = []
+        client.upsert_address.return_value = {"id": "record-1"}
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
+             patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=_ready_observation()), \
+             patch.object(hosting_cmd, "_configure_host_caddy"), \
+             patch.object(hosting_cmd, "_verify_edge"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            hosting_cmd._apply_host(
+                validated, {}, "myvps", runtime, state, False, "main",
+            )
+
+        compose.assert_called_once()
+        self.assertTrue(compose.call_args.kwargs["force_recreate"])
+
+    def test_exact_edge_pending_replay_is_edge_only_and_skips_initializers(self):
+        revision = "2" * 40
+        manifest = _public_acme_manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n",
+        ).replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n"
+            "      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        digest_runtime = dict(runtime)
+        digest_runtime["environment"] = hosting.render_env_file(
+            validated, {}, pushed_commit_sha=revision,
+        )
+        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {key: {
+            "commit": revision, "recorded_revision": revision,
+            "observed_runtime_revision": revision, "config_digest": digest,
+            "runtime": {"state": "ready"}, "edge": {"state": "pending"},
+        }}}
+        client = MagicMock()
+        client.records.return_value = []
+        client.upsert_address.return_value = {"id": "record-1"}
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=_ready_observation(revision)), \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
+             patch.object(hosting_cmd, "_verify_remote_derived_environment") as derived, \
+             patch.object(hosting_cmd, "_configure_host_caddy"), \
+             patch.object(hosting_cmd, "_verify_edge"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            result = hosting_cmd._apply_host(
+                validated, {}, "myvps", runtime, state, False, "main",
+            )
+
+        compose.assert_not_called()
+        runtime_health.assert_not_called()
+        derived.assert_not_called()
+        self.assertEqual(result["runtime"]["state"], "ready")
+        self.assertEqual(result["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.urllib.request.build_opener")

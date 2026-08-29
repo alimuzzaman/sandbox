@@ -475,11 +475,15 @@ Compose/init health checks, converges Caddy, and updates only declared DNS recor
 Sandbox records the requested source, staged source receipt, recorded revision, and
 observed runtime revision separately. The staged receipt is saved before runtime
 observation, and exact runtime/topology evidence is saved before edge verification.
-An observation timeout therefore leaves explicit `runtime: pending` evidence; an edge
-timeout leaves `runtime: ready` with `edge: pending` instead of erasing the successful
-runtime convergence. A later apply repairs only the local record when the exact runtime
-revision, fully healthy declared topology, and matching configuration digest are proven.
-It does not recreate containers merely to repair that record.
+An observation timeout therefore leaves explicit `runtime: unverified` evidence with a
+bounded unavailable phase; an edge timeout leaves `runtime: ready` with `edge: pending`
+instead of erasing the successful runtime convergence. A bounded partial observation is
+also persisted as `runtime: unverified` with its completed/timeout phases before apply
+fails. A later apply repairs only the
+local record when every declared long-lived service and every declared revision key
+exactly matches the requested revision, the full topology is healthy, and the saved
+configuration digest matches. It does not recreate containers merely to repair that
+record.
 The Caddy fragment transaction holds one host-global lock, compares the desired and
 installed fragment digests, and skips validation/reload when both the fragment and
 aggregate import are unchanged. A real change runs separate 30-second validation,
@@ -536,10 +540,13 @@ then deploys config, secrets, and routing onto the image the remote already has,
 skips the explicit `init_services` build. Compose still builds a service that has no
 image at all, so a first deploy works either way, and new application code only ships
 once the image is rebuilt.
-When the configuration digest is already current but runtime topology needs convergence,
-Sandbox uses a targeted idempotent `compose up` for the declared services. A changed
-source/configuration still uses the full recreate path. Unknown Compose health is reported
-as `unverified`, never `ready`.
+Targeted/no-build Compose convergence is guarded by exact source identity, configuration
+digest, topology, and health proof, and never runs migration/setup initializers. Host apply uses
+an even narrower replay rule: an exact same-source `edge: pending` receipt resumes only
+edge work with zero Compose/initializer calls. Missing or partial replay evidence refuses
+instead of mutating runtime. A changed source always uses the full recreate path even
+when a saved configuration digest happens to match. Unknown Compose health is reported as
+`unverified`, never `ready`.
 
 For a deliberate cold or large build, set `compose.build_timeout_seconds` to a bounded
 value from 60 through 7200 (default `900`). The value applies to the Compose `up` and
@@ -560,9 +567,10 @@ manifest-declared services, profile-aware configured Compose services, running s
 rows, per-service Compose state/health, free disk, image metadata, derived source-revision
 checks for every declared long-lived service, and the protected apply-log path. A
 single bounded remote observer collects configured services, runtime rows, and all
-declared source-revision keys under one total deadline. Completed phases and partial or
-unknown evidence survive a later probe failure; diagnose does not open one SSH session
-per service/key. A
+declared source-revision keys under one strict total deadline. It queries only those exact
+allowlisted keys, never a container's full environment, and bounds service/key fan-out,
+rows, bytes, phases, and receipt size. Completed phases and partial or unknown evidence
+survive a later probe failure; diagnose does not open one SSH session per service/key. A
 declared service missing from either Compose configuration or the running set is
 topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
 services are excluded from this long-lived topology comparison. Missing remote evidence

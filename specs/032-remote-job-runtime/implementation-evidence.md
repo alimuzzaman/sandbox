@@ -1187,3 +1187,8 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   pending.
 - This entry records local unit/static implementation evidence only. It is not a live
   remote deployment or a claim that an existing remote runtime was repaired.
+- Follow-up review tightened replay acceptance to the complete declared service/key
+  matrix, made same-source edge replay strictly edge-only, forced changed source through
+  full recreate, and bounded the single observer by a strict total deadline, allowlisted
+  keys, fan-out, rows, bytes, phases, and receipt size. Partial receipts are persisted
+  before a fail-closed apply result. These remain local test claims only.

@@ -13,6 +13,32 @@ from sandbox.transports.remote_sync import HostSourceSyncTransport, RemoteSyncTr
 
 
 class RemoteSyncTransportTests(unittest.TestCase):
+    def test_reconcile_returns_typed_original_generation_without_retransfer(self):
+        relationship = SynchronizationRelationship(
+            "rel_fixture", "project:fixture", "remote", "workspace",
+        )
+        generation = SourceGeneration(
+            "gen_fixture", "rel_fixture", 1, "a" * 64, 2, 10,
+            "transferring", "request_fixture",
+        )
+        calls = []
+
+        def ssh_run(_remote, command, timeout=30):
+            calls.append(command)
+            return SimpleNamespace(
+                returncode=0, stdout='{"status":"accepted"}\n', stderr="",
+            )
+
+        transport = RemoteSyncTransport(
+            remote_lookup=lambda name: {"provisioned": True, "name": name},
+            ssh_run=ssh_run,
+            ssh_process=lambda *_args, **_kwargs: self.fail("must not upload"),
+            resolve_home=lambda _remote: "/srv/sandbox",
+        )
+        result = transport.reconcile(relationship, generation)
+        self.assertEqual(result["accepted_generation"], "gen_fixture")
+        self.assertEqual(result["request_id"], "request_fixture")
+        self.assertEqual(len(calls), 1)
     def test_transfer_stages_archive_and_publishes_only_after_upload(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

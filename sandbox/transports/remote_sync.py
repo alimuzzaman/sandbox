@@ -246,6 +246,73 @@ class RemoteSyncTransport:
         except Exception as exc:
             raise RemoteSyncTransportError("remote synchronization transport failed") from None
 
+    def reconcile(
+        self, relationship: SynchronizationRelationship,
+        generation: SourceGeneration,
+    ) -> dict[str, Any]:
+        """Probe one lost acknowledgment without publishing or replaying bytes."""
+        remote_name = relationship.remote_name
+        if not _SAFE_REMOTE.fullmatch(remote_name):
+            raise RemoteSyncTransportError(
+                "remote name is invalid", "ownership_conflict", retryable=False,
+            )
+        remote = self.remote_lookup(remote_name)
+        if not isinstance(remote, dict) or remote.get("provisioned") is not True:
+            raise RemoteSyncTransportError(
+                "remote is not provisioned", "remote_unavailable", retryable=True,
+            )
+        try:
+            home = self.resolve_home(remote)
+            project_hash = hashlib.sha256(
+                relationship.project_identity.encode()
+            ).hexdigest()[:32]
+            workspace = _safe_id(relationship.workspace_id, "workspace id")
+            generation_id = _safe_id(generation.generation_id, "generation id")
+            base = f"{home}/runtime/sync/{project_hash}/{workspace}"
+            program = r'''import json, pathlib, sys
+base = pathlib.Path(sys.argv[1])
+generation = sys.argv[2]
+manifest_digest = sys.argv[3]
+current = base / "current"
+published = base / "generations" / generation
+manifest = published / ".sandbox-sync-manifest.json"
+accepted = False
+if current.is_symlink() and published.is_dir() and manifest.is_file():
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    accepted = (
+        current.resolve(strict=True) == published.resolve(strict=True)
+        and document.get("generation_id") == generation
+        and document.get("manifest_digest") == manifest_digest
+    )
+print(json.dumps({"status": "accepted" if accepted else "unknown"}, separators=(",", ":")))
+'''
+            command = (
+                f"python3 -c {shlex.quote(program)} {shlex.quote(base)} "
+                f"{shlex.quote(generation_id)} {shlex.quote(generation.manifest_digest)}"
+            )
+            result = self.ssh_run(remote, command, timeout=30)
+            if result.returncode != 0:
+                raise ValueError("reconciliation probe failed")
+            lines = [line for line in str(getattr(result, "stdout", "")).splitlines() if line.strip()]
+            payload = json.loads(lines[-1]) if lines else {}
+            if payload != {"status": "accepted"}:
+                return {"status": "unknown", "request_id": generation.request_id}
+            return {
+                "status": "accepted",
+                "accepted_generation": generation.generation_id,
+                "manifest_digest": generation.manifest_digest,
+                "file_count": generation.file_count,
+                "byte_count": generation.byte_count,
+                "request_id": generation.request_id,
+            }
+        except RemoteSyncTransportError:
+            raise
+        except Exception:
+            raise RemoteSyncTransportError(
+                "remote synchronization acknowledgment is unknown",
+                "transport_unknown", retryable=False,
+            ) from None
+
 
 class HostSourceSyncTransport:
     """Update a hosted Compose source tree without recreating its services.

@@ -12,6 +12,25 @@ from sandbox.jobs.storage import JobStorage
 
 
 class JobServiceTests(unittest.TestCase):
+    def test_synchronized_submission_requires_authoritative_gateway_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(
+                repository, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _descriptor: self.fail("submission must not launch"),
+            )
+            item = JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("source"), sync_relationship_id="relationship",
+                sync_generation_id="generation", source_access="managed_read_only",
+                parallel_safe=True,
+            )
+            with self.assertRaisesRegex(
+                    RuntimeError, "synchronized_job_authority_unavailable"):
+                service.submit(item)
+            self.assertEqual(repository.list(), [])
+            repository.close()
+
     def test_default_launcher_uses_package_root_when_cli_was_called_by_absolute_path(self):
         with tempfile.TemporaryDirectory() as temp, \
                 patch("sandbox.application.job_service.subprocess.Popen", return_value=MagicMock(poll=lambda: None)) as launch:

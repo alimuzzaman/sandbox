@@ -13,6 +13,7 @@ from .capture import (
     UnstableCapture,
     capture_manifest,
 )
+from .coordinator import RelationshipCoordinator
 from .models import (
     DivergenceRecord,
     Participant,
@@ -42,6 +43,7 @@ __all__ = [
     "PinnedJob",
     "RelationshipConflict",
     "RequestDigestConflict",
+    "RelationshipCoordinator",
     "SourceGeneration",
     "SyncJournalCorruption",
     "SyncPolicy",

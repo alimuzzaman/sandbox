@@ -16,6 +16,8 @@ def _common(parser, *, request: bool = False) -> None:
                         help="explicit provisioned remote name")
     parser.add_argument("--workspace-id", required=True,
                         help="durable remote workspace identifier")
+    parser.add_argument("--participant-id",
+                        help="bounded participant session identity")
     if request:
         parser.add_argument("--request-id", required=True,
                             help="replay-safe request identity")
@@ -30,6 +32,8 @@ def configure_parser(parser) -> None:
     _common(once, request=True)
     once.add_argument("--include", action="append", default=[],
                       help="explicit relative path to include in the screened generation")
+    once.add_argument("--checkpoint", action="store_true",
+                      help="mark this explicit transfer as a checkpoint request")
 
     status = actions.add_parser("status", help="read local synchronization state")
     _common(status)
@@ -40,6 +44,12 @@ def configure_parser(parser) -> None:
 
     stop = actions.add_parser("stop", help="stop future automatic transfers")
     _common(stop)
+
+    resolve = actions.add_parser("resolve", help="resolve recorded remote divergence")
+    _common(resolve)
+    resolve.add_argument("--resolution", choices=("keep-local", "stop"), required=True)
+    resolve.add_argument("--confirm", action="store_true", required=True,
+                         help="confirm the explicit divergence decision")
 
 
 def _bounded_error(code: str, *, message: str = "synchronization operation failed") -> dict:
@@ -82,13 +92,22 @@ def cmd_sync(_cfg, args) -> None:
             result = service.once(
                 **common, request_id=args.request_id,
                 explicit_includes=tuple(args.include or ()),
+                checkpoint=bool(args.checkpoint),
+                participant_id=args.participant_id,
             )
         elif args.sync_action == "status":
             result = service.status(**common)
         elif args.sync_action == "start":
-            result = service.start(**common, mode=args.mode)
+            result = service.start(
+                **common, mode=args.mode, participant_id=args.participant_id,
+            )
         elif args.sync_action == "stop":
-            result = service.stop(**common)
+            result = service.stop(**common, participant_id=args.participant_id)
+        elif args.sync_action == "resolve":
+            result = service.resolve(
+                **common, resolution=args.resolution, confirm=args.confirm,
+                participant_id=args.participant_id,
+            )
         else:
             result = _bounded_error("invalid_sync_action")
     except SyncServiceError as exc:

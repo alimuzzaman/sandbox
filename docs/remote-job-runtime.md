@@ -73,6 +73,12 @@ acceptance envelope. `queue.position` follows durable acceptance order, while
 `queue.blocking_jobs` contains bounded opaque job IDs and workspace labels.
 Terminal or expired leases are reaped on the next admission.
 
+Synchronized-generation job execution is not yet a supported runtime path.
+Submissions carrying synchronization metadata fail closed unless an authoritative
+sync gateway is composed; the CLI does not accept hidden relationship or source
+policy claims from callers. Jobs without sync fields keep the existing
+deploy-before-job path unchanged.
+
 Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test
 leaf for each named workspace.

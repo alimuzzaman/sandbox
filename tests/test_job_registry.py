@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
@@ -35,7 +37,7 @@ class JobRegistryTests(unittest.TestCase):
 
     def test_schema_uses_wal_foreign_keys_and_version(self):
         repo = self.repository()
-        self.assertEqual(repo.schema_version(), 3)
+        self.assertEqual(repo.schema_version(), 4)
         self.assertEqual(repo.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(repo.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         names = {row[0] for row in repo.connection.execute(
@@ -54,6 +56,25 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(first["job_id"], second["job_id"])
         reopened = self.repository()
         self.assertEqual(reopened.get(first["job_id"])["lifecycle"], "accepted")
+
+    def test_synchronized_generation_and_source_policy_are_durable(self):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        repo = self.repository()
+        item = JobSubmission(
+            kind="test", project_root="/tmp/project", project_identity="project-1",
+            target_kind="remote", remote_name="remote", workspace_label="default",
+            argv=("python", "-V"), deadline_seconds=60,
+            source=SourceIdentity("sha256:source"),
+            sync_relationship_id="rel_fixture", sync_generation_id="gen_fixture",
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        row, _ = repo.accept(item)
+        self.assertEqual(row["sync_relationship_id"], "rel_fixture")
+        self.assertEqual(row["sync_generation_id"], "gen_fixture")
+        self.assertEqual(row["source_access"], "managed_read_only")
+        snapshot = repo.submission_snapshot(row["job_id"])
+        self.assertEqual(snapshot["sync_generation_id"], "gen_fixture")
 
     def test_credential_like_argv_is_refused_before_any_submission_persistence(self):
         from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -198,6 +219,29 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(replayed["job_id"], original["job_id"])
         self.assertIsNone(repo.submission_snapshot(original["job_id"]))
 
+    def test_default_sync_metadata_preserves_legacy_request_digest_and_replay(self):
+        item = submission("legacy-digest")
+        legacy_payload = item.as_dict()
+        for field in (
+                "sync_relationship_id", "sync_generation_id", "source_access",
+                "parallel_safe"):
+            legacy_payload.pop(field)
+        legacy_json = json.dumps(
+            legacy_payload, sort_keys=True, separators=(",", ":"),
+        )
+        legacy_digest = hashlib.sha256(legacy_json.encode()).hexdigest()
+        self.assertEqual(item.canonical_digest(), legacy_digest)
+
+        repo = self.repository()
+        original, _ = repo.accept(item)
+        repo.connection.execute(
+            "UPDATE jobs SET request_digest=?, submission_json=NULL WHERE job_id=?",
+            (legacy_digest, original["job_id"]),
+        )
+        replayed, replay = repo.accept(submission("legacy-digest"))
+        self.assertTrue(replay)
+        self.assertEqual(replayed["job_id"], original["job_id"])
+
     def test_submission_snapshot_rejects_unbounded_compatibility_detail(self):
         from sandbox.jobs.models import JobSubmission, SourceIdentity
 
@@ -223,7 +267,7 @@ class JobRegistryTests(unittest.TestCase):
                 connection.execute("ALTER TABLE jobs DROP COLUMN submission_json")
             connection.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
         reopened = self.repository()
-        self.assertEqual(reopened.schema_version(), 3)
+        self.assertEqual(reopened.schema_version(), 4)
         self.assertIsNone(reopened.submission_snapshot(row["job_id"]))
         self.assertEqual(reopened.get(row["job_id"])["lifecycle"], "accepted")
 

@@ -456,6 +456,10 @@ class RemoteJobTransport:
             raise RemoteJobTransportError(
                 "remote job command contains credential-like material"
             ) from None
+        if submission.sync_relationship_id is not None:
+            raise RemoteJobTransportError(
+                "synchronized job execution is unavailable without an enforced source authority"
+            )
         remote = self._execution_remote(submission.remote_name)
         deployed = self._deploy(
             remote, submission.project_root,

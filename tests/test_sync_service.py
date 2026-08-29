@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -134,6 +135,132 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(result["code"], "transport_unknown")
         status = service.status(self.root, remote="remote", workspace_id="workspace")
         self.assertEqual(status["status"], "pending")
+
+    def test_checkpoint_request_does_not_enable_automatic_transfer(self):
+        self.service.start(
+            self.root, remote="remote", workspace_id="workspace", mode="checkpoint",
+        )
+        result = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-checkpoint", checkpoint=True,
+        )
+        self.assertTrue(result["ok"])
+        status = self.service.status(self.root, remote="remote", workspace_id="workspace")
+        self.assertEqual(status["relationship"]["mode"], "checkpoint")
+        self.assertFalse(self.service.notify_commit(
+            self.root, remote="remote", workspace_id="workspace", commit="2" * 40,
+        ))
+
+    def test_stop_preserves_pending_state_and_blocks_new_live_triggers(self):
+        relationship = self.service._relationship(self.root, "remote", "workspace")
+        self.repository.reserve_generation(
+            relationship_id=relationship.relationship_id, request_id="pending-request",
+            request_digest="a" * 64, manifest_digest="b" * 64,
+            file_count=1, byte_count=1,
+        )
+        self.service.start(self.root, remote="remote", workspace_id="workspace", mode="live")
+        stopped = self.service.stop(self.root, remote="remote", workspace_id="workspace")
+        self.assertEqual(stopped["relationship"]["mode"], "off")
+        self.assertEqual(stopped["generation"]["state"], "pending")
+        self.assertFalse(self.service.notify_commit(
+            self.root, remote="remote", workspace_id="workspace", commit="3" * 40,
+        ))
+
+    def test_live_commit_trigger_returns_without_waiting_for_transport(self):
+        class SlowTransport:
+            def transfer(inner, project_dir, manifest, relationship, generation):
+                time.sleep(0.2)
+                return {
+                    "status": "accepted", "accepted_generation": generation.generation_id,
+                    "manifest_digest": manifest.manifest_digest,
+                    "file_count": manifest.file_count, "byte_count": manifest.byte_count,
+                }
+
+        service = SyncService(
+            self.repository, lambda: SlowTransport(),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:fixture", "root": str(self.root),
+            },
+        )
+        service.start(self.root, remote="remote", workspace_id="workspace", mode="live")
+        started = time.monotonic()
+        self.assertTrue(service.notify_commit(
+            self.root, remote="remote", workspace_id="workspace", commit="4" * 40,
+        ))
+        self.assertLess(time.monotonic() - started, 0.1)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if service.status(
+                self.root, remote="remote", workspace_id="workspace",
+            )["status"] == "accepted":
+                break
+            time.sleep(0.02)
+
+    def test_competing_project_is_refused_before_capture_or_transport(self):
+        self.service.start(self.root, remote="remote", workspace_id="workspace", mode="live")
+        competing = SyncService(
+            self.repository, lambda: self.fail("transport must not be created"),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:other", "root": str(self.root),
+            },
+        )
+        with self.assertRaisesRegex(Exception, "owned"):
+            competing.once(
+                self.root, remote="remote", workspace_id="workspace",
+                request_id="request-conflict",
+            )
+
+    def test_lost_acknowledgment_reconciles_with_original_request(self):
+        class Reconciling:
+            def transfer(inner, *_args):
+                error = RuntimeError("lost")
+                error.code = "transport_unknown"
+                raise error
+            def reconcile(inner, relationship, generation):
+                return {
+                    "status": "accepted",
+                    "accepted_generation": generation.generation_id,
+                    "manifest_digest": generation.manifest_digest,
+                    "file_count": generation.file_count,
+                    "byte_count": generation.byte_count,
+                }
+
+        service = SyncService(
+            self.repository, lambda: Reconciling(),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:fixture", "root": str(self.root),
+            },
+        )
+        unknown = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-lost",
+        )
+        recovered = service.reconcile(
+            self.root, remote="remote", workspace_id="workspace",
+        )
+        self.assertEqual(unknown["status"], "unknown")
+        self.assertEqual(recovered["status"], "accepted")
+        self.assertEqual(recovered["generation"]["id"], unknown["pending_generation"])
+
+    def test_divergence_resolution_requires_confirmation_and_stops_mode(self):
+        from sandbox.sync.models import DivergenceRecord
+
+        relationship = self.service._relationship(self.root, "remote", "workspace")
+        self.repository.put_divergence(DivergenceRecord(
+            relationship.relationship_id, 1, "gen_fixture",
+            "2026-08-26T00:00:03Z", "explicit_resolution_required",
+        ))
+        with self.assertRaisesRegex(Exception, "confirmation"):
+            self.service.resolve(
+                self.root, remote="remote", workspace_id="workspace",
+                resolution="keep-local", confirm=False,
+            )
+        resolved = self.service.resolve(
+            self.root, remote="remote", workspace_id="workspace",
+            resolution="keep-local", confirm=True,
+        )
+        self.assertEqual(resolved["relationship"]["mode"], "off")
+        self.assertIsNone(self.repository.get_divergence(relationship.relationship_id))
 
 
 if __name__ == "__main__":

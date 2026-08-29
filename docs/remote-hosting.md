@@ -19,6 +19,36 @@ runtime state, and unknown files. The result reports `restarted: false`.
 This is not promotion. A later `host apply --confirm` restores the committed
 revision and performs the controlled Compose, route, and health workflow.
 
+Disposable development workspaces also expose the relationship-owned `sync`
+surface. It is off by default and always requires an explicit registered remote
+and durable workspace ID:
+
+```bash
+./sb sync start --mode checkpoint --project-dir /path/to/project \
+  --remote myvps --workspace-id ws_opaque --participant-id session-a --json
+./sb sync once --checkpoint --project-dir /path/to/project \
+  --remote myvps --workspace-id ws_opaque --request-id checkpoint-1 --json
+./sb sync stop --project-dir /path/to/project \
+  --remote myvps --workspace-id ws_opaque --json
+```
+
+`live` accepts non-blocking commit/event signals; `checkpoint` transfers only
+on an explicit checkpoint; `off` never starts an automatic transfer. Stop keeps
+accepted and pending generation state visible. It does not cancel jobs, delete a
+workspace, revert source, or grant reset/takeover authority. An explicit apply
+may reset synchronized uncommitted source to the committed revision.
+
+Participants that resolve to the same durable project identity share one
+ordered relationship. Symlink locators may share that identity. A fresh clone
+or unresolved relocation is a different owner and is refused before source
+transfer until the existing lifecycle adoption flow explicitly preserves the
+durable identity. Ownership errors expose opaque IDs only, never checkout paths.
+
+Lost acknowledgments reconcile with the original request identity. Remote
+divergence is never adopted or overwritten automatically; `sync resolve
+--resolution keep-local --confirm` clears the conflict gate and leaves sync off
+so the next explicit request repeats normal ownership checks.
+
 ## 1. What this is
 
 `./sb remote` + `./sb deploy` let you run a sandbox instance on a VPS you already own

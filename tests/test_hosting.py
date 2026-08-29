@@ -832,6 +832,24 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("exec -T web", command)
         self.assertIn("LENZORA_SOURCE_REVISION", command)
 
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_apply_revision_probe_ignores_compose_stderr_warning(self, remote_checked):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        revision = "a" * 40
+        remote_checked.return_value = (
+            'time="2026-08-29T10:00:00Z" level=warning '
+            'msg="compose attribute is obsolete"\n'
+            f"{revision}\n"
+        )
+
+        hosting_cmd._verify_remote_derived_environment(
+            {}, validated, "/srv/source", "/srv/runtime", revision,
+            progress=lambda _line: None, log_path="/srv/runtime/apply.log",
+        )
+
+        self.assertEqual(remote_checked.call_count, 1)
+
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_build_timeout_is_used_for_compose_build_steps(self, remote_checked, _write):

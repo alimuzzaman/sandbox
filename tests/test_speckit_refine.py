@@ -74,11 +74,14 @@ class SpeckitRefineArtifactTests(unittest.TestCase):
         self.assertLess(workflow.index("  - id: analyze"), workflow.index("  - id: implement"))
         self.assertIn('args: ""', workflow)
 
-    def test_existing_remote_sync_draft_uses_prd_filename(self):
+    def test_existing_remote_sync_prd_handoff_has_downstream_artifacts(self):
         feature = ROOT / "specs/033-agent-aware-remote-sync"
         self.assertTrue((feature / "prd.md").is_file())
-        self.assertFalse((feature / "plan.md").exists())
-        self.assertIn("**Readiness**: `NOT READY`", (feature / "prd.md").read_text())
+        self.assertTrue((feature / "spec.md").is_file())
+        self.assertTrue((feature / "plan.md").is_file())
+        self.assertTrue((feature / "tasks.md").is_file())
+        self.assertTrue((feature / "checklists/requirements.md").is_file())
+        self.assertIn("**Readiness**: `READY FOR SPECKIT`", (feature / "prd.md").read_text())
 
     def test_integration_manifests_track_custom_skill_and_template(self):
         claude = json.loads((ROOT / ".specify/integrations/claude.manifest.json").read_text())

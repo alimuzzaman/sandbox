@@ -12,6 +12,10 @@
 sandbox.local.yml
 .hermes/
 
+# Codex-managed linked worktrees and local Sandbox runtime state.
+/.codex/worktrees/
+/.codex/sandbox-runtime/
+
 # Plugin repos cloned by `./sb add` live here by default.
 # Each plugin has its own git history; never check them into the sandbox repo.
 plugins/

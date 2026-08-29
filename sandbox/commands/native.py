@@ -8,7 +8,8 @@ import sys
 from sandbox.registry import CommandSpec, register_specs
 
 
-ACTIONS = ("support", "preflight", "baseline", "install-plan", "install", "status", "cleanup")
+ACTIONS = ("support", "preflight", "baseline", "install-plan", "install", "status", "cleanup",
+           "credential-status")
 
 
 def configure_parser(parser):
@@ -64,6 +65,67 @@ def support():
             "runtimes": [dict(value) for value in RUNTIME_DECLARATIONS], "mutated": False}
 
 
+def credential_status(*, repository=None):
+    """Return a secret-free, fail-closed Credential Vault capability report."""
+    from sandbox.isolation.capability_report import (
+        BindingState, CapabilityPrerequisite, CapabilityReport,
+    )
+    from sandbox.isolation.manifest import MANAGED_ISOLATION_CAPABILITIES
+
+    declaration = next(
+        item for item in MANAGED_ISOLATION_CAPABILITIES
+        if item["capability_id"] == "outbound_credential_mediation"
+    )
+    bindings = ()
+    status_error = None
+    if repository is not None:
+        try:
+            bindings = tuple(
+                BindingState(
+                    binding.binding_id, binding.version, binding.scope(),
+                    binding.state, binding.expires_at,
+                )
+                for binding in repository.list()
+            )
+        except Exception:
+            # A status surface must not turn corrupt/foreign state into a
+            # success claim or echo lower-layer diagnostics.
+            bindings = ()
+            status_error = "binding_status_unavailable"
+    report = CapabilityReport(
+        support_tier=declaration["support_tier"],
+        adoptable=bool(declaration["adoptable"]),
+        evidence_id=declaration.get("evidence_id"),
+        prerequisites=(CapabilityPrerequisite(
+            "managed-native-live-proof", "unknown", "evidence_missing",
+        ),),
+        binding_states=bindings,
+        refusal_reasons=((status_error,) if status_error else ()),
+    )
+    return {
+        "ok": report.admissible,
+        "operation": "native_credential_status",
+        "state": "ready" if report.admissible else "blocked",
+        "mutated": False,
+        **report.to_dict(),
+    }
+
+
+def _read_credential_repository():
+    """Open existing native state for status only; never create/migrate it."""
+    try:
+        from sandbox.application.context import managed_native_credential_repository
+        return managed_native_credential_repository()
+    except Exception:
+        # Status must remain a bounded refusal when state-path composition or
+        # a lower repository adapter is unavailable.
+        return None
+
+
+def _predispatch(args):
+    return getattr(args, "action", None) == "credential-status"
+
+
 def cmd_native(cfg, args):
     if args.action == "support": result = support()
     elif args.action == "preflight":
@@ -113,6 +175,8 @@ def cmd_native(cfg, args):
                       "reason": {"code": "version_unavailable", "message": str(exc)}}
     elif args.action == "status":
         result = _runtime_result(cfg, args, "status")
+    elif args.action == "credential-status":
+        result = credential_status(repository=_read_credential_repository())
     elif args.action == "cleanup":
         result = _runtime_result(cfg, args, "destroy")
     else:
@@ -135,4 +199,5 @@ def cmd_native(cfg, args):
 register_specs((CommandSpec(
     name="native", handler=cmd_native, configure=configure_parser,
     owner=__name__, order=56, scope="project", destructive=True,
+    predispatch_policy=_predispatch,
 ),))

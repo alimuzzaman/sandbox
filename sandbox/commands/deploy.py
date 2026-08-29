@@ -49,6 +49,8 @@ def _deploy_error_code(error: BaseException, source_ref: str | None) -> str:
     """Map known safe deploy failures to stable machine-readable codes."""
     if isinstance(error, sr.RemoteBranchDiverged):
         return sr.RemoteBranchDiverged.error_code
+    if isinstance(error, sr.RemoteHomeResolutionTimeout):
+        return sr.RemoteHomeResolutionTimeout.error_code
     return "source_not_immutable" if source_ref else "deploy_failed"
 
 
@@ -220,14 +222,15 @@ def cmd_deploy(cfg, args) -> None:
             sr.resolve_source_ref(root, source_ref)
             if source_ref is not None else None
         )
-        target = sr.ensure_deploy_repo(entry, root)
+        target = sr.ensure_deploy_repo(
+            entry, root, home_timeout=deploy_timeout
+        )
         branch = sr.current_branch(root) if resolved_source is None else None
         pushed_sha = sr.push_commits(
             entry, root, target, branch,
             source_ref=source_ref, resolved_sha=resolved_source,
             push_timeout=deploy_timeout,
         )
-        sr.reset_target_to(entry, target, pushed_sha)
         descriptor_files = sr.deploy_project_descriptor_files(root)
         if resolved_source is None:
             diff_text, untracked = sr.capture_uncommitted(root)
@@ -238,15 +241,20 @@ def cmd_deploy(cfg, args) -> None:
             untracked = list(dict.fromkeys([
                 *untracked, *descriptor_files, *include_paths,
             ]))
-            applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
+            applied = sr.update_target_to(
+                entry, target, pushed_sha, project_root=root,
+                diff_text=diff_text, untracked=untracked,
+            )
         else:
             # The commit remains immutable; the primary Sandbox descriptor is
             # a separately declared runtime-intent layer. Projects commonly
             # keep it gitignored, but the remote still needs it to reconstruct
             # the exact bind mounts before activation.
-            applied = sr.apply_uncommitted(
-                entry, target, root, "", [*descriptor_files, *include_paths],
-            ) if descriptor_files or include_paths else 0
+            applied = sr.update_target_to(
+                entry, target, pushed_sha,
+                project_root=root if descriptor_files or include_paths else None,
+                untracked=[*descriptor_files, *include_paths],
+            )
         # Pro plugins are a HOST-level catalog, not project state: mirror them
         # before the instance boots so its On-Demand page lists the same slugs
         # the local machine offers. Fail-soft — a project deploy stays valid

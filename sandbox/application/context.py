@@ -347,6 +347,20 @@ def ingress_service(cfg, **overrides):
         except Exception:
             return False
 
+    health_context = overrides.pop("caddy_health_context", None)
+
+    def caddy_health():
+        from sandbox.core._domains import sandbox_caddy_health
+
+        if isinstance(health_context, Mapping) and not health_context.get("ok"):
+            return {"ok": False, "state": "degraded", "mutated": False,
+                    "reason": {"code": "project_route_context_unavailable",
+                               "message": "The project route context is unavailable."},
+                    "routes": (), "scope": "project"}
+        domains = (health_context.get("domains")
+                   if isinstance(health_context, Mapping) else None)
+        return sandbox_caddy_health(cfg or {}, domains=domains)
+
     return IngressService(
         detector=detector, registry=registry, repository=repository,
         transaction_runner=transaction_runner,
@@ -354,6 +368,7 @@ def ingress_service(cfg, **overrides):
         bind_probe=overrides.pop("bind_probe", SocketBindProbe()),
         consent_decider=overrides.pop("consent_decider", interactive_consent),
         sandbox_owner=overrides.pop("sandbox_owner", sandbox_owns),
+        caddy_health=overrides.pop("caddy_health", caddy_health),
         clock=overrides.pop("clock", None), **overrides,
     )
 
@@ -707,6 +722,11 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         verifier=verifier, bubblewrap=BubblewrapCompiler("/usr/bin/bwrap"),
         machine_exec=ManagedMachineExecutor(process=process, helper=helper),
     ))
+    credential_repository = overrides.pop("credential_repository", None)
+    credential_broker = overrides.pop("credential_broker", None)
+    credential_supervisor = overrides.pop("credential_supervisor", None)
+    credential_health = overrides.pop("credential_health", None)
+    credential_recovery = overrides.pop("credential_recovery", None)
     cleanup = overrides.pop("cleanup", None)
     if cleanup is None and native_repository is not None:
         cleanup = ManagedNativeCleanup(
@@ -723,6 +743,11 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots,
         packages=packages,
         network=network, database=database, services=services, credentials=credentials,
         grants=grants,
+        credential_repository=credential_repository,
+        credential_broker=credential_broker,
+        credential_supervisor=credential_supervisor,
+        credential_health=credential_health,
+        credential_recovery=credential_recovery,
         verifier=verifier, launcher=launcher, plan_builder=plan_builder,
         provisioner=provisioner, cleanup=cleanup,
         **overrides,
@@ -962,6 +987,58 @@ def runtime_service(cfg):
 
     return RuntimeService(resolve_descriptor=resolve_descriptor, adapters=adapters,
                           backends=backends, resolve_persisted=persisted_selection)
+
+
+def managed_native_credential_repository():
+    """Open existing managed-native binding metadata for read-only status.
+
+    The application context owns Sandbox state-path composition. Returning
+    ``None`` for an absent state file avoids creating a global directory during
+    a status-only command; ``CredentialRepository`` uses the repository's
+    read-only snapshot path for an existing file.
+    """
+    import sandbox_core as sc
+    from pathlib import Path
+
+    from sandbox.runtimes.managed.credential_repository import CredentialRepository
+    from sandbox.runtimes.managed.repository import NativeRepository
+
+    path = Path(sc.sandbox_base()) / "runtime" / "native" / "state.json"
+    if not path.is_file():
+        return None
+    return CredentialRepository(NativeRepository(path))
+
+
+def managed_native_credential_broker(
+    *, instance_id, credential_repository, resolver, proof, egress, upstream,
+    owner=None, max_concurrent=16, clock=None, drain_seconds=5.0,
+):
+    """Compose an explicit per-instance Credential Vault broker.
+
+    This factory has no default source reader, upstream, or proof.  Callers
+    must inject all three trust-boundary mechanisms, which keeps ordinary
+    managed-native composition inert while the live proof gate is incomplete.
+    Binding lookup is delegated to the credential repository and can be
+    owner-scoped; no registry/state JSON is read directly here.
+    """
+    from sandbox.isolation.credential_request_broker import CredentialRequestBroker
+
+    if credential_repository is None or not callable(getattr(credential_repository, "get", None)):
+        raise ValueError("managed credential broker repository is required")
+    if not callable(getattr(resolver, "issue", None)):
+        raise ValueError("managed credential broker resolver is required")
+    if not callable(proof) or not callable(egress) or upstream is None:
+        raise ValueError("managed credential broker gates are required")
+
+    def load(binding_id):
+        return credential_repository.get(binding_id, owner=owner) \
+            if owner is not None else credential_repository.get(binding_id)
+
+    return CredentialRequestBroker(
+        instance_id, resolver, load, proof=proof, egress=egress,
+        upstream=upstream, owner=owner, max_concurrent=max_concurrent,
+        clock=clock, drain_seconds=drain_seconds,
+    )
 
 
 def wordpress_runtime_service(cfg):
@@ -1299,3 +1376,9 @@ def durable_job_dependencies():
         "target_service": target,
         "workspace_service": workspace,
     }
+
+
+def sync_service_dependencies():
+    """Compose opt-in sync service without initializing runtime."""
+    from sandbox.application.sync_service import build_sync_service
+    return build_sync_service()

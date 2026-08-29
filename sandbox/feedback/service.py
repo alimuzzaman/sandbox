@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import tempfile
 from typing import Any, Callable
 
@@ -28,6 +29,10 @@ MAX_REVIEW_REASON = 500
 MAX_REVIEW_EVIDENCE_ITEMS = 8
 MAX_REVIEW_EVIDENCE = 240
 MAX_REVIEW_LINE_BYTES = 16_384
+# Reuse the repository's bounded export ceiling. It safely covers the maximum
+# UTF-8 submission while preventing hand-written records from forcing an
+# unbounded allocation before schema validation.
+MAX_RECORD_BYTES = MAX_EXPORT_BYTES
 _SAFE_SOURCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ /-]{0,79}$")
 _SAFE_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,79}$")
@@ -44,6 +49,15 @@ class FeedbackError(RuntimeError):
     def __init__(self, message: str, code: str = "invalid_feedback") -> None:
         super().__init__(message)
         self.code = code
+
+
+class FeedbackRecordError(ValueError):
+    """Typed internal refusal for one malformed persisted record."""
+
+    def __init__(self, code: str, field: str = "record") -> None:
+        super().__init__(code)
+        self.code = code
+        self.field = field
 
 
 def _timestamp(value: datetime) -> str:
@@ -386,11 +400,57 @@ class FeedbackStore:
 
     @staticmethod
     def _read(path: Path) -> dict[str, Any]:
-        if path.is_symlink() or not path.is_file():
-            raise OSError("feedback record is not a regular file")
-        value = json.loads(path.read_text(encoding="utf-8"))
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = None
+        try:
+            observed = path.lstat()
+            if not stat.S_ISREG(observed.st_mode):
+                raise FeedbackRecordError("feedback_record_not_regular")
+            descriptor = os.open(path, flags)
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or (details.st_dev, details.st_ino) != (observed.st_dev, observed.st_ino)
+            ):
+                raise FeedbackRecordError("feedback_record_not_regular")
+            if details.st_size < 0 or details.st_size > MAX_RECORD_BYTES:
+                raise FeedbackRecordError("feedback_record_too_large")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_RECORD_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(65_536, MAX_RECORD_BYTES + 1 - total),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > MAX_RECORD_BYTES:
+                raise FeedbackRecordError("feedback_record_too_large")
+            value = json.loads(b"".join(chunks).decode("utf-8"))
+        except FeedbackRecordError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise FeedbackRecordError("feedback_record_unreadable") from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         if not isinstance(value, dict) or value.get("schema_version") != 1:
-            raise ValueError("invalid feedback record")
+            raise FeedbackRecordError("feedback_record_schema_invalid")
+        feedback_id = value.get("feedback_id")
+        if not isinstance(feedback_id, str) or not _FEEDBACK_ID.fullmatch(feedback_id):
+            raise FeedbackRecordError("feedback_record_field_invalid", "feedback_id")
+        if _parse_timestamp(value.get("created_at")) is None:
+            raise FeedbackRecordError("feedback_record_field_invalid", "created_at")
         return value
 
     def query(

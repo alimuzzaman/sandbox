@@ -15,16 +15,28 @@ No database. A Job is three files under `runtime/wp-<instance>/.sb-jobs/`.
 | File | Meaning |
 |------|---------|
 | `job_<id>.log` | combined stdout+stderr, appended as it runs |
-| `job_<id>.pid` | wrapper PID, written (`echo $$`) before exec — the cancel handle |
-| `job_<id>.status` | absent ⇒ running; present ⇒ done, contents = exit code (`143` if killed) |
+| `job_<id>.pid` | internal cancel handle: Herd wrapper PID, Docker `launch:<pid>`, or Docker `container` |
+| `job_<id>.cleanup` | temporary durable internal cleanup receipt binding owned PID/PGID and, for Docker, exact container name; retained only when normal marker publication/cleanup is uncertain |
+| `job_<id>.status` | absent ⇒ public non-terminal/running presentation; present ⇒ terminal certainty, contents = exit code (`143` if killed) |
 
 Query states (what `wp_cli_job` returns): **running** (`.log`/`.pid` present, no
 `.status`), **completed** (`.status` present; exit code = its contents), **not_found**
 (no files / pruned). A **cancelled** job is just `completed` with `exit_code:143` —
 not a distinct query status (analysis F2); "cancelled" is the human interpretation.
 
-Transitions: start → running; process exit → completed; `kill` → SIGTERM to the
-wrapper's process **group** → completed(`143`). Age-prune removes terminal jobs' files.
+Transitions: start → accepted/running; Docker launch supervisor → named container;
+process exit → completed; `kill` → verified process group and/or exact named
+container removal → completed(`143`). Age-prune removes terminal jobs' files.
+
+Docker liveness is internally tri-state: running, dead, or unknown. A probe
+timeout/error and an absent container while the handle still says `launch` are
+unknown. Unknown never creates `.status`; poll remains non-terminal and kill
+returns `killed:false`. If marker-write abort cannot prove the entire owned group
+and, for Docker, container absent, the validated cleanup receipt plus bounded
+secret-free log evidence remain. Later poll/kill retries that exact cleanup and
+records terminal failure only after full absence is proven. Every retry first
+revalidates the exact current launcher command, PID, and PGID; mismatch/unknown
+preserves the receipt and refuses to signal a possibly reused numeric group.
 
 ## Query result (`wp_cli_job`)
 

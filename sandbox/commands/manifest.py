@@ -16,6 +16,8 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.data",
     "sandbox.commands.wp",
     "sandbox.commands.domains",
+    # Native owns the managed-runtime support/preflight surface, including the
+    # secret-free Credential Vault capability/binding status report.
     "sandbox.commands.native",
     "sandbox.commands.net",
     "sandbox.commands.debug",
@@ -45,6 +47,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.secrets",
     "sandbox.commands.hermes",
     "sandbox.commands.recovery",
+    "sandbox.commands.sync",
 )
 
 # Every currently shipped parser still defined in ``sandbox.cli`` is named here

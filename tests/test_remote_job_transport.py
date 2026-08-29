@@ -529,7 +529,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("project-workspace-", commands[0])
         self.assertNotIn("project.workspace-", commands[0])
 
-    def test_workspace_prepare_has_a_scoped_root_owned_file_recovery(self):
+    def test_workspace_prepare_delegates_to_shared_bounded_materializer(self):
         commands = []
         transport = RemoteJobTransport(
             deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
@@ -541,14 +541,12 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r"))
         prepare = commands[0]
-        self.assertIn("docker run --rm --user 0:0", prepare)
+        self.assertIn("python3 -m sandbox.workspaces.checkout materialize", prepare)
         self.assertIn("/srv/project-workspace-", prepare)
-        self.assertIn("find /workspace -mindepth 2 -maxdepth 2", prepare)
-        self.assertIn('find "$item" -mindepth 1 -maxdepth 1', prepare)
-        self.assertIn('rmdir -- "$item"', prepare)
         self.assertNotIn("rm -rf /srv/project-workspace-", prepare)
+        self.assertNotIn("docker run", prepare)
 
-    def test_workspace_prepare_checks_for_root_owned_contents_after_unprivileged_cleanup(self):
+    def test_workspace_prepare_has_no_pre_materialization_cleanup(self):
         commands = []
         transport = RemoteJobTransport(
             deploy=lambda *_: {},
@@ -558,9 +556,9 @@ class RemoteJobTransportTests(unittest.TestCase):
         )
         transport._prepare_workspace({}, "/srv/project", "workspace")
         prepare = commands[0]
-        self.assertIn("-print -quit", prepare)
-        self.assertIn('if [ -n "$(find "$workspace" -mindepth 2', prepare)
-        self.assertIn("remote workspace cleanup left contents", prepare)
+        self.assertIn("sandbox.workspaces.checkout", prepare)
+        self.assertNotIn("find ", prepare)
+        self.assertNotIn("rm -rf", prepare)
 
     def test_workspace_prepare_retains_bounded_remote_error_detail(self):
         transport = RemoteJobTransport(

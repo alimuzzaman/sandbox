@@ -6,7 +6,8 @@ description: "Task list for Async / Background WP-CLI Jobs"
 
 **Input**: Design documents from `specs/004-async-wp-cli-jobs/`
 
-**Status**: Implemented + live-verified on Docker (templately-rebuild2). Implementation
+**Status**: Implemented + locally exercised on Docker and Herd; T021 reopened for
+independent review after tri-state cleanup hardening. Implementation
 landed in `sandbox/commands/jobs.py` (core + CLI) and `mcp/wp-server/tools/wp.py` (MCP
 tools), not all in `tools/wp.py` as the original plan guessed.
 
@@ -18,11 +19,15 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 2: Foundational
 
 - [x] T003 Log-slice reader (`offset`/`limit`, `truncated`; `limit=-1` ⇒ whole file) in `job_status`.
-- [x] T004 Launch wrappers — **Docker**: `compose run -d --entrypoint sh wpcli` (the wpcli service is run-style, not `exec`-able; container kill reaps the whole process tree, so no `setsid` needed there); **herd**: `setsid` + backgrounded host `wp`. Each writes `$$`→`.pid`, runs `wp`, `$?`→`.status`; args `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root, same files host + container (gotcha #3).
+- [x] T004 Launch wrappers — **Docker**: Sandbox starts a new-session host
+  supervisor, records its verified handle, and the supervisor starts the exact
+  named `compose run -d --entrypoint sh wpcli` container; **Herd**: Sandbox starts
+  a new-session host wrapper and records the returned Popen PID. WP exit writes
+  `.status`; args are `shlex`-quoted. `.sb-jobs/` is the bind-mounted WP root.
 
 ## Phase 3: US1 — Long command doesn't block (P1)
 
-- [x] T005 `./sb wp --async` flag (dest=`run_async`, since `async` is a reserved word) → `launch_job`, prints job_id. **LIVE-VERIFIED**: returns on container-create (~7s, fixed), not on command duration.
+- [x] T005 `./sb wp --async` flag (dest=`run_async`, since `async` is a reserved word) → `launch_job`, prints one job ID after durable supervisor acceptance, not after WP completion.
 - [x] T006 `./sb wp --async <args>` prints job_id + poll/follow/kill hints.
 - [x] T007 **LIVE-VERIFIED**: `sleep(8)` job → job_id returned; command continued detached.
 
@@ -64,9 +69,23 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 - MCP tools (`wp_cli_async`, `wp_cli_job`, `wp_cli_job_kill`) become callable after a
   Claude Code restart (gotcha #4); the CLI path + the shared `job_status`/`kill_job`
   logic they call are live-verified.
-- The async-start latency is the docker `compose run` container-create cost (~7s, fixed)
-  — it does NOT scale with command duration, which is the property that matters.
+- Docker acceptance is the live host supervisor plus durable `launch:<pid>`
+  marker; the named container transition continues asynchronously under that
+  supervisor's cleanup ownership. Owner/container observation is tri-state and
+  cleanup uncertainty never creates terminal status. Both drivers stage a
+  validated PID/PGID cleanup receipt before normal marker publication; retained
+  receipts let status/kill retry whole-group cleanup, plus exact Docker container
+  cleanup, without caller-supplied ownership. Fresh launcher identity must match
+  before every group signal; PID reuse or unknown identity remains non-terminal
+  and renders as CLI nonzero / MCP `ok:false`, never "already finished".
 
 ## Phase 9: Convergence
 
-- [ ] T021 Reduce or otherwise redesign Docker async-job acceptance so it meets SC-001's under-2-second target; the recorded ~7-second `compose run -d` acceptance is a partial implementation of SC-001 (partial).
+- [ ] T021 Redesign Docker async-job acceptance around a live isolated supervisor
+  with durable running evidence, tri-state observation, receipt-bound whole-group
+  cleanup, and exact named-container cleanup. Post-hardening local measurements
+  include a six-run consecutive pass at 1.09–1.26s, but the same architecture
+  also has a retained 2.13s miss, so SC-001 is not deterministic/proven.
+  Adversarial tests cover unknown probes, residual group members, marker failures,
+  cleanup retry, PID-reuse refusal, and the open timing ledger; keep open pending
+  a consistently passing timing gate and independent review.

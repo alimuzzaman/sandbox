@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Draft
+**Status**: In progress
 
 **Input**: User description: "Steal from Novamira #1 — ride the official WP Abilities API +
 `wordpress/mcp-adapter` so abilities are discoverable WP-natively and work with any MCP

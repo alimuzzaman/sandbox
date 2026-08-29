@@ -32,5 +32,24 @@ class TestNativeCli(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertFalse(result["mutated"]); self.assertEqual(result["state"], "blocked")
 
+    def test_credential_status_is_secret_free_and_fail_closed(self):
+        from sandbox.commands.native import cmd_native
+
+        args = SimpleNamespace(action="credential-status", json=True, project_dir=".",
+                               label="default", web_server="nginx")
+        output = io.StringIO()
+        with mock.patch("sandbox.commands.native._read_credential_repository", return_value=None), \
+                redirect_stdout(output):
+            cmd_native({}, args)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(result["support_tier"], "implemented_unproven")
+        self.assertFalse(result["adoptable"])
+        self.assertEqual(result["binding_states"], [])
+        self.assertIn("support_unproven", result["refusal_reasons"])
+        self.assertNotIn("source_reference", output.getvalue())
+
 
 if __name__ == "__main__": unittest.main()

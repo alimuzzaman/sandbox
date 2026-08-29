@@ -2,12 +2,32 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
 from sandbox.core._plugin_check_report import render_report
+from sandbox.plugin_check import (
+    ArchivePreflightError,
+    ArchiveResultError,
+    ArchiveReviewJournal,
+    ArchiveTargetError,
+    archive_error_counts,
+    build_archive_review_target,
+    cleanup_receipt_complete,
+    load_archive_baseline,
+    open_archive,
+    persist_archive_artifact,
+    update_caller_baseline_atomic,
+)
+from sandbox.plugin_check.runner import (
+    ArchiveRunnerError,
+    launch_archive_runner,
+    resolve_archive_provenance,
+)
 
 
 class PluginCheckOutputError(ValueError):
@@ -283,6 +303,254 @@ def _checker_version(pconf: dict) -> str:
     return m.group(1) if m else "unknown"
 
 
+def _archive_failure(
+    args,
+    code: str,
+    message: str,
+    *,
+    preflight=None,
+) -> None:
+    """Emit one typed archive error without falling through to source mode."""
+
+    result = {
+        "ok": False,
+        "action": "update" if bool(getattr(args, "update", False)) else "check",
+        "plugin_slug": getattr(preflight, "archive_slug", None),
+        "errors": 0,
+        "warnings": 0,
+        "baseline_total": 0,
+        "new_count": 0,
+        "violations": [],
+        "baseline_exists": None,
+        "message": None,
+        "report_path": None,
+        "error": code,
+        "input_mode": "archive",
+    }
+    if preflight is not None:
+        result.update({
+            "archive_sha256": preflight.archive_sha256,
+            "archive_slug": preflight.archive_slug,
+            "main_file": preflight.main_file,
+            "member_count": preflight.member_count,
+            "member_manifest_sha256": preflight.member_manifest_sha256,
+        })
+    # Keep paths and archive-controlled text out of the machine result. Human
+    # output gets the stable error code plus a short reason for recovery.
+    if not getattr(args, "json", False):
+        die(f"{code}: {message[:500]}")
+    print(json.dumps(result, sort_keys=True))
+    raise SystemExit(1)
+
+
+def _archive_run_id() -> str:
+    """Mint a short, lowercase run identity for the isolated target."""
+
+    # Keep ``plugin-check-`` + this identity within Sandbox's 24-character
+    # instance-name budget.  That makes the derived Compose/registry name
+    # deterministic while retaining 40 bits of uniqueness for concurrent runs.
+    # Journal run IDs must start with a letter; keep nine random hex
+    # characters after the prefix so the total still fits the instance-name
+    # budget.
+    return f"r{uuid.uuid4().hex[:9]}"
+
+
+def _archive_report_meta(result: Mapping[str, object], *, baseline_total: int,
+                         new_count: int, baseline_file: str) -> dict[str, object]:
+    provenance = result.get("checker_provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    checker = str(provenance.get("plugin_check", "unknown"))
+    return {
+        "plugin_slug": result.get("archive_slug") or result.get("plugin_slug") or "unknown",
+        "plugin_version": result.get("plugin_version") or "unknown",
+        "checker_version": checker.split("@", 1)[0],
+        "wp_version": provenance.get("wordpress", "unknown"),
+        "php_version": provenance.get("php", "unknown"),
+        "exclude_directories": [],
+        "baseline_total": baseline_total,
+        "new_count": new_count,
+        "baseline_file": baseline_file,
+    }
+
+
+def _cmd_plugin_check_archive(cfg, args, pconf: dict, root: Path, pc: dict) -> None:
+    """Run the exact-release archive path through the disposable child runner."""
+
+    archive_input = Path(str(getattr(args, "archive", ""))).expanduser()
+    if not archive_input.is_absolute():
+        archive_input = root / archive_input
+    archive_path = archive_input.resolve(strict=False)
+    preflight = None
+    target = None
+    journal_path = None
+    try:
+        # Resolve and pin provenance before any runtime or caller-state write.
+        pin, provenance = resolve_archive_provenance(
+            pconf,
+            sandbox_root=Path(__file__).resolve().parents[2],
+        )
+        sc = _core()
+        sandbox_home = Path(getattr(sc, "BASE", os.environ.get("SANDBOX_HOME", "~/sandbox")))
+        with open_archive(archive_path) as session:
+            preflight = session.inspect()
+            target = build_archive_review_target(
+                root,
+                preflight,
+                run_id=_archive_run_id(),
+                sandbox_home=sandbox_home,
+                plugin_check=pin,
+                baseline_path=root / pc["baseline_file"],
+                wordpress_version=provenance["wordpress"],
+                php_version=provenance["php"],
+                sandbox_revision=provenance["sandbox"],
+            )
+            journal_path = target.sandbox_home.parent / "archive-journal.json"
+            journal = ArchiveReviewJournal.create(
+                journal_path,
+                run_id=target.review_instance.removeprefix("plugin-check-"),
+                target=target.contract_dict(),
+            )
+            # Extraction is streamed from the same open descriptor used by
+            # inspection and hashing; the caller checkout is never a target.
+            session.extract_to(target.extraction_root, preflight)
+
+        result = launch_archive_runner(
+            target,
+            journal.path,
+            timeout=900,
+            root=Path(__file__).resolve().parents[2],
+        )
+    except ArchiveRunnerError as exc:
+        _archive_failure(args, exc.code, exc.code, preflight=preflight)
+    except (ArchivePreflightError, ArchiveTargetError, ArchiveResultError) as exc:
+        # A target may have been allocated before journal creation failed. It
+        # has no recoverable ledger, so remove only that exact run directory and
+        # report root; never touch the caller project or global siblings.
+        if target is not None and journal_path is None:
+            for path in (target.sandbox_home.parent, target.artifact_dir):
+                try:
+                    if path.is_dir() and not path.is_symlink():
+                        import shutil
+                        shutil.rmtree(path)
+                except OSError:
+                    pass
+        error_code = (
+            "archive_preflight_failed" if isinstance(exc, ArchivePreflightError)
+            else getattr(exc, "code", "archive_target_failed")
+        )
+        _archive_failure(args, error_code, getattr(exc, "code", type(exc).__name__), preflight=preflight)
+    except Exception:
+        _archive_failure(args, "archive_target_failed", "archive target could not be prepared", preflight=preflight)
+
+    if not isinstance(result, dict):
+        _archive_failure(args, "archive_check_failed", "archive runner returned no result", preflight=preflight)
+    # Bind stable identity from host preflight, not from child-controlled text.
+    result = {
+        **result,
+        "input_mode": "archive",
+        "archive_sha256": preflight.archive_sha256,
+        "archive_slug": preflight.archive_slug,
+        "plugin_slug": preflight.archive_slug,
+        "main_file": preflight.main_file,
+        "member_count": preflight.member_count,
+        "member_manifest_sha256": preflight.member_manifest_sha256,
+        "action": "update" if bool(getattr(args, "update", False)) else "check",
+    }
+    findings = result.get("findings")
+    if not isinstance(findings, list):
+        findings = []
+    cleanup = result.get("cleanup")
+    try:
+        counts = archive_error_counts(findings)
+    except ArchiveResultError:
+        result["ok"] = False
+        result["error"] = "archive_artifact_failed"
+        counts = {}
+
+    baseline_path = target.baseline_path
+    try:
+        baseline = load_archive_baseline(
+            baseline_path,
+            caller_project_root=root,
+        )
+    except ArchiveResultError:
+        result["ok"] = False
+        result["error"] = "archive_artifact_failed"
+        baseline = {}
+    had_baseline = baseline_path.is_file()
+    baseline_total = sum(baseline.values())
+    violations = _diff_against_baseline(counts, baseline) if had_baseline else []
+    new_count = sum(item["delta"] for item in violations)
+    if result.get("error") is None:
+        if getattr(args, "update", False):
+            if not cleanup_receipt_complete(cleanup):
+                result["ok"] = False
+                result["error"] = "archive_cleanup_unknown"
+            else:
+                try:
+                    update_caller_baseline_atomic(
+                        baseline_path,
+                        counts,
+                        cleanup,
+                        caller_project_root=root,
+                    )
+                    baseline_total = sum(counts.values())
+                    had_baseline = True
+                    new_count = 0
+                    violations = []
+                except ArchiveResultError:
+                    result["ok"] = False
+                    result["error"] = "archive_artifact_failed"
+        else:
+            result["ok"] = new_count == 0
+    result["errors"] = sum(1 for item in findings if item.get("type") == "ERROR")
+    result["warnings"] = sum(1 for item in findings if item.get("type") == "WARNING")
+    result["baseline_total"] = baseline_total
+    result["new_count"] = new_count
+    result["violations"] = violations
+    result["baseline_exists"] = had_baseline
+    if not had_baseline and result.get("error") is None and not getattr(args, "update", False):
+        result["message"] = "no baseline exists yet — run with --update to establish one from current findings"
+        result["ok"] = True
+    report_meta = _archive_report_meta(
+        result,
+        baseline_total=baseline_total,
+        new_count=new_count,
+        baseline_file=pc["baseline_file"],
+    )
+    report_html = render_report(findings, report_meta)
+    try:
+        artifacts = persist_archive_artifact(
+            target.artifact_dir,
+            result,
+            report_html,
+            reports_root=target.artifact_dir.parent,
+        )
+        result["report_path"] = str(artifacts["report"])
+    except ArchiveResultError:
+        result["ok"] = False
+        result["error"] = "archive_artifact_failed"
+        result["report_path"] = None
+    # Findings are retained in result.json but not duplicated in the CLI's
+    # response envelope. This keeps the public shape compact and path-safe.
+    result.pop("findings", None)
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+        if not result.get("ok"):
+            raise SystemExit(1)
+        return
+    if result.get("error"):
+        die(f"{result['error']}: archive review did not complete")
+    if not had_baseline and not getattr(args, "update", False):
+        info("no baseline found — archive run is NOT gated; run `./sb plugin-check --archive FILE --update` to establish one")
+    elif violations:
+        die("Plugin Check archive gate FAILED — NEW ERROR-level finding(s) not in the baseline:\n" +
+            "\n".join(f"  {v['key']}: {v['current']} (baseline {v['baseline']}, +{v['delta']})" for v in violations))
+    else:
+        ok("Plugin Check archive gate passed — no new errors")
+    print(f"HTML report: {result.get('report_path')}")
+
+
 def cmd_plugin_check(cfg, args) -> None:
     """`./sb plugin-check --project-dir DIR [--update] [--json]` — run WordPress.org's
     Plugin Check against a project's configured plugin, gated by a committed baseline
@@ -303,6 +571,8 @@ def cmd_plugin_check(cfg, args) -> None:
     do_update = bool(getattr(args, "update", False))
 
     pc = _resolve_plugin_check_config(pconf)
+    if getattr(args, "archive", None):
+        return _cmd_plugin_check_archive(cfg, args, pconf, root, pc)
     entry = ensure_instance(cfg, str(root), create=True)
     instance = entry["instance"]
 

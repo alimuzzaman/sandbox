@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-22
 
-**Status**: Draft
+**Status**: Complete
 
 **Input**: User description: "Integrate Query Monitor with CLI/MCP tools; add dump/dd
 functions for quick-and-dirty debugging; cover Xdebug."

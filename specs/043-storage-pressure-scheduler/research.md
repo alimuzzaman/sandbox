@@ -2,17 +2,18 @@
 
 ## R1 — Where does the timer live, and on which init system?
 
-**Decision**: the schedule is rendered for, and installed on, the **controlling machine**
-(the machine that runs `sb`), not on the monitored remote. Rendering supports systemd user
-units on Linux and a launchd user agent on macOS, chosen by the activation platform.
+**Decision**: the schedule is rendered for the **controlling machine** (the machine that
+runs `sb`), not the monitored remote. Rendering supports systemd user units on Linux and a
+launchd user-agent plan on macOS. Only systemd activation is enabled: launchd rendering
+cannot enforce `schedule_timeout`, so activation fails closed.
 
 **Rationale**: `sb resources` and `sb workspace reap` ship their probe over SSH and need no
 `sb` runtime on the host (CLAUDE.md gotcha 23), so putting the timer on the host would add a
 host-side install requirement that the rest of the feature deliberately avoids. The existing
 `sandbox/recovery/scheduler.py` already sets the precedent of rendering units locally with a
 `--remote` target baked into the `ExecStart` command. The operator's machine here is macOS,
-so systemd-only rendering would have produced a plan that cannot be activated anywhere it is
-read; launchd rendering is therefore not gold-plating but the only path to a usable default.
+so launchd rendering remains useful review evidence even though activation is unavailable
+until a bounded supervisor exists.
 
 **Alternatives considered**: installing on the remote via `ssh systemctl` (rejected: adds a
 host-side `sb` install and a second update path); cron (rejected: no per-unit timeout,
@@ -21,17 +22,17 @@ no randomized delay, no lock semantics, and no structured status); an in-process
 
 ## R2 — How is overlap prevented?
 
-**Decision**: systemd `ExecStart` wraps the command in `flock -n`, exactly as
-`render_systemd_units` already does for recovery. The runner API is
+**Decision**: systemd invokes the fixed monitor command directly. The runner API is
 `monitor_lock(target, *, stale_after_seconds=1800)`. The explicit 1800-second default
 is the conservative value corresponding to the current `schedule_timeout: 30min`; a
-runner with a resolved timeout passes that value explicitly. Both launchd and manual
-runs use one persistent owner-only `<digest>.guard` file held with nonblocking POSIX
+runner with a resolved timeout passes that value explicitly. Scheduled and manual runs use
+one persistent owner-only `<digest>.guard` file held with nonblocking POSIX
 `flock` for the lease lifetime. The guard's schema-2 active/released marker is retained
 after release, so no pathname unlink or replacement is needed for lifecycle changes.
 
-**Rationale**: the runner-side lock protects a human run that races a scheduled one, but
-the flock is advisory and only protects cooperating callers. State reads/writes stay on
+**Rationale**: the runner-side lock protects a human run that races a scheduled one and
+returns `status=skipped, reason=lock_held`; an outer `flock` would hide that result behind
+an init-system nonzero exit. The lock is advisory and protects cooperating callers. State reads/writes stay on
 the retained descriptor, with fd identity checks before the initial open and before a
 release; a later pathname replacement detaches the old lease without mutating its
 successor. A stale active marker is recoverable only when validated UTC age is older than

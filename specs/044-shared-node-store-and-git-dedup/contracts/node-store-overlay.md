@@ -1,6 +1,6 @@
 # Contract: family-scoped node-store Compose overlay
 
-This contract defines the planned additions to
+This contract defines the locally implemented additions to
 `sandbox/config/compose.py::ComposeSchemaProvider` and
 `sandbox/runtimes/compose.py::ComposeAdapter._overlay`. It is normative for the
 `compose.nodeStore` opt-in and deliberately leaves package-manager behaviour to the hosted
@@ -94,7 +94,7 @@ services:
       - "sandbox-nodestore-<family_id>:/sandbox-node"
     environment:
       SANDBOX_NODE_STORE: /sandbox-node/store
-      SANDBOX_NODE_MODULES: /sandbox-node/node_modules
+      SANDBOX_NODE_MODULES: /sandbox-node/node_modules/<canonical-runtime-id>
       npm_config_store_dir: /sandbox-node/store
 volumes:
   sandbox-nodestore-<family_id>:
@@ -104,8 +104,14 @@ volumes:
 Normative invariants:
 
 - The volume is Docker-managed and read-write at `/sandbox-node`; it is not a host bind.
+- Workspace family selection uses the registry record for its exact canonical source root and
+  label. An opted-in workspace without that authoritative source record refuses before overlay
+  publication, including when the registry is empty. It never joins a family based only on a
+  matching display basename or registry order.
 - `SANDBOX_NODE_STORE` and `npm_config_store_dir` are the same path.
-- `SANDBOX_NODE_MODULES` is a sibling path inside the same mount.
+- `SANDBOX_NODE_MODULES` is a runtime-specific child under
+  `/sandbox-node/node_modules/<canonical-runtime-id>`. Sibling workspaces share package-store
+  bytes but never one mutable dependency tree.
 - The service receives one shared node-store mount, not one mount per workspace. No generated
   overlay volume may target the host-visible project/workspace directory.
 - The overlay does not add `node_modules` mounts, alter the project command, change the image
@@ -134,20 +140,23 @@ effect of `ensure`, `apply`, `destroy`, or descriptor parsing.
 
 ## Named store lifecycle (no automatic cleanup)
 
-The shared volume is intentionally outside broad workspace-volume cleanup. The current Sandbox
-code has **no named-store reclaim interface**; raw Docker inspection, process listing, and
-volume removal are unsupported and must not be used as a workaround. Before any apply is
-possible, a future implementation task must define and register a supported Sandbox CLI/MCP
-surface with the following plan/apply contract. This feature does not add automatic deletion.
+The shared volume is intentionally outside broad workspace-volume cleanup. T015 registers a
+supported Sandbox CLI/MCP exact-family plan/apply surface. Raw Docker inspection, process
+listing, and volume removal remain unsupported workarounds. This feature adds no automatic
+deletion.
 
 The supported interface must preserve:
 
 1. **Plan/read-only**: resolve the exact family id, inspect
    `sandbox-nodestore-<family_id>`, report its current existence/size and running-container
-   mounts, and write a named plan id. No `rm`, `prune`, or workspace mutation is allowed.
+   mounts, bind the engine-provided immutable volume identity, and write a named plan id. If
+   the engine cannot provide that identity, planning refuses. No `rm`, `prune`, or workspace
+   mutation is allowed.
 2. **Confirm/apply**: require the plan id and an explicit `--confirm` (or equivalent API
-   confirmation), re-check that no running container mounts the exact named volume, then remove
-   only that exact volume. A missing volume is an idempotent `already_absent` outcome.
+   confirmation), re-check that no running container mounts the exact named volume, and require
+   the current immutable identity to equal the plan before removing only that exact volume. A
+   same-name volume recreated after planning is `node_store_identity_changed` and is never
+   removed. A missing volume is an idempotent `already_absent` outcome.
 3. **Never** use `docker volume prune`, wildcard removal, an inferred family, or automatic
    reclaim from `ensure`, `status`, capacity pressure, job cleanup, or workspace destroy.
 
@@ -155,7 +164,7 @@ Removing a shared package store is recoverable only by a later install repopulat
 plan/apply record must say so. No command may claim that package data is backed up or that a
 store removal is lossless.
 
-## Required test seams (future implementation)
+## Required local test seams
 
 `tests/test_compose_node_store.py` must cover at least:
 
@@ -170,6 +179,7 @@ store removal is lossless.
 | Permission boundary | a container writes store/modules in the named volume while ordinary host-side workspace preparation/removal sees no root-owned store/module entries in the bind. |
 | Build-cache boundary | the generated overlay and any adapter command leave existing BuildKit cache declarations unchanged. |
 | Reclaim safety | plan is read-only; apply without confirmation or with a mounted/raced volume refuses; only the exact planned name can be removed; broad prune/wildcards are rejected. |
+| Recreated volume race | Replacing a planned volume with a same-name, different engine identity makes apply refuse without calling remove. |
 
 ## Required live-remote evidence (future release gate)
 

@@ -48,6 +48,7 @@ import sys
 import time
 import selectors
 import os
+from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -89,6 +90,19 @@ class RemotePushTimeout(RuntimeError):
         )
 
 
+class RemoteHomeResolutionTimeout(RuntimeError):
+    """Safe failure when deploy preflight cannot resolve the remote home."""
+
+    error_code = "remote_home_resolution_timeout"
+
+    def __init__(self, timeout_seconds: int) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            "remote Sandbox home resolution timed out after "
+            f"{timeout_seconds} seconds; no deploy mutation was attempted"
+        )
+
+
 class RemoteBranchDiverged(RuntimeError):
     """Safe, actionable failure when the managed remote branch moved ahead.
 
@@ -125,7 +139,7 @@ def _is_remote_branch_diverged(result) -> bool:
 
 def normalize_remote_push_timeout(value: object) -> int:
     """Validate one bounded local Git-push timeout in seconds."""
-    if (isinstance(value, bool) or not isinstance(value, int)
+    if (type(value) is not int
             or not 1 <= value <= REMOTE_PUSH_TIMEOUT_MAX_SECONDS):
         raise ValueError(
             "remote push timeout must be an integer from 1 to "
@@ -355,7 +369,7 @@ def deploy_exact_working_tree(
     if network_capacity.get("ok") is not True:
         raise NetworkCapacityAdmissionError(network_capacity)
     resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
-    target = ensure_deploy_repo(remote, root)
+    target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     branch = current_branch(root) if resolved_source is None else None
     pushed_sha = push_commits(
         remote, root, target, branch,
@@ -363,9 +377,12 @@ def deploy_exact_working_tree(
         source_root=source_root,
         push_timeout=push_timeout,
     )
-    reset_target_to(remote, target, pushed_sha)
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
-    applied = apply_uncommitted(remote, target, root, diff_text, untracked) if resolved_source is None else 0
+    applied = update_target_to(
+        remote, target, pushed_sha,
+        project_root=root if resolved_source is None else None,
+        diff_text=diff_text, untracked=untracked,
+    )
     dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
@@ -935,24 +952,51 @@ def deploy_target_slug(project_root) -> str:
     return sc._project_slug(None, root.name)
 
 
-def resolve_sandbox_home(remote: dict) -> str:
+def validate_remote_sandbox_home(value: object) -> str:
+    """Validate one canonical, bounded absolute POSIX Sandbox home."""
+    if type(value) is not str or not 1 <= len(value) <= 4096:
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if value == "/" or not value.startswith("/") or value.endswith("/"):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    components = value.split("/")[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        raise ValueError("resolved remote Sandbox home is invalid")
+    if posixpath.normpath(value) != value:
+        raise ValueError("resolved remote Sandbox home is invalid")
+    return value
+
+
+def resolve_sandbox_home(remote: dict, *, timeout: int = 15) -> str:
     """The REAL, expanded absolute path of $SANDBOX_HOME on the remote --
     resolved once via SSH rather than left as a literal shell variable,
     since a git push URL needs a real path, not something only a remote
     shell would expand."""
-    res = ssh_run(remote, "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=15)
-    if res.returncode != 0 or not (res.stdout or "").strip():
+    timeout = normalize_remote_push_timeout(timeout)
+    try:
+        res = ssh_run(
+            remote, "echo ${SANDBOX_HOME:-$HOME/sandbox}", timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RemoteHomeResolutionTimeout(timeout) from exc
+    if res.returncode != 0 or type(res.stdout) is not str or not res.stdout:
         raise RuntimeError(
             f"could not resolve $SANDBOX_HOME on remote: "
             f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
-    return res.stdout.strip()
+    raw_home = res.stdout[:-1] if res.stdout.endswith("\n") else res.stdout
+    return validate_remote_sandbox_home(raw_home)
 
 
-def deploy_target_path(remote: dict, project_root) -> str:
+def deploy_target_path(remote: dict, project_root, *, sandbox_home: str | None = None,
+                       home_timeout: int = 15) -> str:
     """The REAL, resolved absolute VPS-side path for a project's deploy-target
     git repo: <resolved $SANDBOX_HOME>/deploy-src/<canonical-project-slug>."""
-    home = resolve_sandbox_home(remote)
+    home = sandbox_home
+    if home is None:
+        home = resolve_sandbox_home(remote, timeout=home_timeout)
+    home = validate_remote_sandbox_home(home)
     slug = deploy_target_slug(project_root)
     return f"{home}/deploy-src/{slug}"
 
@@ -977,7 +1021,14 @@ def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
 
     source = deployed_path or deploy_target_path(remote, project_root)
     target = remote_workspace_path(remote, project_root, workspace_label)
-    command = workspace_refresh_command(source, target)
+    sandbox_home, marker, _relative = source.partition("/deploy-src/")
+    sandbox_root = (
+        f"{sandbox_home}/sb-src" if marker and sandbox_home
+        else posixpath.dirname(remote_sb_path(remote))
+    )
+    command = workspace_refresh_command(
+        source, target, sandbox_root=sandbox_root,
+    )
     result = ssh_run(remote, command, timeout=120)
     if result.returncode != 0:
         raise RuntimeError("could not prepare remote workspace")
@@ -989,17 +1040,22 @@ def remote_sb_path(remote: dict) -> str:
     return f"{resolve_sandbox_home(remote)}/sb-src/sb"
 
 
-def ensure_deploy_repo(remote: dict, project_root) -> str:
+def ensure_deploy_repo(remote: dict, project_root, *, sandbox_home: str | None = None,
+                       home_timeout: int = 15) -> str:
     """Lazily create the deploy-target git repo on first deploy to this remote
     (NOT during `provision`, which is machine-level, not project-level). Safe
     to call every deploy -- a no-op if the repo already exists. Sets
     receive.denyCurrentBranch=updateInstead so a push directly updates the
     checked-out working tree, no bare-repo indirection needed. Returns the
     resolved absolute path (see deploy_target_path)."""
-    target = deploy_target_path(remote, project_root)
+    target = deploy_target_path(
+        remote, project_root, sandbox_home=sandbox_home,
+        home_timeout=home_timeout,
+    )
+    quoted_target = shlex.quote(target)
     cmd = (
-        f"mkdir -p {target} && "
-        f"cd {target} && "
+        f"mkdir -p {quoted_target} && "
+        f"cd {quoted_target} && "
         f"if [ ! -d .git ]; then git init -q && "
         f"git config receive.denyCurrentBranch updateInstead; fi"
     )
@@ -1565,7 +1621,33 @@ def push_commits(
     return source_commit
 
 
-def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
+@contextmanager
+def _remote_materialization_lock(remote: dict, target_path: str):
+    """Serialize exact source mutation with workspace materialization."""
+    from sandbox.workspaces.checkout import materialization_lock_name
+
+    parent = posixpath.dirname(target_path.rstrip("/"))
+    lock_path = posixpath.join(parent, materialization_lock_name(target_path))
+    acquired = ssh_run(
+        remote, f"mkdir -- {shlex.quote(lock_path)}", timeout=10,
+    )
+    if acquired.returncode != 0:
+        raise RuntimeError("remote source materialization lock is busy")
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        released = ssh_run(
+            remote, f"rmdir -- {shlex.quote(lock_path)}", timeout=10,
+        )
+        if released.returncode != 0 and not failed:
+            raise RuntimeError("remote source materialization lock release failed")
+
+
+def _reset_target_to_unlocked(remote: dict, target_path: str, sha: str) -> None:
     """Reset the VPS working tree to the just-pushed commit BEFORE applying
     the uncommitted layer -- this is what makes each deploy REPLACE rather
     than stack (spec FR-007): any diff a previous deploy applied is wiped
@@ -1607,6 +1689,11 @@ def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
             f"could not reset the VPS working tree to {sha}: "
             f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
+
+
+def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
+    with _remote_materialization_lock(remote, target_path):
+        _reset_target_to_unlocked(remote, target_path, sha)
 
 
 def capture_uncommitted(project_root) -> tuple[str, list[str]]:
@@ -1782,7 +1869,7 @@ def validate_deploy_include_paths(project_root, paths) -> list[str]:
     return selected
 
 
-def apply_uncommitted(remote: dict, target_path: str, project_root,
+def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str],
                        include_paths: list[str] | None = None) -> int:
     """Applies the dirty working tree on top of a just-reset clean tree by
@@ -1882,6 +1969,31 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
             )
         applied += len(existing)
     return applied
+
+
+def apply_uncommitted(remote: dict, target_path: str, project_root,
+                      diff_text: str, untracked: list[str],
+                      include_paths: list[str] | None = None) -> int:
+    with _remote_materialization_lock(remote, target_path):
+        return _apply_uncommitted_unlocked(
+            remote, target_path, project_root, diff_text, untracked,
+            include_paths,
+        )
+
+
+def update_target_to(remote: dict, target_path: str, sha: str, *,
+                     project_root=None, diff_text: str = "",
+                     untracked: list[str] | None = None,
+                     include_paths: list[str] | None = None) -> int:
+    """Reset and publish one dirty overlay under one source lock."""
+    with _remote_materialization_lock(remote, target_path):
+        _reset_target_to_unlocked(remote, target_path, sha)
+        if project_root is None:
+            return 0
+        return _apply_uncommitted_unlocked(
+            remote, target_path, project_root, diff_text,
+            list(untracked or ()), include_paths,
+        )
 
 
 DEFAULT_MCP_PORT = 9174

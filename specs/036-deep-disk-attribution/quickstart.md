@@ -99,11 +99,22 @@ largest findings as JSON. The cancellation command is a non-mutating test seam;
 the MCP equivalent is `resource_status(deep=true, cancelled=true)`. `./sb
 status` must continue to report the current instance normally.
 
+That MCP boolean is only a deterministic pre-cancellation seam. Do not treat it
+as proof that client cancellation or transport loss reaches an in-flight tool;
+T040 remains open until a reviewed MCP request-lifecycle authority is wired.
+
+For an in-flight CLI request, `SIGINT` sets the request-owned signal instead of
+discarding already completed evidence. A remote transport that loses delivery
+uses `disconnected`; a delivered valid partial payload remains usable, while
+total transport loss stays explicit and unavailable for capacity decisions.
+
 ## Done gate
 
 - Focused resource tests pass.
 - Full repository tests pass.
 - Local and named-remote read-only deep status are contract-bounded to budget
   plus five seconds; record actual timing separately before claiming live proof.
+- Deterministic cancellation coverage does not replace the named-remote live
+  acceptance run required by T045.
 - Existing status/plan/cleanup behavior remains compatible.
 - No packages, files, processes, mounts, privileges, or cleanup state changed.

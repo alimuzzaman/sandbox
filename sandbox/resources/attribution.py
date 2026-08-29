@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any, Iterable
 
 from sandbox.services.process import ProcessResult
 
-from .models import redact
+from .models import ResourceRequest, resource_cancellation_signal, redact
 
 
 DEEP_STATES = frozenset({"complete", "partial"})
@@ -1492,17 +1493,35 @@ class DeepAttributionCollector:
         self.which = which
         self.system = system
         self.monotonic = monotonic
+        self._cancellation = resource_cancellation_signal()
+        try:
+            parameters = inspect.signature(self.runner.run).parameters.values()
+            self._runner_accepts_cancellation = any(
+                item.name == "cancellation" or item.kind == item.VAR_KEYWORD
+                for item in parameters
+            )
+        except (TypeError, ValueError):
+            self._runner_accepts_cancellation = False
+
+    def _terminal_state(self) -> str | None:
+        return self._cancellation.terminal_status()
 
     def _run(self, argv, deadline: float, maximum: float):
         command = tuple(str(item) for item in argv)
+        if self._terminal_state() is not None:
+            return ProcessResult(command, 130, "", "request ended")
         remaining = deadline - self.monotonic()
         if remaining <= 0:
             return ProcessResult(command, 124, "", "overall deadline exhausted")
         timeout = min(remaining, maximum)
-        return self.runner.run(command, timeout=timeout)
+        kwargs = {"timeout": timeout}
+        if self._runner_accepts_cancellation:
+            kwargs["cancellation"] = self._cancellation
+        return self.runner.run(command, **kwargs)
 
-    @staticmethod
-    def _state(returncode: int) -> str:
+    def _state(self, returncode: int) -> str:
+        if returncode == 130:
+            return self._terminal_state() or "cancelled"
         return "timed_out" if returncode == 124 else "unavailable"
 
     def _directory_cache_path(self) -> Path:
@@ -1608,6 +1627,9 @@ class DeepAttributionCollector:
         cancelled=False,
         directory_cache: str | None = None,
     ) -> DeepAttribution:
+        self._cancellation = ResourceRequest(
+            float(budget_seconds), cancelled,
+        ).cancellation
         started = self.monotonic()
         deadline = started + max(float(budget_seconds), 0.0)
         managed_roots = tuple(
@@ -1690,8 +1712,11 @@ class DeepAttributionCollector:
         cache_mode = str(directory_cache or "auto")
         cache_now = time.time()
 
+        def terminal_state() -> str | None:
+            return self._terminal_state()
+
         def is_cancelled() -> bool:
-            return bool(cancelled() if callable(cancelled) else cancelled)
+            return terminal_state() is not None
 
         for index, row in enumerate(rows):
             mount = row["mount_point"]
@@ -1748,7 +1773,11 @@ class DeepAttributionCollector:
                 mount, mode=cache_mode, now=cache_now,
             ) if selected else None
             if selected and is_cancelled():
-                status, reason = "cancelled", "request_cancelled"
+                status = terminal_state() or "cancelled"
+                reason = (
+                    "request_disconnected" if status == "disconnected"
+                    else "request_cancelled"
+                )
             elif selected and filesystem_scope_id in scanned_filesystems:
                 status = "not_selected"
                 reason = "duplicate_filesystem_mount"
@@ -2172,7 +2201,11 @@ class DeepAttributionCollector:
             for value in values:
                 filesystem_by_device[value] = filesystem.filesystem_id
         if is_cancelled():
-            deleted_status, deleted_reason = "cancelled", "request_cancelled"
+            deleted_status = terminal_state() or "cancelled"
+            deleted_reason = (
+                "request_disconnected" if deleted_status == "disconnected"
+                else "request_cancelled"
+            )
         elif lsof_path and self.monotonic() < deadline:
             result = self._run((
                 *prefix, lsof_path, "-nP", "-FpcfDitsn", "+L1",
@@ -2221,7 +2254,10 @@ class DeepAttributionCollector:
                 "elevated" if elevated else
                 "unprivileged" if lsof_path else "unavailable"
             ),
-            status=deleted_status,
+            status=(
+                "partial" if deleted_status in {"cancelled", "disconnected"}
+                else deleted_status
+            ),
             limitations=(
                 ("darwin_link_count_requires_deleted_marker",)
                 if self.system() == "Darwin" else ()
@@ -2255,7 +2291,11 @@ class DeepAttributionCollector:
         )
         if docker_result is None:
             logical_bytes = 0
-            docker_status, docker_reason = "cancelled", "request_cancelled"
+            docker_status = terminal_state() or "cancelled"
+            docker_reason = (
+                "request_disconnected" if docker_status == "disconnected"
+                else "request_cancelled"
+            )
         elif docker_result.returncode == 0:
             docker_findings, logical_bytes = parse_docker_disk_usage(
                 docker_result.stdout,
@@ -2265,14 +2305,21 @@ class DeepAttributionCollector:
         else:
             logical_bytes = 0
             docker_status = self._state(docker_result.returncode)
-            docker_reason = "docker_accounting_unavailable"
+            docker_reason = (
+                "request_disconnected" if docker_status == "disconnected"
+                else "request_cancelled" if docker_status == "cancelled"
+                else "docker_accounting_unavailable"
+            )
         capabilities.append(CapabilityObservation(
             category="container_storage",
             name="docker_system_df",
             version=None,
             fallback=False,
             privilege="unprivileged",
-            status=docker_status,
+            status=(
+                "partial" if docker_status in {"cancelled", "disconnected"}
+                else docker_status
+            ),
             limitations=("logical_engine_accounting",),
         ))
         coverage.append(CoverageObservation(

@@ -16,8 +16,9 @@ and visible:
 - one new **`sb resources monitor`** action that measures, classifies, writes a durable
   last-run record, optionally runs the safe tier, and optionally reaps — the exact command
   the timer runs;
-- a **schedule renderer** that produces systemd (Linux) or launchd (macOS) units for that
-  command and installs nothing, with activation refused unless explicitly confirmed;
+- a **schedule renderer** that produces an activatable bounded systemd unit on Linux or a
+  render-only launchd plan on macOS; launchd activation is refused because its rendered
+  form cannot enforce the configured timeout;
 - **warning output** on `sb resources status`, on `sb doctor` (from the record, never over
   the network), and in the monitor run's own output, always carrying free bytes, free
   share, total, threshold crossed, and the next command;
@@ -72,7 +73,7 @@ new/changed policy surfaces and one new CLI action.
 | I. Per-project is the only instance model | Not engaged. This feature is host-scoped (`scope="global"` command, like `resources` already is) and never resolves or boots an instance. The `sb doctor` addition reads records only and adds no instance dependency. |
 | II. The registry is the single source of truth | Respected. Target resolution goes through the existing remote registry (`sandbox.core._remote.get_remote`); an unknown target is an error naming the target, never a fallback to local (FR-006). |
 | III. Single entry file, modular package | Respected. New code is `sandbox/resources/monitor.py`, `sandbox/resources/schedule.py`, `sandbox/config/storage_monitor.py`; the CLI surface is a new action on the already-registered `resources` command spec. `sb` is untouched. |
-| IV. Live-stack verification is the only proof of done | Satisfied by read-only verification against the real remote `scaleway-sandbox`: render the schedule (installs nothing), run `sb resources monitor --remote scaleway-sandbox --dry-run` and confirm the recorded level, numbers, and "deleted nothing" outcome. No timer is activated there and nothing is deleted. |
+| IV. Live-stack verification is the only proof of done | PENDING (T023). Local tests prove rendering and refusal paths only. No `scaleway-sandbox` monitor or schedule command has been run as evidence, and no timer has been activated. |
 | V. Idempotency and docs-with-code | Respected. The monitor is re-runnable (it rewrites one record); activation is idempotent (an identical existing schedule reports itself); `docs/resource-monitoring.md`, `README.md`, `CLAUDE.md`, and `skills/sandbox-cli/SKILL.md` land in the same commit. |
 | VI. Feature parity before removal | Nothing is removed. `--scope cache|stale` keeps working on CLI and MCP; `tier` is added beside it. `disk_capacity_pressure()` keeps its existing default arguments so 042's callers are unchanged. |
 
@@ -115,7 +116,7 @@ sandbox/
 ├── resources/
 │   ├── reclaim.py             # + resolve thresholds from policy (defaults unchanged)
 │   ├── monitor.py             # NEW: policy resolution, run record store, doctor checks
-│   ├── schedule.py            # NEW: pure unit rendering (systemd + launchd) + activation plan
+│   ├── schedule.py            # NEW: pure rendering, transactional activation, installed-plan receipt
 │   └── reclaim_service.py     # + monitor() orchestration entry point
 ├── commands/
 │   ├── resources.py           # + `monitor` and `schedule` actions, warning rendering

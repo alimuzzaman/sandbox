@@ -1,7 +1,8 @@
 # Plugin Check — first-class WordPress.org compliance gate
 
-Author: drafted 2026-07-09 (design-fidelity-diff session). Status: implemented, unit-
-tested; live-verification pending (see §6). Spec: `specs/013-plugin-check/`.
+Author: drafted 2026-07-09 (design-fidelity-diff session). Status: source-tree and
+exact-archive CLI paths implemented and unit-tested; disposable live verification is
+pending (see §6). Spec: `specs/013-plugin-check/`.
 
 ## 1. What this is
 
@@ -44,7 +45,15 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
   "pluginCheck": {
     "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default: "<slug>.php"
-    "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
+    "baselineFile": "plugin-check-baseline.json", // optional, this is already the default
+    "archive": {                                  // required only with --archive
+      "source": "https://downloads.wordpress.org/plugin/plugin-check.2.0.0.zip",
+      "version": "2.0.0",
+      "sha256": "<64-hex-digest>",
+      "wordpressVersion": "6.8.2",
+      "phpVersion": "8.3",
+      "sandboxRevision": "<40-hex-git-sha>"
+    }
   }
 }
 ```
@@ -113,9 +122,11 @@ Both interfaces return the identical JSON shape:
 }
 ```
 
-## Exact-release archive mode (design-only)
+## Exact-release archive mode (runtime-gated)
 
-The proposed archive command is currently gated and has no CLI implementation:
+The exact-release archive CLI is implemented behind an explicit `--archive` flag.
+The disposable live acceptance matrix is complete; the repository-wide regression
+baseline remains a separate open gate before the related feedback is closed:
 
 ```bash
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
@@ -128,6 +139,44 @@ registry, descriptor, checkout, and baseline are never reused or overwritten.
 The target plugin stays inactive and read-only; only the pinned Plugin Check
 dependency is active, and runtime hooks are not run.
 
+The host-only preflight layer is implemented in
+`sandbox/plugin_check/archive.py`. It opens one regular input with
+`O_NOFOLLOW`, validates every canonical member, hashes the validated manifest,
+and can stream extraction through the same open descriptor. The deterministic
+stdlib fixture corpus and focused tests live in
+`tests/fixtures/plugin_check_archive.py` and
+`tests/test_plugin_check_archive.py`. This layer has no lifecycle, registry, or
+WordPress side effects.
+
+The run-local target builder is implemented in
+`sandbox/plugin_check/target.py`. It writes a fresh owner-only descriptor under
+`SANDBOX_HOME/runtime/plugin-check/<run-id>/`, exposes only that review project
+through `SANDBOX_PROJECT_ROOTS`, forces local Compose metadata, keeps the archive
+plugin inactive/read-only, and activates only the pinned Plugin Check entry.
+It does not start the runtime or rewrite the caller baseline; journaled cleanup
+and CLI integration remain separate gates.
+
+The journal and cleanup primitives are implemented in
+`sandbox/plugin_check/journal.py`. A mode-0600 journal records lifecycle intent
+before each phase, and cleanup checks container, network, volume, runtime,
+registry, extraction, and retained-report planes independently. Any failed or
+unproven plane is retained as `unknown` with `recovery_required: true`; retrying
+the same callbacks through `recover_archive_cleanup` is idempotent. These
+primitives still do not choose Docker/registry operations themselves.
+
+Finding/baseline/artifact helpers are implemented in
+`sandbox/plugin_check/result.py`. They normalize archive findings to the same
+relative `(file, rule)` identity as source checks, refuse a baseline update
+unless all cleanup planes are proven complete, atomically replace only the
+caller baseline, and retain sanitized result/report files below the owner-only
+Sandbox report directory (20 runs or 7 days, whichever is smaller).
+
+Archive mode requires the `pluginCheck.archive` block shown above. The checker URL
+must be HTTPS and end in `.zip`; its version and SHA-256 digest are pinned, as are
+the WordPress and PHP versions. `sandboxRevision` is a 40-hex Git SHA; if omitted,
+the current Sandbox checkout revision is used. Missing or malformed provenance fails
+before the ZIP is opened or any runtime state is created.
+
 Archive mode has an explicit threat-model contract in
 `specs/013-plugin-check/archive-mode-design.md`: exact size/member/path/expansion
 limits, Unicode/case-fold collision checks, traversal and special-file rejection,
@@ -135,9 +184,13 @@ same-descriptor hashing/extraction, run-local `SANDBOX_HOME`, an owner-only
 cleanup journal, per-plane absence receipt, retained artifacts, and pinned
 checker/WP/PHP/Sandbox provenance. Any unknown cleanup plane forces `ok: false`.
 MCP archive support is deferred until it can provide identical artifact, cleanup,
-and failure evidence. Do not treat this design note as permission to add
-`--archive` or close the exact-archive feedback records; fixture, focused tests,
-and disposable live acceptance are still required.
+and failure evidence. The CLI integration and disposable acceptance are now
+complete. Focused and live regressions prove source-tree and archive paths
+produce the same `(file, rule)` baseline identity; the two direct exact-archive
+feedback records are independently verified. A separate repository release
+gate still tracks bounded remote-resource acceptance and the optional MCP
+transport environment. The post-install bootstrap-integrity idea remains a
+separate blocked item until it has its own runtime smoke proof.
 
 ## 5. What changed porting from the reference implementation
 

@@ -72,6 +72,11 @@ class ManagedRuntimeDependencies:
     launcher: Any | None = None
     cleanup: Any | None = None
     grants: Any | None = None
+    credential_repository: Any | None = None
+    credential_broker: Any | None = None
+    credential_supervisor: Any | None = None
+    credential_health: Any | None = None
+    credential_recovery: Any | None = None
 
 
 class ManagedNativeCleanup:
@@ -659,12 +664,25 @@ class ManagedNativeAdapter:
     })
 
     def __init__(self, *, preflight, repository, dependencies=None, launcher=None,
-                 evidence_id=None, proof_candidate_authority=None):
+                 evidence_id=None, proof_candidate_authority=None,
+                 credential_broker=None, credential_supervisor=None,
+                 credential_health=None, credential_recovery=None):
         self.preflight = preflight
         self.repository = repository
         self.dependencies = dependencies
         self.launcher = launcher
         self.evidence_id = evidence_id
+        # These are explicit opt-in seams.  The normal composition path leaves
+        # them absent while managed-native proof remains unproven; no adapter
+        # silently creates a credential path or falls back to Compose.
+        self.credential_broker = (credential_broker if credential_broker is not None
+                                  else getattr(dependencies, "credential_broker", None))
+        self.credential_supervisor = (credential_supervisor if credential_supervisor is not None
+                                      else getattr(dependencies, "credential_supervisor", None))
+        self.credential_health = (credential_health if credential_health is not None
+                                  else getattr(dependencies, "credential_health", None))
+        self.credential_recovery = (credential_recovery if credential_recovery is not None
+                                    else getattr(dependencies, "credential_recovery", None))
         self.proof_candidate = _is_proof_candidate_authority(
             proof_candidate_authority,
         )
@@ -673,6 +691,37 @@ class ManagedNativeAdapter:
     def _owner(request):
         return {"project_root": str(Path(request.project_root).expanduser().absolute()),
                 "label": request.label}
+
+    def credential_request(self, value, *, transport_identity=None):
+        """Use an explicitly composed broker; ordinary adapter operations do not.
+
+        The method is intentionally not registered as a generic runtime
+        capability. A caller must compose a broker and pass the verified local
+        transport identity explicitly; absent wiring is a bounded refusal.
+        """
+        broker = self.credential_broker
+        if broker is None or not callable(getattr(broker, "handle", None)):
+            return {"ok": False, "error": {"code": "credential_broker_unavailable",
+                                             "message": "credential broker is unavailable",
+                                             "retryable": False}}
+        try:
+            return broker.handle(value, transport_identity=transport_identity)
+        except Exception:
+            return {"ok": False, "error": {"code": "credential_broker_failed",
+                                             "message": "credential broker request failed",
+                                             "retryable": False}}
+
+    def credential_recover(self, binding_id, **digests):
+        """Run an explicitly wired restart recovery service, if present."""
+        recovery = self.credential_recovery
+        if recovery is None or not callable(getattr(recovery, "recover", None)):
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "reason": {"code": "credential_recovery_unavailable"}}
+        try:
+            return recovery.recover(binding_id, **digests)
+        except Exception:
+            return {"ok": False, "state": "blocked", "mutated": False,
+                    "reason": {"code": "credential_recovery_failed"}}
 
     @staticmethod
     def _same_owner(value, owner):

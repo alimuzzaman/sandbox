@@ -499,6 +499,92 @@ class TestProxyTransportHealth(unittest.TestCase):
                                return_value=[]):
             self.assertTrue(domains_core._proxy_transport_serving({}))
 
+    def test_explicit_route_health_ignores_unrelated_stale_routes(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "current": {"domain": "current.tst", "tld": "tst"},
+                "stale": {"domain": "stale.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries", return_value=[]), \
+             mock.patch.object(domains_core, "_proxy_container_running", return_value=True), \
+             mock.patch.object(domains_core, "_caddyfile_readable_in_container", return_value=True), \
+             mock.patch.object(domains_core, "_caddyfile_has_route", return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               side_effect=lambda domain, **_kw: domain == "current.tst"), \
+             mock.patch.object(domains_core, "PROXY_CADDYFILE") as caddyfile:
+            caddyfile.exists.return_value = True
+            caddyfile.read_text.return_value = "routes"
+            health = domains_core.sandbox_caddy_health(
+                {}, domains=("current.tst",),
+            )
+        self.assertTrue(health["ok"])
+        self.assertEqual([item["hostname"] for item in health["routes"]],
+                         ["current.tst"])
+
+    def test_exact_route_health_reason_is_shared_with_human_detail(self):
+        observed = {
+            "ok": False, "state": "degraded", "routes": [], "mutated": False,
+            "reason": {"code": "sandbox_caddy_route_unreachable",
+                       "message": "Sandbox Caddy route probe failed for ensured.tst."},
+        }
+        with mock.patch.object(domains_core, "sandbox_caddy_health",
+                               return_value=observed), \
+             mock.patch.object(domains_core, "_published_listener_check",
+                               return_value={"label": "listener overlap observed",
+                                             "hint": "inspect ingress status"}):
+            detail = domains_core._proxy_transport_failure_detail(
+                {}, domains=("ensured.tst",),
+            )
+        self.assertIn(observed["reason"]["code"], detail)
+        self.assertIn("ensured.tst", detail)
+
+    def test_caddyfile_permission_error_is_sanitized(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "demo": {"domain": "demo.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries", return_value=[]), \
+             mock.patch.object(domains_core, "PROXY_CADDYFILE") as caddyfile:
+            caddyfile.exists.return_value = True
+            caddyfile.read_text.side_effect = PermissionError(
+                "token=" + "x" * 5000,
+            )
+            health = domains_core.sandbox_caddy_health(
+                {}, domains=("demo.tst",),
+            )
+        self.assertEqual(health["reason"]["code"],
+                         "sandbox_caddy_health_unavailable")
+        self.assertNotIn("token=", repr(health))
+        self.assertLess(len(health["reason"]["message"]), 100)
+
+    def test_stopped_caddy_is_classified_before_route_unreachable(self):
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "demo": {"domain": "demo.tst", "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries", return_value=[]), \
+             mock.patch.object(domains_core, "_proxy_container_running", return_value=False), \
+             mock.patch.object(domains_core, "_caddyfile_has_route", return_value=True), \
+             mock.patch.object(domains_core, "PROXY_CADDYFILE") as caddyfile:
+            caddyfile.exists.return_value = True
+            caddyfile.read_text.return_value = "route"
+            health = domains_core.sandbox_caddy_health(
+                {}, domains=("demo.tst",),
+            )
+        self.assertEqual(health["reason"]["code"], "proxy_not_running")
+
+    def test_unvalidated_route_hostnames_are_never_copied_to_health_output(self):
+        oversized = "a" * 5002 + ".tst"
+        with mock.patch.object(domains_core, "resolve_instances", return_value={
+                "bad": {"domain": oversized, "tld": "tst"},
+            }), mock.patch.object(domains_core, "_generic_proxy_entries", return_value=[
+                {"domain": oversized, "tld": "tst", "url": "http://localhost:8123"},
+            ]), mock.patch.object(domains_core, "_proxy_container_running", return_value=False), \
+             mock.patch.object(domains_core, "PROXY_CADDYFILE") as caddyfile:
+            caddyfile.exists.return_value = False
+            managed = domains_core.sandbox_caddy_health({})
+            explicit = domains_core.sandbox_caddy_health({}, domains=(oversized,))
+        self.assertNotIn(oversized, repr(managed))
+        self.assertEqual(managed["routes"], [])
+        self.assertNotIn(oversized, repr(explicit))
+        self.assertEqual(explicit["reason"]["code"],
+                         "sandbox_caddy_route_invalid")
+        self.assertLess(len(explicit["reason"]["message"]), 100)
+
 
 class TestProxyMountAndReload(unittest.TestCase):
     """The Caddyfile must stay visible to the container across regeneration."""

@@ -376,4 +376,11 @@ def wp_cli_job_kill(job_id: str, *, project_dir: str, label: str | None = None) 
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
-    return {"ok": True, **kill_job(inst, job_id)}
+    result = kill_job(inst, job_id)
+    if result.get("killed") or result.get("status") in {"completed", "not_found"}:
+        return {"ok": True, **result}
+    return {
+        "ok": False,
+        **result,
+        "error": result.get("error") or "job termination was refused",
+    }

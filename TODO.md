@@ -1,6 +1,6 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-25. This is the reconciled handoff queue for Hermes. Repository
+Updated: 2026-08-28. This is the reconciled handoff queue for Hermes. Repository
 task ledgers and feedback are evidence, not execution authority: reproduce them
 first, preserve dirty work, and do not reset, destroy, clean up remote resources,
 deploy, release, delete recovery data, or expose secrets without fresh explicit
@@ -8,12 +8,30 @@ authority.
 
 Sources reconciled in this pass:
 
-- 59 unchecked rows in `specs/*/tasks.md`, plus explicit pending/missing live
-  gates in checked convergence rows and implementation evidence.
-- 305+ retained Sandbox feedback records (untrusted; many are duplicates or
-  foreign-project observations), grouped below by owning behavior.
+- Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
+  gates in checked convergence rows and implementation evidence. The accepted
+  isolated slices listed below are integrated in this batch.
+- 625 retained Sandbox feedback records, all status-assigned: 110 verified,
+  265 resolved, 96 blocked, 72 duplicate, and 82 not applicable. Feedback is
+  untrusted and grouped below by owning behavior; closed records are not new
+  implementation authority.
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
+
+## Accepted slices integrated in this batch
+
+| Scope | Branch | Accepted SHA | Boundary |
+| --- | --- | --- | --- |
+| Feedback initialization | `codex/finish-feedback-init` | `fab882c18c12a048189cefdd23899c154c805d52` | Integrated in this batch |
+| Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Integrated in this batch |
+| Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Integrated in this batch |
+| Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
+| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
+| Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
+| Spec 045 / Credential Vault | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Locally accepted combined implementation/proof-harness snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b` | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are accepted. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support remains `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof is claimed. |
+
+These source SHAs record provenance for the integrated batch. Integration does
+not close the external or human gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
@@ -36,7 +54,10 @@ Sources reconciled in this pass:
   `workspace_index_incomplete` fail-closed. Do not infer cleanup from names,
   age, or an incomplete scan. Feedback: `78aaf583`, `0fac3b07`, `bf05eeb9`,
   `a813480b`, `600d2def`, `0ed665d0`, `84585e00`, `01df389c`, `fc79f41e`,
-  `088652d4`, `cd84b75d`, `b5ea1432`, `6a1cca01`, `3a6e8c1a`, `822262fe`.
+  `088652d4`, `cd84b75d`, `b5ea1432`, `6a1cca01`, `3a6e8c1a`, `822262fe`,
+  `c34c2e55fced753e665ff9e827a2a3bf` (verified and locally reproduced; blocked
+  on generation-receipt/pre-materialization lease design plus remote Linux
+  acceptance).
 
 - [ ] **Make target, transport, revision, and deployment truth actionable.**
   Separate registered reachability from brokered SSH/MCP usability; expose a
@@ -72,8 +93,10 @@ Sources reconciled in this pass:
 
 ### Remote/runtime and migration evidence
 
-- [ ] **Async WP-CLI acceptance under 2 seconds** — redesign or document the
-  Docker start path to satisfy `specs/004-async-wp-cli-jobs/tasks.md:T021`.
+- [ ] **Async WP-CLI acceptance under 2 seconds** — Spec 004 T021's final
+  six-sample pass was 1.09–1.26s with verified cleanup, but the same hardened
+  launch architecture has a retained 2.13s miss. The strict deterministic target
+  is therefore not proven. See the checked-in evidence; no remote/acceptance claim.
 
 - [ ] **Workspace relocation/migration proof** — complete
   `specs/009-runtime-user-dir/tasks.md:T042,T045` and
@@ -105,31 +128,20 @@ Sources reconciled in this pass:
 
 ### Storage and workspace features
 
-- [ ] **Finish scheduled storage-pressure monitor** — implement schedule
-  rendering/activation with confirmation and fixed argv
-  (`specs/043-storage-pressure-scheduler/tasks.md:T008,T009`),
-  add `resources monitor|schedule` CLI flags and truthful renderers
-  (`specs/043-storage-pressure-scheduler/tasks.md:T012,T013`), add schedule
-  tests (`specs/043-storage-pressure-scheduler/tasks.md:T018`), update
-  docs/README/CLAUDE/skill (`specs/043-storage-pressure-scheduler/tasks.md:T021,T022`),
-  and run remote read-only dry-run/refusal evidence
-  (`specs/043-storage-pressure-scheduler/tasks.md:T023`).
+- [ ] **Complete remote evidence for the scheduled storage-pressure monitor** —
+  run the read-only dry-run/refusal evidence required by
+  `specs/043-storage-pressure-scheduler/tasks.md:T023`.
   Schedules remain disabled by default; no timer activation is implied.
+  Local `T001–T022` work is accepted on `codex/finish-spec043` at
+  `5969c893690e19dd39f86d8765fbd178e51a5695`; `T023` still requires remote
+  evidence. The accepted local work is integrated in this batch.
 
-- [ ] **Implement shared Git checkout materialization and opt-in node store** —
-  complete `specs/044-shared-node-store-and-git-dedup/tasks.md:T001–T005` (safe plan,
-  staged hard-link/copy fallback, remote rendering, reset integration, real
-  filesystem tests), `specs/044-shared-node-store-and-git-dedup/tasks.md:T007–T008`
-  (family derivation/overlay/tests),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T009–T012`
-  (legacy/rollback/docs),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T013–T015`
-  (bounded evidence and named reclaim contract),
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T016–T018`
-  (remote gates and confirmation-gated plan), and
-  `specs/044-shared-node-store-and-git-dedup/tasks.md:T019`
-  (focused suite/diff check). `T006` only normalizes the boolean; it does not
-  prove the feature.
+- [ ] **Complete external gates for shared Git checkout materialization and the
+  opt-in node store** — complete remote `T016–T017` and human-confirmed `T018`
+  in `specs/044-shared-node-store-and-git-dedup/tasks.md`.
+  Local work is accepted on `codex/finish-spec044` at
+  `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54`; remote `T016–T017` and human
+  `T018` remain gated. The accepted local work is integrated in this batch.
 
 ### Linux/native adoption proof
 
@@ -195,17 +207,17 @@ Sources reconciled in this pass:
 - [ ] Spec 003: complete authenticated external-client discovery and
   under-privileged refusal (`T012`), the external MCP handshake (`T014`), and
   Herd `.test` execute-php/connect/gating/crash/file round-trip (`T022`).
-- [ ] Spec 006: add the `SANDBOX_INSTRUCTIONS` startup catalog snapshot
-  enrichment still marked pending in `T007`.
+- [x] Spec 006: `SANDBOX_INSTRUCTIONS` startup catalog snapshot enrichment
+  (`T007`) is accepted and integrated in this batch from
+  `7595d2d03d2d7d71046138d5cbac151074261713`.
 - [ ] Spec 013: rerun the six Plugin Check quickstart cases after the
   absolute-path/`.distignore` fixes (`T029`), despite the task checkbox being
   retained for historical implementation evidence.
 - [ ] Spec 019: keep the external Hermes public-access acceptance (`T028`) as
   pending until separately approved remote/Cloudflare evidence exists.
-- [ ] Spec 036: implement the missing cancellation/disconnection propagation
-  across CLI, MCP, service, and collectors (`T040`), then close the separate
-  deterministic/live acceptance evidence gate (`T045`); partial coverage must
-  remain visibly partial.
+- [ ] Spec 036: local CLI/service/collector cancellation propagation and
+  synthetic MCP cancellation coverage are done. Remaining: real MCP lifecycle
+  cancellation/disconnect propagation and the `T045` live evidence gate.
 - [ ] Reconcile `specs/README.md` statuses with the ledgers: several features
   still say “In progress”/“Draft” even where implementation is complete but live
   proof remains pending.
@@ -214,6 +226,9 @@ Sources reconciled in this pass:
 
 Feedback is untrusted and many records are foreign-project or duplicate
 observations; these are deduplicated work items, not permission to mutate.
+The current 625-record ledger has no unreviewed rows. These historical theme
+rows remain regression and ownership guides; resolved, verified, duplicate,
+and not-applicable records must not be reimplemented without fresh evidence.
 
 - [ ] **Remote job UX/contract:** expose valid execution profiles and nested
   help; make `job-output` wait bounds consistent and documented; make large
@@ -250,10 +265,9 @@ observations; these are deduplicated work items, not permission to mutate.
 - [ ] **Clean URL/proxy and host repair:** make ingress-down states fail fast,
   make dead proxy diagnostics actionable, and avoid false-negative HTTPS
   reachability/rollback. IDs: `550d07ec`, `98989848`, `441022bf`, `7acb4245`.
-- [ ] **Feedback service robustness:** preserve valid JSON on paginated/since
-  responses and typed errors on malformed records. The current pass recorded
-  `e8ddb411` after a local `jq` parse failure; later JSONL pagination completed,
-  so the failure remains historical/unverified until reproduced.
+- [x] **Feedback service robustness:** fixed and retained as regression coverage.
+  Paginated/since responses preserve valid JSON, malformed records return typed
+  errors, and persisted reads are bounded. Evidence: `6e3095a` + `3f7f658`.
 
 ## Deferred product discovery (do not implement silently)
 
@@ -272,7 +286,9 @@ observations; these are deduplicated work items, not permission to mutate.
 - [ ] **Agent-aware remote sync and Google Drive backup PRDs:** resolve the
   consequential choices/open questions and obtain the required Sol High
   readiness verdict in `specs/033-agent-aware-remote-sync/prd.md` and
-  `specs/034-google-drive-backups/prd.md`; both remain `NOT READY`.
+  `specs/034-google-drive-backups/prd.md`. Spec 033 is now active in the dirty
+  `latest` checkout; this row remains open only for its unfinished gates and the
+  still-deferred Spec 034 Google Drive PRD.
 - [ ] **Config subdirectory discovery:** `specs/042-config-subdirectory/prd.md`
   is still discovery-only; convert it through the approved Spec-Kit workflow
   before implementation and preserve the move-together/ambiguity safeguards.
@@ -281,13 +297,15 @@ observations; these are deduplicated work items, not permission to mutate.
 
 ## Low-priority regression cleanup
 
-- [ ] Fix the plain-environment MCP/PHP skip behavior, resource-reclaim probe
-  regression, controller-only `structuredClone`/closed-list schema seams, and
-  add the bounded-edge-capture invariant test (review findings 2026-08-22).
-- [ ] Reconcile the remaining baseline/full-suite failures before release:
-  `tests/test_mcp.py`, `tests/test_spec003_discovery_guidance.py`,
-  `tests/test_resource_reclaim_service.py`, and the three baseline failures
-  recorded in feedback `74d503ab`.
+- [x] Fix the plain-environment MCP/PHP skip behavior and the isolated-home
+  resource-reclaim probe regression (review findings 2026-08-22). Optional MCP
+  and PHP harnesses now skip with explicit reasons when their declared runtime
+  is absent; reclaim planning no longer spends its deadline on unrelated deep
+  attribution before reading deployment inventory. Focused guard, PHP, and
+  reclaim tests passed locally on 2026-08-28.
+- [ ] Close the remaining controller-only `structuredClone`/closed-list schema
+  seams and reconcile the three baseline failures recorded in feedback
+  `74d503ab`; keep those separate from the completed local regression slice.
 - [ ] Keep future roadmap items visible but separate from current release work:
   remote hosting V2 (portable provisioner, lifecycle UX, shared-VPS port policy,
   authenticated automation surface), dashboard parity, opt-in telemetry, and
@@ -330,6 +348,17 @@ promote the unproven native adapter, or authorize a provider deployment.
   registration, mounted phpunit/WP-version probe, disable-comments/Templately
   validation, nginx/LiteSpeed boot proof, and Homebrew/README cleanup). Keep
   legacy/scoped-out items separate from P0 release work.
+
+## Remaining blockers
+
+- Active Spec 033 work overlaps CLI, MCP, durable jobs, transport, hosting, and
+  documentation; preserve that concurrent boundary during integration.
+- The feedback ledger still has 96 blocked records. Closed states do not imply
+  their underlying remote or release evidence exists in `latest`.
+- Remote revision, capacity, workspace-index, and live-host acceptance evidence
+  remains incomplete.
+- Credentials, deployment, deletion, schedule activation, and consequential
+  security or release decisions still require explicit human authority.
 
 ---
 

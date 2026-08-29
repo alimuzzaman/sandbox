@@ -5,12 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shlex
+import signal
+import threading
 import time
+from contextlib import contextmanager
 
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
-from sandbox.resources.context import reclaim_service, resource_service
-from sandbox.resources.models import redact
+from sandbox.resources.context import node_store_service, reclaim_service, resource_service
+from sandbox.resources.models import resource_cancellation_signal, redact
 from sandbox.resources.monitor import record_path, resolve_policy
 
 
@@ -19,6 +23,26 @@ from sandbox.resources.monitor import record_path, resolve_policy
 # deadline so a synchronous caller receives a typed result before its own
 # requested budget expires.
 _REMOTE_PLAN_TRANSPORT_GRACE_SECONDS = 5.0
+
+
+@contextmanager
+def _status_cancellation(initial=False):
+    """Own one request signal and translate SIGINT without killing evidence."""
+    request_signal = resource_cancellation_signal(initial)
+    installed = threading.current_thread() is threading.main_thread()
+    previous = None
+    if installed:
+        previous = signal.getsignal(signal.SIGINT)
+
+        def cancel_request(_signum, _frame):
+            request_signal.cancel()
+
+        signal.signal(signal.SIGINT, cancel_request)
+    try:
+        yield request_signal
+    finally:
+        if installed:
+            signal.signal(signal.SIGINT, previous)
 
 
 def _remaining_status_budget(args, requested_budget: float) -> float:
@@ -105,6 +129,7 @@ def _monitor_invalid_mode(args) -> dict | None:
     invalid = (
         ("--scope", getattr(args, "scope", None) is not None),
         ("--tier", getattr(args, "tier", None) is not None),
+        ("--node-store-family", getattr(args, "node_store_family", None) is not None),
         ("--plan-id", getattr(args, "plan_id", None) is not None),
         ("--confirm", bool(getattr(args, "confirm", False))),
         ("--thorough", bool(getattr(args, "thorough", False))),
@@ -125,6 +150,137 @@ def _monitor_invalid_mode(args) -> dict | None:
                 "invalid_mode",
             )
     return None
+
+
+def _schedule_target(remote: str | None) -> dict[str, str]:
+    """Return the safe, display-only target descriptor for a schedule plan."""
+    if remote:
+        return {"kind": "remote", "name": str(remote)}
+    return {"kind": "local", "name": "local"}
+
+
+def _schedule_envelope(
+    remote: str | None,
+    *,
+    ok: bool,
+    status: str,
+    data: dict | None = None,
+    error: Exception | None = None,
+) -> dict:
+    code = getattr(error, "code", None) if error is not None else None
+    message = str(error).replace("\r", " ").replace("\n", " ").strip() if error else ""
+    if error is not None and (not isinstance(code, str) or not code):
+        code = "schedule_failed"
+    return {
+        "schema_version": 1,
+        "ok": bool(ok),
+        "action": "schedule",
+        "status": status,
+        "target": _schedule_target(remote),
+        "data": data or {},
+        "error": None if error is None else {
+            "code": code,
+            "message": message[:240] or "schedule failed",
+            "retryable": bool(getattr(error, "retryable", False)),
+        },
+    }
+
+
+def _schedule_invalid_mode(args) -> dict | None:
+    """Reject non-schedule options before policy or scheduler resolution."""
+    from sandbox.resources.schedule import ScheduleError
+
+    invalid = (
+        ("--scope", getattr(args, "scope", None) is not None),
+        ("--tier", getattr(args, "tier", None) is not None),
+        ("--plan-id", getattr(args, "plan_id", None) is not None),
+        ("--thorough", bool(getattr(args, "thorough", False))),
+        ("--deep", bool(getattr(args, "deep", False))),
+        ("--fast", bool(getattr(args, "fast", False))),
+        ("--refresh", bool(getattr(args, "refresh", False))),
+        ("--cancelled", bool(getattr(args, "cancelled", False))),
+        ("--detach", bool(getattr(args, "detach", False))),
+        ("--request-id", bool(getattr(args, "request_id", None))),
+        ("--scheduled", bool(getattr(args, "scheduled", False))),
+        ("--dry-run", bool(getattr(args, "dry_run", False))),
+    )
+    for flag, present in invalid:
+        if present:
+            return _schedule_envelope(
+                getattr(args, "remote", None),
+                ok=False,
+                status="refused",
+                error=ScheduleError(
+                    f"{flag} is valid only for resources status, plan, cleanup, or monitor",
+                    "invalid_mode",
+                ),
+            )
+    if bool(getattr(args, "activate", False)) and bool(getattr(args, "deactivate", False)):
+        return _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--activate and --deactivate are mutually exclusive",
+                "invalid_mode",
+            ),
+        )
+    if bool(getattr(args, "confirm", False)) and not (
+        bool(getattr(args, "activate", False)) or bool(getattr(args, "deactivate", False))
+    ):
+        return _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--confirm requires --activate or --deactivate",
+                "invalid_mode",
+            ),
+        )
+    return None
+
+
+def _run_schedule(args) -> dict:
+    """Render or explicitly transition one local storage-monitor schedule."""
+    from sandbox.resources.schedule import (
+        ScheduleError,
+        activate,
+        build_schedule_plan,
+        deactivate_installed,
+    )
+
+    invalid = _schedule_invalid_mode(args)
+    if invalid is not None:
+        return invalid
+    remote = getattr(args, "remote", None)
+    activating = bool(getattr(args, "activate", False))
+    deactivating = bool(getattr(args, "deactivate", False))
+    if (activating or deactivating) and not bool(getattr(args, "confirm", False)):
+        operation = "activating" if activating else "deactivating"
+        return _schedule_envelope(
+            remote, ok=False, status="refused",
+            error=ScheduleError(
+                f"{operation} a storage-monitor timer is a protected operation; re-run with --confirm",
+                "protected_operation",
+            ),
+        )
+    if deactivating:
+        # Removal authority comes from the explicit confirmation plus the
+        # persisted installed-plan receipt.  Current remote policy may have
+        # changed or the remote may have been removed entirely.
+        return deactivate_installed(
+            _schedule_target(remote), confirm=True,
+        )
+    try:
+        # Policy resolution validates the named remote but never constructs a
+        # host-facing service.  A schedule therefore remains install-local.
+        policy = resolve_policy(remote)
+        plan = build_schedule_plan(policy, _schedule_target(remote))
+    except Exception as exc:
+        return _schedule_envelope(remote, ok=False, status="refused", error=exc)
+    if activating:
+        return activate(plan, confirm=True)
+    return _schedule_envelope(remote, ok=True, status="planned", data=plan)
 
 
 def _run_monitor(args) -> dict:
@@ -167,7 +323,9 @@ def _run_monitor(args) -> dict:
 
 def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
-    parser.add_argument("action", choices=("status", "plan", "cleanup", "monitor"))
+    parser.add_argument(
+        "action", choices=("status", "plan", "cleanup", "monitor", "schedule")
+    )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
     parser.add_argument(
@@ -222,6 +380,10 @@ def configure_parser(parser) -> None:
     # job-status/job-output rather than invoking the worker directly.
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-id", default=None)
+    parser.add_argument(
+        "--node-store-family", default=None,
+        help="exact canonical Compose family for named node-store plan/apply",
+    )
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument(
         "--scheduled",
@@ -232,6 +394,16 @@ def configure_parser(parser) -> None:
         "--dry-run",
         action="store_true",
         help="observe capacity and retention candidates without deleting",
+    )
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="schedule only: install and enable the rendered monitor unit (requires --confirm)",
+    )
+    parser.add_argument(
+        "--deactivate",
+        action="store_true",
+        help="schedule only: disable and remove the rendered monitor unit (requires --confirm)",
     )
     parser.add_argument("--json", action="store_true")
 
@@ -401,10 +573,72 @@ def _emit_monitor(payload: dict, as_json: bool) -> None:
             )
 
 
+def _emit_schedule(payload: dict, as_json: bool) -> None:
+    """Render a schedule plan or lifecycle result without hiding paths."""
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    target = payload.get("target") or {}
+    name = target.get("name", "unresolved")
+    print(f"resources schedule: {payload.get('status', 'unknown')} ({name})")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        print(f"  {error.get('code', 'schedule_failed')}: {error.get('message', 'schedule failed')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return
+    if "enabled" in data:
+        print(f"  enabled: {str(bool(data.get('enabled'))).lower()}")
+    if data.get("platform"):
+        print(f"  platform: {data['platform']}")
+    if data.get("calendar"):
+        cadence = f"{data['calendar']}"
+        if data.get("randomized_delay"):
+            cadence += f" (randomized delay {data['randomized_delay']}"
+            if data.get("timeout") and data.get("timeout_enforced") is not False:
+                cadence += f", timeout {data['timeout']}"
+            cadence += ")"
+        print(f"  cadence: {cadence}")
+    if data.get("timeout_enforced") is False:
+        print("  timeout: unenforceable on this platform; activation refused")
+    command = data.get("command")
+    if isinstance(command, list):
+        print(f"  command: {shlex.join(str(item) for item in command)}")
+    paths = data.get("paths")
+    if isinstance(paths, dict):
+        for key, value in paths.items():
+            if isinstance(value, str):
+                label = "would write" if payload.get("status") == "planned" else key
+                print(f"  {label}: {value}")
+    for label, key in (("activate", "activate_command"), ("deactivate", "deactivate_command")):
+        if label == "activate" and data.get("activation_supported") is False:
+            print("  activate: unsupported on this platform")
+            continue
+        value = data.get(key)
+        if isinstance(value, list):
+            print(f"  {label}: {shlex.join(str(item) for item in value)}")
+    for label, key in (("written", "paths_written"), ("removed", "paths_removed")):
+        values = data.get(key)
+        if isinstance(values, list):
+            for value in values:
+                print(f"  path {label}: {value}")
+    units = data.get("units")
+    if isinstance(units, dict) and payload.get("status") == "planned":
+        print("  units:")
+        for name, content in units.items():
+            print(f"    {name}:")
+            if isinstance(content, str):
+                for line in content.splitlines():
+                    print(f"      {line}")
+
+
 def _emit(payload: dict, as_json: bool) -> None:
     payload = redact(payload)
     if payload.get("action") == "monitor":
         _emit_monitor(payload, as_json)
+        return
+    if payload.get("action") == "schedule":
+        _emit_schedule(payload, as_json)
         return
     if as_json:
         print(json.dumps(payload, sort_keys=True))
@@ -889,6 +1123,25 @@ def cmd_resources(_cfg, args) -> None:
         )
         _emit(payload, bool(args.json))
         raise SystemExit(1)
+    if (getattr(args, "activate", False) or getattr(args, "deactivate", False)) and action != "schedule":
+        from sandbox.resources.schedule import ScheduleError
+        payload = _schedule_envelope(
+            getattr(args, "remote", None),
+            ok=False,
+            status="refused",
+            error=ScheduleError(
+                "--activate and --deactivate are valid only for resources schedule",
+                "invalid_mode",
+            ),
+        )
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
+    if action == "schedule":
+        payload = _run_schedule(args)
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
     if action == "monitor":
         payload = _run_monitor(args)
         _emit(payload, bool(args.json))
@@ -914,6 +1167,36 @@ def cmd_resources(_cfg, args) -> None:
                                 "invalid_mode"),
         ), bool(args.json))
         raise SystemExit(1)
+    if getattr(args, "node_store_family", None):
+        from sandbox.resources.service import ResourceError, result
+        if action not in {"plan", "cleanup"} or args.scope or args.tier:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "--node-store-family is exclusive to node-store plan/cleanup",
+                "invalid_mode",
+            ))
+        elif action == "plan" and args.plan_id:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "node-store plan does not accept --plan-id", "invalid_mode",
+            ))
+        elif action == "plan":
+            payload = node_store_service(getattr(args, "remote", None)).plan(
+                args.node_store_family,
+                budget_seconds=args.budget if args.budget is not None else 30,
+            )
+        elif not args.plan_id:
+            payload = result(False, action, status="refused", error=ResourceError(
+                "node-store cleanup requires --plan-id", "plan_not_found",
+            ))
+        else:
+            payload = node_store_service(getattr(args, "remote", None)).apply(
+                args.plan_id, family=args.node_store_family,
+                confirm=bool(args.confirm),
+                budget_seconds=args.budget if args.budget is not None else 60,
+            )
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
     if getattr(args, "tier", None) and action == "status":
         from sandbox.resources.service import ResourceError, result
         _emit(result(
@@ -979,11 +1262,9 @@ def cmd_resources(_cfg, args) -> None:
             status_kwargs["directory_cache"] = (
                 "cache_only" if fast else "refresh"
             )
-        if args.cancelled:
-            status_kwargs["cancelled"] = True
-        payload = service.status(
-            **status_kwargs,
-        )
+        with _status_cancellation(args.cancelled) as cancellation:
+            status_kwargs["cancelled"] = cancellation
+            payload = service.status(**status_kwargs)
         _restore_requested_budget(payload, requested_budget)
     elif action == "plan":
         if args.cancelled:

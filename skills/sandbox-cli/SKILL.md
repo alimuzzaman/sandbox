@@ -21,6 +21,7 @@ sb resources status --remote scaleway-sandbox --refresh --json
 sb resources status --remote scaleway-sandbox --fast --json
 sb resources monitor --json
 sb resources monitor --remote scaleway-sandbox --scheduled --dry-run --json
+sb resources schedule --remote scaleway-sandbox --json  # render only
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
 # tiered reclamation of deploy-src (classes, reasons, manifest, retention)
@@ -138,6 +139,14 @@ the local last-run record and a dry review plan may be written. Automatic
 reclamation and real reaping are off by default; policy is resolved before any
 host-facing service is constructed. Normal/warning/skipped runs exit zero;
 critical, unknown, refusal, or action failure exits one.
+
+`sb resources schedule` renders a disabled local systemd user service/timer or
+review-only launchd plist for the fixed monitor argv. Rendering writes nothing. Launchd
+activation refuses because it cannot enforce the configured timeout. Installing systemd
+or removing a receipt-bound installation is protected: use `--activate --confirm` or
+`--deactivate --confirm` only after reviewing the target policy and live
+read-only evidence. The target remote is reached by the monitor command, not by
+installing a timer on that host.
 
 Deep status is diagnostic only. `existing_cache_scope` and
 `existing_stale_scope` may reference only eligibility independently established

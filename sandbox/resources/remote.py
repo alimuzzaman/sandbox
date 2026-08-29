@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import subprocess
 from typing import Callable
@@ -589,9 +590,9 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
                 errors=(), capacity_accounted=False, lifecycle=None,
                 active_references=(), allocation_state=None,
                 allocation_pool=None, cleanup_eligible=False,
-                last_observed=None):
+                last_observed=None, engine_identity=None):
     value = {
-        "resource_id": rid(kind, locator),
+        "resource_id": rid(kind, locator + ("\0" + engine_identity if engine_identity else "")),
         "kind": kind,
         "locator": locator,
         "display_name": display,
@@ -2699,22 +2700,27 @@ def scan():
             ("instance_or_job_registry",)
             if owner_protected or project in protected_projects else ()
         )
+        volume_evidence = (
+            tuple(owner_evidence)
+            if (
+                active or project in active_projects
+                or project in protected_projects
+            ) else
+            tuple((*owner_evidence, "registry_and_job_absence"))
+            if lifecycle_complete else
+            tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
+        ) if project else ("ownership_unverified",)
+        engine_identity = str(volume.get("CreatedAt") or "")
+        if engine_identity:
+            volume_evidence = tuple((*volume_evidence, "engine_volume_identity"))
         resources.append(observation(
             "volume", name, name, owner_kind, owner_id,
             classification, state, measured_size,
             measured_size if classification == "stale_candidate" else 0,
             references,
-            (
-                tuple(owner_evidence)
-                if (
-                    active or project in active_projects
-                    or project in protected_projects
-                ) else
-                tuple((*owner_evidence, "registry_and_job_absence"))
-                if lifecycle_complete else
-                tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
-            ) if project else ("ownership_unverified",),
+            volume_evidence,
             (error,) if error else (),
+            engine_identity=engine_identity,
         ))
     for network in inventory["networks"]:
         network_id = network.get("Id")
@@ -3129,6 +3135,7 @@ def inside(path, root):
 def remove():
     kind = REQUEST.get("kind")
     locator = str(REQUEST.get("locator") or "")
+    expected_identity = REQUEST.get("expected_resource_id")
     if kind == "network":
         # A network locator alone cannot prove inactive leases, containers, or
         # jobs.  Keep network recovery in the confirmation-gated workspace
@@ -3151,6 +3158,32 @@ def remove():
         if kind == "download_cache":
             path.mkdir(parents=True, exist_ok=True)
         return {"status": "removed", "reason": "removed"}
+    if kind == "volume":
+        if not isinstance(expected_identity, str) or not re.fullmatch(
+            r"volume-[0-9a-f]{20}", expected_identity
+        ):
+            return {"status": "failed", "reason": "volume_identity_required"}
+        code, out, _err = run(["docker", "volume", "inspect", locator], 20)
+        if code != 0:
+            return {
+                "status": "timed_out" if code == 124 else "failed",
+                "reason": "cleanup_timed_out" if code == 124 else "volume_identity_unavailable",
+            }
+        try:
+            inspected = json.loads(out)
+            if not isinstance(inspected, list) or len(inspected) != 1:
+                raise ValueError
+            current = inspected[0]
+            if not isinstance(current, dict) or current.get("Name") != locator:
+                raise ValueError
+            created_at = current.get("CreatedAt")
+            if not isinstance(created_at, str) or not created_at:
+                return {"status": "failed", "reason": "volume_identity_unavailable"}
+            current_identity = rid("volume", locator + "\0" + created_at)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"status": "failed", "reason": "volume_identity_unavailable"}
+        if current_identity != expected_identity:
+            return {"status": "failed", "reason": "volume_identity_changed"}
     commands = {
         "volume": ["docker", "volume", "rm", locator],
         "container": ["docker", "container", "rm", locator],
@@ -3375,7 +3408,9 @@ class RemoteResourceAdapter:
             )
         return snapshot.target
 
-    def _request(self, entry: dict, request: dict, timeout: float) -> ProcessResult:
+    def _request(
+        self, entry: dict, request: dict, timeout: float, *, cancellation=False,
+    ) -> ProcessResult:
         """Submit a typed service request; never open SSH in production.
 
         ``service_request`` is an injected HTTP transport seam for tests and
@@ -3384,11 +3419,21 @@ class RemoteResourceAdapter:
         if self._service_request is not None:
             execute = self._service_request
             try:
-                result = execute(
-                    entry, "POST /resources",
-                    input_data=json.dumps(request, separators=(",", ":")),
-                    timeout=max(int(timeout), 1),
-                )
+                kwargs = {
+                    "input_data": json.dumps(request, separators=(",", ":")),
+                    "timeout": max(int(timeout), 1),
+                }
+                try:
+                    parameters = inspect.signature(execute).parameters.values()
+                    accepts_cancellation = any(
+                        item.name == "cancellation" or item.kind == item.VAR_KEYWORD
+                        for item in parameters
+                    )
+                except (TypeError, ValueError):
+                    accepts_cancellation = False
+                if accepts_cancellation:
+                    kwargs["cancellation"] = cancellation
+                result = execute(entry, "POST /resources", **kwargs)
             except subprocess.TimeoutExpired as exc:
                 return ProcessResult(("control-http",), 124, "", str(exc))
             return ProcessResult(
@@ -3407,16 +3452,18 @@ class RemoteResourceAdapter:
                              json.dumps(result, separators=(",", ":")), "")
 
     @staticmethod
-    def _cancelled(signal) -> bool:
-        if isinstance(signal, bool):
-            return signal
-        probe = getattr(signal, "is_set", None)
-        if not callable(probe) and callable(signal):
-            probe = signal
-        try:
-            return bool(probe()) if callable(probe) else False
-        except Exception:
-            return False
+    def _terminal(signal) -> str | None:
+        from sandbox.resources.models import ResourceCancellationSignal
+
+        if type(signal) is bool:
+            return "cancelled" if signal else None
+        if type(signal) is not ResourceCancellationSignal:
+            return None
+        return signal.terminal_status()
+
+    @classmethod
+    def _cancelled(cls, signal) -> bool:
+        return cls._terminal(signal) == "cancelled"
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
@@ -3424,10 +3471,11 @@ class RemoteResourceAdapter:
         cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         entry = self._entry()
-        if self._cancelled(cancelled):
+        initial_terminal = self._terminal(cancelled)
+        if initial_terminal is not None:
             return ProviderSnapshot(
                 self.target(), None, (),
-                ({"category": "remote_probe", "status": "cancelled"},),
+                ({"category": "remote_probe", "status": initial_terminal},),
             )
         if progress:
             progress("remote_probe")
@@ -3441,11 +3489,12 @@ class RemoteResourceAdapter:
             "deep": bool(deep),
             "cancelled": self._cancelled(cancelled),
             "directory_cache": directory_cache or "auto",
-        }, budget_seconds + 5)
+        }, budget_seconds + 5, cancellation=cancelled)
         payload = _salvage_payload(response.stdout)
         if payload is None:
-            status = (
-                "timed_out" if response.returncode == 124 else "unavailable"
+            status = self._terminal(cancelled) or (
+                "timed_out" if response.returncode == 124 else
+                "disconnected" if response.returncode != 0 else "unavailable"
             )
             return ProviderSnapshot(
                 self.target(), None, (),
@@ -3459,8 +3508,8 @@ class RemoteResourceAdapter:
         self._target = target
         outcomes = list(payload.get("category_outcomes") or ())
         terminal = None
-        if self._cancelled(cancelled):
-            terminal = "cancelled"
+        if self._terminal(cancelled) is not None:
+            terminal = self._terminal(cancelled)
         elif response.returncode == 124:
             terminal = "timed_out"
         elif response.returncode != 0:
@@ -3573,6 +3622,7 @@ class RemoteResourceAdapter:
             "action": "remove",
             "kind": candidate.kind,
             "locator": candidate.locator,
+            "expected_resource_id": candidate.resource_id,
             "budget_seconds": 60,
         }, 62)
         if response.returncode == 124:
@@ -3659,7 +3709,10 @@ class LocalProbeAdapter:
             "managed_host": True,
             "remote_name": None,
             "focus": None,
-            "deep": True,
+            # Reclaim planning needs lifecycle, workspace, engine, and
+            # deployment inventory. Capacity deep-attribution is unrelated
+            # and can consume the shared deadline before deploy-src is read.
+            "deep": False,
             "directory_cache": directory_cache,
         }, budget_seconds + 5)
         payload = _salvage_payload(response.stdout) or {}

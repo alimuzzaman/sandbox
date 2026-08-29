@@ -10,8 +10,14 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 `./sb wp --async` start a command detached, returning a 16-hex `job_id` immediately;
 `wp_cli_job` / `./sb job` poll incremental output + status; `wp_cli_job_kill` /
 `./sb job --kill` cancel. State is file-based under each instance's bind-mounted
-`.sb-jobs/` (log + status + self-reported pid). Works on Docker (detached
-`compose exec -d`) and herd (host `nohup`). Auto-pruned by age.
+`.sb-jobs/` (log + status + process handle). Docker acceptance starts an
+isolated host supervisor immediately; it owns the slower named `compose run -d`
+transition and every failure/cancel cleanup. Herd keeps its isolated host
+wrapper. Before publishing the normal handle, both paths durably retain a
+validated cleanup receipt containing the owned PID/PGID and, for Docker, the
+exact named-container identity. Poll and kill use that receipt to retry cleanup;
+probe failure never becomes terminal state. Both paths return only after a
+durable running handle exists and are auto-pruned by age.
 
 ## Technical Context
 
@@ -27,7 +33,7 @@ Add a background-execution mode to the WP-CLI surface: `wp_cli(async=true)` and
 
 **Project Type**: host CLI/MCP extension (single-entry `sb` + `sandbox/` package + `mcp/wp-server/`).
 
-**Performance Goals**: async start returns in <~2s; poll is O(slice) via byte offset.
+**Performance Goals**: async acceptance returns in <2s; poll is O(slice) via byte offset.
 
 **Constraints**: async is only an execution mode for `wp` (no widened command set); job_id strictly validated (`^[a-f0-9]{16}$`) before any path use; artifacts gitignored.
 
@@ -54,7 +60,7 @@ No violations — proceed.
 ```text
 specs/004-async-wp-cli-jobs/
 ├── plan.md
-├── research.md          # launch mechanism per driver, pid self-report, prune policy
+├── research.md          # launch mechanism, verified handles, cleanup, prune policy
 ├── data-model.md        # Job + artifacts state machine
 ├── quickstart.md        # live async/poll/kill verification
 ├── contracts/
@@ -83,9 +89,9 @@ No constitution violations — none.
 
 ## Phase 0 — Research
 
-See [research.md](./research.md): detached launch per driver (Docker `exec -d`
-vs herd `nohup`), pid self-report to enable cancel, the file-based state machine,
-and the prune policy.
+See [research.md](./research.md): detached launch per driver (Docker supervisor
+to named container vs Herd new-session wrapper), authority-recorded handles,
+tri-state cleanup evidence, the file-based state machine, and the prune policy.
 
 ## Phase 1 — Design & Contracts
 

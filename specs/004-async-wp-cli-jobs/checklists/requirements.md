@@ -31,5 +31,6 @@
 
 ## Notes
 
-- Implementation detail (detached container exec vs host nohup, PID self-report to a
-  per-job file, log-slice fseek mechanics, prune timing) deferred to `plan.md`.
+- Implementation detail (Docker supervisor/container handoff, Herd new-session
+  wrapper, authority-recorded internal handles, log-slice mechanics, prune timing)
+  deferred to `plan.md`.

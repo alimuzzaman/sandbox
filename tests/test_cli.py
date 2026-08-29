@@ -28,6 +28,11 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_host_help_advertises_sync_action(self):
+        result = run_sb("host", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sync", result.stdout)
+
     def test_remote_instance_control_flags_reach_registered_handlers(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate
@@ -296,6 +301,37 @@ class TestResolutionGate(unittest.TestCase):
             cli.main()
 
         self.assertEqual(observed, [({}, "/tmp/project")])
+        compose.assert_not_called()
+        env.assert_not_called()
+        auto_migrate.assert_not_called()
+        finalize.assert_not_called()
+
+    def test_archive_plugin_check_skips_global_writes_before_handler(self):
+        """Archive mode owns its run-local lifecycle from the first dispatch."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(sys, "argv", [
+                "sb", "plugin-check", "--project-dir", "/srv/fixture",
+                "--archive", "release.zip", "--json",
+        ]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "plugin-check": lambda cfg, args: observed.append((cfg, args)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance",
+                                  side_effect=AssertionError("controller cwd consulted")), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][1].archive, "release.zip")
+        self.assertTrue(observed[0][1].json)
         compose.assert_not_called()
         env.assert_not_called()
         auto_migrate.assert_not_called()
@@ -654,7 +690,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 89)
+        self.assertEqual(len(COMMANDS), 90)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 
@@ -843,6 +879,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--source-ref", r.stdout)
         self.assertIn("--deploy-timeout", r.stdout)
+
+    def test_remote_help_exposes_bounded_runtime_upload_timeout(self):
+        r = run_sb("remote", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--upload-timeout", r.stdout)
+        self.assertIn("1-7200", r.stdout)
 
     def test_wp_payload_stdout_is_clean_and_diagnostics_use_stderr(self):
         import sandbox.commands.wp as command

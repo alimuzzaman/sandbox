@@ -211,9 +211,10 @@ class ResourceService:
         }
         if deep_attribution is not None:
             states.update(item.status for item in deep_attribution.coverage)
-        if request.is_cancelled() or "cancelled" in states:
+        signal_status = request.terminal_status()
+        if signal_status == "cancelled" or "cancelled" in states:
             return "cancelled"
-        if "disconnected" in states:
+        if signal_status == "disconnected" or "disconnected" in states:
             return "disconnected"
         return None
 
@@ -227,10 +228,11 @@ class ResourceService:
         started = self.clock().astimezone(timezone.utc)
         observe = self.adapter.observe
         supports_cancellation = self._supports_keyword(observe, "cancelled")
-        if request.is_cancelled() and not supports_cancellation:
+        if request.is_terminal() and not supports_cancellation:
             raise ResourceError(
-                "resource measurement was cancelled before provider execution",
-                "request_cancelled",
+                "resource measurement ended before provider execution",
+                "measurement_disconnected" if request.terminal_status() == "disconnected"
+                else "request_cancelled",
             )
         observe_kwargs = {
             "thorough": bool(thorough or deep),
@@ -240,7 +242,7 @@ class ResourceService:
             "deep": bool(deep),
         }
         if supports_cancellation:
-            observe_kwargs["cancelled"] = cancelled
+            observe_kwargs["cancelled"] = request.cancellation
         if directory_cache and self._supports_keyword(observe, "directory_cache"):
             observe_kwargs["directory_cache"] = directory_cache
         snapshot = observe(**observe_kwargs)
@@ -295,10 +297,11 @@ class ResourceService:
                 reclaim=_reclaim_report(snapshot, None),
             )
         if snapshot.capacity is None:
-            if request.is_cancelled():
+            if request.is_terminal():
                 raise ResourceError(
-                    "resource measurement was cancelled",
-                    "request_cancelled",
+                    "resource measurement ended before capacity was available",
+                    "measurement_disconnected" if request.terminal_status() == "disconnected"
+                    else "request_cancelled",
                 )
             raise ResourceError(
                 "host capacity could not be measured",

@@ -828,6 +828,7 @@ print(record.workspace_id, flush=True)
              patch.object(cli, "write_env_for_compose",
                           side_effect=lambda *_a, **_k: compose_writes.append("env")), \
              patch.object(resources, "resource_service", return_value=service), \
+             patch.object(resources.time, "monotonic", return_value=100.0), \
              patch.dict(os.environ, {migrate._AUTO_FINALIZE_ENV: "1"}, clear=False), \
              redirect_stdout(io.StringIO()):
             cli.main(invocation_started_monotonic=100.0)

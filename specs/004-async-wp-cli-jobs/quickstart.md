@@ -15,6 +15,11 @@ Expect: prints a 16-hex `job_id` in <~2s; the command keeps running.
 (MCP: `wp_cli(command="eval 'sleep(30);'", background=true, project_dir=…)` —
 the param is `background`, not the reserved word `async`.)
 
+Docker returns after a live isolated launch supervisor and durable running
+handle exist; it does not wait for the slower named WP-CLI container creation.
+The checked-in local measurement transcript is in
+[`evidence/local-docker-timing-2026-08-28.md`](./evidence/local-docker-timing-2026-08-28.md).
+
 ## 2. Poll to completion (incremental)
 
 - `wp_cli_job(job_id, project_dir=…)` → `status:"running"` with partial `stdout`.
@@ -37,8 +42,14 @@ exit_code `143`. Killing it again → no-op, no error.
 
 ## 5. Driver parity
 
-Repeat steps 1–3 on a **herd** instance (host `nohup` path) and confirm identical
+Repeat steps 1–3 on a **herd** instance (host new-session wrapper) and confirm identical
 behavior.
+
+If Docker process/container observation is unavailable, polling must remain
+non-terminal and kill must report that termination could not be verified. Never
+interpret that result as completion or retry the WP command under a new job ID.
+Marker-publication failures retain a private cleanup receipt; a later poll/kill
+retries only its validated PGID and exact Docker job name until cleanup is proven.
 
 ## 6. Safety
 

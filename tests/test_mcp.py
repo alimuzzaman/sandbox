@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +52,25 @@ def require_mcp_venv(testcase) -> None:
         testcase.skipTest("MCP venv not built (run: ./sb mcp-install)")
     elif not mcp_venv_ready():
         testcase.skipTest("mcp package unavailable in MCP venv")
+
+
+class TestMcpDependencyGuards(unittest.TestCase):
+    def test_missing_mcp_venv_is_an_intentional_skip(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch(__name__ + ".VENV_PY", Path(directory) / "missing-python"):
+            with self.assertRaisesRegex(unittest.SkipTest, "MCP venv not built"):
+                require_mcp_venv(self)
+
+    def test_incomplete_mcp_venv_is_an_intentional_skip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory) / "python"
+            interpreter.touch()
+            with patch(__name__ + ".VENV_PY", interpreter), \
+                    patch(__name__ + ".mcp_venv_ready", return_value=False):
+                with self.assertRaisesRegex(
+                    unittest.SkipTest, "mcp package unavailable"
+                ):
+                    require_mcp_venv(self)
 
 _PROBE = """
 import os, asyncio, json, subprocess, tempfile

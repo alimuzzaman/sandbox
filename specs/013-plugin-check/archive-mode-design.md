@@ -1,7 +1,8 @@
 # Plugin Check exact-archive mode — bounded design
 
-Status: design only. No CLI flag, runtime mutation, or shared image change is
-authorized by this note.
+Status: CLI integration and disposable live acceptance landed; the full
+repository regression gate remains open. No shared image change or MCP archive
+surface is authorized by this note.
 
 This design addresses the blocked exact-release feedback records
 `3f0bc71ac86f145ab9480f5972800a63` and
@@ -10,14 +11,22 @@ This design addresses the blocked exact-release feedback records
 record `bcdb8d8f647df1652727abbcbf616ed4` remain separate acceptance work.
 
 This document is an executable design contract, not an implementation approval.
-Archive mode remains disabled until the limits, isolation journal, fixture corpus,
-and acceptance matrix below are implemented and reviewed.
+Archive mode remains subject to the full-suite and source/archive parity gates
+below; no MCP or shared-image adoption is implied.
 
-Independent Sol High readiness review on 2026-08-26: **not ready for
-implementation**. The review identified missing target identity, inherited-state
-isolation, static-only execution proof, durable cleanup/recovery, exact ZIP
-limits, artifact ownership, report escaping, and pinned provenance. Phase 9 in
-`tasks.md` tracks the resulting convergence work.
+The deterministic fixture corpus, pure single-descriptor preflight, run-local
+target/config builder, owner-only journal/cleanup primitives, and finding/
+baseline/artifact helpers are landed. The CLI integration now wires those pieces
+through a fresh child process with typed failures, pinned provenance, and
+cleanup-gated baseline updates. It does not inspect secrets, inherit global
+config, or mutate a caller project during a normal check. Disposable live
+acceptance, concurrency, and recovery evidence passed on 2026-08-26; a clean
+full-suite baseline and end-to-end source/archive finding-key parity remain open.
+
+Independent Sol High readiness review on 2026-08-26: **implementation gates
+addressed; archive-specific acceptance passed, repository gate pending**. The review identified missing target identity,
+inherited-state isolation, static-only execution proof, durable cleanup/recovery,
+exact ZIP limits, artifact ownership, report escaping, and pinned provenance; Phase
 
 ## Proposed surface
 
@@ -138,7 +147,7 @@ the check itself passed.
 
 ## Result and integration scope
 
-The first archive implementation is CLI-only. The existing MCP
+The archive implementation is CLI-only. The existing MCP
 `run_plugin_check(project_dir, update=False)` contract remains source-tree-only;
 MCP archive support is deferred until an identical artifact, cleanup, and error
 contract can be tested. When implemented, archive results use these typed fields:

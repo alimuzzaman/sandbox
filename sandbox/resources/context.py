@@ -76,3 +76,14 @@ def reclaim_service(remote: str | None = None):
         _LocalReclaimProvider(LocalProbeAdapter(), target), store,
         target=target,
     )
+
+
+def node_store_service(remote: str | None = None):
+    """Build the exact-name node-store plan/apply service."""
+    from sandbox.core._paths import RUNTIME_DIR
+    from .node_store import NodeStoreReclaimService
+
+    service = resource_service(remote)
+    return NodeStoreReclaimService(
+        service.adapter, Path(RUNTIME_DIR) / "resource-plans",
+    )

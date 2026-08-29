@@ -253,14 +253,23 @@ class WorkspaceService:
                     "workspace_ownership_drift",
                     "receipt-backed workspace locator digest changed")
             if action == "reset":
-                if checkout.exists():
-                    if not checkout.is_dir():
-                        raise WorkspaceIndexError(
-                            "workspace_ownership_drift",
-                            "receipt-backed workspace is not a directory")
-                    shutil.rmtree(checkout)
-                shutil.copytree(source_checkout, checkout, symlinks=True)
-                return {"ok": True, "reset": True, "source_restored": True}
+                from sandbox.workspaces.checkout import (
+                    WorkspaceMaterializationError, materialize,
+                    plan_materialization,
+                )
+                try:
+                    receipt = materialize(plan_materialization(
+                        source_checkout, checkout,
+                        source_identity=source_identity,
+                        workspace_label=record.label,
+                    ))
+                except WorkspaceMaterializationError as exc:
+                    raise WorkspaceIndexError(
+                        "workspace_lifecycle_indeterminate",
+                        "receipt-backed workspace reset is indeterminate",
+                    ) from exc
+                return {"ok": True, "reset": True, "source_restored": True,
+                        "materialization": receipt.to_dict()}
             if action == "destroy":
                 if checkout.exists():
                     if not checkout.is_dir():

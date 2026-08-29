@@ -7,7 +7,8 @@
 ```
 
 The exact-release archive extension is intentionally separate from the source-tree
-contract while its isolation work is in design. The proposed, CLI-only shape is:
+contract. Its CLI-only shape and disposable live acceptance are implemented; the
+repository-wide regression gate remains open:
 
 ```text
 ./sb plugin-check --project-dir DIR --archive FILE [--update] [--json]
@@ -18,7 +19,9 @@ relative to the caller project, must be a regular non-symlink ZIP, and is never
 installed into the caller instance. Archive mode uses the typed result and
 cleanup/provenance contract in `archive-mode-design.md`; the current MCP tool
 does not accept an archive and remains source-tree-only until MCP parity is
-implemented and tested.
+implemented and tested. The caller project must declare a pinned
+`pluginCheck.archive` provenance block (checker HTTPS ZIP/version/SHA-256, WordPress
+version, and PHP version; optional Sandbox revision defaults to the current Git SHA).
 
 | Flag | Meaning |
 |---|---|
@@ -89,7 +92,15 @@ on timeout/parse failure).
   "pluginCheck": {
     "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default "<slug>.php"
-    "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
+    "baselineFile": "plugin-check-baseline.json", // optional, this is already the default
+    "archive": {                                  // required only with --archive
+      "source": "https://downloads.wordpress.org/plugin/plugin-check.2.0.0.zip",
+      "version": "2.0.0",
+      "sha256": "<64-hex-digest>",
+      "wordpressVersion": "6.8.2",
+      "phpVersion": "8.3",
+      "sandboxRevision": "<40-hex-git-sha>"
+    }
   }
 }
 ```

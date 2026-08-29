@@ -115,6 +115,8 @@ minting that label). Reconcile an existing named instance with
 NAME`; pass `--project-dir DIR` so an initializer cannot mutate the tooling
 checkout by mistake. For an additional labeled instance, run
 `sb ensure --project-dir DIR --label LABEL --create` explicitly.
+Init treats that exact directory (or the exact current directory when omitted) as its
+maximum root, does not inherit ancestor project markers, and refuses the user home itself.
 
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
@@ -365,6 +367,7 @@ Inspect local or named-remote storage without booting an instance:
 # always-available: capacity plus the cached index, no disk walk
 ./sb resources status --remote scaleway-sandbox --fast
 ./sb resources monitor --remote scaleway-sandbox --scheduled --json
+./sb resources schedule --remote scaleway-sandbox --json   # render only
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -376,6 +379,14 @@ still allowing the local monitor record and review-plan metadata to be written.
 The monitor policy is resolved before any host-facing service is built, and
 warning/normal runs exit 0 while critical, unknown, refused, or failed runs
 exit 1. Automatic reclamation and real reaping are off by default.
+
+`resources schedule` renders a disabled systemd user service/timer on Linux or
+a review-only launchd user plist on macOS. Launchd activation is refused because it cannot
+enforce the configured timeout. Systemd installs nothing unless the operator passes
+`--activate --confirm`; `--deactivate --confirm` removes only the installed receipt-bound
+schedule even after policy drift. The unit always runs the fixed cache-only monitor command, and the
+rendered plan includes its paths and reverse command. No schedule is activated
+by default.
 
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker
@@ -807,6 +818,23 @@ unadvertised. The helper installation and pending live-evidence gate are documen
 host-ingress guide.
 
 ---
+
+## Shared remote workspace storage
+
+Remote job workspaces share only immutable Git object files by hard link; their worktree,
+refs, index, logs, and configuration stay private, with a complete-copy fallback for older or
+unsupported layouts. Generic Compose projects can explicitly set `compose.nodeStore: true`
+to receive one family-scoped `sandbox-nodestore-<family>` volume at `/sandbox-node`, with the
+store and dependency-tree paths inside that same mount. Projects without the opt-in keep the
+legacy overlay byte-for-byte, and BuildKit caches are separate and unchanged. The package
+store is family-shared; each canonical runtime receives its own dependency-tree child so
+sibling workspaces with different dependency versions do not share mutable `node_modules`.
+
+Shared stores are never removed automatically. Use `sb resources plan
+--node-store-family <canonical-family>` first, review its exact volume, size, and running
+mounts, then apply that named plan only with `--confirm`. Wildcards, inferred families, and
+broad volume pruning are unsupported. See [remote hosting](docs/remote-hosting.md) for the
+compatibility, migration, and rollback checklist.
 
 ## Bringing your own CLAUDE.md and skills
 

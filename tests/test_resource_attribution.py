@@ -29,6 +29,7 @@ from sandbox.resources.attribution import (
     select_filesystem_mounts,
 )
 from sandbox.services.process import ProcessResult
+from sandbox.resources.models import ResourceCancellationSignal
 from tests.resource_fixtures import observation
 
 
@@ -510,6 +511,27 @@ class TestDeepAttributionParsers(unittest.TestCase):
 
 
 class TestDeepAttributionCollector(unittest.TestCase):
+    def test_pre_disconnected_collection_launches_no_commands(self):
+        signal = ResourceCancellationSignal()
+        signal.disconnect()
+        runner = FakeRunner([])
+        deep = DeepAttributionCollector(
+            runner,
+            host_root=Path("/fixture"),
+            sandbox_home=Path("/fixture/sandbox"),
+            which=lambda _name: None,
+            monotonic=lambda: 10.0,
+        ).collect(
+            capacity={"total_bytes": 100, "used_bytes": 80,
+                      "available_bytes": 20},
+            budget_seconds=15,
+            cancelled=signal,
+        )
+        self.assertEqual(runner.calls, [])
+        self.assertTrue(any(
+            item.status == "disconnected" for item in deep.coverage
+        ))
+
     def test_expired_deadline_does_not_launch_runner(self):
         runner = FakeRunner([])
         collector = DeepAttributionCollector(

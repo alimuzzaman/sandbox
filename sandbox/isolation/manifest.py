@@ -1,5 +1,24 @@
 """Exact managed-isolation support matrix; proof and code presence stay distinct."""
 
+
+# Feature declarations are intentionally separate from the prerequisite matrix.
+# Registering a capability here records its contract ownership; it does not make
+# the capability available to a runtime or promote an unproven host.
+MANAGED_ISOLATION_CAPABILITIES = ({
+    "capability_id": "outbound_credential_mediation",
+    "runtime": "managed-native",
+    "contract_modules": (
+        "sandbox.isolation.credential_resolver",
+        "sandbox.isolation.credential_binding",
+        "sandbox.isolation.credential_request_broker",
+        "sandbox.isolation.capability_report",
+        "sandbox.runtimes.managed.credential_repository",
+    ),
+    "support_tier": "implemented_unproven",
+    "evidence_id": None,
+    "adoptable": False,
+},)
+
 MANAGED_ISOLATION_MATRICES = ({
     "matrix_id": "ubuntu-24.04-systemd-255",
     "platform": {"id": "ubuntu", "version": "24.04"},

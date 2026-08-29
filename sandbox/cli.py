@@ -730,6 +730,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     pcheck.add_argument("--update", action="store_true",
         help="rewrite the baseline to match current findings exactly, "
              "instead of gating against it")
+    pcheck.add_argument("--archive", default=None, metavar="FILE",
+        help="check an exact-release ZIP in a fresh disposable runtime; "
+             "the archive target is never installed into the caller instance")
     pcheck.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
@@ -810,6 +813,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="required with `remote ssh`: exact operator command to run directly over SSH")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
+    remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
+        default=300, metavar="SECONDS",
+        help="SSH runtime-source upload timeout for provision, up, and confirmed "
+             "service migration (1-7200 seconds; default 300; packaging stays 300)")
 
     deploy_p = sub.add_parser("deploy",
         help="Deploy local project state (committed + uncommitted) to a remote "
@@ -844,12 +851,13 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="explicitly transfer a relative ignored build artifact such as vendor/ (repeatable; sensitive paths rejected)")
     deploy_p.add_argument("--deploy-timeout", dest="deploy_timeout", type=int,
         default=None, metavar="SECONDS",
-        help="bounded Git push timeout for this deploy (1-3600 seconds; default 120)")
+        help="bounded remote-home preflight and Git push timeout for this deploy "
+             "(1-3600 seconds; default 120)")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, apply, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -869,6 +877,18 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--request-id", default=None,
+        help="replay-safe host sync request identity (auto-generated when omitted)")
+    host_p.add_argument("--include", action="append", default=None, metavar="PATH",
+        help="explicit relative source path to include (repeatable; credential-like paths are refused)")
+    host_p.add_argument("--watch", action="store_true",
+        help="keep polling and transfer changed source generations without restarting Compose")
+    host_p.add_argument("--watch-seconds", type=int, default=3600,
+        help="maximum watch duration in seconds (1-86400; default 3600)")
+    host_p.add_argument("--interval", type=float, default=0.25,
+        help="watch polling interval in seconds (0.1-10; default 0.25)")
+    host_p.add_argument("--debounce", type=float, default=0.5,
+        help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
 
@@ -1254,7 +1274,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     # helper re-execs this exact command after staging the data; explicit
     # migration/home commands keep their own dry-run and relocation semantics.
     command_spec = COMMAND_SPECS.get(args.cmd)
-    predispatch_skip = bool(
+    # Exact archive mode owns its complete run-local lifecycle. Skip the
+    # compatibility writers below so merely invoking it cannot regenerate the
+    # caller's global Compose or environment files before host preflight.
+    archive_plugin_check = (
+        args.cmd == "plugin-check" and bool(getattr(args, "archive", None))
+    )
+    predispatch_skip = archive_plugin_check or bool(
         command_spec is not None
         and command_spec.predispatch_policy is not None
         and command_spec.predispatch_policy(args)
@@ -1310,7 +1336,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             bool(getattr(args, "project_dir", None))
             and args.cmd in {
                 "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
-                "plugin-check", "deploy", "wp", "exec",
+                "plugin-check", "deploy", "wp", "exec", "sync",
             }
         )
         if (inner_local_observation or project_routed_with_root) and not explicit:
@@ -1353,7 +1379,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy", "sync"}
     # `apply` reconciles a PROJECT. Without --project-dir it used to fall
     # through to the sandbox.yml setup alias even when the caller had named an
     # instance or was standing inside a project — so `apply --instance X`
@@ -1457,9 +1483,12 @@ Per-project (each plugin carries its own sandbox.config.json):
                 "cd into a registered project, or run `sb init` / `sb ensure` "
                 "to create one."
             )
-            if _known:
-                hint += " Use `sb instances --json` for the global inventory, " \
-                        "or pass `--instance NAME` for a known instance."
+            # Keep the machine-readable recovery contract stable even when the
+            # registry is empty.  The global inventory and explicit selector
+            # are useful guidance in both cases; omitting them made the JSON
+            # shape depend on unrelated host state and broke clients/tests.
+            hint += " Use `sb instances --json` for the global inventory, " \
+                    "or pass `--instance NAME` for a known instance."
             _die_status_resolution(args, "instance_context_missing", message, hint)
     elif inner_local_observation and explicit and chosen not in instances:
         # A named selector remains an explicit selector even when the staged

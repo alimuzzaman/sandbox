@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import time
 from types import SimpleNamespace
@@ -15,7 +16,9 @@ from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
 from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
-from sandbox.resources.models import CleanupCandidate, NetworkLifecycle
+from sandbox.resources.models import (
+    CleanupCandidate, NetworkLifecycle, ResourceCancellationSignal,
+)
 
 
 class TestRemoteResourceAdapter(unittest.TestCase):
@@ -357,6 +360,26 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertIsNone(snapshot.capacity)
         self.assertEqual(snapshot.category_outcomes[0]["status"], "cancelled")
 
+    def test_remote_disconnect_signal_is_shared_and_total_loss_is_explicit(self):
+        signal = ResourceCancellationSignal()
+
+        def service(_remote, _command, *, input_data=None, timeout=0,
+                    cancellation=None):
+            self.assertIs(cancellation, signal)
+            signal.disconnect()
+            return ProcessResult(("control",), 1, "", "connection lost")
+
+        snapshot = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            service_request=service,
+            clock=lambda: NOW,
+        ).observe(thorough=True, budget_seconds=2, cancelled=signal)
+        self.assertIsNone(snapshot.capacity)
+        self.assertEqual(snapshot.category_outcomes, ({
+            "category": "remote_probe", "status": "disconnected",
+        },))
+
     def test_remote_nonzero_interruption_retains_delivered_valid_payload(self):
         payload = {
             "identity": "remote-identity",
@@ -663,6 +686,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertEqual(outcome.status, "removed")
         self.assertIn('"kind":"build_cache"', calls[0])
         self.assertIn('"locator":"bbbbbbbbbbbbbbbbbbbbbbbb"', calls[0])
+        self.assertIn(f'"expected_resource_id":"{item.resource_id}"', calls[0])
         self.assertNotIn("python3", calls[0])
         self.assertNotIn("docker rm", calls[0])
 
@@ -754,6 +778,52 @@ class TestRemoteProbeResilience(unittest.TestCase):
         envelope_at = program.index('"stage": "envelope"')
         self.assertLess(envelope_at, program.index('PHASE = "lifecycle_evidence"'))
         self.assertIn("emit(ENVELOPE)", program)
+
+    def test_remote_volume_remove_refuses_recreated_same_name_identity(self):
+        locator = "sandbox-nodestore-lenzora"
+        expected = "volume-" + hashlib.sha256(
+            (locator + "\0" + "old-created-at").encode()
+        ).hexdigest()[:20]
+        namespace = self._probe_namespace({
+            "action": "remove", "kind": "volume", "locator": locator,
+            "expected_resource_id": expected, "budget_seconds": 60,
+        })
+        calls = []
+        def run(argv, _timeout):
+            calls.append(tuple(argv))
+            return 0, json.dumps([{
+                "Name": locator, "CreatedAt": "new-created-at",
+            }]), ""
+        namespace["run"] = run
+        self.assertEqual(namespace["remove"](), {
+            "status": "failed", "reason": "volume_identity_changed",
+        })
+        self.assertEqual(calls, [("docker", "volume", "inspect", locator)])
+
+    def test_remote_volume_remove_rechecks_identity_immediately_before_exact_remove(self):
+        locator = "sandbox-nodestore-lenzora"
+        created = "created-at"
+        expected = "volume-" + hashlib.sha256(
+            (locator + "\0" + created).encode()
+        ).hexdigest()[:20]
+        namespace = self._probe_namespace({
+            "action": "remove", "kind": "volume", "locator": locator,
+            "expected_resource_id": expected, "budget_seconds": 60,
+        })
+        calls = []
+        def run(argv, _timeout):
+            calls.append(tuple(argv))
+            if argv[:3] == ["docker", "volume", "inspect"]:
+                return 0, json.dumps([{"Name": locator, "CreatedAt": created}]), ""
+            return 0, "", ""
+        namespace["run"] = run
+        self.assertEqual(namespace["remove"](), {
+            "status": "removed", "reason": "removed",
+        })
+        self.assertEqual(calls, [
+            ("docker", "volume", "inspect", locator),
+            ("docker", "volume", "rm", locator),
+        ])
 
     def test_truncated_final_record_still_reports_capacity(self):
         stdout = self._envelope_line() + "\n" + '{"identity":"remote-ide'

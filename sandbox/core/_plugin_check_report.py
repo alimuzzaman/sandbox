@@ -16,7 +16,24 @@ import json
 
 def _esc(s) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+            .replace(">", "&gt;").replace('"', "&quot;")
+            .replace("'", "&#x27;"))
+
+
+def _script_json(value: object) -> str:
+    """Encode JSON safely inside an HTML script/data block.
+
+    Escaping ``<``/``>``/``&`` prevents archive-controlled finding text from
+    terminating the data block with ``</script>``. U+2028/U+2029 are escaped as
+    well for older JavaScript parsers.
+    """
+
+    return (json.dumps(value, ensure_ascii=False)
+            .replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
 
 
 def render_report(findings: list[dict], meta: dict) -> str:
@@ -69,9 +86,9 @@ def render_report(findings: list[dict], meta: dict) -> str:
         items = findings_by_file[fpath]
         rows = "".join(
             f"""
-          <tr class="finding-row" data-type="{it.get('type')}">
-            <td class="col-sev"><span class="sev-dot {'err' if it.get('type') == 'ERROR' else 'warn'}" title="{it.get('type')}"></span></td>
-            <td class="col-line">{it.get('line')}</td>
+          <tr class="finding-row" data-type="{_esc(it.get('type'))}">
+            <td class="col-sev"><span class="sev-dot {'err' if it.get('type') == 'ERROR' else 'warn'}" title="{_esc(it.get('type'))}"></span></td>
+            <td class="col-line">{_esc(it.get('line'))}</td>
             <td class="col-code">{_esc(it.get('code'))}</td>
             <td class="col-msg">{_esc(it.get('message'))}</td>
           </tr>"""
@@ -92,7 +109,7 @@ def render_report(findings: list[dict], meta: dict) -> str:
       </details>""")
     file_groups_html = "".join(file_groups_html_parts)
 
-    findings_json = json.dumps([
+    findings_json = _script_json([
         {"f": f.get("file"), "t": f.get("type"), "c": f.get("code"),
          "l": f.get("line"), "m": f.get("message")}
         for f in findings

@@ -1,8 +1,7 @@
 # Research: Shared node store and hardlinked Git workspaces
 
-This research records design decisions for Spec 044. It is a planning artifact only: the
-checkout helper, Compose overlay, tests, documentation, and live-host evidence described
-below do not exist yet.
+This research records the design decisions used by the local Spec 044 implementation. It
+contains no live-host evidence or release certification.
 
 ## R1 — What part of a Git checkout may be shared?
 
@@ -129,7 +128,7 @@ declared service:
 
 ```text
 SANDBOX_NODE_STORE=/sandbox-node/store
-SANDBOX_NODE_MODULES=/sandbox-node/node_modules
+SANDBOX_NODE_MODULES=/sandbox-node/node_modules/<canonical-runtime-id>
 npm_config_store_dir=/sandbox-node/store
 ```
 

@@ -1,5 +1,24 @@
 # Remote VPS hosting for sandbox instances
 
+## Agent-aware source sync
+
+Use the opt-in one-time path to transfer one credential-screened generation
+without running `host apply` or restarting Compose:
+
+```bash
+./sb host sync --project-dir /path/to/site --environment production \
+  --remote myvps --request-id edit-20260828-01 --json
+```
+
+For a bounded caller-owned watch loop, add `--watch --watch-seconds 3600`.
+Capture is Git-relative and refuses the complete generation when tracked,
+modified, untracked, or explicitly included input looks credential-like. The
+remote replaces only sync-owned files atomically; it preserves Git metadata,
+runtime state, and unknown files. The result reports `restarted: false`.
+
+This is not promotion. A later `host apply --confirm` restores the committed
+revision and performs the controlled Compose, route, and health workflow.
+
 ## 1. What this is
 
 `./sb remote` + `./sb deploy` let you run a sandbox instance on a VPS you already own
@@ -36,12 +55,19 @@ the source of truth for the remote deploy repository and the instance it
 ensures. The global `--instance` selector is rejected for this command rather
 than silently ignored; use the intended project directory explicitly.
 
-The Git push budget defaults to 120 seconds. For a large first-time transfer,
+The remote-home preflight and Git push budget both default to 120 seconds. The
+home is resolved once before any deploy-target mutation. For a large first-time transfer,
 set a bounded value explicitly with `--deploy-timeout SECONDS` (1-3600). Remote
 test/job submissions derive the same budget from their job deadline, retaining
 a 120-second minimum and a 3600-second cap. A push timeout is reported as a
 handled, command-free error; inspect the remote deployment state before replaying
 because the final state is unknown.
+
+Runtime source uploads used by confirmed `remote provision`, `remote up`, and
+`remote service migrate` default to 300 seconds. Set their SSH upload budget
+with `--upload-timeout SECONDS` (1-7200); the local package budget remains fixed
+at 300 seconds. An upload timeout has unknown completion and is never retried
+automatically.
 
 If the managed remote branch has moved independently, deploy fails with the stable
 `remote_branch_diverged` error code. Sandbox never force-pushes that branch. Inspect
@@ -415,7 +441,14 @@ be combined with `--environment` and is rejected for mutating or remote actions.
 it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandbox
 checks the local Git branch and clean-tree policy declared for the target environment.
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
-Compose/init health checks, validates Caddy, and updates only declared DNS records.
+Compose/init health checks, converges Caddy, and updates only declared DNS records.
+The Caddy fragment transaction holds one host-global lock, compares the desired and
+installed fragment digests, and skips validation/reload when both the fragment and
+aggregate import are unchanged. A real change runs separate 30-second validation,
+reload, and active-service observation phases. Their sanitized phase/digest receipts
+are appended to the mode-0600 apply log. Rollback restores the exact previous fragment
+(or its previous absence) and records `rollback_complete`; any failed restore is
+reported as `rollback_incomplete` rather than being presented as recovery.
 `logs` reads a bounded snapshot from the hosted web service and declared background
 services; it does not hold an SSH stream open. If a declared service is absent from
 the deployed Compose configuration, the output includes a bounded `[missing service:
@@ -481,8 +514,13 @@ latest output tail rather than reducing a failed build to a bare timeout message
 
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
-per-service Compose state/health, free disk, image metadata, derived source-revision
-checks, and the protected apply-log path. Missing remote evidence is reported as
+manifest-declared services, profile-aware configured Compose services, running service
+rows, per-service Compose state/health, free disk, image metadata, derived source-revision
+checks for every declared long-lived service, and the protected apply-log path. A
+declared service missing from either Compose configuration or the running set is
+topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
+services are excluded from this long-lived topology comparison. Missing remote evidence
+is reported as
 `unavailable` or `degraded`; the command never mutates the host or prints secrets.
 
 An environment may also protect its public origin with Basic Auth:
@@ -679,7 +717,7 @@ reference. Summary:
 |---|---|
 | `./sb remote add <name> <ssh_url>` | Register a VPS target |
 | `./sb remote list` | Show configured remotes + reachability + provisioned status |
-| `./sb remote provision <name> --control-host <host> --confirm` | Fully automated install + start the remote MCP server over public HTTPS |
+| `./sb remote provision <name> --control-host <host> --confirm [--upload-timeout <seconds>]` | Fully automated install + start the remote MCP server over public HTTPS |
 | `./sb remote provision <name> --control tailscale --confirm` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
 | `./sb remote service <name> --json` | Read-only status shorthand; equivalent to `service status <name>` |
@@ -734,6 +772,55 @@ The migration archive intentionally excludes local-only generated payloads such 
 directory. These artifacts are not imported by the remote Python CLI/MCP service;
 excluding them keeps the supported upload within its bounded transfer window. Project
 source deployment remains a separate operation.
+
+## Shared Git history and opt-in Node package storage
+
+New remote job workspaces copy their worktree and mutable Git metadata privately. Eligible
+content-addressed files below `.git/objects` are hard-linked when the filesystem allows it.
+Cross-device, unsupported, and permission failures fall back to a complete private copy.
+Old-layout workspaces remain valid and reset through their legacy lifecycle until they have
+a materialization receipt; Sandbox does not migrate or delete them automatically.
+
+Generic Compose projects may explicitly opt in with `compose.nodeStore: true` in their
+project-owned configuration. Sandbox never infers this from package files or scripts. The
+generated overlay mounts exactly one Docker-managed volume named
+`sandbox-nodestore-<canonical-family>` at `/sandbox-node` and exports:
+
+```text
+SANDBOX_NODE_STORE=/sandbox-node/store
+SANDBOX_NODE_MODULES=/sandbox-node/node_modules/<canonical-runtime-id>
+npm_config_store_dir=/sandbox-node/store
+```
+
+Each runtime gets a distinct dependency-tree child while the package store remains
+family-shared. The project remains responsible for pointing its dependency tree at
+`$SANDBOX_NODE_MODULES` and removing any project-owned per-workspace dependency mount. The
+BuildKit package cache is unchanged. A consumer that ignores these variables keeps its legacy
+behavior. `compose.nodeStore: false` restores byte-identical legacy overlay generation.
+
+Use this reversible migration order for one reviewed family:
+
+1. Record the source revision, current overlay, named volumes, used-space observations, and
+   source `git status --porcelain`, `git diff --exit-code`, and `git fsck --full` results.
+2. Stop only the selected family, update its project-owned dependency-tree setting, set
+   `compose.nodeStore: true`, and inspect the generated Compose configuration.
+3. Start two disposable sibling workspaces. Confirm the same exact family volume, the three
+   paths above, successful installs, and no store/module content on the host bind.
+4. Keep the old layout until the measured cutover is accepted. Roll back by stopping the
+   family, setting `nodeStore` false, restoring the project-owned dependency mount/command,
+   and starting it again before considering reclaim.
+
+Named reclaim is separate and confirmation-gated:
+
+```sh
+./sb resources plan --node-store-family <canonical-family> --json
+./sb resources cleanup --node-store-family <canonical-family> --plan-id <plan-id> --confirm --json
+```
+
+Apply rechecks running mounts and removes only the exact planned name. A missing volume is an
+idempotent `already_absent` result. Never infer a family, use wildcards, automate this from
+ensure/status/destroy, or use broad volume pruning. Package data is repopulatable by a later
+install, not backed up or losslessly recoverable.
 
 ## 9. Troubleshooting a failed `host apply`
 

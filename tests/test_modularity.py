@@ -148,10 +148,10 @@ class TestModularityInventory(unittest.TestCase):
         self.assertEqual(
             audit_metrics(),
             {
-                "cli_commands": 88,
+                "cli_commands": 90,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "kind_referencing_conditionals": 141,
+                "kind_referencing_conditionals": 168,
             },
         )
 
@@ -159,6 +159,7 @@ class TestModularityInventory(unittest.TestCase):
         self.assertEqual(
             approved_runtime_kind_locations(),
             Counter({
+                ("sandbox/activation/catalog.py", "build_catalog"): 2,
                 ("sandbox/cli.py", "main"): 1,
                 ("sandbox/core/_instances.py", "resolve_instances"): 1,
                 ("sandbox/core/_domains.py", "_generic_proxy_entries"): 1,
@@ -169,6 +170,8 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/commands/instances_cmd.py", "cmd_init"): 2,
                 ("sandbox/commands/instances_cmd.py", "cmd_instance"): 1,
                 ("sandbox/commands/net.py", "cmd_secure"): 1,
+                ("sandbox/commands/activation.py", "invoke"): 1,
+                ("sandbox/commands/activation.py", "observe"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_up"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_down"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_status"): 1,

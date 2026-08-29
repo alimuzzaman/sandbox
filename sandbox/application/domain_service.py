@@ -109,6 +109,18 @@ class DomainService:
             fallback = f"http://localhost:{port}" if port else "http://localhost"
         return config, policy, hostname, fallback
 
+    def route_context(self, project_dir: str, *, label: str = "default") -> dict[str, Any]:
+        """Return the bounded project route scope shared by ingress diagnostics."""
+        try:
+            _config, _policy, hostname, _fallback = self._context(project_dir, label)
+        except Exception:
+            return {"ok": False, "domains": (), "mutated": False,
+                    "reason": {"code": "project_route_context_unavailable",
+                               "message": "The project route context is unavailable."}}
+        return {"ok": True, "domains": (hostname,), "mutated": False,
+                "reason": {"code": "project_route_context_ready",
+                           "message": "The project route context is ready."}}
+
     def status(self, project_dir: str, *, label: str = "default") -> DomainResult:
         try:
             _config, policy, hostname, fallback = self._context(project_dir, label)

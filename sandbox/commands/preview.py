@@ -171,12 +171,14 @@ def cmd_preview(cfg, args) -> None:
             die(f"remote preview '{preview_id}' already exists")
         target = remote.ensure_deploy_repo(entry, root)
         sha = remote.push_commits(entry, root, target, branch)
-        remote.reset_target_to(entry, target, sha)
         dirty, untracked = remote.capture_uncommitted(root)
         untracked = list(dict.fromkeys([
             *untracked, *remote.deploy_project_descriptor_files(root),
         ]))
-        remote.apply_uncommitted(entry, target, root, dirty, untracked)
+        remote.update_target_to(
+            entry, target, sha, project_root=root,
+            diff_text=dirty, untracked=untracked,
+        )
         instance = remote.ensure_remote_instance(entry, target, label)
         reconciled = remote.reconcile_remote_instance(entry, target, label)
         if reconciled.get("instance") != instance.get("instance"):

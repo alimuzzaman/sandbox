@@ -10,8 +10,16 @@
   `{ ok, job_id, status:"running" }`; it never waits for the WP command's
   completion. The CLI equivalent is `./sb wp --async <args>`.
 - No PID is returned to callers. The per-job `.pid` artifact is an internal
-  cancellation handle; on Herd it is written immediately from the spawned
-  wrapper PID to avoid an immediate-poll/cancel race.
+  cancellation handle. Herd records the wrapper group. Docker records
+  `launch:<supervisor-pid>` before return, then atomically changes it to
+  `container` after named-container acceptance. Both states support immediate
+  poll/cancel without minting another job ID.
+- Before publishing that normal handle, Sandbox durably records a private,
+  validated cleanup receipt binding PID/PGID and the exact Docker container name.
+  A marker-publication failure retains this ownership until status/kill proves
+  the whole group and container absent; callers cannot supply the receipt. The
+  receipt never authorizes a signal by itself: exact current launcher identity
+  must also match, otherwise cleanup remains refused/non-terminal.
 
 ### `wp_cli_job(job_id, offset=0, limit=1048576, *, project_dir)`
 - Validates `job_id`; returns `{ ok, job_id, status, exit_code?, stdout, bytes_read, truncated }`.
@@ -19,13 +27,18 @@
 
 ### `wp_cli_job_kill(job_id, *, project_dir)`
 - Herd sends `SIGTERM` to the wrapper process **group**. Docker force-removes
-  the detached job container (and therefore its children). A `143` status is
-  written only after the process group/container is verified gone.
+  the detached job container (and therefore its children). During Docker launch,
+  it also stops the identity-checked supervisor. A `143` status is written only
+  after the entire applicable process group and exact named container are both
+  observed absent. Leader exit alone is not completion evidence.
 - A cancelled job reports `status:"completed"` with `exit_code:143` (the `.status` file is present = done); "cancelled" is a human-facing interpretation, not a distinct query status (analysis F2).
 - Killing a finished/unknown job → `{ ok, status }` no-op (no error).
-- Polling reconciles a known job whose process/container died before writing
-  `.status` into a durable non-zero completion rather than reporting it as
-  running forever.
+- A live cleanup refusal, unknown identity, or unverified termination is not an
+  "already finished" no-op: CLI exits nonzero with the bounded reason and MCP
+  returns `ok:false`. Only `killed:true`, `completed`, and `not_found` are success.
+- Polling reconciles only a definitely dead, published execution boundary. A
+  timeout, OS error, malformed observation, or container absence before the
+  `launch`→`container` transition is unknown and remains non-terminal.
 
 ## CLI (`sandbox/commands/`)
 
@@ -61,7 +74,13 @@ orphaned. `.sb-jobs/` is the same directory on host
 and container via the bind-mount (gotcha #3 — same absolute path inside the
 container), so the host reader and the wrapper resolve identical files (F7).
 
-- **Docker**: `compose run -d --name <job-name> --entrypoint sh wpcli -c 'echo $$ > …pid; wp <args> > …log 2>&1; echo $? > …status'`. The container itself is the cancellation boundary.
+- **Docker**: an isolated host supervisor is the acceptance/cancellation
+  boundary while it runs `compose run -d --name <job-name> --entrypoint sh
+  wpcli -c 'wp <args> > …log 2>&1; echo $? > …status'`. It traps cancellation,
+  cleans the exact named container, verifies exact absence, and only then records
+  cancellation or launch failure. Cleanup uncertainty remains observable and
+  retryable. After successful creation, the named container becomes the
+  cancellation boundary.
 - **Herd**: Python spawns `sh -c '<same wrapper>'` from `<wp_root>` with
   `start_new_session=True` and records the returned wrapper PID immediately.
 - Args shell-quoted per token (`shlex.quote`).

@@ -10,7 +10,7 @@
 - **Detached acceptance →** always supply a replay-safe `--request-id` and retain the returned `job_id`. Empty or malformed output is `acceptance_unknown`, never success; perform a read-only ledger lookup before an idempotent replay and never launch a second request identity.
 - **Disposable source sync →** require an explicit registered remote, durable
   workspace ID, and replay-safe request. Off/checkpoint never auto-transfer;
-  divergence requires confirmed resolution and shared job source stays read-only.
+  divergence requires confirmed resolution.
 - **Workspace inventory/migration →** use durable `workspace_id`/`project_identity` controls. A migration is metadata-only and plan-bound; unresolved/conflicting legacy records must remain visible and never authorize reset, destroy, or network cleanup.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.

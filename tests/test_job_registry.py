@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
@@ -216,6 +218,29 @@ class JobRegistryTests(unittest.TestCase):
         self.assertTrue(replay)
         self.assertEqual(replayed["job_id"], original["job_id"])
         self.assertIsNone(repo.submission_snapshot(original["job_id"]))
+
+    def test_default_sync_metadata_preserves_legacy_request_digest_and_replay(self):
+        item = submission("legacy-digest")
+        legacy_payload = item.as_dict()
+        for field in (
+                "sync_relationship_id", "sync_generation_id", "source_access",
+                "parallel_safe"):
+            legacy_payload.pop(field)
+        legacy_json = json.dumps(
+            legacy_payload, sort_keys=True, separators=(",", ":"),
+        )
+        legacy_digest = hashlib.sha256(legacy_json.encode()).hexdigest()
+        self.assertEqual(item.canonical_digest(), legacy_digest)
+
+        repo = self.repository()
+        original, _ = repo.accept(item)
+        repo.connection.execute(
+            "UPDATE jobs SET request_digest=?, submission_json=NULL WHERE job_id=?",
+            (legacy_digest, original["job_id"]),
+        )
+        replayed, replay = repo.accept(submission("legacy-digest"))
+        self.assertTrue(replay)
+        self.assertEqual(replayed["job_id"], original["job_id"])
 
     def test_submission_snapshot_rejects_unbounded_compatibility_detail(self):
         from sandbox.jobs.models import JobSubmission, SourceIdentity

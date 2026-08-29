@@ -207,12 +207,6 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--source-identity")
     parser.add_argument("--source-commit")
     parser.add_argument("--source-dirty-digest")
-    parser.add_argument("--sync-relationship-id", help=argparse.SUPPRESS)
-    parser.add_argument("--sync-generation-id", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--source-access", choices=("managed_read_only", "isolated_copy"),
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument("--wait", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("command", nargs="...", help="argv after --")
@@ -402,10 +396,6 @@ def cmd_job_start(_cfg, args) -> None:
         stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
         cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
         execution_policy_provenance=policy.provenance,
-        sync_relationship_id=getattr(args, "sync_relationship_id", None),
-        sync_generation_id=getattr(args, "sync_generation_id", None),
-        source_access=getattr(args, "source_access", None),
-        parallel_safe=(getattr(args, "source_access", None) == "managed_read_only"),
     )
     if target.kind == "remote":
         from sandbox.core import _remote

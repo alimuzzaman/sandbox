@@ -23,6 +23,13 @@ class _Server:
 
 
 class SyncMcpTests(unittest.TestCase):
+    def test_explicit_manifest_declares_every_registered_sync_tool(self):
+        from tools.manifest import BUILTIN_TOOL_NAMES
+
+        self.assertEqual(BUILTIN_TOOL_NAMES["sync"], (
+            "sync_once", "sync_status", "sync_start", "sync_stop", "sync_resolve",
+        ))
+
     def test_group_registers_all_sync_tools_against_one_dependency(self):
         from dependencies import ToolDependencies
         from tools import sync

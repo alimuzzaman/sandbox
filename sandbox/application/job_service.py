@@ -52,7 +52,9 @@ class JobService:
     sync_gateway: Any = None
 
     def submit(self, submission: JobSubmission):
-        if self.sync_gateway is not None and submission.sync_relationship_id is not None:
+        if submission.sync_relationship_id is not None:
+            if self.sync_gateway is None:
+                raise RuntimeError("synchronized_job_authority_unavailable")
             submission = self.sync_gateway.prepare_submission(submission)
         # Production composition supplies the durable workspace boundary.  It
         # must commit ownership before the job repository can acknowledge an

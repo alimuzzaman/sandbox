@@ -31,6 +31,7 @@ class RelationshipCoordinator:
         self._guard = threading.Lock()
         self._inflight: set[str] = set()
         self._recent: dict[str, tuple[str, float]] = {}
+        self._pending: dict[str, tuple[str, Callable[[], object]]] = {}
 
     @contextmanager
     def serialize(self, relationship_id: str) -> Iterator[None]:
@@ -67,6 +68,11 @@ class RelationshipCoordinator:
         with self._guard:
             recent = self._recent.get(relationship_id)
             if relationship_id in self._inflight:
+                if recent is None or recent[0] != trigger_id:
+                    # Keep only the newest distinct event. The active worker
+                    # drains it after the current transfer, so commit hooks
+                    # stay non-blocking without losing the latest source state.
+                    self._pending[relationship_id] = (trigger_id, operation)
                 return False
             if recent is not None and recent[0] == trigger_id and now - recent[1] < self.debounce_seconds:
                 return False
@@ -74,16 +80,22 @@ class RelationshipCoordinator:
             self._recent[relationship_id] = (trigger_id, now)
 
         def run() -> None:
-            try:
-                with self.serialize(relationship_id):
-                    operation()
-            except Exception:
-                # The durable service records bounded failure/pending state.
-                # A commit/event caller must never inherit this exception.
-                pass
-            finally:
+            current = operation
+            while True:
+                try:
+                    with self.serialize(relationship_id):
+                        current()
+                except Exception:
+                    # The durable service records bounded failure/pending state.
+                    # A commit/event caller must never inherit this exception.
+                    pass
                 with self._guard:
-                    self._inflight.discard(relationship_id)
+                    pending = self._pending.pop(relationship_id, None)
+                    if pending is None:
+                        self._inflight.discard(relationship_id)
+                        return
+                    trigger, current = pending
+                    self._recent[relationship_id] = (trigger, self.clock())
 
         threading.Thread(
             target=run, name=f"sandbox-sync-{relationship_id[-12:]}", daemon=True,

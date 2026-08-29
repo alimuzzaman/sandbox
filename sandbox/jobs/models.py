@@ -592,7 +592,17 @@ class JobSubmission:
         }
 
     def canonical_json(self) -> str:
-        return json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+        payload = self.as_dict()
+        # Schema-v4 sync metadata is additive. A submission that does not use
+        # it must retain the exact pre-v4 digest so a durable legacy request ID
+        # still replays instead of becoming a false conflict after migration.
+        if (self.sync_relationship_id is None and self.sync_generation_id is None
+                and self.source_access is None and not self.parallel_safe):
+            for field in (
+                    "sync_relationship_id", "sync_generation_id", "source_access",
+                    "parallel_safe"):
+                payload.pop(field)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def canonical_digest(self) -> str:
         return hashlib.sha256(self.canonical_json().encode()).hexdigest()

@@ -17,23 +17,15 @@ from sandbox.transports.remote_jobs import (
 
 
 class RemoteJobTransportTests(unittest.TestCase):
-    def test_synchronized_submission_uses_accepted_generation_without_deploy(self):
+    def test_synchronized_submission_fails_closed_without_runtime_authority(self):
         calls = []
         transport = RemoteJobTransport(
-            deploy=lambda *_args, **_kwargs: self.fail("deploy-only path must stay unused"),
-            ssh_run=lambda *_args, **_kwargs: None,
+            deploy=lambda *_args, **_kwargs: calls.append("deploy"),
+            ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
             remote_lookup=lambda _name: {
                 "provisioned": True,
                 "capabilities": ["job.exec", "job.execution-policy.v1"],
             },
-            sync_prepare=lambda submission: {
-                "target_path": "/srv/generation",
-                "identity": "sha256:accepted-generation",
-                "generation_id": submission.sync_generation_id,
-            },
-        )
-        transport._submit_deployed = lambda remote, deployed, submission: (
-            calls.append((deployed, submission)) or {"ok": True}
         )
         submission = JobSubmission(
             "test", "/project", "project:remote", "remote", "unit",
@@ -41,8 +33,10 @@ class RemoteJobTransportTests(unittest.TestCase):
             sync_relationship_id="rel_fixture", sync_generation_id="gen_fixture",
             source_access="managed_read_only",
         )
-        self.assertEqual(transport.submit(submission), {"ok": True})
-        self.assertEqual(calls[0][0]["generation_id"], "gen_fixture")
+        with self.assertRaisesRegex(
+                RemoteJobTransportError, "synchronized job execution is unavailable"):
+            transport.submit(submission)
+        self.assertEqual(calls, [])
     def test_job_deadline_is_forwarded_to_deploy_push_when_supported(self):
         observed = {}
 

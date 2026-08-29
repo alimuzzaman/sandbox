@@ -124,6 +124,7 @@ def _compose_up(
     services: tuple[str, ...] | list[str],
     *,
     quiet: bool = False,
+    json_output: bool = False,
 ) -> object:
     """Start one managed stack and classify stale-network failures.
 
@@ -160,16 +161,46 @@ def _compose_up(
     if re.search(r"\bnetwork\b[^\n]{0,240}\bnot found\b", output,
                  flags=re.IGNORECASE):
         quoted = shlex.quote(str(instance))
-        die(
+        message = (
             "stale_container_network: the managed Docker network for "
             f"instance {instance!r} is missing; no containers or volumes were "
             "removed. Recover this instance with: "
-            f"./sb down --instance {quoted} && ./sb up --instance {quoted}",
-            code=returncode,
+            f"./sb down --instance {quoted} && ./sb up --instance {quoted}"
         )
+        if json_output:
+            print(json.dumps({
+                "ok": False,
+                "mutated": False,
+                "command": "up",
+                "instance": instance,
+                "error": {
+                    "code": "stale_container_network",
+                    "message": message.removeprefix("stale_container_network: "),
+                },
+                "recovery": {
+                    "command": (
+                        f"./sb down --instance {quoted} && "
+                        f"./sb up --instance {quoted}"
+                    ),
+                },
+            }, sort_keys=True))
+            raise SystemExit(returncode)
+        die(message, code=returncode)
 
     detail = " ".join(output.split())[:500]
     suffix = f": {detail}" if detail else ""
+    if json_output:
+        print(json.dumps({
+            "ok": False,
+            "mutated": False,
+            "command": "up",
+            "instance": instance,
+            "error": {
+                "code": "compose_up_failed",
+                "message": f"docker compose up failed with exit code {returncode}{suffix}",
+            },
+        }, sort_keys=True))
+        raise SystemExit(returncode)
     die(f"docker compose up failed with exit code {returncode}{suffix}",
         code=returncode)
 
@@ -222,7 +253,7 @@ def cmd_up(cfg: dict, args) -> None:
     # orphan containers.
     services = _web_services(inst_cfg.get("server", "nginx"))
     if json_output:
-        _compose_up(inst, services, quiet=True)
+        _compose_up(inst, services, quiet=True, json_output=True)
     else:
         _compose_up(inst, services)
     if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:

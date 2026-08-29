@@ -36,7 +36,8 @@ Use the feature-owned command with an explicit remote and disposable workspace:
 ```bash
 SANDBOX_HOME=/Users/alim/sandbox ./sb sync once \
   --project-dir /absolute/path/to/fixture \
-  --remote scaleway-sandbox --workspace-id <disposable-workspace-id> --json
+  --remote scaleway-sandbox --workspace-id <disposable-workspace-id> \
+  --request-id <replay-safe-request-id> --json
 ```
 
 Expected: one accepted generation ID, a matching remote workspace status, and no
@@ -84,3 +85,34 @@ its artifact/output boundary and cannot alter A or a parallel-safe peer.
 Record the remote name, workspace ID, generation IDs, request IDs, command
 results, timings, and cleanup result. Do not record credentials, source content,
 raw paths, or process arguments.
+
+## 2026-08-29 US1 remote acceptance evidence (blocked)
+
+This attempt used `scaleway-sandbox` only after its active, authenticated,
+owned service reported matching local and installed runtime revision
+`483914586a6e3d5ce3d9a278`. The focused static gate passed 27 tests and
+`git diff --check`.
+
+- The supported lifecycle created disposable workspace
+  `ws_31b212f517b741c0bf22fe8266e0d496` with complete workspace index
+  generation 101 and a two-hour lease.
+- Request `spec033-t026-once-20260829-a` created pending generation
+  `gen_bf178536621342867087737d410d5e0ca7ed931101c0529b61a1b7ef372951e4`.
+  Its first bounded transfer returned `remote_unavailable`. Replaying the exact
+  request identity returned `transport_unknown`, `retryable:false`, for the
+  same generation. No accepted generation was reported, so T026 remains open.
+- Request `spec033-t026-credential-negative-20260829-a` returned
+  `credential_detected` before remote mutation. No protected value or fixture
+  content was retained in this evidence.
+- The workspace lease was released successfully at
+  `2026-08-29T11:40:03.100493Z`. Feedback record
+  `282cd7f7afba66f30a1c6ddd3bfe5cd3` retains the sanitized transport gap.
+- A no-production fixture for T026b validated locally, but read-only host status
+  reported no state record, no deployed revision, and no configured or running
+  service. Request `spec033-t026b-host-sync-20260829-a` therefore returned
+  `remote_unavailable` with pending generation
+  `gen_73afc1fac49afa60836dc877f9d54781d8ed91e6f53cfcbe7e5dd1b9bb867f4b`.
+  `host apply` was not run because the documented creation path also changes
+  public routing/DNS, which was outside this acceptance lane. No edit,
+  no-restart, or committed-revision restoration proof exists; T026b remains
+  open.

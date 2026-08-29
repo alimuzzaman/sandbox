@@ -71,6 +71,15 @@ is unavailable.
 - [X] T026a [US1] Add the hosted-app `host sync` adapter, project-relative archive manifest, in-place managed-file publication, deletion ownership, and watch CLI contract with focused tests.
 - [ ] T026b [US1] Run disposable hosted-app acceptance proving an edit reaches `deploy-src/hosts/<project>` without service restart and that later `host apply` restores the committed revision.
 
+2026-08-29 acceptance note: the revision-matched remote and focused local gate
+were ready, and the credential-like negative correctly refused before mutation.
+The one-time transfer remained pending after `remote_unavailable` followed by
+`transport_unknown` on the exact request replay. The disposable workspace lease
+was released. The no-production T026b fixture had no deployed host state, and
+the only documented provisioning path would change public routing/DNS, so no
+host apply was attempted. Detailed redacted IDs and cleanup evidence are in
+`quickstart.md`; T026 and T026b remain unchecked.
+
 **Checkpoint**: User Story 1 is complete only when focused tests pass and the
 disposable remote accepts a generation without `host apply` or service
 recreation.

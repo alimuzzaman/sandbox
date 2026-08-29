@@ -155,6 +155,10 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 
 ## Common loops
 
+- **Disposable source sync** → use explicit `sync start|once|status|stop|resolve`
+  with a registered remote and durable workspace ID. Off/checkpoint never
+  auto-transfer; managed synchronized job source is read-only.
+
 - **Working on plugin** → `cd` into repo (or pass `project_dir`); `sandbox init` if new, else `ensure_instance`; `focus_get`.
 - **Tests** → `run_tests(project_dir, mode="unit"|"integration")`; omit `mode` for
   conservative `auto` resolution. Unit mode skips the WordPress harness/database;

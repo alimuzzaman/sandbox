@@ -341,10 +341,12 @@ class RemoteJobTransport:
     """Deploy then exchange compact job-control JSON, never child stdio pipes."""
 
     def __init__(self, *, deploy: Callable, ssh_run: Callable, remote_lookup: Callable,
-                 remote_sb_path: Callable | None = None) -> None:
+                 remote_sb_path: Callable | None = None,
+                 sync_prepare: Callable | None = None) -> None:
         self.deploy = deploy
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
+        self.sync_prepare = sync_prepare
         self._deploy_accepts_push_timeout = self._accepts_keyword(
             deploy, "push_timeout"
         )
@@ -457,10 +459,22 @@ class RemoteJobTransport:
                 "remote job command contains credential-like material"
             ) from None
         remote = self._execution_remote(submission.remote_name)
-        deployed = self._deploy(
-            remote, submission.project_root,
-            deployment_timeout=submission.deadline_seconds,
-        )
+        if submission.sync_relationship_id is not None:
+            if self.sync_prepare is None:
+                raise RemoteJobTransportError(
+                    "synchronized generation preparation is unavailable"
+                )
+            deployed = self.sync_prepare(submission)
+            if (not isinstance(deployed, dict) or
+                    deployed.get("generation_id") != submission.sync_generation_id):
+                raise RemoteJobTransportError(
+                    "synchronized generation acceptance is incomplete"
+                )
+        else:
+            deployed = self._deploy(
+                remote, submission.project_root,
+                deployment_timeout=submission.deadline_seconds,
+            )
         self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
@@ -596,12 +610,30 @@ class RemoteJobTransport:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
+        if (submission.sync_relationship_id is not None and
+                submission.source_access == "managed_read_only"):
+            result = self._run(
+                remote,
+                "find " + shlex.quote(workspace_path) +
+                " -type d -exec chmod a-w {} + -o -type f -exec chmod a-w {} +",
+                timeout=60,
+            )
+            if getattr(result, "returncode", 1) != 0:
+                raise RemoteJobTransportError(
+                    "managed synchronized source could not be made read-only"
+                )
         args = ["job-start", "--local", "--project-dir", workspace_path,
                 "--project-identity", submission.project_identity,
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
                 "--cwd-relative", submission.cwd_relative,
                 "--output-profile", submission.output_profile, "--profile", submission.execution_profile,
                 "--source-identity", deployed["identity"]]
+        if submission.sync_relationship_id is not None:
+            args += [
+                "--sync-relationship-id", submission.sync_relationship_id,
+                "--sync-generation-id", submission.sync_generation_id,
+                "--source-access", submission.source_access,
+            ]
         policy = {
             "execution_profile": submission.execution_profile,
             "deadline_seconds": submission.deadline_seconds,
@@ -687,6 +719,11 @@ class RemoteJobTransport:
                  "dirty": bool(deployed.get("dirty")), "dirty_digest": deployed.get("dirty_digest")},
                 "deadline": payload.get("deadline", {"seconds": submission.deadline_seconds,
                                                        "source": submission.deadline_source}),
+                "generation": ({
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                } if submission.sync_relationship_id is not None else None),
                 "workspace_path": workspace_path}
 
     def read_output(self, remote_name: str, job_id: str, *, stream: str = "combined",

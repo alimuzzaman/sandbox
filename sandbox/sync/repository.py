@@ -11,7 +11,16 @@ from pathlib import Path
 import tempfile
 from typing import Any, Callable
 
-from .models import SourceGeneration, SynchronizationRelationship, utc_now, validate_identifier
+from .models import (
+    DivergenceRecord,
+    Participant,
+    SourceGeneration,
+    SynchronizationRelationship,
+    utc_now,
+    validate_count,
+    validate_identifier,
+    validate_timestamp,
+)
 
 
 SCHEMA_VERSION = 1
@@ -59,6 +68,7 @@ class SyncRepository:
         return {
             "schema_version": SCHEMA_VERSION,
             "relationships": {}, "generations": {}, "requests": {},
+            "participants": {}, "divergences": {}, "metrics": {},
         }
 
     def _prepare(self) -> None:
@@ -82,6 +92,13 @@ class SyncRepository:
                     "relationships", "generations", "requests",
                 ))):
             raise SyncJournalCorruption("synchronization journal schema is invalid")
+        # These additive collections were introduced after the original v1
+        # journal. Keep old owner-only journals readable without advertising a
+        # new schema before a migration is necessary.
+        for key in ("participants", "divergences", "metrics"):
+            collection = value.setdefault(key, {})
+            if not isinstance(collection, dict):
+                raise SyncJournalCorruption("synchronization journal schema is invalid")
         try:
             for key, item in value["relationships"].items():
                 if SynchronizationRelationship.from_dict(item).relationship_id != key:
@@ -96,6 +113,26 @@ class SyncRepository:
                         len(item["digest"]) != 64):
                     raise ValueError("request record invalid")
                 validate_identifier(item["generation_id"], "generation id")
+            for key, item in value["participants"].items():
+                participant = Participant.from_dict(item)
+                if key != f"{participant.relationship_id}:{participant.participant_id}":
+                    raise ValueError("participant key mismatch")
+            for key, item in value["divergences"].items():
+                divergence = DivergenceRecord.from_dict(item)
+                if key != divergence.relationship_id:
+                    raise ValueError("divergence key mismatch")
+            for key, item in value["metrics"].items():
+                validate_identifier(key, "relationship id")
+                if not isinstance(item, dict) or set(item) != {
+                    "attempts", "accepted", "refused", "failed", "unknown",
+                    "file_count", "byte_count", "observed_at",
+                }:
+                    raise ValueError("metrics record invalid")
+                for field in ("attempts", "accepted", "refused", "failed", "unknown"):
+                    validate_count(item[field], field, maximum=2**63 - 1)
+                validate_count(item["file_count"], "file count", maximum=1_000_000)
+                validate_count(item["byte_count"], "byte count", maximum=512 * 1024 * 1024)
+                validate_timestamp(item["observed_at"], "observed at")
         except (TypeError, ValueError) as exc:
             raise SyncJournalCorruption("synchronization journal contains invalid records") from exc
         return value
@@ -173,11 +210,155 @@ class SyncRepository:
             ), None)
         return self._locked(operation)
 
+    def find_workspace_owner(
+        self, remote_name: str, workspace_id: str,
+    ) -> SynchronizationRelationship | None:
+        """Return the sole recorded owner of a remote/workspace pair.
+
+        This lookup intentionally ignores the requesting project identity so a
+        fresh clone is refused before capture or transport.
+        """
+        def operation(value: dict[str, Any]) -> SynchronizationRelationship | None:
+            matches = [
+                SynchronizationRelationship.from_dict(item)
+                for item in value["relationships"].values()
+                if item.get("remote_name") == remote_name
+                and item.get("workspace_id") == workspace_id
+            ]
+            if len(matches) > 1:
+                raise SyncJournalCorruption("workspace has multiple synchronization owners")
+            return matches[0] if matches else None
+        return self._locked(operation)
+
+    def set_mode(
+        self, relationship_id: str, mode: str, *, lifecycle: str,
+        updated_at: str | None = None,
+    ) -> SynchronizationRelationship:
+        validate_identifier(relationship_id, "relationship id")
+
+        def operation(value: dict[str, Any]) -> SynchronizationRelationship:
+            raw = value["relationships"].get(relationship_id)
+            if raw is None:
+                raise RelationshipNotFound("synchronization relationship was not found")
+            relationship = SynchronizationRelationship.from_dict(raw)
+            updated = replace(
+                relationship, mode=mode, lifecycle=lifecycle,
+                updated_at=updated_at or utc_now(),
+            )
+            value["relationships"][relationship_id] = updated.as_dict()
+            return updated
+        return self._locked(operation, write=True)
+
+    def register_participant(
+        self, participant: Participant, *, maximum: int = 64,
+    ) -> Participant:
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 256:
+            raise ValueError("participant bound is invalid")
+
+        def operation(value: dict[str, Any]) -> Participant:
+            if participant.relationship_id not in value["relationships"]:
+                raise RelationshipNotFound("synchronization relationship was not found")
+            prefix = f"{participant.relationship_id}:"
+            peers = [key for key in value["participants"] if key.startswith(prefix)]
+            key = prefix + participant.participant_id
+            if key not in value["participants"] and len(peers) >= maximum:
+                raise RelationshipConflict("synchronization participant limit was reached")
+            value["participants"][key] = participant.as_dict()
+            return participant
+        return self._locked(operation, write=True)
+
+    def list_participants(self, relationship_id: str) -> list[Participant]:
+        validate_identifier(relationship_id, "relationship id")
+        prefix = f"{relationship_id}:"
+        return self._locked(lambda value: sorted(
+            (
+                Participant.from_dict(item)
+                for key, item in value["participants"].items()
+                if key.startswith(prefix)
+            ),
+            key=lambda item: item.participant_id,
+        ))
+
     def list_relationships(self) -> list[SynchronizationRelationship]:
         return self._locked(lambda value: sorted(
             (SynchronizationRelationship.from_dict(item)
              for item in value["relationships"].values()),
             key=lambda item: item.relationship_id,
+        ))
+
+    def list_generations(self, relationship_id: str, *, limit: int = 256) -> list[SourceGeneration]:
+        validate_identifier(relationship_id, "relationship id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 256:
+            raise ValueError("generation list limit is invalid")
+        return self._locked(lambda value: sorted(
+            (
+                SourceGeneration.from_dict(item)
+                for item in value["generations"].values()
+                if item.get("relationship_id") == relationship_id
+            ),
+            key=lambda item: item.sequence,
+        )[-limit:])
+
+    def put_divergence(self, divergence: DivergenceRecord) -> DivergenceRecord:
+        def operation(value: dict[str, Any]) -> DivergenceRecord:
+            if divergence.relationship_id not in value["relationships"]:
+                raise RelationshipNotFound("synchronization relationship was not found")
+            value["divergences"][divergence.relationship_id] = divergence.as_dict()
+            relationship = SynchronizationRelationship.from_dict(
+                value["relationships"][divergence.relationship_id]
+            )
+            value["relationships"][divergence.relationship_id] = replace(
+                relationship, lifecycle="diverged", updated_at=divergence.detected_at,
+            ).as_dict()
+            return divergence
+        return self._locked(operation, write=True)
+
+    def get_divergence(self, relationship_id: str) -> DivergenceRecord | None:
+        validate_identifier(relationship_id, "relationship id")
+        return self._locked(lambda value: (
+            DivergenceRecord.from_dict(value["divergences"][relationship_id])
+            if relationship_id in value["divergences"] else None
+        ))
+
+    def clear_divergence(self, relationship_id: str) -> bool:
+        validate_identifier(relationship_id, "relationship id")
+        def operation(value: dict[str, Any]) -> bool:
+            return value["divergences"].pop(relationship_id, None) is not None
+        return self._locked(operation, write=True)
+
+    def record_metrics(
+        self, relationship_id: str, *, outcome: str, file_count: int,
+        byte_count: int, observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        validate_identifier(relationship_id, "relationship id")
+        if outcome not in {"accepted", "refused", "failed", "unknown"}:
+            raise ValueError("metric outcome is invalid")
+        validate_count(file_count, "file count", maximum=1_000_000)
+        validate_count(byte_count, "byte count", maximum=512 * 1024 * 1024)
+        when = validate_timestamp(observed_at or utc_now(), "observed at")
+
+        def operation(value: dict[str, Any]) -> dict[str, Any]:
+            if relationship_id not in value["relationships"]:
+                raise RelationshipNotFound("synchronization relationship was not found")
+            current = dict(value["metrics"].get(relationship_id) or {
+                "attempts": 0, "accepted": 0, "refused": 0, "failed": 0,
+                "unknown": 0, "file_count": 0, "byte_count": 0,
+                "observed_at": when,
+            })
+            current["attempts"] += 1
+            current[outcome] += 1
+            current["file_count"] = file_count
+            current["byte_count"] = byte_count
+            current["observed_at"] = when
+            value["metrics"][relationship_id] = current
+            return dict(current)
+        return self._locked(operation, write=True)
+
+    def metrics(self, relationship_id: str) -> dict[str, Any] | None:
+        validate_identifier(relationship_id, "relationship id")
+        return self._locked(lambda value: (
+            dict(value["metrics"][relationship_id])
+            if relationship_id in value["metrics"] else None
         ))
 
     def delete_relationship(self, relationship_id: str) -> bool:

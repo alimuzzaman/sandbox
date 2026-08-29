@@ -49,8 +49,11 @@ class JobService:
     scheduler: Any = None
     runtime_selector: Any = None
     workspace_registry: Any = None
+    sync_gateway: Any = None
 
     def submit(self, submission: JobSubmission):
+        if self.sync_gateway is not None and submission.sync_relationship_id is not None:
+            submission = self.sync_gateway.prepare_submission(submission)
         # Production composition supplies the durable workspace boundary.  It
         # must commit ownership before the job repository can acknowledge an
         # acceptance, otherwise a detached job can outlive the only metadata
@@ -80,7 +83,11 @@ class JobService:
                 return self._accepted(row, replay=False)
             if self.scheduler is not None:
                 try:
-                    self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
+                    self.scheduler.acquire(
+                        row,
+                        parallel_safe=(submission.parallel_safe or
+                                       submission.workspace_mode == "isolated"),
+                    )
                 except WorkspaceBusy:
                     queue = self.scheduler.queue_details(row)
                     row = self.repository.transition(
@@ -145,7 +152,12 @@ class JobService:
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
                 "execution_runtime": execution_runtime,
-                "artifact_paths": list(submission.artifact_paths)}
+                "artifact_paths": list(submission.artifact_paths),
+                "generation": ({
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                } if submission.sync_relationship_id is not None else None)}
 
     def _launch(self, descriptor_path: Path) -> None:
         if self.launcher:
@@ -200,6 +212,12 @@ class JobService:
                 },
                 "cleanup_policy": row["cleanup_policy"],
                 "idempotent_replay": replay}
+        if row.get("sync_relationship_id") is not None:
+            result["generation"] = {
+                "relationship_id": row["sync_relationship_id"],
+                "generation_id": row.get("sync_generation_id"),
+                "source_access": row.get("source_access"),
+            }
         if row.get("lifecycle") == Lifecycle.QUEUED.value:
             result["queue"] = row.get("_queue_details") or {
                 "reason": row.get("queue_reason") or "queued",
@@ -237,7 +255,11 @@ class JobService:
             if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
                 try:
                     if self.scheduler is not None:
-                        self.scheduler.acquire(snapshot, parallel_safe=snapshot["workspace_mode"] == "isolated")
+                        self.scheduler.acquire(
+                            snapshot,
+                            parallel_safe=(bool(snapshot.get("parallel_safe")) or
+                                           snapshot["workspace_mode"] == "isolated"),
+                        )
                     self._launch(self.storage.job_dir(job_id) / "descriptor.json")
                     snapshot = self.repository.snapshot(job_id)
                 except WorkspaceBusy:

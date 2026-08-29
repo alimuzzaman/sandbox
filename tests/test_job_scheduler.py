@@ -11,6 +11,29 @@ from sandbox.jobs.storage import JobStorage
 
 
 class JobSchedulerTests(unittest.TestCase):
+    def test_parallel_safe_jobs_share_only_the_same_accepted_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            scheduler = JobScheduler(
+                repo, max_parallel=3, min_free_memory_mb=0, min_free_disk_mb=0,
+            )
+
+            def accept(request, generation):
+                return repo.accept(JobSubmission(
+                    "test", "/p", "p", "remote", "same", ("echo", "x"), 60,
+                    SourceIdentity("s"), remote_name="remote", request_id=request,
+                    sync_relationship_id="rel", sync_generation_id=generation,
+                    source_access="managed_read_only", parallel_safe=True,
+                ))[0]
+
+            first = accept("one", "gen_a")
+            peer = accept("two", "gen_a")
+            newest = accept("three", "gen_b")
+            scheduler.acquire(first, parallel_safe=True)
+            scheduler.acquire(peer, parallel_safe=True)
+            with self.assertRaises(WorkspaceBusy):
+                scheduler.acquire(newest, parallel_safe=True)
+            repo.close()
     def test_exclusive_workspace_and_capacity_are_transactional(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "jobs.sqlite")

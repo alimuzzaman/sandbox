@@ -13,6 +13,7 @@ from .capture import (
     UnstableCapture,
     capture_manifest,
 )
+from .coordinator import RelationshipCoordinator
 from .models import (
     DivergenceRecord,
     Participant,
@@ -24,6 +25,7 @@ from .models import (
     validate_sync_envelope,
 )
 from .policy import CredentialDetected, SyncPolicy
+from .projection import ManagedSourceProjection, SourceWriteRefused
 from .repository import (
     RelationshipConflict,
     RequestDigestConflict,
@@ -38,11 +40,14 @@ __all__ = [
     "DivergenceRecord",
     "ManifestEntry",
     "ManifestLimitExceeded",
+    "ManagedSourceProjection",
     "Participant",
     "PinnedJob",
     "RelationshipConflict",
     "RequestDigestConflict",
+    "RelationshipCoordinator",
     "SourceGeneration",
+    "SourceWriteRefused",
     "SyncJournalCorruption",
     "SyncPolicy",
     "SyncRepository",

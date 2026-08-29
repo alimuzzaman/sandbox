@@ -57,6 +57,12 @@ If remote source staging times out before a durable job is accepted, the CLI
 returns a typed transport error with `--local` as the safe local fallback; it
 does not expose the underlying subprocess command as a traceback.
 
+For an opt-in disposable source relationship, use `sb sync` with explicit
+`--project-dir`, `--remote`, and `--workspace-id` selectors. `live` accepts
+non-blocking event signals, `checkpoint` sends only `sync once --checkpoint`,
+and `off` keeps ordinary edits and commits local. `sync stop` preserves pending
+state; `sync resolve --confirm` clears only a recorded divergence gate.
+
 Once a remote job is running on its selected VPS, Sandbox invokes its nested
 project commands with `--local`. In that context, `--local` means the selected
 VPS's co-located runtime, not the developer workstation; it prevents a

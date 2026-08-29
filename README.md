@@ -821,6 +821,14 @@ host-ingress guide.
 
 ## Shared remote workspace storage
 
+Disposable remote development workspaces can opt into relationship-owned source
+sync with explicit `sync start|once|status|stop|resolve` commands. Sync is off by
+default, requires opaque project/workspace ownership, refuses credential-like
+input before transfer, and keeps accepted/pending generations visible. Durable
+synchronized jobs record one generation and use read-only shared source or an
+explicit isolated copy. See [remote hosting](docs/remote-hosting.md#agent-aware-source-sync)
+and [durable remote jobs](docs/remote-job-runtime.md).
+
 Remote job workspaces share only immutable Git object files by hard link; their worktree,
 refs, index, logs, and configuration stay private, with a complete-copy fallback for older or
 unsupported layouts. Generic Compose projects can explicitly set `compose.nodeStore: true`

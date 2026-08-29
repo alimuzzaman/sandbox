@@ -15,7 +15,7 @@ from sandbox.services.redaction import require_safe_argv
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_SUBMISSION_SNAPSHOT_BYTES = 65_536
 MAX_SUBMISSION_ITEMS = 256
 MAX_SUBMISSION_TEXT = 4_096
@@ -160,6 +160,18 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "depends_on": _bounded_strings(raw.get("depends_on", ()), "job dependency"),
         "failure_policy": raw["failure_policy"],
         "compatibility_differences": [_safe_difference(item) for item in differences],
+        "sync_relationship_id": _bounded_text(
+            raw.get("sync_relationship_id"), "synchronization relationship id",
+            maximum=160, allow_none=True,
+        ),
+        "sync_generation_id": _bounded_text(
+            raw.get("sync_generation_id"), "synchronization generation id",
+            maximum=160, allow_none=True,
+        ),
+        "source_access": _bounded_text(
+            raw.get("source_access"), "source access", maximum=32, allow_none=True,
+        ),
+        "parallel_safe": bool(raw.get("parallel_safe", False)),
         "source": {
             "identity": _bounded_text(source["identity"], "source identity"),
             "commit": _bounded_text(source.get("commit"), "source commit", allow_none=True),
@@ -249,6 +261,10 @@ class JobRepository:
             source_identity TEXT NOT NULL,
             source_commit TEXT,
             source_dirty_digest TEXT,
+            sync_relationship_id TEXT,
+            sync_generation_id TEXT,
+            source_access TEXT,
+            parallel_safe INTEGER NOT NULL DEFAULT 0,
             accepted_at TEXT NOT NULL,
             queued_at TEXT,
             started_at TEXT,
@@ -299,6 +315,8 @@ class JobRepository:
             job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
             mode TEXT NOT NULL,
             parallel_safe INTEGER NOT NULL,
+            sync_generation_id TEXT,
+            source_access TEXT,
             acquired_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             heartbeat_at TEXT NOT NULL
@@ -384,6 +402,10 @@ class JobRepository:
                 ("queue_reason", "TEXT"),
                 ("queue_position", "INTEGER"),
                 ("submission_json", "TEXT"),
+                ("sync_relationship_id", "TEXT"),
+                ("sync_generation_id", "TEXT"),
+                ("source_access", "TEXT"),
+                ("parallel_safe", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -393,6 +415,15 @@ class JobRepository:
             metric_columns = {row[1] for row in connection.execute("PRAGMA table_info(metrics_index)")}
             if "available" not in metric_columns:
                 connection.execute("ALTER TABLE metrics_index ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+            lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(workspace_leases)")}
+            for name, declaration in (
+                ("sync_generation_id", "TEXT"),
+                ("source_access", "TEXT"),
+            ):
+                if name not in lease_columns:
+                    connection.execute(
+                        f"ALTER TABLE workspace_leases ADD COLUMN {name} {declaration}"
+                    )
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -444,7 +475,10 @@ class JobRepository:
                 int(submission.cancel_on_stall), submission.cleanup_policy,
                 json.dumps(dict(submission.execution_policy_provenance or {}), sort_keys=True),
                 submission.source.identity, submission.source.commit,
-                submission.source.dirty_digest, now, now, submission_json,
+                submission.source.dirty_digest,
+                submission.sync_relationship_id, submission.sync_generation_id,
+                submission.source_access, int(submission.parallel_safe),
+                now, now, submission_json,
             )
             connection.execute(
                 """INSERT INTO jobs(
@@ -456,8 +490,10 @@ class JobRepository:
                     execution_profile, output_profile, deadline_seconds, deadline_source,
                     deadline_reminder, stall_seconds, cancel_grace_seconds, cancel_on_stall, cleanup_policy,
                     execution_policy_provenance_json, source_identity,
-                    source_commit, source_dirty_digest, accepted_at, updated_at, submission_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source_commit, source_dirty_digest, sync_relationship_id,
+                    sync_generation_id, source_access, parallel_safe,
+                    accepted_at, updated_at, submission_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id

@@ -468,6 +468,10 @@ class JobSubmission:
     depends_on: tuple[str, ...] = ()
     failure_policy: str = "fail-fast"
     compatibility_differences: tuple[Mapping[str, Any], ...] = ()
+    sync_relationship_id: str | None = None
+    sync_generation_id: str | None = None
+    source_access: str | None = None
+    parallel_safe: bool = False
 
     def __post_init__(self) -> None:
         _safe_name(self.kind, "job kind")
@@ -533,6 +537,21 @@ class JobSubmission:
         if not isinstance(self.compatibility_differences, (tuple, list)):
             raise ValueError("compatibility differences must be a sequence")
         object.__setattr__(self, "compatibility_differences", tuple(dict(item) for item in self.compatibility_differences))
+        synchronized = self.sync_relationship_id is not None or self.sync_generation_id is not None
+        if synchronized and (self.sync_relationship_id is None or self.sync_generation_id is None):
+            raise ValueError("synchronized job requires relationship and generation identity")
+        if self.sync_relationship_id is not None:
+            _safe_text(self.sync_relationship_id, "synchronization relationship id")
+            _safe_text(self.sync_generation_id, "synchronization generation id")
+        if self.source_access is not None and self.source_access not in {
+                "managed_read_only", "isolated_copy"}:
+            raise ValueError("synchronized source access is invalid")
+        if synchronized and self.source_access is None:
+            object.__setattr__(self, "source_access", "managed_read_only")
+        if not synchronized and self.source_access is not None:
+            raise ValueError("source access requires a synchronized generation")
+        if not isinstance(self.parallel_safe, bool):
+            raise ValueError("parallel-safe policy must be boolean")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -565,6 +584,10 @@ class JobSubmission:
             "depends_on": list(self.depends_on),
             "failure_policy": self.failure_policy,
             "compatibility_differences": list(self.compatibility_differences),
+            "sync_relationship_id": self.sync_relationship_id,
+            "sync_generation_id": self.sync_generation_id,
+            "source_access": self.source_access,
+            "parallel_safe": self.parallel_safe,
             "source": asdict(self.source),
         }
 

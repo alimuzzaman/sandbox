@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sandbox.sync.models import SynchronizationRelationship
+from sandbox.sync.models import DivergenceRecord, Participant, SynchronizationRelationship
 from sandbox.sync.repository import (
     RelationshipConflict,
     RequestDigestConflict,
@@ -178,6 +178,62 @@ class SyncStateTests(unittest.TestCase):
                 broken.put_relationship(relationship(identifier="rel_second", workspace="workspace_second"))
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(json.loads(self.path.read_text())["schema_version"], 1)
+
+    def test_workspace_owner_lookup_refuses_a_competing_project_identity(self):
+        self.repo.put_relationship(relationship())
+        owner = self.repo.find_workspace_owner("remote-fixture", "workspace_fixture")
+        self.assertEqual(owner.project_identity, "project_fixture")
+        self.assertIsNone(self.repo.find_workspace_owner("other", "workspace_fixture"))
+
+    def test_participant_heartbeat_is_bounded_and_replaces_same_session(self):
+        self.repo.put_relationship(relationship())
+        first = Participant(
+            "participant_fixture", "rel_fixture", "2026-08-26T00:00:01Z",
+        )
+        later = Participant(
+            "participant_fixture", "rel_fixture", "2026-08-26T00:00:02Z", "observer",
+        )
+        self.repo.register_participant(first)
+        self.repo.register_participant(later)
+        self.assertEqual(self.repo.list_participants("rel_fixture"), [later])
+
+    def test_mode_transition_preserves_pending_generation_when_stopped(self):
+        self.repo.put_relationship(relationship())
+        generation, _ = self.reserve()
+        live = self.repo.set_mode("rel_fixture", "live", lifecycle="active")
+        stopped = self.repo.set_mode("rel_fixture", "off", lifecycle="stopped")
+        self.assertEqual(live.mode, "live")
+        self.assertEqual(stopped.pending_generation_id, generation.generation_id)
+
+    def test_divergence_and_aggregate_metrics_never_persist_paths(self):
+        self.repo.put_relationship(relationship())
+        divergence = DivergenceRecord(
+            "rel_fixture", 2, "gen_fixture", "2026-08-26T00:00:03Z",
+            "explicit_resolution_required",
+        )
+        self.repo.put_divergence(divergence)
+        self.repo.record_metrics(
+            "rel_fixture", outcome="unknown", file_count=2, byte_count=10,
+            observed_at="2026-08-26T00:00:04Z",
+        )
+        self.assertEqual(self.repo.get_divergence("rel_fixture"), divergence)
+        self.assertEqual(self.repo.metrics("rel_fixture"), {
+            "attempts": 1, "accepted": 0, "refused": 0, "failed": 0,
+            "unknown": 1, "file_count": 2, "byte_count": 10,
+            "observed_at": "2026-08-26T00:00:04Z",
+        })
+        serialized = self.path.read_text()
+        self.assertNotIn("path", serialized.lower())
+        self.assertTrue(self.repo.clear_divergence("rel_fixture"))
+
+    def test_generation_listing_is_bounded_to_one_relationship(self):
+        self.repo.put_relationship(relationship())
+        first, _ = self.reserve("request-1", "a" * 64)
+        second, _ = self.reserve("request-2", "b" * 64)
+        self.assertEqual(
+            [item.generation_id for item in self.repo.list_generations("rel_fixture")],
+            [first.generation_id, second.generation_id],
+        )
 
 
 if __name__ == "__main__":

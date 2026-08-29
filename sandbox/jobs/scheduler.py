@@ -73,8 +73,19 @@ class JobScheduler:
                 "AND j.lifecycle IN ('accepted','queued','running','cancelling')",
                 (namespace, row["project_identity"], row["workspace_label"]),
             ).fetchall()
-            if active and (not parallel_safe or any(not item["parallel_safe"] for item in active)):
-                raise WorkspaceBusy(f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait")
+            if active:
+                compatible = parallel_safe and all(bool(item["parallel_safe"]) for item in active)
+                requested_generation = row.get("sync_generation_id")
+                if requested_generation is not None:
+                    compatible = compatible and all(
+                        item["sync_generation_id"] == requested_generation
+                        and item["source_access"] == "managed_read_only"
+                        for item in active
+                    )
+                if not compatible:
+                    raise WorkspaceBusy(
+                        f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait"
+                    )
             slots = {int(value[0]) for value in connection.execute("SELECT slot FROM host_capacity_leases").fetchall()}
             slot = next((candidate for candidate in range(1, self.max_parallel + 1) if candidate not in slots), None)
             if slot is None:
@@ -82,8 +93,11 @@ class JobScheduler:
             lease_id = secrets.token_hex(16)
             timestamp = now.isoformat()
             connection.execute(
-                "INSERT INTO workspace_leases(lease_id,target_namespace,project_identity,workspace_label,job_id,mode,parallel_safe,acquired_at,expires_at,heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (lease_id, namespace, row["project_identity"], row["workspace_label"], row["job_id"], row["workspace_mode"], int(parallel_safe), timestamp, expiry, timestamp),
+                "INSERT INTO workspace_leases(lease_id,target_namespace,project_identity,workspace_label,job_id,mode,parallel_safe,sync_generation_id,source_access,acquired_at,expires_at,heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (lease_id, namespace, row["project_identity"], row["workspace_label"],
+                 row["job_id"], row["workspace_mode"], int(parallel_safe),
+                 row.get("sync_generation_id"), row.get("source_access"),
+                 timestamp, expiry, timestamp),
             )
             connection.execute("INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) VALUES(?,?,?,?)",
                                (slot, row["job_id"], timestamp, timestamp))

@@ -31,6 +31,23 @@ class SyncCliTests(unittest.TestCase):
         self.assertIn('"status":"stopped"', output.call_args.args[0])
         self.assertNotIn("secret", output.call_args.args[0])
 
+    def test_parser_exposes_checkpoint_participant_and_resolve_confirmation(self):
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        once = parser.parse_args([
+            "once", "--project-dir", "/tmp/project", "--remote", "remote",
+            "--workspace-id", "workspace", "--request-id", "request",
+            "--checkpoint", "--participant-id", "participant",
+        ])
+        resolve = parser.parse_args([
+            "resolve", "--project-dir", "/tmp/project", "--remote", "remote",
+            "--workspace-id", "workspace", "--resolution", "keep-local",
+            "--confirm",
+        ])
+        self.assertTrue(once.checkpoint)
+        self.assertEqual(once.participant_id, "participant")
+        self.assertTrue(resolve.confirm)
+
 
 if __name__ == "__main__":
     unittest.main()

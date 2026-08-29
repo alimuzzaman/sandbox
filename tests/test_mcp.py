@@ -387,8 +387,13 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_create", ""), ("recovery_restore_plan", "backup_id"),
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
+            ("sync_once", "project_dir,remote,request_id,workspace_id"),
+            ("sync_status", "project_dir,remote,workspace_id"),
+            ("sync_start", "mode,project_dir,remote,workspace_id"),
+            ("sync_stop", "project_dir,remote,workspace_id"),
+            ("sync_resolve", "confirm,project_dir,remote,resolution,workspace_id"),
         )
-        self.assertEqual(len(actual), 129)
+        self.assertEqual(len(actual), 134)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

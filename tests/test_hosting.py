@@ -832,6 +832,24 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("exec -T web", command)
         self.assertIn("LENZORA_SOURCE_REVISION", command)
 
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_apply_revision_probe_ignores_compose_stderr_warning(self, remote_checked):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        revision = "a" * 40
+        remote_checked.return_value = (
+            'time="2026-08-29T10:00:00Z" level=warning '
+            'msg="compose attribute is obsolete"\n'
+            f"{revision}\n"
+        )
+
+        hosting_cmd._verify_remote_derived_environment(
+            {}, validated, "/srv/source", "/srv/runtime", revision,
+            progress=lambda _line: None, log_path="/srv/runtime/apply.log",
+        )
+
+        self.assertEqual(remote_checked.call_count, 1)
+
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_build_timeout_is_used_for_compose_build_steps(self, remote_checked, _write):
@@ -930,13 +948,81 @@ class TestHostingManifest(unittest.TestCase):
         rows = '{"Service":"web","State":"running","Health":"healthy"}\n' \
             '{"Service":"worker","State":"running","Health":"unknown"}\n'
         with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_remote_checked", return_value=rows):
+             patch.object(hosting_cmd, "_remote_checked", side_effect=["web\nworker\n", rows]):
             result = hosting_cmd._host_runtime_status(
                 validated, {"provisioned": True}, "myvps", state,
             )
         self.assertEqual(result["deployed_revision"], "a" * 40)
         self.assertEqual(result["health"], {"state": "ready"})
         self.assertEqual([item["service"] for item in result["services"]], ["web", "worker"])
+        self.assertEqual(result["topology"], {
+            "state": "ready",
+            "declared_services": ["web", "worker"],
+            "compose_services": ["web", "worker"],
+            "running_services": ["web", "worker"],
+            "missing_from_compose": [],
+            "missing_from_runtime": [],
+        })
+
+    def test_host_status_includes_profiled_declared_services_without_counting_init_or_db(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n"
+            "      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        rows = '{"Service":"web","State":"running","Health":"healthy"}\n' \
+            '{"Service":"worker","State":"running","Health":"healthy"}\n' \
+            '{"Service":"db","State":"running","Health":"healthy"}\n'
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=[
+                 "web\nworker\nmigrate\ndb\n", rows,
+             ]) as checked:
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", {"version": 1, "hosts": {}},
+            )
+        self.assertIn("--profile '*' config --services", checked.call_args_list[0].args[1])
+        self.assertEqual(result["health"], {"state": "ready"})
+        self.assertEqual(result["topology"]["compose_services"], ["web", "worker"])
+        self.assertEqual(result["topology"]["running_services"], ["web", "worker"])
+        self.assertNotIn("migrate", result["topology"]["compose_services"])
+        self.assertNotIn("db", result["topology"]["running_services"])
+
+    def test_host_status_marks_manifest_service_missing_from_compose_as_degraded(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        rows = '{"Service":"web","State":"running","Health":"healthy"}\n'
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=["web\n", rows]):
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", {"version": 1, "hosts": {}},
+            )
+        self.assertEqual(result["health"]["state"], "degraded")
+        self.assertEqual(result["topology"]["state"], "degraded")
+        self.assertEqual(result["topology"]["missing_from_compose"], ["worker"])
+        self.assertEqual(result["topology"]["missing_from_runtime"], ["worker"])
+
+    def test_host_status_marks_compose_service_without_runtime_row_as_degraded(self):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        rows = '{"Service":"web","State":"running","Health":"healthy"}\n'
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=["web\nworker\n", rows]):
+            result = hosting_cmd._host_runtime_status(
+                validated, {"provisioned": True}, "myvps", {"version": 1, "hosts": {}},
+            )
+        self.assertEqual(result["health"]["state"], "degraded")
+        self.assertEqual(result["topology"]["missing_from_compose"], [])
+        self.assertEqual(result["topology"]["missing_from_runtime"], ["worker"])
 
     def test_host_status_fails_closed_to_unavailable_without_mutation(self):
         with self._write(_manifest()) as directory:
@@ -951,6 +1037,76 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(result["health"]["state"], "unavailable")
         self.assertIn("ssh unavailable", result["health"]["reason"])
         self.assertEqual(state["hosts"], {})
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_caddy_apply_is_locked_digest_aware_and_phase_bounded(self, remote_checked, write):
+        desired = "example.test { reverse_proxy 127.0.0.1:18001 }\n"
+        digest = hashlib.sha256(desired.encode()).hexdigest()
+        remote_checked.return_value = (
+            f"[Sandbox] caddy phase=digest state=changed digest={digest}\n"
+            "[Sandbox] caddy phase=validate state=passed\n"
+            "[Sandbox] caddy phase=reload state=passed\n"
+            "[Sandbox] caddy phase=observe state=active\n"
+        )
+
+        receipt = hosting_cmd._configure_host_caddy(
+            {}, "sandbox-host-example-site-production", desired,
+            log_path="/srv/runtime/apply.log",
+        )
+
+        self.assertEqual(receipt, {"state": "changed", "digest": digest})
+        write.assert_called_once()
+        command = remote_checked.call_args.args[1]
+        self.assertIn("flock -w 30", command)
+        self.assertIn("sha256sum", command)
+        self.assertIn("timeout 30 caddy validate", command)
+        self.assertIn("timeout 30 systemctl reload caddy", command)
+        self.assertIn("timeout 30 systemctl is-active --quiet caddy", command)
+        self.assertIn("phase noop unchanged", command)
+        self.assertEqual(remote_checked.call_args.kwargs["timeout"], 150)
+        self.assertEqual(remote_checked.call_args.kwargs["log_path"], "/srv/runtime/apply.log")
+        syntax = subprocess.run(
+            ["sh", "-n", "-c", command], capture_output=True, text=True,
+            check=False,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_caddy_digest_noop_returns_unchanged_receipt(self, remote_checked, _write):
+        desired = "example.test { reverse_proxy 127.0.0.1:18001 }\n"
+        digest = hashlib.sha256(desired.encode()).hexdigest()
+        remote_checked.return_value = (
+            f"[Sandbox] caddy phase=digest state=unchanged digest={digest}\n"
+            f"[Sandbox] caddy phase=noop state=unchanged digest={digest}\n"
+            f"[Sandbox] caddy phase=observe state=active digest={digest}\n"
+        )
+        receipt = hosting_cmd._configure_host_caddy(
+            {}, "sandbox-host-example-site-production", desired,
+        )
+        self.assertEqual(receipt, {"state": "unchanged", "digest": digest})
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_caddy_restore_reports_exact_rollback_state(self, remote_checked, _write):
+        previous = "example.test { reverse_proxy 127.0.0.1:18000 }\n"
+        digest = hashlib.sha256(previous.encode()).hexdigest()
+        remote_checked.return_value = (
+            f"[Sandbox] caddy phase=rollback state=rollback_complete digest={digest}\n"
+        )
+        receipt = hosting_cmd._restore_host_caddy(
+            {}, "sandbox-host-example-site-production", previous,
+            log_path="/srv/runtime/apply.log",
+        )
+        self.assertEqual(receipt, {"state": "rollback_complete", "digest": digest})
+
+        remote_checked.side_effect = RuntimeError("reload timed out")
+        with self.assertRaisesRegex(hosting.HostingError, "rollback_incomplete.*reload timed out"):
+            hosting_cmd._restore_host_caddy(
+                {}, "sandbox-host-example-site-production", previous,
+                log_path="/srv/runtime/apply.log",
+            )
 
     def test_host_diagnose_combines_disk_images_and_source_revision_evidence(self):
         with self._write(_manifest_with_derived_revision()) as directory:
@@ -1013,10 +1169,11 @@ class TestHostingManifest(unittest.TestCase):
         output = hosting_cmd._read_host_logs(validated, {}, lines=75)
 
         self.assertEqual(output, "web | ready\nworker | polling\n")
-        command = remote_checked.call_args.args[1]
-        self.assertIn("docker compose", command)
-        self.assertIn("-p sandbox-host-example-site-production", command)
-        self.assertIn("logs --no-color --tail 75 web worker", command)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertIn("--profile '*' config --services", commands[0])
+        self.assertIn("docker compose", commands[1])
+        self.assertIn("-p sandbox-host-example-site-production", commands[1])
+        self.assertIn("logs --no-color --tail 75 web worker", commands[1])
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",
@@ -1523,7 +1680,10 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(client.restore_record.call_count, 2)
         restored = [call.args[1] for call in client.restore_record.call_args_list]
         self.assertEqual(restored, list(reversed(previous)))
-        restore_caddy.assert_called_once_with({}, "sandbox-host-example-site-production", "old caddy")
+        restore_caddy.assert_called_once_with(
+            {}, "sandbox-host-example-site-production", "old caddy",
+            log_path="/srv/sandbox/runtime/hosts/example-site/production/apply.log",
+        )
         save_state.assert_not_called()
 
     @patch("sandbox.commands.hosting.urllib.request.build_opener")

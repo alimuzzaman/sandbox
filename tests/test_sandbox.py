@@ -1159,6 +1159,27 @@ class TestPluginConfigMap(unittest.TestCase):
         cfg = self._load_project_doc({"plugins": ["."]}, dirname="real-plugin-slug")
         self.assertIn("real-plugin-slug", cfg["plugins_resolved"])
 
+    def test_legacy_self_entry_uses_plugin_header_for_generated_worktree_name(self):
+        tmp = tempfile.mkdtemp(prefix="sb-slug-", dir=str(Path.home()))
+        old_user_config = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(Path(tmp) / "missing-user-config.json")
+        root = Path(tmp) / "fixture-review.20260823.1234"
+        root.mkdir()
+        (root / "fixture.php").write_text(
+            "<?php\n/**\n * Plugin Name: Fixture\n * Text Domain: fixture-plugin\n */\n"
+        )
+        (root / "sandbox.config.json").write_text(json.dumps({"plugins": ["."]}))
+        try:
+            cfg = sandbox_core.load_project_config(root)
+        finally:
+            if old_user_config is None:
+                os.environ.pop("SANDBOX_USER_CONFIG", None)
+            else:
+                os.environ["SANDBOX_USER_CONFIG"] = old_user_config
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn("fixture-plugin", cfg["plugins_resolved"])
+        self.assertNotIn("fixture-review.20260823.1234", cfg["plugins_resolved"])
+
     def test_rejects_invalid_top_level_slug(self):
         with self.assertRaises(sandbox_core.ConfigError):
             self._load_project_doc({"slug": "../nope", "plugins": ["."]})

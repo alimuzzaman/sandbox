@@ -4,16 +4,16 @@
 
 **Created**: 2026-07-18
 
-**Last Refined**: 2026-07-29
+**Last Refined**: 2026-08-26
 
 **Input**: "Resume the committed agent-aware incremental sync draft for remote
 development workspaces and make it ready for formal specification."
 
 **Drafting Model**: active root configuration (exact model and effort not exposed)
 
-**Final Validation**: `REOPEN` — independent `gpt-5.6-sol` High
+**Final Validation**: `PASS` — independent `gpt-5.6-sol` High
 
-**Validated On**: 2026-07-29
+**Validated On**: 2026-08-26
 
 **Artifact Owner**: `speckit-refine`
 
@@ -116,14 +116,15 @@ the same destination.
 
 ### Scenario 3 — Synchronize after a commit
 
-- **Starting state**: A mode selected by the commit-trigger policy is enabled and
-  the local worktree may contain both committed and supported uncommitted changes.
+- **Starting state**: Live synchronization is enabled and the local worktree may
+  contain both committed and supported uncommitted changes.
 - **User action**: A participating developer or agent completes a local Git commit.
-- **Expected outcome**: Sandbox treats the commit as a high-priority source change,
-  records its identity, coalesces it with any pending edits, and synchronizes the
-  resulting source generation without changing or pushing the commit. If the
-  remote is unavailable, the commit still succeeds and synchronization status
-  retains an actionable pending failure.
+- **Expected outcome**: Sandbox treats the commit as a high-priority source
+  change, records its identity, coalesces it with any pending edits, and
+  synchronizes the resulting source generation without changing or pushing the
+  commit. In checkpoint and off modes the commit does not trigger an automatic
+  transfer. If the remote is unavailable, the commit still succeeds and
+  synchronization status retains an actionable pending failure.
 
 ### Scenario 4 — Share one relationship across agents
 
@@ -167,16 +168,26 @@ the same destination.
   synchronization only after every active job using the workspace releases that
   generation.
 
+### Scenario 7b — Queue a parallel-safe job behind a pending generation
+
+- **Starting state**: Job A is running against generation A, local edits have
+  created pending generation B, and a second job is declared parallel-safe.
+- **User action**: The developer requests job B while generation B is pending.
+- **Expected outcome**: The second job waits for generation B to be accepted; it
+  does not silently join stale generation A. Once B is accepted, parallel-safe
+  jobs may share B according to the existing job policy.
+
 ### Scenario 8 — Recover after interruption
 
 - **Starting state**: Automatic change detection, the local synchronization
   process, a client, a network connection, or the remote host stops and later
   resumes.
 - **User action**: The developer requests synchronization status or restarts the
-  selected mode.
+  selected mode after an interrupted transfer or a lost acceptance response.
 - **Expected outcome**: Sandbox compares local, accepted, pending, workspace, and
-  runtime state; resumes only safe pending work; avoids duplicate acceptance; and
-  reports any condition that needs explicit operator action.
+  runtime state; resumes only safe pending work with the same replay-safe request
+  identity; avoids duplicate acceptance; and reports any condition that needs
+  explicit operator action.
 
 ### Scenario 9 — Protect remote divergence and excluded state
 
@@ -188,39 +199,63 @@ the same destination.
   source, does not transfer excluded content, and never deletes anything outside
   source entries previously managed by this synchronization relationship.
 
-### Scenario 10 — Keep synchronization off
+### Scenario 10 — Handle attempted and out-of-band job source changes
+
+- **Starting state**: A synchronized job has a read-only projection of its pinned
+  managed source generation.
+- **User action**: The job attempts to write managed source, or an explicitly
+  isolated job copy writes source-like output, or an out-of-band remote actor
+  changes the managed source area.
+- **Expected outcome**: A shared-job write is rejected with no managed-source
+  mutation. An isolated-copy write remains only in the existing job-artifact or
+  output boundary and is never adopted locally. An out-of-band change is
+  reported as remote divergence and requires explicit resolution before a later
+  synchronization can mutate that area.
+
+### Scenario 11 — Keep synchronization off
 
 - **Starting state**: The project uses the current deploy-before-job workflow and
   has not opted into synchronization.
 - **User action**: The developer edits or commits local source.
 - **Expected outcome**: No automatic edit synchronization runs. Commit behavior
-  follows the confirmed commit-trigger policy, and existing explicit deploy and
-  remote-job behavior remains unchanged.
+  does not trigger synchronization, and existing explicit deploy and remote-job
+  behavior remains unchanged.
 
 ## Proposed Product Behavior
 
 - Synchronization applies only to explicitly selected disposable remote
   development workspaces. It is off by default.
-- A synchronization relationship is identified by the canonical local worktree,
-  named remote, and workspace label. The worktree is the shared source owner;
-  individual agent or session identities are participants used for bounded status
-  and audit, not independent owners.
+- A synchronization relationship is identified by the resolved project identity,
+  named remote, and durable workspace ID. A workspace label is only a human-facing
+  locator and may change without transferring ownership. The canonical worktree
+  is the shared source owner; individual agent or session identities are
+  participants used for bounded status and audit, not independent owners.
+- Canonical identity follows the repository/worktree resolution rules: symlinked
+  paths resolving to the same project identity share ownership, a relocated
+  worktree retains ownership only when its durable project identity is preserved,
+  and a fresh clone is a different owner until an explicit lifecycle operation
+  authorizes adoption.
 - The persistent modes are:
   - **off**: Existing deploy-only behavior; ordinary edits do not synchronize.
   - **live**: Supported edits synchronize automatically.
   - **checkpoint**: Ordinary edits synchronize only when explicitly requested.
 - A one-time synchronization can be requested without leaving a persistent mode
   enabled.
-- Commit-triggered synchronization is separately governed by the confirmed
-  commit policy. It never blocks, amends, creates, or pushes a Git commit.
+- In live mode, a successful local commit is a high-priority synchronization
+  signal; checkpoint and off modes remain explicit-only. The signal never blocks,
+  amends, creates, or pushes a Git commit.
 - Every synchronization request validates the registered remote, selected
   workspace, healthy runtime, correct source mount, and ownership relationship
   before transferring files. Repeating start or ensure is idempotent.
-- Synchronization uses the existing deployment-eligible source set: all tracked
-  files and supported non-ignored untracked files, subject only to established
-  credential, runtime-state, ignore, and path-safety exclusions. Any additional
-  synchronization-only exclusion is reported explicitly because it prevents
-  exact-working-tree parity.
+- Synchronization starts from the deployment-eligible source set and applies
+  ordinary exclusions to runtime state, databases, uploads, caches, logs, and
+  unsafe paths before generation capture. A separate fail-closed credential
+  screen examines every tracked, modified, untracked, and explicitly included
+  file. A credential-like name, value, key material, or local environment file
+  is a generation-fatal finding: the entire generation is rejected before any
+  remote mutation, and the result reports refusal rather than silently
+  narrowing the source. Ordinary non-credential exclusions may be omitted from
+  the captured generation.
 - Deletions affect only source entries that Sandbox can prove were previously
   managed by the same synchronization relationship. Unknown remote changes fail
   closed and require explicit resolution.
@@ -229,11 +264,19 @@ the same destination.
   complete, coherent source state; repeating the same request does not create a
   second accepted generation.
 - Starting a remote job is an explicit source boundary. The job starts only after
-  the latest deployment-eligible local working tree is accepted as one complete
-  generation; failure to accept it prevents job launch.
+  the latest eligible local working tree is accepted as one complete generation;
+  if generation A is active and generation B is pending, a new job waits for B
+  rather than joining stale A. Failure to accept B prevents job launch.
 - Every remote job records and remains pinned to the source generation it
-  accepted. Existing parallel-safe jobs may share that generation. Later edits
-  remain pending until every active job using the workspace releases it.
+  accepted. Existing parallel-safe jobs may share the same accepted generation.
+  Later edits remain pending until every active job using the workspace releases
+  its generation.
+- During a synchronized job, the managed source projection is read-only and
+  source-mutating job requests are rejected unless they explicitly request an
+  isolated job copy. The existing job-artifact channel remains the supported
+  writable output path; isolated or rejected source changes are never adopted
+  automatically, and a detected pre-existing managed-source change remains
+  remote divergence requiring explicit resolution.
 - Synchronization status reports mode, lifecycle, remote/workspace/runtime
   identity, redacted worktree identity, health and mount state, participating
   sessions when available, latest commit, accepted and pending generations,
@@ -243,7 +286,9 @@ the same destination.
 - Stop disables future automatic generations for the shared relationship, leaves
   pending state visible, and does not delete the remote workspace, revert accepted
   source, cancel jobs, or broaden reset/destroy authority. The treatment of a
-  transfer already in progress remains an open product decision.
+  transfer already in progress is deterministic: it completes as one coherent
+  generation if its capture and validation succeed; stop prevents new transfers
+  and leaves a failed/incomplete generation unaccepted.
 - Operational counters may record timestamps, aggregate path counts, commit
   counts, and byte counts for reconciliation and bounded status. Source contents,
   diffs, file names, secrets, and process arguments are not analytics.
@@ -252,17 +297,36 @@ the same destination.
 
 - Per-project instance identity and the registered remote/workspace model remain
   authoritative; no implicit instance or fallback workspace may be targeted.
+- Durable workspace ID and resolved project identity are authoritative for
+  ownership; labels and local paths are relocatable locators only. Symlinked paths
+  that resolve to the same identity may participate, while fresh clones and
+  unresolved relocations require explicit lifecycle adoption.
 - Existing remote deployment and durable remote-job capabilities must remain
   available and compatible.
 - Synchronization cannot begin until the selected runtime is healthy and uses the
   intended workspace source mount.
 - Source synchronization is local-to-remote only. A remote change is a conflict,
   not an input to be merged.
+- A synchronized job sees its pinned managed generation through a read-only
+  projection. A source-mutating job cannot share the synchronized workspace;
+  it must either use an isolated copy whose writes stay in the artifact/output
+  boundary or be rejected before launch. Existing deploy-only behavior is
+  unchanged while synchronization is off.
+- A generation is captured from a stable local view. If files change during
+  capture, the transfer is retried within a bounded limit and then fails without
+  accepting mixed content. Concurrent synchronization and job-launch requests
+  serialize at the relationship boundary; a lost acknowledgment is replayed with
+  one request identity rather than creating a second generation.
 - Active jobs remain pinned to their accepted generation. Existing parallel-safe
   jobs may share it; a newer generation remains pending until every active job
-  using the workspace releases it. Reset, destroy, takeover, instance replacement,
-  and conflicting source mutation remain blocked while a job or unsafe
-  synchronization transition is active.
+  using the workspace releases it, and a new job waits for the newest pending
+  generation rather than joining an older one. Reset, destroy, takeover, instance
+  replacement, and conflicting source mutation remain blocked while a job or
+  unsafe synchronization transition is active.
+- Job-produced source changes are never silently adopted. Shared synchronized
+  jobs cannot write managed source; isolated-copy writes stay in the job-artifact
+  or output boundary. Managed-source divergence requires explicit resolution
+  before another synchronization can mutate that area.
 - CLI and MCP must resolve the same target, ownership, generation, lifecycle, and
   error semantics.
 - Public output and persisted non-secret metadata must not contain credentials,
@@ -280,26 +344,29 @@ the same destination.
 | Eligible targets | Disposable remote development workspaces only | Prevents an edit-oriented feature from mutating permanent instances | Committed feature input |
 | Source authority | Canonical local worktree; one-way local-to-remote | Preserves the established source-of-truth boundary | Existing remote deployment policy |
 | Modes | Off, live, checkpoint, plus one-time sync | Separates continuous, deliberate, and ad-hoc workflows without overloading off | Refined committed feature input |
+| Commit trigger | Successful commits trigger synchronization only in live mode; checkpoint and off remain explicit-only | Keeps live edit-test loops current without contradicting checkpoint/off semantics | Safe default adopted during refinement; commit safety remains existing Git policy |
 | Commit safety | A trigger never blocks, amends, creates, or pushes a Git commit | Preserves Git authority even when remote synchronization is unavailable | Existing Git policy |
 | Shared participation | Sessions in one canonical worktree share one source owner | Matches collaborative worktree behavior and avoids duplicate leases | Committed feature input |
 | Shared mode | Mode changes apply to the relationship and survive participant disconnect | A shared owner cannot have conflicting per-session modes | Existing shared-ownership decision |
+| Worktree identity | Ownership uses resolved project identity plus durable workspace ID; labels and symlinked paths are locators | Prevents false conflicts after relocation while rejecting fresh-clone takeover | Existing workspace identity model and safe default adopted during refinement |
 | Worktree isolation | Different canonical worktrees require different remote workspaces | Prevents silent cross-worktree overwrite | Committed feature input |
 | Remote divergence | Fail closed; no automatic merge or overwrite | Remote source is not authoritative, but unexpected changes may be valuable | Existing safety policy |
-| Source inclusion | Reuse the exact deployment-eligible source set; extra sync-only exclusions must be explicit | Preserves exact-working-tree parity without weakening established safety exclusions | Remote-job specification FR-005 |
-| Job launch | Accept the latest eligible local generation before launch or do not start the job | Preserves exact-current-working-tree execution | Remote-job specification FR-005 |
-| Active jobs | All jobs pin a generation; existing parallel-safe jobs may share it while newer source waits | Prevents mixed-source execution without removing current parallel-safe behavior | Existing durable-job policy |
+| Source inclusion | Start from deployment eligibility but fail closed on credential-like content across tracked and untracked files | Prevents a tracked secret from bypassing the untracked-file boundary | Existing secret-inspection policy and safe default adopted during refinement |
+| Job launch | Accept the newest pending eligible generation before launch; queue a new job behind it rather than joining stale source | Preserves exact-current-working-tree execution and makes parallel sharing generation-consistent | Remote-job specification FR-005 and existing durable-job policy |
+| Active jobs | All jobs pin a generation; parallel-safe jobs may share the same generation after it is accepted | Prevents mixed-source execution without removing current parallel-safe behavior | Existing durable-job policy |
+| Stop during transfer | Complete an in-flight transfer only if it validates as one coherent generation; otherwise leave it unaccepted | Avoids partial source while making stop deterministic and non-destructive | Safe default adopted during refinement |
+| Job-produced changes | Reject shared managed-source writes, keep isolated-copy writes in the artifact/output boundary, and treat out-of-band edits as divergence | Preserves immutable generations without adopting remote-produced state | Existing remote-job artifact policy and safe default adopted during refinement |
+| Credential finding | Reject the entire generation before any remote mutation; ordinary non-credential exclusions may be omitted | Prevents a secret from being hidden by source-set narrowing | Existing secret-inspection policy and safe default adopted during refinement |
+| Synchronized job writes | Managed source is read-only for shared synchronized jobs; source-mutating requests require an isolated copy or are rejected | Preserves immutable pinned generations and safe parallel sharing | Safe default adopted during refinement |
 | Deletion boundary | Only provably managed source entries can be deleted | Synchronization must not become arbitrary remote cleanup | Existing destructive-action policy |
 | Status surfaces | Equivalent bounded, redacted CLI and MCP behavior | Maintains interface parity for developers and agents | Existing architecture policy |
 
 ## Open Questions
 
-- **Commit-trigger scope**: Should a successful commit trigger synchronization in
-  live mode only, in live and checkpoint modes, or in every mode including off?
-  The original committed draft said every configured mode, while off and
-  checkpoint were also described as deploy-only and explicit-only.
-- **Stop during transfer**: When stop is requested while one generation is already
-  transferring, should that complete as one coherent accepted generation, or
-  should Sandbox cancel it and keep the last previously accepted generation?
+None. The refinement adopts the safe defaults recorded in the Decisions table:
+live-only commit triggers, deterministic completion-or-rejection for an in-flight
+transfer, newest-generation queueing for new jobs, durable workspace identity,
+fail-closed credential screening, and explicit handling of job-produced divergence.
 
 ## Acceptance Outcomes
 
@@ -309,9 +376,10 @@ the same destination.
 - An explicit checkpoint or one-time synchronization reports its accepted
   generation before returning success; later edits remain unsynchronized in
   checkpoint mode until another explicit request.
-- A successful local commit in every mode selected by the confirmed trigger policy
-  is reflected in accepted or pending synchronization status within 10 seconds,
-  and remote unavailability never causes the Git commit itself to fail.
+- A successful local commit in live mode is reflected in accepted or pending
+  synchronization status within 10 seconds; checkpoint and off mode perform no
+  automatic transfer, and remote unavailability never causes the Git commit
+  itself to fail.
 - Two sessions using the same canonical worktree and workspace produce one
   ordered generation stream with no duplicate acceptance for identical source.
 - A different canonical worktree is rejected before remote file mutation and
@@ -322,24 +390,41 @@ the same destination.
 - Two parallel-safe jobs sharing generation A continue to report A after local
   generation B is created; B remains pending and is accepted only after both jobs
   release A.
+- If job A runs on generation A while generation B is pending, a new job request
+  waits for B and never reports A as its accepted generation; once B is accepted,
+  parallel-safe jobs may share B.
 - Restarting after a local, network, or remote interruption reconciles accepted
   and pending generations without repeating an already accepted generation or
-  silently discarding supported edits.
-- Exact-working-tree acceptance demonstrates that all deployment-eligible tracked
-  files and supported non-ignored untracked files synchronize, while established
-  credential, ignored-untracked, runtime-state, database, upload, cache, log, and
-  path-safety exclusions transfer nothing and expose no protected values.
+  silently discarding supported edits; a lost response is safely replayable with
+  the original request identity.
+- A capture that observes a file change, a simultaneous sync/job launch, or two
+  identical launch requests either retries and accepts one coherent generation or
+  fails without accepting mixed content or starting a job against it.
+- Exact-working-tree acceptance demonstrates that eligible files synchronize only
+  after the credential screen passes for tracked, modified, untracked, and
+  explicitly included content; credential-like values, ignored-untracked files,
+  runtime-state, databases, uploads, caches, logs, and unsafe paths transfer
+  nothing and expose no protected values. A credential finding rejects the
+  whole generation before remote mutation; it is never silently narrowed.
 - A supported local deletion removes a remote file only when the same
   synchronization relationship previously managed it; unknown remote source and
   unrelated runtime state remain untouched.
+- A synchronized shared job cannot write its managed source projection: the
+  attempted write is rejected with no managed-source mutation. A source-mutating
+  request is rejected before launch unless it explicitly uses an isolated job
+  copy; isolated writes remain retrievable output and cannot alter the accepted
+  generation or a parallel-safe peer's view. An out-of-band managed-source edit
+  is surfaced as divergence and requires explicit resolution.
 - With synchronization off, ordinary edits cause no automatic transfer, commits
-  follow the confirmed trigger policy, and all existing deploy-before-job
-  acceptance scenarios continue to pass.
+  cause no synchronization, and all existing deploy-before-job acceptance
+  scenarios continue to pass.
 - CLI and MCP return equivalent target, mode, ownership, generation, lifecycle,
   partial-failure, conflict, and redaction fields for the same state.
 - A disposable live acceptance run demonstrates shared-worktree edits, a commit,
   a concurrent pinned remote job, post-job synchronization, interruption
-  recovery, conflict rejection, and explicit cleanup without touching a
+  recovery, queued-new-job behavior behind a pending generation, conflict
+  rejection, credential refusal, shared-write rejection, isolated-output
+  handling, out-of-band divergence, and explicit cleanup without touching a
   permanent instance.
 
 ## Risks and Assumptions
@@ -364,10 +449,20 @@ the same destination.
   provide enough stable identity to own one synchronization relationship.
 - **Assumption**: Existing exact-working-tree deployment defines the authoritative
   inclusion baseline; synchronization reuses it rather than silently narrowing it.
-- **Assumption**: Normal healthy connectivity can satisfy the 10-second live
-  freshness outcome for ordinary source edits under a documented acceptance
-  profile that bounds source size, changed bytes, round-trip latency, and remote
-  load; larger transfers may report delayed progress without false success.
+- **Assumption**: The 10-second live freshness outcome is measured end to end
+  from the client monotonic timestamp when a supported edit/commit trigger is
+  accepted until the remote durable generation-accepted acknowledgment. The
+  timed path includes preflight, credential screening, stable capture, transfer,
+  remote validation, and acceptance acknowledgment. It applies only under the
+  documented healthy profile: eligible checkout at most 512 MiB, one generation
+  changing at most 10 MiB or 100 paths, round-trip latency at most 100 ms,
+  sustained measured transfer throughput at least 5 MiB/s, packet loss at most
+  1%, remote CPU below 70%, and at least 20% free workspace storage. Larger or
+  busier transfers report delayed progress rather than false success.
+- **Assumption**: A successful commit is a synchronization signal only in live
+  mode; checkpoint and off deliberately require an explicit request.
+- **Assumption**: An in-flight transfer either validates as one generation or is
+  left unaccepted when stopped; no partial generation is ever visible as current.
 
 ## Readiness for Specification
 
@@ -375,12 +470,12 @@ the same destination.
 - [x] Goals and non-goals bound the product scope.
 - [x] Primary and negative scenarios are covered.
 - [x] Material constraints, dependencies, and risks are recorded.
-- [ ] Consequential choices are confirmed rather than inferred.
+- [x] Consequential choices are confirmed or explicitly recorded as safe defaults.
 - [x] Acceptance outcomes are measurable and implementation-independent.
-- [ ] No blocking open questions remain.
+- [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent Sol High validation verdict is `PASS`.
+- [x] The latest independent Sol High validation verdict is `PASS`.
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

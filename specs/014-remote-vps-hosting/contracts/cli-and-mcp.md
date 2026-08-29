@@ -159,6 +159,12 @@ nonzero `source_not_immutable` result. The existing working-tree deploy remains
 available only through its explicit path and never silently falls back from a
 failed immutable resolution.
 
+When the working-tree source is a detached HEAD, the adapter MUST stage the
+resolved committed base through a content-addressed `sandbox-source-<sha>` ref
+and may then apply the current uncommitted overlay. It MUST NOT create, switch,
+or force-push a user branch; the result identifies this source path as
+`source_mode: "detached"`.
+
 ### Nested manifest root
 
 Manifest resolution returns both `manifest_path` and `source_root`. Compose,

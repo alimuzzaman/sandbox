@@ -130,6 +130,23 @@ Start in any configured project with:
 
 The guide detects the runtime and emits only its useful commands.
 
+## Disposable review worktrees
+
+Project discovery is intentionally restricted to `$HOME` and configured
+`SANDBOX_PROJECT_ROOTS`. Keep temporary review worktrees under an allowed root,
+not the system temporary directory:
+
+```bash
+review_root="$HOME/Sites/sandbox-reviews"
+mkdir -p "$review_root"
+export SANDBOX_PROJECT_ROOTS="$review_root"
+git worktree add --detach "$review_root/pr-123" origin/feature/pr-123
+./sb ensure --project-dir "$review_root/pr-123" --label pr-123 --create --local
+```
+
+This keeps project discovery and instance ownership inside the explicit
+allowlist. No system-temp exception is inferred.
+
 ## Generic Compose
 
 ```bash
@@ -147,6 +164,10 @@ The guide detects the runtime and emits only its useful commands.
 audit with failed checks: the JSON keeps `ok: false` and `exit_code: 1`, while the
 process exits 0 so callers can consume findings. Preflight or transport failures
 still exit non-zero. Without `--report-only`, doctor keeps its normal failure exit.
+
+`sb logs` returns a bounded 200-line snapshot by default. Use `--lines` (or
+`--tail`) and `--since` to narrow it, or opt into streaming with `--follow`.
+The same controls are forwarded for explicit remote lifecycle observations.
 
 `sb exec` accepts an explicit argv list and runs it in the configured public
 Compose service. It does not invent a shell, service, or package command.
@@ -194,6 +215,12 @@ select --local/--remote`.
 WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
 
+For Docker-backed instances, supported local plugin/theme ZIPs, media files,
+and `eval-file` scripts are staged through Sandbox's download-cache mount before
+WP-CLI runs. Temporary staged files are removed after completion or timeout;
+Herd continues to use host paths directly. Paths must resolve to regular files
+no larger than 512 MiB.
+
 `sb wp --local` is accepted as an explicit local-runtime selector for scripts
 that share target flags across Sandbox commands; `--project-dir DIR` selects
 the registered instance for that project from any working directory. Neither
@@ -216,7 +243,8 @@ and validate explicit IDs before updating or deleting posts.
 
 `./sb test` consumes its Sandbox routing options whether they appear before or
 after the mode. Keep PHPUnit arguments after the `--` delimiter; only those
-tokens are forwarded to the runner.
+tokens are forwarded to the runner, including a focused file such as
+`./sb test unit -- tests/Unit/SmokeTest.php`.
 
 When a ready instance's containers are stopped, `sb ensure` reports
 `instance_runtime_stopped` instead of presenting it as missing mount evidence;
@@ -232,6 +260,10 @@ token first. A remote staged from a runtime that predates the flag ensures
 without it and reports that — restage with `./sb remote provision <name>`.
 Treat a revealed URL from a publicly exposed instance as an admin credential:
 write it to a gitignored descriptor, never to a log or a commit.
+
+Remote `ensure` fails closed when SSH exits successfully but returns no JSON
+document. It emits `error.code=remote_empty_output`; inspect remote state before
+retrying.
 
 When `login_url` contains a `sandbox_autologin` query parameter, the JSON also
 includes the derived boolean `login_url_redacted`. It is `true` whenever the

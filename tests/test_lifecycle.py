@@ -121,6 +121,25 @@ class TestMuPluginDirectoryPreparation(unittest.TestCase):
         compose.assert_not_called()
 
 
+class TestBoundedLogs(unittest.TestCase):
+    @patch("sandbox.commands.lifecycle.compose")
+    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
+    @patch("sandbox.commands.lifecycle._remote_lifecycle", return_value=None)
+    @patch("sandbox.commands.lifecycle._core")
+    def test_local_logs_are_bounded_and_follow_is_explicit(
+            self, core, _remote_lifecycle, _is_herd, compose):
+        core.return_value.registry_find_instance.return_value = None
+        args = SimpleNamespace(
+            resolved_instance="preview-demo", remote=None, project_dir=None,
+            lines=75, since="2026-08-26T00:00:00Z", follow=False,
+        )
+        lifecycle.cmd_logs({}, args)
+        compose.assert_called_once_with(
+            "logs", "--no-color", "--tail=75", "--since=2026-08-26T00:00:00Z",
+            "wp", "db", instance="preview-demo",
+        )
+
+
 class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
     def test_loopback_muplugin_preserves_url_and_routes_curl_via_host_gateway(self):
         import sandbox.core._provision as provision

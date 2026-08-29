@@ -749,6 +749,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(guide["project_kind"], "compose")
         self.assertIn("sandbox-cli", guide["skill"])
 
+    def test_guide_accepts_documented_local_selector(self):
+        result = run_sb("guide", "--local", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        guide = json.loads(result.stdout)
+        self.assertEqual(guide["mode"], "cli-first")
+
     def test_guide_catalog_covers_public_registry_with_explicit_exclusions(self):
         r = run_sb("guide", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)

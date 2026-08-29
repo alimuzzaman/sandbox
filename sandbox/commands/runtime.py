@@ -162,6 +162,8 @@ def configure_guide_parser(parser) -> None:
     parser.description = "Show the CLI-first workflow for a project runtime."
     parser.add_argument("--project-dir", default=None,
                         help="project to inspect (default: current directory when configured)")
+    parser.add_argument("--local", action="store_true",
+                        help="explicitly select the host-local guide context")
     parser.add_argument("--json", action="store_true", help="emit a machine-readable command catalog")
 
 

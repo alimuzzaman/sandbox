@@ -59,7 +59,11 @@ clamped to 1 with an explicit message — never silently raced.
 Handled entirely by the shared fan-out helper (§4.1): concurrency capped (default ~4
 simultaneous stacks), provisioning failure of one worker recorded as `provision_failed`
 without aborting the others (`--strict-provision` to flip to fail-fast), ephemeral
-instances torn down unless `--keep-on-fail`.
+instances torn down unless `--keep-on-fail`. Before a shard starts Playwright, the
+runner performs a bounded read-only probe of the instance's canonical browser URL
+(including the secured/proxied hostname when one is configured). A local container port
+being open is not sufficient: if the canonical URL is still unavailable, the shard is
+reported as failed with an explicit readiness error and Playwright is not launched.
 
 ### 2.5 CLI + MCP surface
 

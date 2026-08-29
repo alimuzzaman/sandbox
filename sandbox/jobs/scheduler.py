@@ -62,6 +62,9 @@ class JobScheduler:
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=max(60, int(row["deadline_seconds"])))).isoformat()
         with self.repository.transaction(immediate=True) as connection:
+            # Terminal jobs can finish without a later status read. Reap those
+            # leases before admission so completed work cannot block a new job.
+            self._reap_stale_locked(connection, now=now)
             if not self._resource_floor_available():
                 raise WorkspaceBusy("host resource floor is not available")
             active = connection.execute(
@@ -84,6 +87,64 @@ class JobScheduler:
             )
             connection.execute("INSERT INTO host_capacity_leases(slot,job_id,acquired_at,heartbeat_at) VALUES(?,?,?,?)",
                                (slot, row["job_id"], timestamp, timestamp))
+
+    def queue_details(self, row: dict) -> dict:
+        """Return bounded, advisory scheduler evidence for a queued job."""
+        namespace = self.namespace(row)
+        lifecycle = ("accepted", "queued", "running", "cancelling")
+        queued_before = self.repository.connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE target_kind=? AND IFNULL(remote_name,'')=? "
+            "AND project_identity=? AND lifecycle='queued' "
+            "AND (accepted_at < ? OR (accepted_at = ? AND job_id < ?))",
+            (row["target_kind"], row.get("remote_name") or "", row["project_identity"],
+             row.get("accepted_at", ""), row.get("accepted_at", ""), row["job_id"]),
+        ).fetchone()[0]
+        workspace_rows = self.repository.connection.execute(
+            "SELECT l.job_id, l.workspace_label FROM workspace_leases l "
+            "JOIN jobs j ON j.job_id=l.job_id "
+            "WHERE l.target_namespace=? AND l.project_identity=? "
+            "AND l.workspace_label=? AND j.lifecycle IN (?,?,?,?) "
+            "ORDER BY l.acquired_at, l.job_id LIMIT 8",
+            (namespace, row["project_identity"], row["workspace_label"], *lifecycle),
+        ).fetchall()
+        active_slots = self.repository.connection.execute(
+            "SELECT h.job_id, j.workspace_label FROM host_capacity_leases h "
+            "JOIN jobs j ON j.job_id=h.job_id "
+            "WHERE j.lifecycle IN (?,?,?,?) ORDER BY h.acquired_at, h.job_id LIMIT 8",
+            lifecycle,
+        ).fetchall()
+        blockers = []
+        seen = set()
+        candidates = (
+            *workspace_rows,
+            *(active_slots if len(active_slots) >= self.max_parallel else ()),
+        )
+        for blocker in candidates:
+            job_id = blocker[0]
+            if job_id in seen or job_id == row.get("job_id"):
+                continue
+            seen.add(job_id)
+            blockers.append({"job_id": job_id, "workspace": blocker[1]})
+        return {
+            "reason": row.get("queue_reason") or "queued",
+            "position": int(queued_before) + 1,
+            "blocking_jobs": blockers,
+            "namespace": namespace,
+        }
+
+    def _reap_stale_locked(self, connection, *, now: datetime) -> list[str]:
+        timestamp = now.isoformat()
+        rows = connection.execute(
+            "SELECT l.job_id FROM workspace_leases l LEFT JOIN jobs j ON j.job_id=l.job_id "
+            "WHERE l.expires_at<=? OR j.job_id IS NULL OR j.lifecycle IN "
+            "('succeeded','failed','timed_out','cancelled','interrupted')",
+            (timestamp,),
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        for job_id in ids:
+            connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+        return ids
 
     def release(self, job_id: str) -> None:
         self.repository.release_leases(job_id)
@@ -112,19 +173,8 @@ class JobScheduler:
     def reconcile_stale(self, *, now: datetime | None = None) -> list[str]:
         """Release expired leases and terminal-job leases atomically."""
         now = now or datetime.now(timezone.utc)
-        timestamp = now.isoformat()
         with self.repository.transaction(immediate=True) as connection:
-            rows = connection.execute(
-                "SELECT l.job_id FROM workspace_leases l LEFT JOIN jobs j ON j.job_id=l.job_id "
-                "WHERE l.expires_at<=? OR j.job_id IS NULL OR j.lifecycle IN "
-                "('succeeded','failed','timed_out','cancelled','interrupted')",
-                (timestamp,),
-            ).fetchall()
-            ids = [row[0] for row in rows]
-            for job_id in ids:
-                connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
-                connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
-        return ids
+            return self._reap_stale_locked(connection, now=now)
 
     def active(self, *, namespace: str | None = None) -> list[dict]:
         query = "SELECT * FROM workspace_leases"

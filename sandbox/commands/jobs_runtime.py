@@ -213,13 +213,17 @@ def configure_start_parser(parser) -> None:
 
 
 def configure_status_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", nargs="?")
+    parser.add_argument("--job-id", dest="job_id_option",
+                        help="accepted job identifier (alias for the positional argument)")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_output_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", nargs="?")
+    parser.add_argument("--job-id", dest="job_id_option",
+                        help="accepted job identifier (alias for the positional argument)")
     parser.add_argument("--stream", choices=("combined", "stdout", "stderr"), default="combined")
     position = parser.add_mutually_exclusive_group()
     position.add_argument("--cursor")
@@ -418,7 +422,20 @@ def cmd_job_start(_cfg, args) -> None:
               f"deadline={deadline.get('seconds', policy.deadline_seconds)}s source={deadline.get('source', submission.deadline_source)}")
 
 
+def _normalize_observation_job_id(args) -> str:
+    positional = getattr(args, "job_id", None)
+    option = getattr(args, "job_id_option", None)
+    if positional and option and positional != option:
+        _die("job identifier was provided twice with different values")
+    job_id = option or positional
+    if not isinstance(job_id, str) or not job_id.strip():
+        _die("a job identifier is required (use JOB_ID or --job-id JOB_ID)")
+    args.job_id = job_id.strip()
+    return args.job_id
+
+
 def cmd_job_status(_cfg, args) -> None:
+    _normalize_observation_job_id(args)
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -446,6 +463,7 @@ def cmd_job_status(_cfg, args) -> None:
 
 
 def cmd_job_output(_cfg, args) -> None:
+    _normalize_observation_job_id(args)
     try:
         max_bytes = normalize_output_page_bytes(getattr(args, "max_bytes", 65536))
         wait_seconds = normalize_output_wait_seconds(getattr(args, "wait_seconds", 0))
@@ -474,7 +492,27 @@ def cmd_job_output(_cfg, args) -> None:
             if args.json: print(json.dumps(result, sort_keys=True))
             elif result.get("data"): print(result["data"], end="")
             if not args.follow: return
-            state = transport.status(args.remote, args.job_id)
+            try:
+                state = transport.status(
+                    args.remote, args.job_id,
+                    timeout=min(5, max(1, effective_wait_seconds + 2)),
+                )
+            except RemoteJobTransportError as exc:
+                unknown = exc.to_payload(remote=args.remote, operation="job-status")
+                unknown.update({
+                    "job_id": args.job_id,
+                    "follow": "stopped",
+                    "recovery": "retry job-status or job-output without --follow",
+                })
+                if args.json:
+                    print(json.dumps(unknown, sort_keys=True))
+                else:
+                    print(
+                        "warning: remote job status became unavailable; follow stopped. "
+                        "Retry job-status or job-output without --follow.",
+                        file=sys.stderr,
+                    )
+                return
             if state.get("lifecycle") in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}: return
             cursor = result.get("cursor"); time.sleep(.2)
     service = durable_job_dependencies()["job_service"]

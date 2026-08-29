@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 from sandbox.core import *  # noqa: F401,F403
+from sandbox.core._instances import _wait_reachable
 
 from sandbox.registry import register
 
@@ -146,6 +147,18 @@ def _run_shard(entry: dict, spec: dict, root: Path, config_path: Path | None,
     idx = spec["index"]
     total = spec["total"]
     url = entry.get("url") or f"http://localhost:{entry.get('wordpress_port')}"
+    # Provisioning proves that the WordPress container and its local port are
+    # up, but Playwright may use the canonical secured/proxied URL instead.
+    # Gate the browser process on that exact URL so a proxy/DNS race becomes a
+    # bounded, attributable provisioning failure rather than an opaque test
+    # navigation timeout. The helper never mutates the instance and treats
+    # 2xx--4xx responses as reachable, matching the lifecycle readiness gate.
+    if not _wait_reachable(entry, timeout=30):
+        return {
+            "status": "failed",
+            "error": "canonical instance URL did not become reachable before Playwright",
+            "url": url,
+        }
     if write_wp_env_port:
         _write_wp_env_port(root, entry)
     env = dict(os.environ)

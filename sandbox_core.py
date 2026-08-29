@@ -678,7 +678,8 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     # override < per-label (highest — a label's own plugin set wins last).
     layers = []
     used_legacy = False
-    self_slug = _project_slug(merged.get("slug"), root.name)
+    fallback_slug = _detect_project_plugin_slug(root) or root.name
+    self_slug = _project_slug(merged.get("slug"), fallback_slug)
     for doc in (user_doc, native_doc, override_doc, label_doc):
         m, legacy, self_entry = _normalize_plugins(doc or {})
         if self_entry is not None:

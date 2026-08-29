@@ -30,6 +30,12 @@ from sandbox.plugin_check.runner import (
 )
 
 
+_SUCCESS_SUMMARY_RE = re.compile(
+    r"^Success:\s*Checks complete\.\s*No errors found\.?$",
+    re.IGNORECASE,
+)
+
+
 class PluginCheckOutputError(ValueError):
     """`wp plugin check --format=json` did not emit its documented format."""
 
@@ -201,9 +207,19 @@ def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
         # Sandbox checkout's cwd.
         return os.path.normpath(raw)
 
-    lines = [(number, line.strip()) for number, line in
-             enumerate(output.splitlines(), start=1) if line.strip()]
+    lines = []
+    success_summary = False
+    for number, line in enumerate(output.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _SUCCESS_SUMMARY_RE.fullmatch(stripped):
+            success_summary = True
+            continue
+        lines.append((number, stripped))
     if not lines:
+        if success_summary:
+            return []
         raise PluginCheckOutputError("empty output")
     # A successful zero-finding run may be emitted as a plain JSON empty array.
     # It is the only FILE-less form accepted; accepting arbitrary prose here

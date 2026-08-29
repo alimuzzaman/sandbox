@@ -165,6 +165,17 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
+- [ ] **Evaluate an opt-in rsync transport for bounded remote source updates.**
+  Keep `git push` plus reset/diff-overlay as the default exact-revision deploy
+  path. Specify and prototype rsync only as an explicit capability-gated
+  transport for large incremental source sets or uncommitted files, with a
+  dry-run manifest, credential screening, path and size limits, replay-safe
+  request identity, ownership-scoped deletion, staged atomic publication,
+  revision/transport receipts, and no implicit `--delete`. Compare transfer
+  time and bytes against the current Git-plus-archive path on a disposable
+  remote before adoption; preserve `host apply`, job pinning, and sync
+  generation semantics.
+
 - [ ] **Real recovery set and fresh-server drill** — with explicit credentials
   and approval, complete `specs/023-scoped-recovery-profiles/tasks.md:T060,T061`; keep
   automation disabled until a current-passphrase encrypted set verifies and a

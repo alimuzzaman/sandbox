@@ -1129,6 +1129,17 @@ class TestPushCommits(unittest.TestCase):
 
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
+    def test_dirty_overlay_identity_changes_with_untracked_file_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "new.txt")
+            path.write_text("first")
+            first = sr.dirty_overlay_identity(directory, "", ["new.txt"])
+            path.write_text("second")
+            second = sr.dirty_overlay_identity(directory, "", ["new.txt"])
+
+        self.assertRegex(first, r"^sha256:[0-9a-f]{64}$")
+        self.assertNotEqual(first, second)
+
     def test_appledouble_filter_is_basename_only(self):
         kept, skipped = sr.filter_appledouble_paths([
             "._root-sidecar", "nested/._nested-sidecar", ".env",

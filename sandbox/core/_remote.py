@@ -1804,6 +1804,59 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     return diff_text, untracked
 
 
+_DIRTY_IDENTITY_MAX_FILES = 4096
+_DIRTY_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
+
+
+def dirty_overlay_identity(project_root, diff_text: str,
+                           untracked: list[str]) -> str:
+    """Hash the exact bounded dirty file set without retaining source bytes."""
+    root = Path(project_root).resolve()
+    names = set(untracked)
+    if diff_text.strip():
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", "--relative", "HEAD"],
+            cwd=str(root), env=git_environment(), capture_output=True,
+            text=True, check=False,
+        )
+        if changed.returncode != 0:
+            raise RuntimeError("could not identify changed deployment source files")
+        names.update(line.strip() for line in (changed.stdout or "").splitlines()
+                     if line.strip())
+    names = set(filter_appledouble_paths(sorted(names))[0])
+    if len(names) > _DIRTY_IDENTITY_MAX_FILES:
+        raise ValueError("dirty deployment identity exceeds the file limit")
+    digest = hashlib.sha256(b"sandbox-dirty-overlay-v1\0")
+    total = 0
+    for relative in sorted(names):
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or "\x00" in relative:
+            raise ValueError("dirty deployment identity contains an unsafe path")
+        local = root / path
+        if local.is_symlink():
+            raise ValueError("dirty deployment identity does not accept symbolic links")
+        encoded = relative.encode("utf-8", "surrogateescape")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        if not local.exists():
+            digest.update(b"\0deleted\0")
+            continue
+        if not local.is_file():
+            raise ValueError("dirty deployment identity accepts regular files only")
+        digest.update(b"\0file\0")
+        digest.update((local.stat().st_mode & 0o777).to_bytes(2, "big"))
+        with local.open("rb") as stream:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _DIRTY_IDENTITY_MAX_BYTES:
+                    raise ValueError("dirty deployment identity exceeds the byte limit")
+                digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 def deploy_project_descriptor_files(project_root) -> list[str]:
     """Return project-local runtime descriptors that deploy must carry.
 

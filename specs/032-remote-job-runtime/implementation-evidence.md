@@ -1192,3 +1192,7 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   full recreate, and bounded the single observer by a strict total deadline, allowlisted
   keys, fan-out, rows, bytes, phases, and receipt size. Partial receipts are persisted
   before a fail-closed apply result. These remain local test claims only.
+- A second follow-up records and compares a bounded dirty-overlay identity, refuses an
+  identical staged/unverified retry unless runtime evidence can reconcile it, and drains
+  observer subprocess output incrementally into a fixed-size buffer. No source bytes,
+  source paths, credentials, or live-host evidence are persisted by these checks.

@@ -979,7 +979,7 @@ def _host_observation_command(prefix: str, services: list[str],
         "revision_commands": revision_commands,
     }, separators=(",", ":")).encode()).decode()
     program = "\n".join((
-        "import base64,json,subprocess,sys,time",
+        "import base64,json,os,selectors,signal,subprocess,sys,time",
         f"MAX_OUTPUT_BYTES={_HOST_OBSERVATION_MAX_OUTPUT_BYTES}",
         f"MAX_ROWS={_HOST_OBSERVATION_MAX_ROWS}",
         f"MAX_CONFIGURED={_HOST_OBSERVATION_MAX_CONFIGURED_SERVICES}",
@@ -987,6 +987,9 @@ def _host_observation_command(prefix: str, services: list[str],
         "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline_seconds']",
         "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[],'bounded':True}",
         "expired=False",
+        "def stop(q):",
+        " try:os.killpg(q.pid,signal.SIGKILL)",
+        " except ProcessLookupError:pass",
         "def run(phase,command):",
         " global expired",
         " remaining=end-time.monotonic()",
@@ -994,13 +997,34 @@ def _host_observation_command(prefix: str, services: list[str],
         "  expired=True",
         "  if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':'deadline'})",
         "  return None",
-        " try:q=subprocess.run(command,shell=True,text=True,capture_output=True,timeout=remaining,check=False)",
-        " except subprocess.TimeoutExpired:",
-        "  expired=True",
+        " q=subprocess.Popen(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)",
+        " selector=selectors.DefaultSelector();selector.register(q.stdout,selectors.EVENT_READ)",
+        " raw=bytearray();truncated=False;timed_out=False",
+        " while True:",
+        "  remaining=end-time.monotonic()",
+        "  if remaining<=0:",
+        "   timed_out=True;expired=True;stop(q);break",
+        "  ready=selector.select(remaining)",
+        "  if not ready:",
+        "   timed_out=True;expired=True;stop(q);break",
+        "  chunk=os.read(q.stdout.fileno(),65536)",
+        "  if not chunk:break",
+        "  space=max(0,MAX_OUTPUT_BYTES-len(raw));raw.extend(chunk[:space])",
+        "  if len(chunk)>space:truncated=True",
+        " selector.close()",
+        " if not timed_out:",
+        "  remaining=end-time.monotonic()",
+        "  if remaining<=0:timed_out=True;expired=True;stop(q)",
+        "  else:",
+        "   try:q.wait(timeout=remaining)",
+        "   except subprocess.TimeoutExpired:timed_out=True;expired=True;stop(q)",
+        " q.wait()",
+        " if timed_out:",
         "  if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':'timeout'})",
         "  return None",
-        " raw=(q.stdout or '').encode('utf-8','replace');truncated=len(raw)>MAX_OUTPUT_BYTES",
-        " output=raw[:MAX_OUTPUT_BYTES].decode('utf-8','replace')",
+        " output=bytes(raw).decode('utf-8','replace');encoded=output.encode('utf-8')",
+        " if len(encoded)>MAX_OUTPUT_BYTES:truncated=True",
+        " output=encoded[:MAX_OUTPUT_BYTES].decode('utf-8','ignore')",
         " state='partial' if truncated else ('unavailable' if q.returncode else 'complete')",
         " if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':state,'bytes':len(output.encode('utf-8')),'truncated':truncated})",
         " return output",
@@ -1198,18 +1222,27 @@ def _source_revision_evidence_ready(validated: dict, classified: dict,
 
 
 def _runtime_apply_decision(*, previous: dict, requested_revision: str,
-                            config_digest: str, exact_runtime_proven: bool) -> str:
+                            config_digest: str, source_state_identity: str,
+                            exact_runtime_proven: bool) -> str:
     """Choose only full convergence, proven edge replay, or refusal."""
     recorded = previous.get("recorded_revision") or previous.get("commit")
+    staged = previous.get("staged_revision")
     observed = previous.get("observed_runtime_revision")
-    same_identity = recorded == requested_revision and observed == requested_revision
+    runtime_state = (previous.get("runtime") or {}).get("state")
+    same_source_state = previous.get("source_state_identity") == source_state_identity
+    recorded_identity = recorded == requested_revision and observed == requested_revision
+    staged_identity = staged == requested_revision and runtime_state in {
+        "pending", "unverified",
+    }
     same_config = previous.get("config_digest") == config_digest
-    edge_pending = (previous.get("edge") or {}).get("state") == "pending"
-    if same_identity and same_config and exact_runtime_proven:
+    if same_source_state and same_config and exact_runtime_proven \
+            and (recorded_identity or staged_identity):
         return "edge_only"
-    if edge_pending and same_identity and same_config:
+    if same_source_state and same_config and (recorded_identity or staged_identity):
         return "refuse"
-    if recorded == requested_revision and same_config:
+    if same_config and staged_identity and previous.get("source_state_identity") is None:
+        return "refuse"
+    if same_source_state and same_config and recorded == requested_revision:
         return "refuse"
     return "full_recreate"
 
@@ -1632,11 +1665,18 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         raise hosting.HostingError(
             f"{validated['environment']} working tree changed while the source was being pushed"
         )
+    source_state_identity = remote.dirty_overlay_identity(
+        validated["project_root"], diff, untracked,
+    )
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
     key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})
+    if require_clean and previous_entry.get("source_state_identity") is None:
+        # Older clean receipts predate this field. Their staged commit is still
+        # exact because clean hosting never transferred a dirty overlay.
+        previous_entry["source_state_identity"] = source_state_identity
     config_digest = _host_config_digest(validated, runtime)
     client = cloudflare.Client()
     remote.update_target_to(
@@ -1650,6 +1690,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         **previous_entry,
         "requested_revision": sha,
         "staged_revision": sha,
+        "source_state_identity": source_state_identity,
         "config_digest": config_digest,
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},
@@ -1705,10 +1746,20 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         classified = None
         evidence_error = None
         recorded_before = previous_entry.get("recorded_revision") or previous_entry.get("commit")
+        staged_before = previous_entry.get("staged_revision")
+        previous_runtime_state = (previous_entry.get("runtime") or {}).get("state")
+        same_source_state = (
+            previous_entry.get("source_state_identity") == source_state_identity
+        )
         may_replay = (
             previous_entry.get("config_digest") == config_digest
-            and recorded_before == sha
-            and previous_entry.get("observed_runtime_revision") == sha
+            and same_source_state
+            and (
+                (recorded_before == sha
+                 and previous_entry.get("observed_runtime_revision") == sha)
+                or (staged_before == sha
+                    and previous_runtime_state in {"pending", "unverified"})
+            )
         )
         exact_runtime_proven = False
         if may_replay:
@@ -1730,6 +1781,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             previous=previous_entry,
             requested_revision=sha,
             config_digest=config_digest,
+            source_state_identity=source_state_identity,
             exact_runtime_proven=exact_runtime_proven,
         )
         if decision == "refuse":

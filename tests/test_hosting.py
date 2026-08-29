@@ -93,6 +93,10 @@ def _ready_observation(revision=None, services=("web",)):
     }
 
 
+def _clean_source_identity():
+    return "sha256:" + hashlib.sha256(b"sandbox-dirty-overlay-v1\0").hexdigest()
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -1151,9 +1155,11 @@ class TestHostingManifest(unittest.TestCase):
             previous={
                 "config_digest": "digest-1", "recorded_revision": "a" * 40,
                 "observed_runtime_revision": "a" * 40, "edge": {"state": "ready"},
+                "source_state_identity": _clean_source_identity(),
             },
             requested_revision="b" * 40,
             config_digest="digest-1",
+            source_state_identity=_clean_source_identity(),
             exact_runtime_proven=False,
         )
         self.assertEqual(decision, "full_recreate")
@@ -1162,14 +1168,59 @@ class TestHostingManifest(unittest.TestCase):
         previous = {
             "config_digest": "digest-1", "recorded_revision": "a" * 40,
             "observed_runtime_revision": "a" * 40, "edge": {"state": "pending"},
+            "source_state_identity": _clean_source_identity(),
         }
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision="a" * 40,
-            config_digest="digest-1", exact_runtime_proven=True,
+            config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            exact_runtime_proven=True,
         ), "edge_only")
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision="a" * 40,
-            config_digest="digest-1", exact_runtime_proven=False,
+            config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            exact_runtime_proven=False,
+        ), "refuse")
+
+    def test_dirty_source_identity_change_cannot_choose_edge_only(self):
+        revision = "a" * 40
+        decision = hosting_cmd._runtime_apply_decision(
+            previous={
+                "config_digest": "digest-1", "recorded_revision": revision,
+                "observed_runtime_revision": revision,
+                "source_state_identity": "sha256:" + "1" * 64,
+                "runtime": {"state": "ready"}, "edge": {"state": "pending"},
+            },
+            requested_revision=revision,
+            config_digest="digest-1",
+            source_state_identity="sha256:" + "2" * 64,
+            exact_runtime_proven=True,
+        )
+        self.assertEqual(decision, "full_recreate")
+
+    def test_same_staged_unverified_source_refuses_initializer_replay(self):
+        revision = "a" * 40
+        previous = {
+            "config_digest": "digest-1", "staged_revision": revision,
+            "source_state_identity": _clean_source_identity(),
+            "runtime": {"state": "unverified"}, "edge": {"state": "pending"},
+        }
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision=revision,
+            config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            exact_runtime_proven=False,
+        ), "refuse")
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision=revision,
+            config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            exact_runtime_proven=True,
+        ), "edge_only")
+
+        without_identity = dict(previous)
+        without_identity.pop("source_state_identity")
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=without_identity, requested_revision=revision,
+            config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            exact_runtime_proven=False,
         ), "refuse")
 
     def test_observer_uses_allowlisted_keys_and_bounds_payload(self):
@@ -1184,6 +1235,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("SECRET_TOKEN", command)
         self.assertIn("MAX_OUTPUT_BYTES", program)
         self.assertIn("remaining<=0", program)
+        self.assertIn("subprocess.Popen", program)
+        self.assertNotIn("capture_output=True", program)
 
     def test_observer_stops_scheduling_at_expired_total_deadline(self):
         command = hosting_cmd._host_observation_command(
@@ -1845,12 +1898,15 @@ class TestHostingManifest(unittest.TestCase):
         client.records.return_value = []
         client.upsert_address.return_value = {"id": "record-1"}
         overlay = ("diff --git a/x b/x\n", ["new.txt"])
+        overlay_identity = "sha256:" + "d" * 64
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=overlay), \
+             patch.object(hosting_cmd.remote, "dirty_overlay_identity",
+                          return_value=overlay_identity), \
              patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
              patch.object(hosting_cmd.remote, "update_target_to") as apply_overlay, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
@@ -1869,6 +1925,8 @@ class TestHostingManifest(unittest.TestCase):
             project_root=validated["project_root"],
             diff_text=overlay[0], untracked=overlay[1],
         )
+        record = state["hosts"][hosting.state_key("myvps", validated)]
+        self.assertEqual(record["source_state_identity"], overlay_identity)
 
     def test_observation_timeout_preserves_staged_receipt_without_claiming_runtime(self):
         revision = "f" * 40
@@ -1959,6 +2017,63 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(record["edge"]["state"], "pending")
         self.assertGreaterEqual(save.call_count, 2)
 
+    def test_identical_staged_unverified_retry_never_reruns_compose_or_initializer(self):
+        revision = "6" * 40
+        manifest = _public_acme_manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n",
+        ).replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n"
+            "      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        digest_runtime = dict(runtime)
+        digest_runtime["environment"] = hosting.render_env_file(
+            validated, {}, pushed_commit_sha=revision,
+        )
+        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {key: {
+            "requested_revision": revision, "staged_revision": revision,
+            "source_state_identity": _clean_source_identity(),
+            "config_digest": digest, "runtime": {"state": "unverified"},
+            "edge": {"state": "pending"},
+        }}}
+        partial = {
+            "schema_version": 1, "complete": False, "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [],
+            "phases": [{"phase": "source_revision:web", "state": "timeout"}],
+        }
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_observe_host_runtime", return_value=partial), \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
+             patch.object(hosting_cmd, "_configure_host_caddy") as edge, \
+             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
+             patch.object(hosting_cmd, "_restore_host_caddy"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            with self.assertRaisesRegex(RuntimeError, "refusing Compose or initializer replay"):
+                hosting_cmd._apply_host(
+                    validated, {}, "myvps", runtime, state, False, "main",
+                )
+
+        compose.assert_not_called()
+        runtime_health.assert_not_called()
+        edge.assert_not_called()
+
     def test_changed_source_with_same_saved_config_runs_full_recreate(self):
         old_revision, revision = "3" * 40, "4" * 40
         with self._write(_public_acme_manifest()) as directory:
@@ -2026,6 +2141,7 @@ class TestHostingManifest(unittest.TestCase):
         state = {"version": 1, "hosts": {key: {
             "commit": revision, "recorded_revision": revision,
             "observed_runtime_revision": revision, "config_digest": digest,
+            "source_state_identity": _clean_source_identity(),
             "runtime": {"state": "ready"}, "edge": {"state": "pending"},
         }}}
         client = MagicMock()

@@ -194,7 +194,11 @@ reconcile a stale local record without a Compose mutation when the saved configu
 digest also matches. An `edge: pending` replay with that evidence is edge-only; missing
 evidence refuses without Compose or initializer replay. A changed source always takes the
 full recreate path. Targeted convergence also requires exact identity/config plus ready
-topology and health. Unknown service health is `unverified`, not ready. Remote
+topology and health. Dirty-allowed source identity includes a bounded digest of the
+overlaid file bytes/modes; changed or missing dirty identity cannot select edge-only.
+A staged unverified retry reconciles from observation or refuses without rerunning an
+initializer. Unknown service health is `unverified`, not ready. Remote
 Compose/source observation uses one bounded session with a strict shared deadline,
-allowlisted revision keys, bounded fan-out/output, and retained phase-level partial
-evidence. Partial evidence is persisted before a failed apply returns.
+allowlisted revision keys, process-level bounded output draining, and bounded fan-out.
+It retains phase-level partial evidence. Partial evidence is persisted before a failed
+apply returns.

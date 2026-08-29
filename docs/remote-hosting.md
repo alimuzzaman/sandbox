@@ -483,10 +483,12 @@ fails. A later apply repairs only the
 local record when every declared long-lived service and every declared revision key
 exactly matches the requested revision, the full topology is healthy, and the saved
 configuration digest matches. It does not recreate containers merely to repair that
-record. Dirty-allowed deployments also persist a bounded digest of the exact overlaid
-file bytes and modes (never the source bytes or paths); replay requires that digest to
-match. A staged `unverified` receipt is observed and reconciled or refused, so a missing
-observation alone never reruns Compose initializers.
+record. Dirty-allowed deployments snapshot one bounded immutable tar artifact, hash that
+artifact plus its deletion set, transfer those exact bytes, and persist only the digest.
+Because that digest is not runtime-observable, dirty receipts never use commit-only
+record reconciliation or edge-only replay. A clean staged `unverified` receipt is
+observed and reconciled or refused; a dirty one is refused unless a real source change
+requires full convergence. Missing observation alone never reruns Compose initializers.
 The Caddy fragment transaction holds one host-global lock, compares the desired and
 installed fragment digests, and skips validation/reload when both the fragment and
 aggregate import are unchanged. A real change runs separate 30-second validation,
@@ -576,6 +578,10 @@ rows, bytes, phases, and receipt size. Each subprocess pipe is drained increment
 a fixed-size buffer, so an untrusted command cannot allocate unbounded captured output
 before truncation. Completed phases and partial or unknown evidence
 survive a later probe failure; diagnose does not open one SSH session per service/key. A
+revision mismatch is retained only as `mismatch`; the arbitrary container value is never
+saved or returned by status. Exact record reconciliation preserves the bounded service,
+topology, health, source-key-state, and phase receipt rather than collapsing it to ready.
+Git checkout-boundary probes also discard inherited `GIT_*` repository selectors. A
 declared service missing from either Compose configuration or the running set is
 topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
 services are excluded from this long-lived topology comparison. Missing remote evidence

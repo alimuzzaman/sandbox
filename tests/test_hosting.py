@@ -3,6 +3,7 @@ import base64
 import json
 import hashlib
 import io
+import os
 import subprocess
 import shlex
 import sys
@@ -94,7 +95,9 @@ def _ready_observation(revision=None, services=("web",)):
 
 
 def _clean_source_identity():
-    return "sha256:" + hashlib.sha256(b"sandbox-dirty-overlay-v1\0").hexdigest()
+    digest = hashlib.sha256(b"sandbox-dirty-overlay-v2\0")
+    digest.update(hashlib.sha256(b"").digest())
+    return "sha256:" + digest.hexdigest()
 
 
 class TestHostingManifest(unittest.TestCase):
@@ -291,6 +294,24 @@ class TestHostingManifest(unittest.TestCase):
             with self.assertRaisesRegex(hosting.HostingError, "source_root"):
                 hosting.validate_manifest(nested)
 
+    def test_git_root_boundary_ignores_hostile_repository_selectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            intended = root / "intended"
+            foreign = root / "foreign"
+            intended.mkdir()
+            foreign.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=intended, check=True)
+            subprocess.run(["git", "init", "-q"], cwd=foreign, check=True)
+            hostile = {
+                "GIT_DIR": str(foreign / ".git"),
+                "GIT_WORK_TREE": str(foreign),
+            }
+            with patch.dict(os.environ, hostile, clear=False):
+                resolved = hosting._git_root(intended)
+
+        self.assertEqual(resolved, intended.resolve())
+
     def test_nested_manifest_declared_source_root_is_the_transfer_root(self):
         """A nested manifest's declared root drives validation and dirty apply.
 
@@ -354,9 +375,9 @@ class TestHostingManifest(unittest.TestCase):
                 if call.kwargs.get("input_data") is not None
             )
             command = transfer_call.args[1]
-            self.assertIn("tar -xzf - -C /srv/deploy/example-site", command)
+            self.assertIn("tar -xf - -C /srv/deploy/example-site", command)
             self.assertNotIn("/srv/deploy/example-site/site", command)
-            archive = tarfile.open(fileobj=io.BytesIO(transfer_call.kwargs["input_data"]), mode="r:gz")
+            archive = tarfile.open(fileobj=io.BytesIO(transfer_call.kwargs["input_data"]), mode="r:")
             names = {name for name in archive.getnames() if not name.startswith("._")}
             self.assertEqual(names, {"compose.yml", "local.yml"})
 
@@ -1061,6 +1082,7 @@ class TestHostingManifest(unittest.TestCase):
                 "requested_revision": revision,
                 "staged_revision": revision,
                 "config_digest": "digest-1",
+                "source_state_clean": True,
                 "runtime": {"state": "pending"},
                 "edge": {"state": "pending"},
             },
@@ -1069,6 +1091,8 @@ class TestHostingManifest(unittest.TestCase):
             "complete": True,
             "topology": {"state": "ready"},
             "health": {"state": "ready"},
+            "services": [{"service": "web", "state": "running", "health": "healthy"}],
+            "phases": [{"phase": "source_revision:web", "state": "complete"}],
             "observed_runtime_revision": revision,
             "source_revision": {"state": "ready", "checks": [{
                 "service": "web", "key": "LENZORA_SOURCE_REVISION",
@@ -1090,6 +1114,13 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(record["commit"], revision)
         self.assertEqual(record["observed_runtime_revision"], revision)
         self.assertEqual(record["runtime"]["state"], "ready")
+        self.assertEqual(record["runtime"]["topology"], {"state": "ready"})
+        self.assertEqual(record["runtime"]["health"], {"state": "ready"})
+        self.assertEqual(record["runtime"]["services"], observation["services"])
+        saved_source = record["runtime"]["source_revision"]
+        self.assertEqual(saved_source["state"], "ready")
+        self.assertEqual(saved_source["checks"][0]["state"], "match")
+        self.assertNotIn("observed", saved_source["checks"][0])
         self.assertEqual(record["edge"]["state"], "pending")
 
     def test_record_reconcile_rejects_ready_aggregate_with_a_missing_service_key(self):
@@ -1160,6 +1191,7 @@ class TestHostingManifest(unittest.TestCase):
             requested_revision="b" * 40,
             config_digest="digest-1",
             source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=False,
         )
         self.assertEqual(decision, "full_recreate")
@@ -1173,11 +1205,13 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision="a" * 40,
             config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=True,
         ), "edge_only")
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision="a" * 40,
             config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=False,
         ), "refuse")
 
@@ -1193,9 +1227,21 @@ class TestHostingManifest(unittest.TestCase):
             requested_revision=revision,
             config_digest="digest-1",
             source_state_identity="sha256:" + "2" * 64,
+            source_state_clean=False,
             exact_runtime_proven=True,
         )
         self.assertEqual(decision, "full_recreate")
+        previous = {
+            "config_digest": "digest-1", "recorded_revision": revision,
+            "observed_runtime_revision": revision,
+            "source_state_identity": "sha256:" + "2" * 64,
+            "runtime": {"state": "ready"}, "edge": {"state": "pending"},
+        }
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision=revision,
+            config_digest="digest-1", source_state_identity="sha256:" + "2" * 64,
+            source_state_clean=False, exact_runtime_proven=True,
+        ), "refuse")
 
     def test_same_staged_unverified_source_refuses_initializer_replay(self):
         revision = "a" * 40
@@ -1207,11 +1253,13 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision=revision,
             config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=False,
         ), "refuse")
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=previous, requested_revision=revision,
             config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=True,
         ), "edge_only")
 
@@ -1220,6 +1268,7 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(hosting_cmd._runtime_apply_decision(
             previous=without_identity, requested_revision=revision,
             config_digest="digest-1", source_state_identity=_clean_source_identity(),
+            source_state_clean=True,
             exact_runtime_proven=False,
         ), "refuse")
 
@@ -1237,6 +1286,38 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("remaining<=0", program)
         self.assertIn("subprocess.Popen", program)
         self.assertNotIn("capture_output=True", program)
+
+    def test_mismatched_revision_value_is_never_retained_or_exposed(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        hostile = "credential-looking-value-that-must-not-survive"
+        classified = hosting_cmd._classify_host_observation(validated, {
+            "complete": True,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": hostile,
+            }],
+            "phases": [{"phase": "source_revision:web", "state": "complete"}],
+        }, "a" * 40)
+
+        self.assertEqual(classified["source_revision"]["checks"][0]["state"], "mismatch")
+        self.assertNotIn(hostile, json.dumps(classified))
+        self.assertNotIn("observed", classified["source_revision"]["checks"][0])
+        key = hosting.state_key("myvps", validated)
+        legacy = {"version": 1, "hosts": {key: {"runtime": {
+            "state": "unverified", "source_revision": {
+                "state": "degraded", "checks": [{
+                    "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                    "state": "mismatch", "observed": hostile,
+                }],
+            },
+        }}}}
+        status = hosting_cmd._host_runtime_status(
+            validated, {"provisioned": False}, "myvps", legacy,
+        )
+        self.assertNotIn(hostile, json.dumps(status))
 
     def test_observer_stops_scheduling_at_expired_total_deadline(self):
         command = hosting_cmd._host_observation_command(
@@ -1905,8 +1986,10 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
              patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
              patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=overlay), \
-             patch.object(hosting_cmd.remote, "dirty_overlay_identity",
-                          return_value=overlay_identity), \
+             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay", return_value={
+                 "identity": overlay_identity, "digest": "d" * 64,
+                 "archive": b"artifact", "deleted": [], "files": 1,
+             }), \
              patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
              patch.object(hosting_cmd.remote, "update_target_to") as apply_overlay, \
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
@@ -1924,9 +2007,11 @@ class TestHostingManifest(unittest.TestCase):
             {}, "/srv/source", revision,
             project_root=validated["project_root"],
             diff_text=overlay[0], untracked=overlay[1],
+            overlay_snapshot=ANY,
         )
         record = state["hosts"][hosting.state_key("myvps", validated)]
         self.assertEqual(record["source_state_identity"], overlay_identity)
+        self.assertFalse(record["source_state_clean"])
 
     def test_observation_timeout_preserves_staged_receipt_without_claiming_runtime(self):
         revision = "f" * 40
@@ -2041,6 +2126,7 @@ class TestHostingManifest(unittest.TestCase):
         state = {"version": 1, "hosts": {key: {
             "requested_revision": revision, "staged_revision": revision,
             "source_state_identity": _clean_source_identity(),
+            "source_state_clean": True,
             "config_digest": digest, "runtime": {"state": "unverified"},
             "edge": {"state": "pending"},
         }}}
@@ -2070,6 +2156,58 @@ class TestHostingManifest(unittest.TestCase):
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
 
+        compose.assert_not_called()
+        runtime_health.assert_not_called()
+        edge.assert_not_called()
+
+    def test_dirty_staged_unverified_retry_refuses_without_commit_only_observation(self):
+        revision = "b" * 40
+        manifest = _public_acme_manifest().replace(
+            "      service: web\n",
+            "      service: web\n      init_services: [migrate]\n",
+        ).replace("      require_clean: true\n", "      require_clean: false\n")
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+        digest_runtime = dict(runtime)
+        digest_runtime["environment"] = hosting.render_env_file(
+            validated, {}, pushed_commit_sha=revision,
+        )
+        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        identity = "sha256:" + "e" * 64
+        key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {key: {
+            "staged_revision": revision, "source_state_identity": identity,
+            "source_state_clean": False, "config_digest": digest,
+            "runtime": {"state": "unverified"}, "edge": {"state": "pending"},
+        }}}
+        snapshot = {"identity": identity, "digest": "e" * 64,
+                    "archive": b"artifact", "deleted": [], "files": 1}
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
+             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted",
+                          return_value=("diff", ["new.txt"])), \
+             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay",
+                          return_value=snapshot), \
+             patch.object(hosting_cmd.remote, "update_target_to"), \
+             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_cmd, "_observe_host_runtime") as observe, \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
+             patch.object(hosting_cmd, "_configure_host_caddy") as edge, \
+             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
+             patch.object(hosting_cmd, "_restore_host_caddy"), \
+             patch.object(hosting_cmd.hosting, "save_host_state"):
+            with self.assertRaisesRegex(RuntimeError, "refusing Compose or initializer replay"):
+                hosting_cmd._apply_host(
+                    validated, {}, "myvps", runtime, state, False, "main",
+                )
+
+        observe.assert_not_called()
         compose.assert_not_called()
         runtime_health.assert_not_called()
         edge.assert_not_called()
@@ -2142,6 +2280,7 @@ class TestHostingManifest(unittest.TestCase):
             "commit": revision, "recorded_revision": revision,
             "observed_runtime_revision": revision, "config_digest": digest,
             "source_state_identity": _clean_source_identity(),
+            "source_state_clean": True,
             "runtime": {"state": "ready"}, "edge": {"state": "pending"},
         }}}
         client = MagicMock()

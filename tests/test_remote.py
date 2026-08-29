@@ -1140,6 +1140,29 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         self.assertRegex(first, r"^sha256:[0-9a-f]{64}$")
         self.assertNotEqual(first, second)
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_dirty_transfer_uses_the_exact_immutable_hashed_artifact(self, ssh_run):
+        ssh_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "new.txt")
+            path.write_bytes(b"snapshot-A")
+            snapshot = sr.snapshot_dirty_overlay(directory, "", ["new.txt"])
+            path.write_bytes(b"later-B")
+            applied = sr.apply_uncommitted(
+                {"ssh": "ubuntu@example.test"}, "/remote/project", directory,
+                "", ["new.txt"], overlay_snapshot=snapshot,
+            )
+            current = sr.snapshot_dirty_overlay(directory, "", ["new.txt"])
+
+        payload = next(call.kwargs["input_data"] for call in ssh_run.call_args_list
+                       if call.kwargs.get("input_data") is not None)
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            transferred = archive.extractfile("new.txt").read()
+        self.assertEqual(applied, 1)
+        self.assertEqual(payload, snapshot["archive"])
+        self.assertEqual(transferred, b"snapshot-A")
+        self.assertNotEqual(snapshot["identity"], current["identity"])
+
     def test_appledouble_filter_is_basename_only(self):
         kept, skipped = sr.filter_appledouble_paths([
             "._root-sidecar", "nested/._nested-sidecar", ".env",
@@ -1307,9 +1330,8 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
     @patch("subprocess.run")
     def test_apply_counts_tracked_and_untracked_files(self, mock_run, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
-        # subprocess.run is used for: git diff --name-only, git diff deleted,
-        # and one local tar archive; the archive is streamed over one SSH
-        # session.
+        # subprocess.run is used only to resolve the tracked changed/deleted
+        # path set. Python builds the immutable transfer artifact in memory.
         with tempfile.TemporaryDirectory() as d:
             proj = Path(d)
             (proj / "a.php").write_text("x")
@@ -1317,36 +1339,29 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             mock_run.side_effect = [
                 _completed(returncode=0, stdout="a.php\n"),  # git diff --name-only
                 _completed(returncode=0, stdout=""),           # git diff deleted
-                _completed(returncode=0, stdout=b"archive"),   # tar archive
             ]
             applied = sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4"}, "/home/ubuntu/sandbox/deploy-src/proj",
                 str(proj), "diff --git a/x b/x\n+y\n", ["b.php"],
             )
             self.assertEqual(applied, 2)  # 1 tracked-diff file + 1 untracked file
-            self.assertEqual(mock_run.call_args_list[2][0][0][:3], ["tar", "-czf", "-"])
-            self.assertIn("a.php", mock_run.call_args_list[2][0][0])
-            self.assertIn("b.php", mock_run.call_args_list[2][0][0])
             transfer = next(call for call in mock_ssh_run.call_args_list
                             if call.kwargs.get("input_data") is not None)
-            self.assertEqual(transfer.kwargs["input_data"], b"archive")
+            with tarfile.open(fileobj=io.BytesIO(transfer.kwargs["input_data"]),
+                              mode="r:") as archive:
+                self.assertEqual(set(archive.getnames()), {"a.php", "b.php"})
 
     @patch("sandbox.core._remote.ssh_run")
-    @patch("subprocess.run")
-    def test_streamed_dirty_files_use_one_remote_session(self, mock_run, mock_ssh_run):
+    def test_streamed_dirty_files_use_one_remote_session(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as d:
             proj = Path(d)
             (proj / "b.php").write_text("y")
-            mock_run.return_value = _completed(returncode=0, stdout=b"archive")
             sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4:2222"},
                 "/home/ubuntu/sandbox/deploy-src/proj",
                 str(proj), "", ["b.php"],
             )
-            tar_args = mock_run.call_args[0][0]
-            self.assertEqual(tar_args[:3], ["tar", "-czf", "-"])
-            self.assertIn("b.php", tar_args)
             transfers = [call for call in mock_ssh_run.call_args_list
                          if call.kwargs.get("input_data") is not None]
             self.assertEqual(len(transfers), 1)
@@ -1364,25 +1379,26 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
                 sr.validate_deploy_include_paths(project, [".env"])
 
     @patch("sandbox.core._remote.ssh_run")
-    @patch("subprocess.run")
-    def test_explicit_deploy_include_is_transferred_even_when_gitignored(self, mock_run, mock_ssh_run):
+    def test_explicit_deploy_include_is_transferred_even_when_gitignored(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as d:
             project = Path(d)
             vendor = project / "vendor"
             vendor.mkdir()
             (vendor / "autoload.php").write_text("<?php")
-            mock_run.return_value = _completed(returncode=0, stdout=b"archive")
             applied = sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4"}, "/remote/project", project,
                 "", [], ["vendor"],
             )
             self.assertEqual(applied, 1)
-            self.assertIn("vendor/autoload.php", mock_run.call_args[0][0])
-            self.assertEqual(len([
+            transfers = [
                 call for call in mock_ssh_run.call_args_list
                 if call.kwargs.get("input_data") is not None
-            ]), 1)
+            ]
+            self.assertEqual(len(transfers), 1)
+            with tarfile.open(fileobj=io.BytesIO(transfers[0].kwargs["input_data"]),
+                              mode="r:") as archive:
+                self.assertEqual(archive.getnames(), ["vendor/autoload.php"])
 
     @patch("sandbox.core._remote.ssh_run")
     def test_dirty_archive_excludes_sidecars_and_preserves_dotfiles_bytes(self, mock_ssh_run):
@@ -1413,7 +1429,7 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
                 call.kwargs["input_data"] for call in mock_ssh_run.call_args_list
                 if call.kwargs.get("input_data") is not None
             )
-            with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+            with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
                 members = {
                     member.name[2:] if member.name.startswith("./") else member.name
                     for member in archive.getmembers()

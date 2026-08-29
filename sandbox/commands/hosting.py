@@ -1156,7 +1156,7 @@ def _classify_host_observation(validated: dict, observation: dict,
         observed_revision = raw.get("observed")
         item = {"service": raw.get("service"), "key": raw.get("key"),
                 "provider": "pushed_commit_sha",
-                "observed": observed_revision or None, "expected": expected_revision}
+                "expected": expected_revision}
         item["state"] = ("match" if expected_revision and observed_revision == expected_revision
                          else "missing" if not observed_revision else "mismatch")
         checks.append(item)
@@ -1169,8 +1169,7 @@ def _classify_host_observation(validated: dict, observation: dict,
     actual_pairs = {(item["service"], item["key"]) for item in checks}
     source_ready = (bool(expected_pairs) and actual_pairs == expected_pairs
                     and len(checks) == len(expected_pairs) and all(
-        item["state"] == "match" and item["observed"] == expected_revision
-        for item in checks
+        item["state"] == "match" for item in checks
     ))
     return {"complete": bool(observation.get("complete")), "services": service_rows,
             "topology": topology, "health": health,
@@ -1215,7 +1214,6 @@ def _source_revision_evidence_ready(validated: dict, classified: dict,
         and all(
             item.get("state") == "match"
             and item.get("expected") == revision
-            and item.get("observed") == revision
             for item in checks if isinstance(item, dict)
         )
     )
@@ -1223,6 +1221,7 @@ def _source_revision_evidence_ready(validated: dict, classified: dict,
 
 def _runtime_apply_decision(*, previous: dict, requested_revision: str,
                             config_digest: str, source_state_identity: str,
+                            source_state_clean: bool,
                             exact_runtime_proven: bool) -> str:
     """Choose only full convergence, proven edge replay, or refusal."""
     recorded = previous.get("recorded_revision") or previous.get("commit")
@@ -1235,7 +1234,7 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
         "pending", "unverified",
     }
     same_config = previous.get("config_digest") == config_digest
-    if same_source_state and same_config and exact_runtime_proven \
+    if source_state_clean and same_source_state and same_config and exact_runtime_proven \
             and (recorded_identity or staged_identity):
         return "edge_only"
     if same_source_state and same_config and (recorded_identity or staged_identity):
@@ -1247,17 +1246,44 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     return "full_recreate"
 
 
+def _safe_source_revision_receipt(source: dict | None) -> dict:
+    source = source if isinstance(source, dict) else {}
+    state = source.get("state")
+    if state not in {"ready", "degraded", "not_declared", "unavailable"}:
+        state = "unavailable"
+    checks = []
+    for raw in source.get("checks", []) if isinstance(source.get("checks"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            "service": str(raw.get("service") or "")[:128],
+            "key": str(raw.get("key") or "")[:128],
+            "provider": "pushed_commit_sha",
+            "state": raw.get("state") if raw.get("state") in {
+                "match", "missing", "mismatch",
+            } else "mismatch",
+        }
+        expected = raw.get("expected")
+        if isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{40}", expected):
+            item["expected"] = expected
+        checks.append(item)
+        if len(checks) >= _HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS:
+            break
+    return {"state": state, "checks": checks}
+
+
 def _persist_runtime_observation(state: dict, key: str, classified: dict,
                                  *, runtime_state: str) -> None:
     record = state["hosts"][key]
     record["observed_runtime_revision"] = classified.get("observed_runtime_revision")
     record["runtime"] = {
         "state": runtime_state,
+        "services": list(classified.get("services") or [])[:_HOST_OBSERVATION_MAX_SERVICES],
         "health": classified.get("health") or {"state": "unavailable"},
         "topology": classified.get("topology") or {"state": "unavailable"},
-        "source_revision": classified.get("source_revision") or {
-            "state": "unavailable", "checks": [],
-        },
+        "source_revision": _safe_source_revision_receipt(
+            classified.get("source_revision"),
+        ),
         "observation": list(classified.get("phases") or [])[:_HOST_OBSERVATION_MAX_PHASES],
     }
     record["edge"] = {"state": "pending"}
@@ -1273,7 +1299,8 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
     """Repair only the local receipt when exact runtime evidence is complete."""
     key = hosting.state_key(remote_name, validated)
     record = state.setdefault("hosts", {}).get(key)
-    if not isinstance(record, dict) or record.get("config_digest") != config_digest:
+    if not isinstance(record, dict) or record.get("config_digest") != config_digest \
+            or record.get("source_state_clean") is not True:
         return False
     if observation is None:
         observation = _observe_host_runtime(
@@ -1296,7 +1323,20 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
         "commit": revision,
         "recorded_revision": revision,
         "observed_runtime_revision": revision,
-        "runtime": {"state": "ready", "observation": classified.get("phases", [])},
+        "runtime": {
+            "state": "ready",
+            "services": list(classified.get("services") or [])[
+                :_HOST_OBSERVATION_MAX_SERVICES
+            ],
+            "health": classified.get("health"),
+            "topology": classified.get("topology"),
+            "source_revision": _safe_source_revision_receipt(
+                classified.get("source_revision"),
+            ),
+            "observation": list(classified.get("phases") or [])[
+                :_HOST_OBSERVATION_MAX_PHASES
+            ],
+        },
     })
     record.setdefault("edge", {"state": "pending"})
     hosting.save_host_state(state)
@@ -1308,6 +1348,11 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
     """Read deployed revision and bounded Compose health without mutation."""
     key = hosting.state_key(remote_name, validated)
     recorded = dict((state.get("hosts") or {}).get(key) or {})
+    recorded_runtime = dict(recorded.get("runtime") or {"state": "unknown"})
+    if "source_revision" in recorded_runtime:
+        recorded_runtime["source_revision"] = _safe_source_revision_receipt(
+            recorded_runtime.get("source_revision"),
+        )
     services = [
         validated["compose"]["service"],
         *validated["compose"].get("background_services", []),
@@ -1321,7 +1366,7 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "staged_revision": recorded.get("staged_revision"),
         "recorded_revision": recorded.get("recorded_revision") or recorded.get("commit"),
         "observed_runtime_revision": recorded.get("observed_runtime_revision"),
-        "runtime": recorded.get("runtime") or {"state": "unknown"},
+        "runtime": recorded_runtime,
         "edge": recorded.get("edge") or {"state": "unknown"},
         "state_record": "present" if recorded else "missing",
         "services": [],
@@ -1665,24 +1710,28 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         raise hosting.HostingError(
             f"{validated['environment']} working tree changed while the source was being pushed"
         )
-    source_state_identity = remote.dirty_overlay_identity(
+    source_snapshot = remote.snapshot_dirty_overlay(
         validated["project_root"], diff, untracked,
     )
+    source_state_identity = source_snapshot["identity"]
+    source_state_clean = not bool(diff or untracked)
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
     key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})
-    if require_clean and previous_entry.get("source_state_identity") is None:
-        # Older clean receipts predate this field. Their staged commit is still
-        # exact because clean hosting never transferred a dirty overlay.
+    if require_clean:
+        # Older clean receipts predate these fields. Their staged commit is
+        # still exact because clean hosting never transferred a dirty overlay.
         previous_entry["source_state_identity"] = source_state_identity
+        previous_entry["source_state_clean"] = True
     config_digest = _host_config_digest(validated, runtime)
     client = cloudflare.Client()
     remote.update_target_to(
         entry, target, sha,
         project_root=None if require_clean else validated["project_root"],
         diff_text=diff, untracked=untracked,
+        overlay_snapshot=source_snapshot,
     )
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     apply_log = f"{runtime_dir}/apply.log"
@@ -1691,6 +1740,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "requested_revision": sha,
         "staged_revision": sha,
         "source_state_identity": source_state_identity,
+        "source_state_clean": source_state_clean,
         "config_digest": config_digest,
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},
@@ -1748,17 +1798,20 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         recorded_before = previous_entry.get("recorded_revision") or previous_entry.get("commit")
         staged_before = previous_entry.get("staged_revision")
         previous_runtime_state = (previous_entry.get("runtime") or {}).get("state")
+        previous_source_clean = previous_entry.get("source_state_clean") is True
         same_source_state = (
             previous_entry.get("source_state_identity") == source_state_identity
         )
         may_replay = (
             previous_entry.get("config_digest") == config_digest
             and same_source_state
+            and previous_source_clean
             and (
                 (recorded_before == sha
                  and previous_entry.get("observed_runtime_revision") == sha)
                 or (staged_before == sha
-                    and previous_runtime_state in {"pending", "unverified"})
+                    and previous_runtime_state in {"pending", "unverified"}
+                    and previous_source_clean)
             )
         )
         exact_runtime_proven = False
@@ -1782,6 +1835,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             requested_revision=sha,
             config_digest=config_digest,
             source_state_identity=source_state_identity,
+            source_state_clean=source_state_clean,
             exact_runtime_proven=exact_runtime_proven,
         )
         if decision == "refuse":

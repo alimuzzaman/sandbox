@@ -195,10 +195,16 @@ digest also matches. An `edge: pending` replay with that evidence is edge-only; 
 evidence refuses without Compose or initializer replay. A changed source always takes the
 full recreate path. Targeted convergence also requires exact identity/config plus ready
 topology and health. Dirty-allowed source identity includes a bounded digest of the
-overlaid file bytes/modes; changed or missing dirty identity cannot select edge-only.
+single immutable artifact and deletion set whose exact bytes are transferred. Since that
+digest is not observable inside the runtime, dirty receipts cannot select commit-only
+reconciliation or edge-only replay.
 A staged unverified retry reconciles from observation or refuses without rerunning an
 initializer. Unknown service health is `unverified`, not ready. Remote
 Compose/source observation uses one bounded session with a strict shared deadline,
 allowlisted revision keys, process-level bounded output draining, and bounded fan-out.
 It retains phase-level partial evidence. Partial evidence is persisted before a failed
 apply returns.
+Persisted/status source checks contain only match, missing, or mismatch state and never a
+raw nonmatching environment value. Exact reconciliation retains the full bounded
+classified service/topology/health/source/phase receipt. Source-root Git boundary lookup
+scrubs inherited repository selectors.

@@ -1196,3 +1196,7 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   identical staged/unverified retry unless runtime evidence can reconcile it, and drains
   observer subprocess output incrementally into a fixed-size buffer. No source bytes,
   source paths, credentials, or live-host evidence are persisted by these checks.
+- Final review replaced the mutable-file dirty transfer with one deterministic immutable
+  artifact used for both digest and upload, restricted commit-only reconciliation to clean
+  source, scrubbed Git selectors during hosting boundary lookup, retained full classified
+  reconciliation evidence, and removed raw mismatched revision values from state/status.

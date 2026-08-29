@@ -32,6 +32,7 @@ whether it's provisioned -- never what instances it has.
 """
 from __future__ import annotations
 import os
+import io
 import re
 import secrets
 import shlex
@@ -47,7 +48,7 @@ import subprocess
 import sys
 import time
 import selectors
-import os
+import tarfile
 from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
@@ -395,12 +396,13 @@ def deploy_exact_working_tree(
         push_timeout=push_timeout,
     )
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
+    overlay = snapshot_dirty_overlay(root, diff_text, untracked)
     applied = update_target_to(
         remote, target, pushed_sha,
         project_root=root if resolved_source is None else None,
-        diff_text=diff_text, untracked=untracked,
+        diff_text=diff_text, untracked=untracked, overlay_snapshot=overlay,
     )
-    dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
+    dirty = overlay["digest"]
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
@@ -1808,11 +1810,12 @@ _DIRTY_IDENTITY_MAX_FILES = 4096
 _DIRTY_IDENTITY_MAX_BYTES = 64 * 1024 * 1024
 
 
-def dirty_overlay_identity(project_root, diff_text: str,
-                           untracked: list[str]) -> str:
-    """Hash the exact bounded dirty file set without retaining source bytes."""
+def snapshot_dirty_overlay(project_root, diff_text: str, untracked: list[str],
+                           include_paths: list[str] | None = None) -> dict:
+    """Build one immutable bounded artifact and identity for an overlay."""
     root = Path(project_root).resolve()
     names = set(untracked)
+    deleted: set[str] = set()
     if diff_text.strip():
         changed = subprocess.run(
             ["git", "diff", "--name-only", "--relative", "HEAD"],
@@ -1823,38 +1826,79 @@ def dirty_overlay_identity(project_root, diff_text: str,
             raise RuntimeError("could not identify changed deployment source files")
         names.update(line.strip() for line in (changed.stdout or "").splitlines()
                      if line.strip())
-    names = set(filter_appledouble_paths(sorted(names))[0])
-    if len(names) > _DIRTY_IDENTITY_MAX_FILES:
+        removed = subprocess.run(
+            ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
+            cwd=str(root), env=git_environment(), capture_output=True,
+            text=True, check=False,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError("could not identify deleted deployment source files")
+        deleted.update(line.strip() for line in (removed.stdout or "").splitlines()
+                       if line.strip())
+    names.update(validate_deploy_include_paths(root, include_paths or []))
+    filtered_names, skipped_names = filter_appledouble_paths(sorted(names))
+    filtered_deleted, skipped_deleted = filter_appledouble_paths(sorted(deleted))
+    emit_appledouble_skip_diagnostic(
+        skipped_names + skipped_deleted, context="dirty-overlay",
+    )
+    names = set(filtered_names)
+    deleted = set(filtered_deleted)
+    names.difference_update(deleted)
+    if len(names) + len(deleted) > _DIRTY_IDENTITY_MAX_FILES:
         raise ValueError("dirty deployment identity exceeds the file limit")
-    digest = hashlib.sha256(b"sandbox-dirty-overlay-v1\0")
-    total = 0
-    for relative in sorted(names):
+    for relative in deleted:
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts or "\x00" in relative:
             raise ValueError("dirty deployment identity contains an unsafe path")
-        local = root / path
-        if local.is_symlink():
-            raise ValueError("dirty deployment identity does not accept symbolic links")
+    total = 0
+    archive_buffer = io.BytesIO()
+    files = 0
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        for relative in sorted(names):
+            path = Path(relative)
+            if path.is_absolute() or ".." in path.parts or "\x00" in relative:
+                raise ValueError("dirty deployment identity contains an unsafe path")
+            local = root / path
+            if local.is_symlink():
+                raise ValueError("dirty deployment identity does not accept symbolic links")
+            if not local.exists():
+                continue
+            if not local.is_file():
+                raise ValueError("dirty deployment identity accepts regular files only")
+            content = bytearray()
+            with local.open("rb") as stream:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _DIRTY_IDENTITY_MAX_BYTES:
+                        raise ValueError("dirty deployment identity exceeds the byte limit")
+                    content.extend(chunk)
+            info = tarfile.TarInfo(relative)
+            info.size = len(content)
+            info.mode = local.stat().st_mode & 0o777
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
+            files += 1
+    archive_bytes = archive_buffer.getvalue() if files else b""
+    digest = hashlib.sha256(b"sandbox-dirty-overlay-v2\0")
+    for relative in sorted(deleted):
         encoded = relative.encode("utf-8", "surrogateescape")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
-        if not local.exists():
-            digest.update(b"\0deleted\0")
-            continue
-        if not local.is_file():
-            raise ValueError("dirty deployment identity accepts regular files only")
-        digest.update(b"\0file\0")
-        digest.update((local.stat().st_mode & 0o777).to_bytes(2, "big"))
-        with local.open("rb") as stream:
-            while True:
-                chunk = stream.read(64 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _DIRTY_IDENTITY_MAX_BYTES:
-                    raise ValueError("dirty deployment identity exceeds the byte limit")
-                digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    digest.update(hashlib.sha256(archive_bytes).digest())
+    value = digest.hexdigest()
+    return {"identity": f"sha256:{value}", "digest": value,
+            "archive": archive_bytes, "deleted": sorted(deleted), "files": files}
+
+
+def dirty_overlay_identity(project_root, diff_text: str,
+                           untracked: list[str]) -> str:
+    """Compatibility wrapper for callers that need only the artifact identity."""
+    return snapshot_dirty_overlay(project_root, diff_text, untracked)["identity"]
 
 
 def deploy_project_descriptor_files(project_root) -> list[str]:
@@ -1967,57 +2011,14 @@ def validate_deploy_include_paths(project_root, paths) -> list[str]:
 
 def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str],
-                       include_paths: list[str] | None = None) -> int:
-    """Applies the dirty working tree on top of a just-reset clean tree by
-    copying exact file bytes for changed tracked files and untracked files.
-
-    This deliberately avoids replaying `git diff` through `git apply`: a live
-    deploy against a plugin with a CRLF->LF rewrite in `assets/admin.css`
-    proved text patches are too brittle for the promise here. The contract is
-    "remote reflects the local working tree", so copying the current file
-    content is both simpler and more correct. Deleted tracked files are removed
-    explicitly. Returns the total number of paths touched."""
-    applied = 0
-    to_copy: list[str] = []
-    deleted: list[str] = []
-    if diff_text.strip():
-        changed_res = subprocess.run(
-            ["git", "diff", "--name-only", "--relative", "HEAD"],
-            cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
-        )
-        if changed_res.returncode != 0:
-            raise RuntimeError(
-                f"could not list changed tracked files: "
-                f"{_safe_remote_diagnostic(changed_res, limit=500)}"
-            )
-        deleted_res = subprocess.run(
-            ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
-            cwd=str(project_root), env=git_environment(), capture_output=True, text=True, check=False,
-        )
-        if deleted_res.returncode != 0:
-            raise RuntimeError(
-                f"could not list deleted tracked files: "
-                f"{_safe_remote_diagnostic(deleted_res, limit=500)}"
-            )
-        changed_names = [n for n in (changed_res.stdout or "").splitlines() if n.strip()]
-        deleted = [n for n in (deleted_res.stdout or "").splitlines() if n.strip()]
-        deleted_set = set(deleted)
-        to_copy.extend([n for n in changed_names if n not in deleted_set])
-    to_copy.extend(untracked)
-    to_copy.extend(validate_deploy_include_paths(project_root, include_paths or []))
-    def safe_relpath(value: str) -> str:
-        path = Path(value)
-        if path.is_absolute() or ".." in path.parts:
-            raise RuntimeError(f"unsafe relative deploy path: {value!r}")
-        return value
-
-    deleted = [safe_relpath(value) for value in deleted]
-    to_copy = [safe_relpath(value) for value in to_copy]
-    deleted, skipped_deleted = filter_appledouble_paths(deleted)
-    to_copy, skipped_to_copy = filter_appledouble_paths(to_copy)
-    emit_appledouble_skip_diagnostic(
-        skipped_deleted + skipped_to_copy, context="dirty-overlay"
+                       include_paths: list[str] | None = None,
+                       overlay_snapshot: dict | None = None) -> int:
+    """Apply one immutable overlay artifact, never rereading source bytes."""
+    snapshot = overlay_snapshot or snapshot_dirty_overlay(
+        project_root, diff_text, untracked, include_paths,
     )
+    applied = 0
+    deleted = snapshot.get("deleted") or []
     if deleted:
         commands = [
             f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
@@ -2030,57 +2031,39 @@ def _apply_uncommitted_unlocked(remote: dict, target_path: str, project_root,
                 f"{_safe_remote_diagnostic(rm_res, remote, limit=500)}"
             )
         applied += len(deleted)
-
-    existing = [relpath for relpath in to_copy
-                if (Path(project_root) / relpath).is_file()]
-    if existing:
-        # One compressed archive and one remote shell session replace one
-        # mkdir + SCP channel per file. The archive is built from the local
-        # project root, so paths remain relative and no local absolute path is
-        # ever sent to the remote shell.
-        tar_res = subprocess.run(
-            ["tar", "-czf", "-", "--", *existing], cwd=str(project_root),
-            capture_output=True, check=False,
-            # BSD tar on macOS otherwise synthesizes ``._*`` members from
-            # filesystem metadata even when no sidecar exists in the input.
-            # Disable that metadata channel so the archive contains only the
-            # intended project bytes; GNU tar ignores this variable.
-            env={**os.environ, "COPYFILE_DISABLE": "1"},
-        )
-        if tar_res.returncode != 0:
-            raise RuntimeError(
-                "could not package dirty files: "
-                f"{_safe_remote_diagnostic(tar_res, limit=500)}"
-            )
+    archive = snapshot.get("archive") or b""
+    if archive:
         extract = (
             f"mkdir -p -- {shlex.quote(target_path)} && "
-            f"tar -xzf - -C {shlex.quote(target_path)}"
+            f"tar -xf - -C {shlex.quote(target_path)}"
         )
         copy_res = ssh_run(remote, extract, timeout=120,
-                           input_data=tar_res.stdout)
+                           input_data=archive)
         if copy_res.returncode != 0:
             raise RuntimeError(
                 "could not transfer dirty files: "
                 f"{_safe_remote_diagnostic(copy_res, remote, limit=500)}"
             )
-        applied += len(existing)
+        applied += int(snapshot.get("files") or 0)
     return applied
 
 
 def apply_uncommitted(remote: dict, target_path: str, project_root,
                       diff_text: str, untracked: list[str],
-                      include_paths: list[str] | None = None) -> int:
+                      include_paths: list[str] | None = None,
+                      overlay_snapshot: dict | None = None) -> int:
     with _remote_materialization_lock(remote, target_path):
         return _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text, untracked,
-            include_paths,
+            include_paths, overlay_snapshot,
         )
 
 
 def update_target_to(remote: dict, target_path: str, sha: str, *,
                      project_root=None, diff_text: str = "",
                      untracked: list[str] | None = None,
-                     include_paths: list[str] | None = None) -> int:
+                     include_paths: list[str] | None = None,
+                     overlay_snapshot: dict | None = None) -> int:
     """Reset and publish one dirty overlay under one source lock."""
     with _remote_materialization_lock(remote, target_path):
         _reset_target_to_unlocked(remote, target_path, sha)
@@ -2088,7 +2071,7 @@ def update_target_to(remote: dict, target_path: str, sha: str, *,
             return 0
         return _apply_uncommitted_unlocked(
             remote, target_path, project_root, diff_text,
-            list(untracked or ()), include_paths,
+            list(untracked or ()), include_paths, overlay_snapshot,
         )
 
 

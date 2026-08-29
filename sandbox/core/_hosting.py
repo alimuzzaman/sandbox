@@ -170,9 +170,13 @@ def _git_root(path: Path) -> Path | None:
     boundary for a project checkout; when there is no checkout boundary we
     retain the safer historical restriction to the manifest directory.
     """
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
     result = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=False,
+        env=environment, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         return None

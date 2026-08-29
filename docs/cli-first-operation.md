@@ -130,6 +130,26 @@ Start in any configured project with:
 
 The guide detects the runtime and emits only its useful commands.
 
+## Disposable review worktrees
+
+Project discovery is intentionally restricted to `$HOME` and the configured
+`SANDBOX_PROJECT_ROOTS`; macOS `/tmp` resolves to `/private/tmp` and is rejected
+by the same boundary. Keep temporary PR checkouts under an allowed review root
+instead of the system temp directory:
+
+```bash
+review_root="$HOME/Sites/sandbox-reviews"
+mkdir -p "$review_root"
+export SANDBOX_PROJECT_ROOTS="$review_root"
+git worktree add --detach "$review_root/pr-123" origin/feature/pr-123
+./sb ensure --project-dir "$review_root/pr-123" --label pr-123 --create --local
+```
+
+This preserves the disposable checkout while keeping project discovery and
+instance ownership inside the explicit allowlist. A path already registered
+under another allowed root can be inspected with `--project-dir` or a direct
+`--instance` selector; no system-temp exception is inferred.
+
 ## Generic Compose
 
 ```bash
@@ -147,6 +167,11 @@ The guide detects the runtime and emits only its useful commands.
 audit with failed checks: the JSON keeps `ok: false` and `exit_code: 1`, while the
 process exits 0 so callers can consume findings. Preflight or transport failures
 still exit non-zero. Without `--report-only`, doctor keeps its normal failure exit.
+
+`sb logs` returns a bounded 200-line snapshot by default; use `--lines` (or its
+`--tail` compatibility alias) and `--since` to narrow it, or opt into a live
+stream with `--follow`. The same options are forwarded for explicit remote
+lifecycle observations.
 
 `sb exec` accepts an explicit argv list and runs it in the configured public
 Compose service. It does not invent a shell, service, or package command.
@@ -194,6 +219,23 @@ select --local/--remote`.
 WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
 
+For Docker-backed instances, a local package path is staged through Sandbox's
+existing download-cache mount before WP-CLI runs. This makes exact-head review
+archives usable without copying files into the container manually:
+
+```bash
+./sb wp --project-dir <dir> -- plugin install /absolute/path/plugin.zip --activate
+./sb wp --project-dir <dir> -- theme install /absolute/path/theme.zip --activate
+./sb wp --project-dir <dir> -- media import /absolute/path/fixture.png --porcelain
+./sb wp --project-dir <dir> -- eval-file /absolute/path/script.php
+```
+
+The temporary staged file is removed after the command (or timeout); Herd keeps
+using the host path directly. Relative paths are resolved from the invoking
+project directory when they name an existing file. Package, media, and eval-file
+paths must be regular files no larger than 512 MiB. A failed or timed-out command
+remains subject to the usual WP-CLI completion-uncertain inspection rule.
+
 `sb wp --local` is accepted as an explicit local-runtime selector for scripts
 that share target flags across Sandbox commands; `--project-dir DIR` selects
 the registered instance for that project from any working directory. Neither
@@ -208,6 +250,36 @@ or use `--async` for long work. Sandbox never retries a timed-out command
 automatically, and synchronous WP stdout remains raw rather than wrapped in
 JSON.
 
+For `wp eval`, pass the PHP expression as one argument after the `--`
+delimiter. Shell single quotes preserve namespace separators; do not add a
+second layer of backslashes for Sandbox to remove:
+
+```bash
+./sb wp --timeout 60 -- eval 'echo \XSpeed\Cache::enabled() ? "on" : "off";'
+```
+
+Sandbox forwards that payload unchanged to WP-CLI, so a PHP parse error is a
+quoting error in the supplied expression rather than a hidden retry or a
+different command being executed.
+
+For `wp eval-file`, the first `--` separates Sandbox options from the WP-CLI
+command and an optional second `--` belongs after the script path when the
+script itself accepts positional arguments:
+
+```bash
+./sb wp -- eval-file tests/support/prepare.php -- fixture-id
+```
+
+Do not use a WP-CLI-global option such as `--output` as a script option; capture
+or redirect the script's stdout at the caller instead.
+
+If an active plugin prevents WordPress from booting, pass WP-CLI's global
+skip flag before the command while replacing it:
+
+```bash
+./sb wp -- --skip-plugins=broken-plugin plugin install /absolute/path/fixed.zip --force
+```
+
 `wp post list` does not support a `--search` query argument: WP-CLI forwards
 that unknown spelling to `WP_Query`, which can silently return an unfiltered
 list. Sandbox rejects it before execution so a list cannot accidentally feed a
@@ -216,7 +288,8 @@ and validate explicit IDs before updating or deleting posts.
 
 `./sb test` consumes its Sandbox routing options whether they appear before or
 after the mode. Keep PHPUnit arguments after the `--` delimiter; only those
-tokens are forwarded to the runner.
+tokens are forwarded to the runner, including a focused file such as
+`./sb test unit -- tests/Unit/SmokeTest.php`.
 
 When a ready instance's containers are stopped, `sb ensure` reports
 `instance_runtime_stopped` instead of presenting it as missing mount evidence;
@@ -232,6 +305,10 @@ token first. A remote staged from a runtime that predates the flag ensures
 without it and reports that — restage with `./sb remote provision <name>`.
 Treat a revealed URL from a publicly exposed instance as an admin credential:
 write it to a gitignored descriptor, never to a log or a commit.
+
+Remote `ensure` also fails closed when the SSH command exits successfully but
+returns no JSON document. It emits `error.code=remote_empty_output` instead of
+inventing a ready instance; inspect the remote state before retrying.
 
 When `login_url` contains a `sandbox_autologin` query parameter, the JSON also
 includes the derived boolean `login_url_redacted`. It is `true` whenever the

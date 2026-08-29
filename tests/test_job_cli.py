@@ -15,7 +15,7 @@ from unittest.mock import patch
 from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
                                           cmd_job_start, cmd_job_status, _emit_json_line,
                                           configure_list_parser, configure_output_parser,
-                                          configure_start_parser)
+                                          configure_start_parser, configure_status_parser)
 from sandbox.jobs.registry import JobNotFound
 
 
@@ -43,6 +43,20 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(invalid.wait_seconds, "not-a-number")
         self.assertIn("0-20 whole seconds", " ".join(parser.format_help().split()))
         self.assertIn("1-262144 bytes", " ".join(parser.format_help().split()))
+
+    def test_output_parser_accepts_job_id_option_alias(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_output_parser(parser)
+        args = parser.parse_args(["--job-id", "a" * 32, "--json"])
+        self.assertIsNone(args.job_id)
+        self.assertEqual(args.job_id_option, "a" * 32)
+
+    def test_status_parser_accepts_job_id_option_alias(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_status_parser(parser)
+        args = parser.parse_args(["--job-id", "b" * 32, "--json"])
+        self.assertIsNone(args.job_id)
+        self.assertEqual(args.job_id_option, "b" * 32)
 
     def test_cli_output_rejects_oversized_page_before_remote_lookup(self):
         from sandbox.commands.jobs_runtime import cmd_job_output
@@ -130,6 +144,31 @@ class JobCliTests(unittest.TestCase):
             cmd_job_output(None, args)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].wait_seconds, 1)
+
+    def test_remote_follow_stops_with_bounded_status_recovery(self):
+        from sandbox.commands.jobs_runtime import cmd_job_output
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+        transport = SimpleNamespace(
+            read_output=lambda *args, **kwargs: {
+                "ok": True, "job_id": "a" * 32, "data": "progress\n", "cursor": "c",
+            },
+            status=lambda *args, **kwargs: (_ for _ in ()).throw(
+                RemoteJobTransportError("status probe stalled")),
+        )
+        args = SimpleNamespace(remote="vps", job_id="a" * 32, stream="combined",
+            cursor=None, offset=None, tail_bytes=None, lines=None, since=None,
+            max_bytes=1024, wait_seconds=0, follow=True, encoding="utf8",
+            json=True, profile="full")
+        output = StringIO()
+        with patch("sandbox.transports.remote_jobs.RemoteJobTransport",
+                   return_value=transport), redirect_stdout(output):
+            cmd_job_output(None, args)
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(rows[0]["data"], "progress\n")
+        self.assertEqual(rows[1]["status"], "unknown")
+        self.assertEqual(rows[1]["follow"], "stopped")
+        self.assertIn("without --follow", rows[1]["recovery"])
     def test_job_acceptance_json_is_flushed_as_one_complete_line(self):
         class Output(io.StringIO):
             def __init__(self):

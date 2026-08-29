@@ -375,7 +375,13 @@ def cmd_ensure(cfg, args) -> None:
         if remote_result is not None and getattr(args, "json", False):
             _print_ensure_json(remote_result, sort_keys=True,
                                reveal_login=getattr(args, "reveal_login", False))
+            if remote_result.get("ok") is False:
+                raise SystemExit(1)
         elif remote_result is not None:
+            if remote_result.get("ok") is False:
+                error = remote_result.get("error")
+                message = error.get("message") if isinstance(error, dict) else str(error or "remote ensure failed")
+                die(redact_text(message))
             print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
         if remote_result is not None:
             return

@@ -14,6 +14,12 @@ class PluginCheckOutputError(ValueError):
     """`wp plugin check --format=json` did not emit its documented format."""
 
 
+_SUCCESS_SUMMARY_RE = re.compile(
+    r"^Success:\s*Checks complete\.\s*No errors found\.?$",
+    re.IGNORECASE,
+)
+
+
 # See docs/plugin-check.md and specs/013-plugin-check/ for the full design this module
 # implements. Brings WordPress.org's official Plugin Check tool (`wp plugin check`)
 # in as a first-class sandbox command, applying the SAME baseline-gate pattern already
@@ -181,9 +187,24 @@ def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
         # Sandbox checkout's cwd.
         return os.path.normpath(raw)
 
-    lines = [(number, line.strip()) for number, line in
-             enumerate(output.splitlines(), start=1) if line.strip()]
+    # Plugin Check emits this human-readable success summary even when
+    # ``--format=json`` produces no finding arrays (and may append it after
+    # arrays when warnings are present).  It is a documented terminal marker,
+    # not arbitrary noise; remove only this exact shape before parsing so a
+    # clean run is accepted without weakening the malformed-output guard.
+    lines = []
+    success_summary = False
+    for number, line in enumerate(output.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _SUCCESS_SUMMARY_RE.fullmatch(stripped):
+            success_summary = True
+            continue
+        lines.append((number, stripped))
     if not lines:
+        if success_summary:
+            return []
         raise PluginCheckOutputError("empty output")
     # A successful zero-finding run may be emitted as a plain JSON empty array.
     # It is the only FILE-less form accepted; accepting arbitrary prose here

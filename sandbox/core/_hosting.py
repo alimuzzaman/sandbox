@@ -780,9 +780,22 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
     state = state or {"version": 1, "hosts": {}}
     key = state_key(remote_name, validated)
     port = allocate_loopback_port(state, key)
+    compose = validated["compose"]
+    # Keep the read-only plan honest about the full lifecycle scope.  Apply
+    # recreates and starts the primary, one-shot, and long-lived services; the
+    # plan must expose the same bounded inventory before confirmation so an
+    # operator can review every container that will be touched.
+    services = [
+        {"name": compose["service"], "role": "primary"},
+        *({"name": name, "role": "init"}
+          for name in compose.get("init_services", [])),
+        *({"name": name, "role": "background"}
+          for name in compose.get("background_services", [])),
+    ]
     runtime = {
         "key": key,
         "compose_project": compose_project_name(validated),
+        "services": services,
         "loopback_port": port,
         "compose_override": compose_override(validated, port),
         "caddyfile": caddyfile(validated, port, redact_basic_auth=True),

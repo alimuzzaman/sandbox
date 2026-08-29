@@ -356,11 +356,12 @@ def deploy_exact_working_tree(
         raise NetworkCapacityAdmissionError(network_capacity)
     resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     target = ensure_deploy_repo(remote, root)
-    branch = current_branch(root) if resolved_source is None else None
+    branch = current_branch(root, allow_detached=True) if resolved_source is None else None
     pushed_sha = push_commits(
         remote, root, target, branch,
         source_ref=source_ref, resolved_sha=resolved_source,
         source_root=source_root,
+        allow_detached=resolved_source is None and branch is None,
         push_timeout=push_timeout,
     )
     reset_target_to(remote, target, pushed_sha)
@@ -373,6 +374,10 @@ def deploy_exact_working_tree(
             "uncommitted_files_applied": applied,
             "network_capacity": network_capacity,
             "source_ref": source_ref,
+            "source_mode": (
+                "immutable" if resolved_source is not None
+                else "detached" if branch is None else "branch"
+            ),
             # For a nested immutable deploy the pushed commit is the
             # source-root subtree artifact; retain the user's resolved ref as
             # the provenance identity rather than replacing it with the
@@ -932,6 +937,23 @@ def deploy_target_slug(project_root) -> str:
     (research.md)."""
     sc = _core()
     root = Path(project_root)
+    # Generic Compose projects are not WordPress plugins.  Their directory
+    # name is a deployment identity, not an install slug, so a valid dotted
+    # name such as ``alimuzzaman.me`` must not be sent through the legacy
+    # WordPress-only validator.  Keep the path component bounded and
+    # shell-safe while retaining dots for stable, human-readable targets.
+    try:
+        project = sc.load_project_config(str(root))
+    except Exception:
+        project = None
+    if isinstance(project, dict) and project.get("kind") == "compose":
+        candidate = str(project.get("slug") or root.name).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,62}", candidate):
+            raise ValueError(
+                f"invalid Compose deployment name {candidate!r}; use lowercase "
+                "letters, numbers, dots, hyphens, or underscores"
+            )
+        return candidate
     return sc._project_slug(None, root.name)
 
 
@@ -1422,15 +1444,27 @@ def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
         )
 
 
-def current_branch(project_root) -> str:
-    """The local project's current git branch name. Raises on a detached
-    HEAD -- deploy needs a named branch to push to."""
+def current_branch(project_root, *, allow_detached: bool = False) -> str | None:
+    """Return the local project's branch, or ``None`` for detached HEAD.
+
+    Named-branch callers retain the historical refusal by default. Remote
+    source deployment opts into ``allow_detached`` and addresses the exact
+    commit through a SHA-derived ref instead of inventing or switching a
+    branch in the review checkout.
+    """
     res = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
     branch = (res.stdout or "").strip()
-    if res.returncode != 0 or not branch or branch == "HEAD":
+    if res.returncode != 0 or not branch:
+        raise RuntimeError(
+            "could not determine the current git branch (detached HEAD?) -- "
+            "deploy needs a named branch checked out"
+        )
+    if branch == "HEAD":
+        if allow_detached:
+            return None
         raise RuntimeError(
             "could not determine the current git branch (detached HEAD?) -- "
             "deploy needs a named branch checked out"
@@ -1489,6 +1523,7 @@ def push_commits(
     resolved_sha: str | None = None,
     source_root: str | Path | None = None,
     push_timeout: int | None = None,
+    allow_detached: bool = False,
 ) -> str:
     """Push the committed source artifact to the deploy-target repo.
 
@@ -1524,8 +1559,15 @@ def push_commits(
         source_spec = f"{source_commit}:{destination}"
     else:
         if not isinstance(branch, str) or not branch.strip():
-            raise ValueError("deploy branch is required for a working-tree source")
-        source_spec = f"{source_commit}:refs/heads/{branch}"
+            if not allow_detached:
+                raise ValueError("deploy branch is required for a working-tree source")
+            # A detached review checkout has no safe mutable branch to update.
+            # Push the committed base to an immutable, content-addressed ref;
+            # the caller still applies the current dirty overlay afterwards.
+            destination = f"refs/heads/sandbox-source-{source_commit}"
+            source_spec = f"{source_commit}:{destination}"
+        else:
+            source_spec = f"{source_commit}:refs/heads/{branch}"
     if source_root is not None:
         tree_commit, push_cwd = _source_tree_commit(project_root, source_root, source_commit or "")
         # A subtree commit cannot update a branch previously seeded with the

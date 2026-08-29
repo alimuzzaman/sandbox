@@ -619,7 +619,24 @@ def cmd_logs(cfg, args) -> None:
     if _is_herd_instance(args.resolved_instance):
         die("no containers on a herd instance — tail the WP debug log instead: "
             f"tail -f runtime/wp-{args.resolved_instance}/wp-content/debug.log")
-    compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
+    lines = _log_tail(args)
+    options = ["--no-color", f"--tail={lines}"]
+    if getattr(args, "since", None):
+        options.append(f"--since={args.since}")
+    if getattr(args, "follow", False):
+        options.append("-f")
+    compose("logs", *options, "wp", "db", instance=args.resolved_instance)
+
+
+def _log_tail(args) -> int:
+    """Validate the bounded log snapshot requested by local/remote callers."""
+    lines = getattr(args, "lines", 200)
+    if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 1000:
+        die("log lines must be between 1 and 1000", 2)
+    since = getattr(args, "since", None)
+    if since is not None and (not isinstance(since, str) or len(since) > 64):
+        die("log since must be an RFC 3339 timestamp or Unix seconds (max 64 characters)", 2)
+    return lines
 
 
 def _direct_remote_lifecycle(remote_name: str, instance: str,
@@ -644,6 +661,12 @@ def _direct_remote_lifecycle(remote_name: str, instance: str,
         _remote.remote_sb_path(remote), action, "--local",
         "--instance", str(instance),
     ]
+    if action == "logs":
+        command.extend(["--lines", str(_log_tail(args))])
+        if getattr(args, "since", None):
+            command.extend(["--since", args.since])
+        if getattr(args, "follow", False):
+            command.append("--follow")
     if action == "status":
         command.append("--json")
         if getattr(args, "refresh", False):
@@ -736,6 +759,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     # intentionally different: it creates the requested reusable inner label,
     # so retain its explicit `--label` + `--create` contract.
     command = [sb, action, "--local", "--project-dir", target_path]
+    if action == "logs":
+        command.extend(["--lines", str(_log_tail(args))])
+        if getattr(args, "since", None):
+            command.extend(["--since", args.since])
+        if getattr(args, "follow", False):
+            command.append("--follow")
     if action == "ensure":
         command.extend(["--label", target.workspace_label, "--create"])
     # `ensure` must report the instance record (url, ports, instance name) the
@@ -784,6 +813,20 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
     elif action != "logs":
         payload = _remote._last_json(result.stdout or "")
+        if payload is None:
+            # A successful SSH exit with no typed document is not a successful
+            # lifecycle operation.  Returning the historical bare ``ok``
+            # fallback made an interrupted/empty remote ensure look complete
+            # and left callers without the instance identity they need for
+            # recovery.  Keep the failure machine-readable and scoped to the
+            # selected remote/workspace.
+            payload = {
+                "ok": False,
+                "error": {
+                    "code": "remote_empty_output",
+                    "message": f"remote {action} returned no JSON output",
+                },
+            }
         if reveal_login and isinstance(payload, dict):
             # Lift ONE field out of the unredacted remote document: the
             # autologin URL the operator explicitly asked for. Everything else
@@ -1540,7 +1583,7 @@ def configure_parser(sub) -> None:
         "--stats", action="store_true",
         help="include a bounded point-in-time CPU, memory, and PID snapshot (local only)",
     )
-    logs = sub.add_parser("logs", help="Tail WP + DB logs")
+    logs = sub.add_parser("logs", help="Read a bounded WP + DB log snapshot")
     for parser in (status, logs):
         parser.add_argument("--project-dir", default=None)
         target = parser.add_mutually_exclusive_group()
@@ -1548,6 +1591,12 @@ def configure_parser(sub) -> None:
         target.add_argument("--remote")
         parser.add_argument("--workspace")
         parser.add_argument("--json", action="store_true")
+    logs.add_argument("--lines", "--tail", dest="lines", type=int, default=200,
+                      help="number of recent log lines (1-1000; --tail is an alias; default 200)")
+    logs.add_argument("--since", default=None,
+                      help="only logs since an RFC 3339 timestamp or Unix seconds")
+    logs.add_argument("--follow", action="store_true",
+                      help="keep streaming after the bounded initial snapshot")
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
     doctor = sub.add_parser(

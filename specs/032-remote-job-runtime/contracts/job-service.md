@@ -83,7 +83,11 @@ Required fields:
     "mode": "persistent",
     "lease": "exclusive"
   },
-  "queue": {"reason": null, "position": null},
+  "queue": {
+    "reason": null,
+    "position": null,
+    "blocking_jobs": []
+  },
   "timing": {
     "accepted_at": "...",
     "started_at": "...",

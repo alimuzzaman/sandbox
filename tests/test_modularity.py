@@ -148,10 +148,10 @@ class TestModularityInventory(unittest.TestCase):
         self.assertEqual(
             audit_metrics(),
             {
-                "cli_commands": 88,
+                "cli_commands": 90,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "kind_referencing_conditionals": 141,
+                "kind_referencing_conditionals": 154,
             },
         )
 
@@ -164,11 +164,14 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/core/_domains.py", "_generic_proxy_entries"): 1,
                 ("sandbox/core/_domains.py", "secure_generic_instance"): 1,
                 ("sandbox/runtimes/compose.py", "_descriptor"): 1,
+                ("sandbox/activation/catalog.py", "build_catalog"): 2,
                 ("sandbox/commands/ci.py", "cmd_ci"): 1,
                 ("sandbox/commands/instances_cmd.py", "cmd_ensure"): 1,
                 ("sandbox/commands/instances_cmd.py", "cmd_init"): 2,
                 ("sandbox/commands/instances_cmd.py", "cmd_instance"): 1,
                 ("sandbox/commands/net.py", "cmd_secure"): 1,
+                ("sandbox/commands/activation.py", "invoke"): 1,
+                ("sandbox/commands/activation.py", "observe"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_up"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_down"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_status"): 1,

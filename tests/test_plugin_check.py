@@ -62,6 +62,16 @@ class TestParseFindings(unittest.TestCase):
     def test_plain_empty_array_is_a_valid_zero_finding_result(self):
         self.assertEqual(pc._parse_findings("[]\n"), [])
 
+    def test_documented_success_summary_is_a_valid_zero_finding_result(self):
+        self.assertEqual(
+            pc._parse_findings("Success: Checks complete. No errors found.\n"),
+            [],
+        )
+
+    def test_documented_success_summary_can_follow_structured_findings(self):
+        output = SAMPLE_OUTPUT + "Success: Checks complete. No errors found.\n"
+        self.assertEqual(len(pc._parse_findings(output)), 3)
+
     def test_rejects_malformed_or_unrecognised_findings(self):
         for output in (
             "FILE: includes/Foo.php\nnot-json\n",

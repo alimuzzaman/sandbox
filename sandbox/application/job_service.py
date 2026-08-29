@@ -82,9 +82,12 @@ class JobService:
                 try:
                     self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
                 except WorkspaceBusy:
-                    self.repository.transition(row["job_id"], Lifecycle.QUEUED,
-                        queue_reason="workspace_or_capacity_busy")
-                    return {**self._accepted(row, replay=False), "queue": {"reason": "workspace_or_capacity_busy"}}
+                    queue = self.scheduler.queue_details(row)
+                    row = self.repository.transition(row["job_id"], Lifecycle.QUEUED,
+                        queue_reason="workspace_or_capacity_busy",
+                        queue_position=queue["position"])
+                    row["_queue_details"] = queue
+                    return self._accepted(row, replay=False)
             self._launch(descriptor_path)
         except BaseException as exc:
             if self.scheduler is not None:
@@ -196,7 +199,11 @@ class JobService:
                 "cleanup_policy": row["cleanup_policy"],
                 "idempotent_replay": replay}
         if row.get("lifecycle") == Lifecycle.QUEUED.value:
-            result["queue"] = {"reason": row.get("queue_reason") or "queued"}
+            queue = row.get("_queue_details") or {
+                "reason": row.get("queue_reason") or "queued",
+                "position": row.get("queue_position"),
+            }
+            result["queue"] = queue
         elif row.get("lifecycle") in {item.value for item in (Lifecycle.CANCELLED, Lifecycle.FAILED)}:
             result["lifecycle"] = row["lifecycle"]
             result["termination_reason"] = row.get("termination_reason")
@@ -221,6 +228,10 @@ class JobService:
                     termination_reason="dependency_failed")
             elif dependency_state != "ready":
                 snapshot["queue_reason"] = dependency_reason or snapshot.get("queue_reason") or "dependency"
+                snapshot["queue"] = {
+                    "reason": snapshot["queue_reason"], "position": None,
+                    "blocking_jobs": [],
+                }
                 return snapshot
             if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
                 try:
@@ -230,6 +241,9 @@ class JobService:
                     snapshot = self.repository.snapshot(job_id)
                 except WorkspaceBusy:
                     snapshot["queue_reason"] = "workspace_or_capacity_busy"
+                    if self.scheduler is not None:
+                        snapshot["queue"] = self.scheduler.queue_details(snapshot)
+                        snapshot["queue_position"] = snapshot["queue"]["position"]
         if reconcile:
             if self.scheduler is not None and snapshot["lifecycle"] in {"accepted", "queued", "running", "cancelling"}:
                 self.scheduler.renew(job_id, deadline_seconds=snapshot["deadline_seconds"])
@@ -268,6 +282,10 @@ class JobService:
             snapshot["health_evidence"] = evidence
         if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             self.scheduler.release(job_id)
+        if self.scheduler is not None and snapshot["lifecycle"] == Lifecycle.QUEUED.value:
+            queue = self.scheduler.queue_details(snapshot)
+            snapshot["queue"] = queue
+            snapshot["queue_position"] = queue["position"]
         return snapshot
 
     @staticmethod

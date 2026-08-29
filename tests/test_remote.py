@@ -657,6 +657,16 @@ class TestDeployTargetPath(unittest.TestCase):
         self.assertEqual(path, "/home/ubuntu/sandbox/deploy-src/my-plugin")
 
     @patch("subprocess.run")
+    def test_generic_compose_deployment_preserves_dotted_project_name(self, mock_run):
+        mock_run.return_value = _completed(returncode=0, stdout="/home/ubuntu/sandbox\n")
+        core = sr._core()
+        with patch.object(core, "load_project_config", return_value={"kind": "compose"}):
+            path = sr.deploy_target_path(
+                {"ssh": "ubuntu@1.2.3.4"}, "/local/path/alimuzzaman.me"
+            )
+        self.assertEqual(path, "/home/ubuntu/sandbox/deploy-src/alimuzzaman.me")
+
+    @patch("subprocess.run")
     def test_raises_when_sandbox_home_unresolvable(self, mock_run):
         mock_run.return_value = _completed(returncode=1, stderr="connection refused")
         with self.assertRaises(RuntimeError):
@@ -1333,6 +1343,38 @@ class TestCurrentBranch(unittest.TestCase):
         mock_run.return_value = _completed(returncode=0, stdout="HEAD\n")
         with self.assertRaises(RuntimeError):
             sr.current_branch("/local/proj")
+
+    @patch("subprocess.run")
+    def test_allows_detached_head_for_remote_source_staging(self, mock_run):
+        mock_run.return_value = _completed(returncode=0, stdout="HEAD\n")
+        self.assertIsNone(sr.current_branch("/local/proj", allow_detached=True))
+
+    @patch("sandbox.core._remote._ensure_ssh_control_dir")
+    @patch("sandbox.core._remote.git_ssh_command", return_value="ssh")
+    @patch("sandbox.core._remote.git_ssh_url", return_value="ssh://remote/srv/deploy/proj")
+    @patch("subprocess.run")
+    def test_detached_working_tree_push_uses_sha_ref(
+        self, mock_run, _git_url, _git_ssh, _control_dir,
+    ):
+        sha = "c" * 40
+        mock_run.return_value = _completed(returncode=0, stdout=sha + "\n")
+        pushed = sr.push_commits(
+            {"ssh": "ubuntu@1.2.3.4"}, "/local/proj", "/srv/deploy/proj",
+            None, allow_detached=True,
+        )
+        self.assertEqual(pushed, sha)
+        push_args = mock_run.call_args.args[0]
+        self.assertIn(f"{sha}:refs/heads/sandbox-source-{sha}", push_args)
+
+    def test_push_still_rejects_missing_branch_without_detached_opt_in(self):
+        with patch.object(sr, "git_ssh_url", return_value="ssh://remote/srv/deploy/proj"), \
+             patch.object(sr, "_ensure_ssh_control_dir"), \
+             patch("subprocess.run", return_value=_completed(returncode=0, stdout="d" * 40 + "\n")):
+            with self.assertRaisesRegex(ValueError, "deploy branch is required"):
+                sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/local/proj", "/srv/deploy/proj",
+                    None,
+                )
 
 
 class TestCmdRemoteAdd(unittest.TestCase):
@@ -2545,6 +2587,37 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch("builtins.print"):
                     deploy_cmd.cmd_deploy(None, args)
                 self.assertEqual(push.call_args.kwargs["push_timeout"], 900)
+
+    def test_detached_deploy_reports_source_mode_and_uses_immutable_push_ref(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock(
+                    project_dir=str(root), remote="myvps", source_ref=None,
+                    json=True, ensure=False, expose=False, pro_plugins=False,
+                    deploy_timeout=120, include=None, plugin_slug=None,
+                )
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value={
+                        "root": str(root), "slug": "demo", "kind": "wordpress"}), \
+                     patch.object(deploy_cmd, "preflight_project_capability", return_value=None), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value=None), \
+                     patch.object(sr, "push_commits", return_value="a" * 40) as push, \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch("builtins.print") as printed:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(printed.call_args[0][0])
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["source_mode"], "detached")
+                self.assertTrue(push.call_args.kwargs["allow_detached"])
 
     def test_json_deploy_reports_remote_branch_divergence(self):
         with tempfile.TemporaryDirectory() as d:

@@ -10,8 +10,9 @@ same CLI/MCP surface as a local instance. This is a first-class capability
 `docs/remote-hosting-prd.md` (read that doc's §0 for the resolved architecture
 decisions this feature encodes).
 
-**Not this**: a continuous file-sync daemon, an on-demand-power-managed VPS, or a
-multi-tenant/shared-VPS story. See §5 for what's explicitly out of scope.
+**Not this**: an always-on file-sync daemon, an on-demand-power-managed VPS, or a
+multi-tenant/shared-VPS story. The opt-in `host sync --watch` loop is bounded and
+caller-owned. See §5 for what's explicitly out of scope.
 
 ## Choose the remote workflow
 
@@ -243,6 +244,57 @@ paths (`.env*`, private-key files, `.git`, and `.sandbox`), and caps the transfe
 10,000 files/512 MiB. The JSON result reports the exact included relative files under
 `included_paths`; the option is explicit and is never inferred from `.gitignore`.
 
+### Agent-aware source sync (opt-in)
+
+For a disposable remote workspace that supports the sync contract, transfer one
+credential-screened generation without running `host apply` or recreating services:
+
+```bash
+./sb sync once --project-dir /path/to/project --remote myvps \
+  --workspace-id workspace-opaque --request-id edit-20260826-01 --json
+./sb sync status --project-dir /path/to/project --remote myvps \
+  --workspace-id workspace-opaque --json
+```
+
+The request ID is replay-safe. Source capture is Git-relative, bounded, race-checked,
+and refuses the complete generation before transfer when a tracked, modified,
+untracked, or explicitly included path looks credential-like. The remote receives an
+owner-only staged generation and advances its pointer only after the archive and
+manifest are complete. Sync is off by default; `sync start --mode checkpoint|live`
+and `sync stop` currently record the relationship boundary, while transfers remain
+explicit `sync once` requests. This path is additive and does not change ordinary
+`deploy`, `host apply`, or synchronization-off job behavior.
+
+#### Hosted application source sync
+
+For a declared hosted application that is already applied, `host sync` provides a
+faster opt-in path for local edits. It transfers the screened source into the
+existing `deploy-src/hosts/<project>` tree in place; it does not run Compose,
+restart a container, change DNS, or change the committed host revision:
+
+```bash
+./sb host sync --project-dir /path/to/site --environment production \
+  --remote myvps --request-id edit-20260826-01 --json
+
+# Keep polling for edits (bounded; Ctrl-C stops the relationship cleanly).
+./sb host sync --project-dir /path/to/site --environment production \
+  --remote myvps --watch --watch-seconds 3600 --debounce 0.5 --json
+```
+
+The capture is Git-relative to the manifest `source_root`, excludes `.git`,
+dependencies, build/cache/log/runtime/upload/storage trees, and rejects the whole
+generation when a secret-like path or value is found. Deletions remove only files
+owned by an earlier `host sync`; unknown files, Git metadata, and runtime state are
+preserved. Each managed file is replaced atomically, and the result reports
+`restarted: false`. This is not a production promotion: `host apply --confirm`
+remains the controlled path for committing a revision, Compose reconciliation,
+health checks, routes, and DNS.
+
+Applying afterward resets the synced-uncommitted source back to the committed
+revision selected by `host apply`; review that warning before using apply as a
+rollback or release operation. Live acceptance still requires a disposable hosted
+target and evidence of the edit, no restart, and subsequent apply restoration.
+
 Before the remote instance is considered ready, `ensure` reconciles each instance's
 published WordPress, database, and Mailpit ports against listeners already present on
 the host. If a stale container or unrelated process owns a recorded port, Sandbox moves
@@ -297,7 +349,7 @@ Sandbox also emits a progress line every ten seconds with the last safe probe re
 Use the host logs command for the declared service logs after a deployment:
 
 ```bash
-./sb host logs --remote myvps --project-dir /path/to/site --environment production
+./sb host logs --remote myvps --project-dir /path/to/site --environment production --lines 200
 ```
 
 These diagnostics are bounded and are not a substitute for live-host acceptance or
@@ -373,13 +425,18 @@ Behavior:
 
 ## 5. Using a remote instance
 
-Once deployed, boot and use it exactly like a local project — but by running commands
-directly on the VPS (SSH in, or via the second MCP server), not via a `--remote` flag on
-your local `sb`/MCP tools:
+Once deployed, inspect or operate it through the registered remote adapter. The adapter
+resolves the installed Sandbox path and avoids guessing a host filesystem location:
 
 ```bash
-ssh ubuntu@203.0.113.10 "cd \$SANDBOX_HOME/deploy-src/<project-slug> && ./sb ensure --project-dir ."
+./sb status --remote myvps --instance <remote-instance-name> --json
+./sb logs --remote myvps --instance <remote-instance-name> --lines 200
 ```
+
+Do not copy a local `/home/.../sandbox` path into an SSH command. If direct SSH is
+required for an approved maintenance operation, first resolve the registered remote
+through Sandbox's supported lifecycle commands; the installed runtime path is not a
+public contract.
 
 ## Managed Compose hosts
 
@@ -404,12 +461,20 @@ The result contains one bounded validation document per declared environment and
 top-level `ok` value. It exits non-zero if any environment is invalid. `--all` cannot
 be combined with `--environment` and is rejected for mutating or remote actions.
 
+The read-only `host plan --json` envelope includes `runtime.services`, with each
+declared Compose service labeled `primary`, `init`, or `background`. Review this
+bounded inventory before `host apply`; it is the same service scope that apply
+recreates or starts.
+
 ```bash
 ./sb host validate --project-dir /path/to/site
 ./sb host plan --project-dir /path/to/site --environment production --remote myvps
 ./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
 ./sb host logs --project-dir /path/to/site --environment production --remote myvps --lines 200
 ```
+
+`--tail` is accepted as a compatibility alias for `--lines` on both `sb logs`
+and `sb host logs`.
 
 `validate` is offline. `plan` is read-only and lists only the declared hostnames;
 it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandbox
@@ -690,6 +755,13 @@ reference. Summary:
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
+
+Remote deploy also accepts a clean or dirty detached review worktree. Its committed
+base is pushed to a content-addressed `sandbox-source-<sha>` ref; uncommitted edits
+are then applied as the normal replace-not-stack overlay. This preserves the exact
+review SHA without creating, switching, or force-pushing a branch. JSON responses
+identify this path with `source_mode: "detached"`. Production hosting commands retain
+their named-branch policy.
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.

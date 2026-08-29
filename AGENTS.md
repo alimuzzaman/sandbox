@@ -193,5 +193,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/036-deep-disk-attribution/plan.md
+at specs/033-agent-aware-remote-sync/plan.md
 <!-- SPECKIT END -->

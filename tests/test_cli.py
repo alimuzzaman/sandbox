@@ -654,7 +654,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 89)
+        self.assertEqual(len(COMMANDS), 90)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 
@@ -712,6 +712,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(guide["mode"], "cli-first")
         self.assertEqual(guide["project_kind"], "compose")
         self.assertIn("sandbox-cli", guide["skill"])
+
+    def test_guide_accepts_documented_local_selector(self):
+        r = run_sb("guide", "--local", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        guide = json.loads(r.stdout)
+        self.assertEqual(guide["mode"], "cli-first")
 
     def test_guide_catalog_covers_public_registry_with_explicit_exclusions(self):
         r = run_sb("guide", "--json")

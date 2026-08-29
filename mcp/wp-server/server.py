@@ -303,6 +303,15 @@ def _durable_job_dependencies():
     return durable_job_dependencies()
 
 
+def _sync_service():
+    import sys
+    repository_root = str(SANDBOX_ROOT)
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from sandbox.application.context import sync_service_dependencies
+    return sync_service_dependencies()
+
+
 def _last_json(stdout: str) -> dict | None:
     for line in reversed((stdout or "").splitlines()):
         try:
@@ -382,6 +391,7 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "feedback_service_factory": _feedback_service,
     "secret_service_factory": _secret_service,
     "hermes_service": _HermesCommandAdapter(),
+    "sync_service": _sync_service(),
     **_job_dependencies,
 }))
 

@@ -635,7 +635,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     ts.add_argument("--json", action="store_true",
         help="print the durable remote submission result as JSON")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,
-        help="args after `--` are passed to phpunit (e.g. --filter foo)")
+        help="args after `--` are passed to phpunit (e.g. --filter foo or tests/Test.php)")
 
     e2 = sub.add_parser("e2e",
         help="Run Playwright e2e tests with N workers, each against its OWN "
@@ -848,15 +848,18 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, apply, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
-    host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
+    host_p.add_argument(
+        "--confirm", action="store_true",
+        help="allow protected apply or login-url actions (one-time admin link)",
+    )
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",
@@ -865,10 +868,22 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="generate any declared generated secrets that are missing")
     host_p.add_argument("--ttl-seconds", type=int, default=None,
         help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
-    host_p.add_argument("--lines", type=int, default=200,
-        help="bounded number of recent hosted-service log lines (1-1000)")
+    host_p.add_argument("--lines", "--tail", dest="lines", type=int, default=200,
+        help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--request-id", default=None,
+        help="replay-safe host sync request identity (auto-generated when omitted)")
+    host_p.add_argument("--include", action="append", default=None, metavar="PATH",
+        help="explicit relative source path to include (repeatable; credential-like paths are refused)")
+    host_p.add_argument("--watch", action="store_true",
+        help="keep polling and transfer changed source generations without restarting Compose")
+    host_p.add_argument("--watch-seconds", type=int, default=3600,
+        help="maximum watch duration in seconds (1-86400; default 3600)")
+    host_p.add_argument("--interval", type=float, default=0.25,
+        help="watch polling interval in seconds (0.1-10; default 0.25)")
+    host_p.add_argument("--debounce", type=float, default=0.5,
+        help="minimum quiet window after a transfer in watch mode (0.1-10; default 0.5)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
 
@@ -1310,7 +1325,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             bool(getattr(args, "project_dir", None))
             and args.cmd in {
                 "init", "ensure", "test", "mcp", "smoke", "e2e", "ci",
-                "plugin-check", "deploy", "wp", "exec",
+                "plugin-check", "deploy", "wp", "exec", "sync",
             }
         )
         if (inner_local_observation or project_routed_with_root) and not explicit:
@@ -1353,7 +1368,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy", "sync"}
     # `apply` reconciles a PROJECT. Without --project-dir it used to fall
     # through to the sandbox.yml setup alias even when the caller had named an
     # instance or was standing inside a project — so `apply --instance X`

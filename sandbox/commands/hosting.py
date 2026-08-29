@@ -909,7 +909,7 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
     # declared service names first, then request logs only for that intersection
     # and emit a bounded diagnostic for every missing declaration.
     declared = _remote_checked(
-        entry, f"{prefix} config --services", timeout=60,
+        entry, f"{prefix} --profile {shlex.quote('*')} config --services", timeout=60,
     )
     available = {
         line.strip() for line in (declared or "").splitlines()

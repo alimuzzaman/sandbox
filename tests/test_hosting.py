@@ -1169,10 +1169,11 @@ class TestHostingManifest(unittest.TestCase):
         output = hosting_cmd._read_host_logs(validated, {}, lines=75)
 
         self.assertEqual(output, "web | ready\nworker | polling\n")
-        command = remote_checked.call_args.args[1]
-        self.assertIn("docker compose", command)
-        self.assertIn("-p sandbox-host-example-site-production", command)
-        self.assertIn("logs --no-color --tail 75 web worker", command)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertIn("--profile '*' config --services", commands[0])
+        self.assertIn("docker compose", commands[1])
+        self.assertIn("-p sandbox-host-example-site-production", commands[1])
+        self.assertIn("logs --no-color --tail 75 web worker", commands[1])
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",

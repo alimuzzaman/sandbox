@@ -8,7 +8,6 @@ import secrets
 import subprocess
 import base64
 import shlex
-import re
 import time
 import urllib.error
 import urllib.request

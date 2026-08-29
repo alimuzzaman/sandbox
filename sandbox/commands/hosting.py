@@ -6,6 +6,7 @@ import secrets
 import subprocess
 import base64
 import shlex
+import re
 import time
 import urllib.error
 import urllib.request
@@ -664,12 +665,17 @@ def _verify_remote_derived_environment(entry: dict, validated: dict,
         for key, provider in sorted(derived.items()):
             if provider != "pushed_commit_sha":
                 continue
-            probe = shlex.quote(f'printf %s "${key}"')
-            observed = _remote_checked(
+            probe = shlex.quote(f'printf "%s\\n" "${key}"')
+            output = _remote_checked(
                 entry,
                 f"{prefix} exec -T {service} sh -c {probe}",
                 timeout=30, progress=progress, log_path=log_path,
-            ).strip()
+            )
+            revisions = {
+                line.strip() for line in output.splitlines()
+                if re.fullmatch(r"[0-9a-f]{40}", line.strip())
+            }
+            observed = next(iter(revisions)) if len(revisions) == 1 else ""
             if observed != expected_sha:
                 state = "missing" if not observed else "mismatch"
                 raise RuntimeError(

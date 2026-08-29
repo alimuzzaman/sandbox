@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import time
@@ -29,9 +30,18 @@ def install() -> dict[str, object]:
     if sys.platform == "darwin":
         path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
         path.parent.mkdir(parents=True, exist_ok=True)
+        docker = shutil.which("docker")
+        executable_dirs = [
+            *([str(Path(docker).parent)] if docker else []),
+            "/opt/homebrew/bin", "/usr/local/bin",
+            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ]
         payload = {"Label": LABEL, "ProgramArguments": [str(sb), "activation", "serve"],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True,
-                   "ProcessType": "Background"}
+                   "ProcessType": "Background",
+                   "EnvironmentVariables": {
+                       "PATH": os.pathsep.join(dict.fromkeys(executable_dirs)),
+                   }}
         path.write_bytes(plistlib.dumps(payload, sort_keys=True))
     elif sys.platform.startswith("linux"):
         path = Path.home() / ".config" / "systemd" / "user" / "sandbox-activation.service"

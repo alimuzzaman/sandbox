@@ -73,6 +73,12 @@ class ActivationHTTPApplication:
         return HTTPResponse(status, headers)
 
     def handle(self, method: str, path: str, headers: Mapping[str, str], body: bytes = b"") -> HTTPResponse:
+        # HTTP field names are case-insensitive. BaseHTTPRequestHandler and
+        # Caddy may canonicalize ``ID`` to ``Id``; converting the message to a
+        # plain dict otherwise turns a valid activation claim into a 404.
+        normalized_headers = {
+            str(key).lower(): value for key, value in headers.items()
+        }
         if path == "/healthz" and method == "GET" and not body:
             # Keep liveness independent of registry/config I/O. Supervisors
             # use a sub-second probe here; catalog freshness is enforced on
@@ -82,14 +88,14 @@ class ActivationHTTPApplication:
             return self._response(404)
         if method != "GET":
             return self._response(405)
-        if body or headers.get("Content-Length", "0") not in {"", "0"}:
+        if body or normalized_headers.get("content-length", "0") not in {"", "0"}:
             return self._response(400)
         self._refresh_catalog()
         with self._catalog_lock:
             catalog = self.catalog
-        route_id = headers.get("X-Sandbox-Route-ID", "")
+        route_id = normalized_headers.get("x-sandbox-route-id", "")
         route = catalog.get(route_id)
-        auth = headers.get("Authorization", "")
+        auth = normalized_headers.get("authorization", "")
         if route is None or not auth.startswith("Bearer ") or not route.authorized(auth[7:]):
             return self._response(404)
         result = self.service.activate(

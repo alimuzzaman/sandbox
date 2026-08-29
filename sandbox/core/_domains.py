@@ -373,11 +373,18 @@ def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
     except Exception:
         return unavailable()
     observed = []
+    # An exact route may perform its first request-triggered wake while it is
+    # being created. Give that one route a bounded window to finish the
+    # existing Compose start; managed health scans keep their short per-route
+    # budget so stale fleets cannot amplify startup time.
+    probe_timeout = 5.0 if requested is not None else 0.5
     for dom, secure in dict.fromkeys(routes):
         try:
             configured = _caddyfile_has_route(dom, text)
             serving = bool(running and readable is not False and configured and
-                           _sandbox_proxy_route_serving(dom, secure=secure, timeout=0.5))
+                           _sandbox_proxy_route_serving(
+                               dom, secure=secure, timeout=probe_timeout,
+                           ))
         except Exception:
             return unavailable()
         observed.append({"hostname": dom, "secure": bool(secure),

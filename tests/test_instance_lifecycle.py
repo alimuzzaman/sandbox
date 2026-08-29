@@ -7,6 +7,14 @@ from unittest import mock
 
 
 class TestInstanceLifecycleConfig(unittest.TestCase):
+    def test_wordpress_power_uses_the_core_instance_owner(self):
+        import inspect
+        from sandbox.application import context
+
+        source = inspect.getsource(context.runtime_service)
+        self.assertIn("core.resolve_instances(cfg)", source)
+        self.assertNotIn("sc.resolve_instances(cfg)", source)
+
     def test_omission_resolves_to_idle_stop_and_request_wake(self):
         from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
 

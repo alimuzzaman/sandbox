@@ -1083,10 +1083,12 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
     if not resolved:
         return existing
     fresh = site_url({k: v for k, v in resolved.items() if k != "url"})
-    if not fresh or fresh == existing.get("url"):
+    if not fresh:
         return existing
     block = _local_yaml().get("instances", {}).get(name, {})
     token = block.get("autologin_token", "")
+    login_url = f"{fresh}/?sandbox_autologin={token}" if token else ""
+    admin_url = f"{fresh}/wp-admin/"
     extra = {}
     # Record the clean hostname alongside the URL: consumers (domain status,
     # MCP, doctor) read the registry, and a URL alone leaves them re-deriving
@@ -1095,10 +1097,17 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
         extra["domain"] = block["domain"]
         if block.get("tld"):
             extra["tld"] = block["tld"]
+    expected = {
+        "url": fresh,
+        "login_url": login_url,
+        "admin_url": admin_url,
+        **extra,
+    }
+    if all(existing.get(key, "") == value for key, value in expected.items()):
+        return existing
     return sc.registry_put(
         root, label=label, instance=name, url=fresh,
-        login_url=f"{fresh}/?sandbox_autologin={token}" if token else "",
-        admin_url=f"{fresh}/wp-admin/", **extra,
+        login_url=login_url, admin_url=admin_url, **extra,
     )
 
 
@@ -1229,6 +1238,14 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 # the live site. Re-versioning in place is a tracked follow-up; for
                 # now the instance must be recreated to apply a changed pin.
                 _warn_version_drift(cfg, existing.get("instance"), pconf)
+                if (str(existing.get("url") or "").startswith("http://localhost:")
+                        and _proxy_sudoers_installed()
+                        and _secure_at_create(cfg, existing["instance"])):
+                    # A ready instance may have been created while the clean-URL
+                    # proxy was unavailable.  Retry only this instance's route
+                    # before returning it; do not require the machine-wide
+                    # `domains setup` path or assign names to unrelated records.
+                    cfg = load_config()
                 _auto_heal_wp_url(existing["instance"])
                 return _refresh_registered_url(sc, root, label, existing, cfg)
 

@@ -586,47 +586,8 @@ case "$verb" in
         valid_digest "$expected"
         require_root
         require_installed_helper
-        receipt=$(check_authorization resolved "$owner" "$suffix" "$address" "$port" "$expected" \
-            "$service_pid" "$service_start" "$service_uid" "$service_control")
-        applied=$(check_applied resolved "$owner" "$suffix" "$address" "$port" "$expected")
-        uid=$(caller_uid)
-        other_status=0
-        other_applied_exists "$uid" resolved "$owner" "$suffix" "$address" "$port" "$expected" \
-            || other_status=$?
-        if [ "$other_status" -eq 0 ]; then
-            require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
-            rm -f -- "$applied" "$receipt"
-            echo "retained"
-            exit 0
-        fi
-        [ "$other_status" -eq 1 ] || fail "shared applied resolver receipts are unsafe"
-        destination="/etc/systemd/resolved.conf.d/80-sandbox-$suffix.conf"
-        if [ ! -e "$destination" ]; then
-            require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
-            rm -f -- "$applied" "$receipt"
-            exit 0
-        fi
-        require_root_fragment "$destination"
-        [ "$(sed -n '1p' "$destination")" = "# sandbox-resolver v1 suffix=$suffix" ] \
-            || fail "refusing to remove a foreign resolver fragment"
-        actual=$(sha256sum -- "$destination" | cut -d' ' -f1)
-        [ "$actual" = "$expected" ] || fail "owned resolver fragment drifted"
-        require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
-        backup="$destination.remove.$$"
-        cp -p -- "$destination" "$backup"
-        trap 'rm -f -- "$backup"' EXIT HUP INT TERM
-        require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
-        rm -f -- "$destination"
-        require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
-        if ! systemctl reload-or-restart systemd-resolved.service; then
-            mv -f -- "$backup" "$destination"
-            trap - EXIT HUP INT TERM
-            systemctl reload-or-restart systemd-resolved.service >/dev/null 2>&1 || true
-            fail "systemd-resolved cleanup reload failed; fragment restored"
-        fi
-        rm -f -- "$backup"
-        trap - EXIT HUP INT TERM
-        rm -f -- "$applied" "$receipt"
+        valid_service_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
+        fail "resolved cleanup requires atomic service identity ownership"
         ;;
     macos-apply)
         [ "$#" -eq 5 ] || usage

@@ -895,6 +895,7 @@ class DomainService:
             )
         incomplete = False
         mutated = False
+        refusal_reason = None
         for binding in bindings:
             recovery = self.repository.snapshot()["recovery"].get(binding.binding_id) or {}
             if recovery.get("reason_code") == "authority_cleanup_failed":
@@ -930,6 +931,7 @@ class DomainService:
                         None, "resolver_owner_changed", None, "unavailable",
                     ))
                     incomplete = True
+                    refusal_reason = refusal_reason or "resolver_owner_changed"
                     continue
             observed = (
                 self.binding_observer(binding, adapter)
@@ -971,12 +973,14 @@ class DomainService:
                 result = adapter.cleanup(binding)
             if result is not None:
                 if not result.get("ok"):
+                    result_code = result.get("code") or "resolver_cleanup_failed"
                     self.repository.put_recovery(CleanupRecovery(
                         binding.binding_id, binding.adapter_id,
                         binding.last_applied_digest, observed_digest,
-                        "resolver_cleanup_failed", None, "unavailable",
+                        result_code, None, "unavailable",
                     ))
                     incomplete = True
+                    refusal_reason = refusal_reason or result_code
                     continue
             if len(binding.owners) > 1:
                 if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
@@ -1001,8 +1005,12 @@ class DomainService:
             return self._result(
                 state="cleanup_incomplete", hostname=hostname, policy=policy,
                 observation=observation, expected=(), fallback=fallback,
-                reason_code="cleanup_incomplete",
-                message="One or more resolver bindings drifted or were unavailable; retry state was retained.",
+                reason_code=refusal_reason or "cleanup_incomplete",
+                message=(
+                    "Resolver cleanup was refused because atomic service ownership is unproven; managed state was retained."
+                    if refusal_reason == "resolved_cleanup_atomicity_unproven" else
+                    "One or more resolver bindings drifted or were unavailable; retry state was retained."
+                ),
                 mutated=mutated, ownership="residual",
             )
         return self._result(

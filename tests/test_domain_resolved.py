@@ -146,10 +146,10 @@ class TestResolvedAdapter(unittest.TestCase):
                 "owner_digest": "b" * 64, "fragment_digest": "a" * 64,
                 "service_identity": self._identity(),
             })
-        self.assertTrue(result["ok"])
-        self.assertEqual(process.calls[0][0][4:9], (
-            "b" * 64, "test", "127.0.0.54", "5300", "a" * 64,
-        ))
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual(result["code"], "resolved_cleanup_atomicity_unproven")
+        self.assertEqual(process.calls, [])
 
     def test_preapply_revoke_is_receipt_only_and_distinct_from_rollback(self):
         from sandbox.network.adapters.resolved import ResolvedAdapter
@@ -165,6 +165,29 @@ class TestResolvedAdapter(unittest.TestCase):
             "revoke-authorization", "resolved",
         ))
         self.assertNotIn("resolved-remove", process.calls[0][0])
+
+    def test_release_owner_returns_typed_no_mutation_refusal(self):
+        from sandbox.network.adapters.resolved import ResolvedAdapter
+        from sandbox.network.models import ResolutionBinding
+
+        process = RecordingProcess()
+        desired = {
+            "suffix": "test", "address": "127.0.0.54", "port": 5300,
+            "owner_digest": "b" * 64, "service_identity": self._identity(),
+        }
+        binding = ResolutionBinding.create(
+            kind="exact", name="demo.test", target="127.0.0.77",
+            adapter_id="systemd-resolved", owners=("owner",), desired=desired,
+        ).with_applied({"fragment_digest": "a" * 64})
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = ResolvedAdapter(process=process, network_root=Path(tmp))
+            result = adapter.release_owner(binding, "b" * 64)
+        self.assertEqual(result, {
+            "ok": False, "mutated": False,
+            "code": "resolved_cleanup_atomicity_unproven",
+            "error": "systemd-resolved cleanup requires proven atomic service ownership",
+        })
+        self.assertEqual(process.calls, [])
 
     def test_nonfixed_mutation_helper_is_rejected(self):
         from sandbox.network.adapters.resolved import ResolvedAdapter

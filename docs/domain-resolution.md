@@ -59,12 +59,12 @@ treated as ready: after consent it is upgraded from the checked-in helper, and a
 legacy resolved authorization receipt may be replaced only during the interactive
 authorization step with the new identity-bound receipt.
 
-Cleanup is bound to the same service identity. DomainService compares the live helper
-preflight with the binding's stored PID, start ticks, UID, and control group before release.
-The helper repeats that comparison immediately before every shared-receipt branch,
-missing-fragment receipt removal, final fragment removal, and reload. An owner or service
-identity change retains recovery state and performs no receipt, fragment, or reload
-mutation.
+Systemd-resolved cleanup is not promoted by this batch. DomainService still compares the
+live helper preflight with the binding's stored identity, but a check cannot make an
+external reload atomic against service replacement. Therefore `resolved-remove` and the
+adapter release path return `resolved_cleanup_atomicity_unproven` before any receipt,
+fragment, or reload mutation. All managed state remains for later reconciliation until an
+atomic service-identity ownership mechanism is proven under T070.
 
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
 authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.
@@ -81,8 +81,10 @@ application state.
 
 Sandbox writes only marked fragments through fixed, schema-validated helper verbs. It
 does not replace resolver-managed `resolv.conf`, foreign dnsmasq fragments, hosts entries,
-or public DNS. Apply validates complete configuration and rolls back on reload or fresh
-DNS/HTTP verification failure. Cleanup compares the observed state with the stored
+or public DNS. Apply validates complete configuration. Adapters with proven atomic
+rollback revert on reload or fresh DNS/HTTP verification failure; the unadvertised
+systemd-resolved candidate instead retains residual recovery because its remove path is
+disabled. Cleanup compares the observed state with the stored
 receipt; drift and unavailable managers produce durable `cleanup_incomplete` recovery
 instead of deleting ambiguous state. Recovery remains retryable after instance deletion.
 

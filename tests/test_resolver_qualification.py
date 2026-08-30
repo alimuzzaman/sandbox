@@ -56,6 +56,11 @@ class QualifiedAdapter:
         self.calls.append(("rollback",))
         return {"ok": True, "mutated": True}
 
+    def release_owner(self, binding, owner_digest):
+        self.calls.append(("release_owner", owner_digest))
+        return {"ok": False, "mutated": False,
+                "code": "resolved_cleanup_atomicity_unproven"}
+
     def observe(self, binding):
         return None
 
@@ -306,10 +311,30 @@ class TestResolverProductionQualification(unittest.TestCase):
         cleaned = qualified.cleanup("/tmp/project", interactive=True)
 
         self.assertEqual(cleaned.state, "cleanup_incomplete")
+        self.assertEqual(cleaned.reason["code"], "resolver_owner_changed")
         self.assertEqual(authority.calls, [])
         self.assertEqual(adapter.calls, [
             ("ensure_helper", True),
             ("qualification_preflight", "systemd-resolved:host"),
+        ])
+        self.assertEqual(len(qualified.repository.snapshot()["bindings"]), 1)
+
+    def test_replacement_during_cleanup_keeps_all_external_state(self):
+        qualified, adapter, _endpoints, authority = self._service()
+        self.assertTrue(qualified.apply("/tmp/project", interactive=True).ok)
+        binding = next(iter(qualified.repository.snapshot()["bindings"].values()))
+        qualified.binding_observer = lambda _binding, _adapter: dict(binding["last_applied"])
+        adapter.calls.clear()
+        authority.calls.clear()
+
+        cleaned = qualified.cleanup("/tmp/project", interactive=True)
+
+        self.assertEqual(cleaned.state, "cleanup_incomplete")
+        self.assertEqual(cleaned.reason["code"],
+                         "resolved_cleanup_atomicity_unproven")
+        self.assertEqual(authority.calls, [])
+        self.assertEqual([call[0] for call in adapter.calls], [
+            "ensure_helper", "qualification_preflight", "release_owner",
         ])
         self.assertEqual(len(qualified.repository.snapshot()["bindings"]), 1)
 

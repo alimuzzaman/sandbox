@@ -19,6 +19,14 @@ _PREFLIGHT = re.compile(
 
 
 class ResolvedAdapter:
+    @staticmethod
+    def _cleanup_refusal() -> dict:
+        return {
+            "ok": False, "mutated": False,
+            "code": "resolved_cleanup_atomicity_unproven",
+            "error": "systemd-resolved cleanup requires proven atomic service ownership",
+        }
+
     def __init__(self, *, process, helper: str = INSTALLED_HELPER,
                  repository_helper: str | None = None, network_root: str | Path,
                  readlink=os.readlink) -> None:
@@ -170,15 +178,7 @@ class ResolvedAdapter:
         }}
 
     def rollback(self, plan: dict) -> dict:
-        digest = (plan.get("applied") or plan).get("fragment_digest")
-        identity = self._identity_args(plan)
-        if not digest or identity is None:
-            return {"ok": False, "mutated": False}
-        result = self.process.run((
-            "sudo", "-n", self.helper, "resolved-remove", plan["owner_digest"],
-            plan["suffix"], plan["address"], str(plan["port"]), digest, *identity,
-        ), timeout=30)
-        return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
+        return self._cleanup_refusal()
 
     def revoke_authorization(self, plan: dict) -> dict:
         digest = hashlib.sha256(self._content(
@@ -219,21 +219,7 @@ class ResolvedAdapter:
                 identity["control_group"])
 
     def release_owner(self, binding, owner_digest: str) -> dict:
-        desired = dict(binding.desired)
-        digest = (dict(binding.last_applied) if binding.last_applied is not None else {}).get(
-            "fragment_digest"
-        )
-        identity = self._identity_args(desired)
-        if not digest or identity is None:
-            return {"ok": False, "mutated": False,
-                    "error": "resolver binding has no owned fragment receipt"}
-        result = self.process.run((
-            "sudo", "-n", self.helper, "resolved-remove", owner_digest,
-            desired["suffix"], desired["address"], str(desired["port"]), digest,
-            *identity,
-        ), timeout=30)
-        return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
-                "error": (result.stderr or "")[:1000]}
+        return self._cleanup_refusal()
 
     def observe(self, binding) -> dict | None:
         desired = dict(binding.desired)

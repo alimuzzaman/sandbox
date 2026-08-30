@@ -51,18 +51,21 @@ one of the accepted addresses.
   source-owned version. Its final read-only service identity (PID, start ticks, UID, and
   control group) is bound into authorization and revalidated inside the helper immediately
   before the resolver write.
-- Starts/updates the authority before adding a routed-resolver rule; removes candidate
-  authority state if route activation fails.
+- Starts/updates the authority before adding a routed-resolver rule. Candidate authority
+  is removed after route failure only when the resolver adapter has a proven atomic
+  rollback; systemd-resolved currently retains residual reconciliation state instead.
 - Verifies fresh resolution to one accepted address. It does not call A to add a route.
 
 `cleanup(owner, interactive) -> CleanupResult`
 
 - Removes only unchanged owned binding state.
-- For systemd-resolved, requires the current helper PID/start/UID/control identity to
-  equal the binding's applied identity at the service boundary and again inside the helper
-  before every receipt, fragment, or reload mutation.
+- For systemd-resolved, returns `resolved_cleanup_atomicity_unproven` without mutating
+  receipts, fragments, or resolver state. Preflight comparison alone cannot make an
+  external reload atomic against service replacement; managed state remains for later
+  reconciliation until T070 proves an ownership mechanism.
 - Removes a shared zone only after its final owner is gone.
-- Reverts routed-resolver state before stopping the final authority binding.
+- Reverts a routed-resolver state before stopping the final authority binding only for an
+  adapter with a proven atomic cleanup mechanism.
 - Returns incomplete recovery for drift/unavailability; safe to repeat.
 
 ### Read-only selected-ingress diagnostic

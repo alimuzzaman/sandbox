@@ -171,6 +171,32 @@ class RemoteSyncTransportTests(unittest.TestCase):
                                  if key != "checkout"},
             "ambiguous_state": {**baseline, "state": "provisioning"},
             "missing_source_binding": {**baseline, "deployment_proof": None},
+            "mismatched_checkout_locator_digest": {
+                **baseline,
+                "locator_digests": {
+                    **baseline["locator_digests"],
+                    "checkout": "sha256:" + "9" * 64,
+                },
+            },
+            "missing_locator_map": {key: value for key, value in baseline.items()
+                                    if key != "locator_digests"},
+            "missing_source_commit": {
+                **baseline,
+                "deployment_proof": {
+                    "source_identity": "sha256:" + "4" * 64,
+                },
+            },
+            "malformed_source_commit": {
+                **baseline,
+                "deployment_proof": {
+                    **baseline["deployment_proof"],
+                    "source_commit": "A" * 40,
+                },
+            },
+            "missing_source_identity": {
+                **baseline,
+                "deployment_proof": {"source_commit": "a" * 40},
+            },
         }
         for label, evidence in cases.items():
             with self.subTest(label=label):

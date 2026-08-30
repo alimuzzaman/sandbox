@@ -387,6 +387,10 @@ class SyncService:
         if mode not in {"live", "checkpoint"}:
             raise SyncServiceError("synchronization mode is invalid", "ownership_conflict")
         relationship = self._relationship(project_dir, remote, workspace_id)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         updated = self.repository.set_mode(
             relationship.relationship_id, mode, lifecycle="active",
         )
@@ -402,6 +406,10 @@ class SyncService:
     def stop(self, project_dir: str | Path, *, remote: str, workspace_id: str,
              participant_id: str | None = None) -> dict:
         relationship = self._relationship(project_dir, remote, workspace_id)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         updated = self.repository.set_mode(
             relationship.relationship_id, "off", lifecycle="stopped",
         )

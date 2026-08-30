@@ -377,8 +377,18 @@ class SyncServiceTests(unittest.TestCase):
             )
 
     def test_remote_workspace_owner_conflict_remains_bounded_and_non_retryable(self):
+        accepting = {"enabled": False}
+
         class ConflictingTransport:
-            def transfer(self, *_args):
+            def transfer(self, _project_dir, manifest, _relationship, generation):
+                if accepting["enabled"]:
+                    return {
+                        "status": "accepted",
+                        "accepted_generation": generation.generation_id,
+                        "manifest_digest": manifest.manifest_digest,
+                        "file_count": manifest.file_count,
+                        "byte_count": manifest.byte_count,
+                    }
                 error = RuntimeError("private remote ownership detail")
                 error.code = "ownership_conflict"
                 error.retryable = False
@@ -422,6 +432,33 @@ class SyncServiceTests(unittest.TestCase):
             self.assertEqual(conflict["status"], "conflicted")
             self.assertEqual(conflict["code"], "ownership_conflict")
             self.assertEqual(conflict["request_id"], "request-remote-conflict")
+        started = service.start(
+            self.root, remote="remote", workspace_id="workspace", mode="live",
+        )
+        stopped = service.stop(
+            self.root, remote="remote", workspace_id="workspace",
+        )
+        for conflict in (started, stopped):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["status"], "conflicted")
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
+        self.assertEqual(
+            self.repository.get_relationship(relationship.relationship_id).lifecycle,
+            "conflicted",
+        )
+
+        accepting["enabled"] = True
+        accepted = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-after-reviewed-adoption",
+        )
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(
+            self.repository.get_relationship(relationship.relationship_id).lifecycle,
+            "stopped",
+        )
 
     def test_lost_acknowledgment_reconciles_with_original_request(self):
         class Reconciling:

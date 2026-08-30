@@ -34,6 +34,7 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SAFE_REMOTE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SAFE_PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 _PUBLISH_PROGRAM = r'''import hashlib, json, os, pathlib, stat, sys
@@ -249,6 +250,8 @@ class RemoteSyncTransport:
             and isinstance(deployment_proof, Mapping)
             and isinstance(deployment_proof.get("source_identity"), str)
             and _SHA256.fullmatch(deployment_proof["source_identity"]) is not None
+            and isinstance(deployment_proof.get("source_commit"), str)
+            and _FULL_COMMIT.fullmatch(deployment_proof["source_commit"]) is not None
         )
         if not ready:
             raise RemoteSyncTransportError(

@@ -52,6 +52,12 @@ deployment receipt provide the canonical source binding; destroyed, incomplete,
 unhealthy, ambiguous, or unbound records remain unavailable. The controller
 also attests that both protected checkout directories still exist as real
 directories at status time; stored locator digests alone are not acceptance.
+Publication keeps the workspace operation lock while it binds every staging and
+generation directory to an opened filesystem identity, validates the complete
+tree, and atomically changes the `current` pointer. A renamed or cleanup entry
+whose identity changes is refused. If the final validation fails after the
+pointer change, the controller restores the exact prior pointer (or removes the
+new pointer when there was no prior generation) before returning failure.
 
 Lost acknowledgments reconcile with the original request identity. Remote
 divergence is never adopted or overwritten automatically; `sync resolve

@@ -213,6 +213,34 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(refused.exception.code, "sync_manifest_invalid")
             self.assertFalse((base / "current").exists())
 
+    def test_sync_publication_rejects_incoming_directory_replacement_after_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            original_rename = __import__("os").rename
+            replaced = False
+
+            def replace_incoming_before_rename(source, destination, **kwargs):
+                nonlocal replaced
+                if (not replaced and isinstance(source, str)
+                        and source.startswith(".incoming-")
+                        and destination == request.generation_id):
+                    replaced = True
+                    original_rename(
+                        source, ".validated-away",
+                        src_dir_fd=kwargs["src_dir_fd"],
+                        dst_dir_fd=kwargs["src_dir_fd"],
+                    )
+                    __import__("os").mkdir(source, 0o700, dir_fd=kwargs["src_dir_fd"])
+                return original_rename(source, destination, **kwargs)
+
+            with mock.patch("os.rename", side_effect=replace_incoming_before_rename):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_namespace_changed")
+            self.assertFalse((base / "current").exists())
+            self.assertFalse(
+                (base / "receipts" / f"{request.generation_id}.json").exists())
+
     def test_sync_publication_current_failure_is_redacted_and_retryable(self):
         with tempfile.TemporaryDirectory() as temp:
             service, _repository, request, base = self._sync_fixture(temp)
@@ -418,6 +446,165 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(__import__("os").readlink(base / "current"),
                              "generations/gen_second")
+
+    def test_sync_publication_restores_prior_current_after_post_commit_mutation(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            service.publish_sync(request)
+            output = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(request.archive_bytes), mode="r:gz") as source, \
+                    tarfile.open(fileobj=output, mode="w:gz") as target:
+                for member in source.getmembers():
+                    content = source.extractfile(member).read()
+                    if member.name == ".sandbox-sync-manifest.json":
+                        document = json.loads(content)
+                        document["generation_id"] = "gen_mutated"
+                        document["manifest_digest"] = "4" * 64
+                        content = json.dumps(
+                            document, sort_keys=True, separators=(",", ":")).encode()
+                        member.size = len(content)
+                    target.addfile(member, io.BytesIO(content))
+            second = replace(
+                request, generation_id="gen_mutated", manifest_digest="4" * 64,
+                archive_bytes=output.getvalue(),
+            )
+            original_snapshot = workspace_module._snapshot_sync_fd
+            mutated = False
+
+            def mutate_after_current_commit(root_fd, publish_request):
+                nonlocal mutated
+                current = base / "current"
+                if (not mutated and current.is_symlink()
+                        and __import__("os").readlink(current)
+                        == "generations/gen_mutated"):
+                    mutated = True
+                    descriptor = __import__("os").open(
+                        "source.txt", __import__("os").O_WRONLY
+                        | __import__("os").O_TRUNC, dir_fd=root_fd,
+                    )
+                    try:
+                        __import__("os").write(descriptor, b"post-commit mutation\n")
+                    finally:
+                        __import__("os").close(descriptor)
+                return original_snapshot(root_fd, publish_request)
+
+            with mock.patch.object(
+                    workspace_module, "_snapshot_sync_fd",
+                    side_effect=mutate_after_current_commit):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(second)
+            self.assertTrue(mutated)
+            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertEqual(__import__("os").readlink(base / "current"),
+                             "generations/gen_sync")
+
+    def test_sync_publication_removes_first_current_after_post_commit_mutation(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            original_snapshot = workspace_module._snapshot_sync_fd
+            mutated = False
+
+            def mutate_after_current_commit(root_fd, publish_request):
+                nonlocal mutated
+                if not mutated and (base / "current").is_symlink():
+                    mutated = True
+                    descriptor = __import__("os").open(
+                        "source.txt", __import__("os").O_WRONLY
+                        | __import__("os").O_TRUNC, dir_fd=root_fd,
+                    )
+                    try:
+                        __import__("os").write(descriptor, b"post-commit mutation\n")
+                    finally:
+                        __import__("os").close(descriptor)
+                return original_snapshot(root_fd, publish_request)
+
+            with mock.patch.object(
+                    workspace_module, "_snapshot_sync_fd",
+                    side_effect=mutate_after_current_commit):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertTrue(mutated)
+            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_current_replacement_has_no_observation_gap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            service.publish_sync(request)
+            output = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(request.archive_bytes), mode="r:gz") as source, \
+                    tarfile.open(fileobj=output, mode="w:gz") as target:
+                for member in source.getmembers():
+                    content = source.extractfile(member).read()
+                    if member.name == ".sandbox-sync-manifest.json":
+                        document = json.loads(content)
+                        document["generation_id"] = "gen_atomic"
+                        document["manifest_digest"] = "5" * 64
+                        content = json.dumps(
+                            document, sort_keys=True, separators=(",", ":")).encode()
+                        member.size = len(content)
+                    target.addfile(member, io.BytesIO(content))
+            second = replace(
+                request, generation_id="gen_atomic", manifest_digest="5" * 64,
+                archive_bytes=output.getvalue(),
+            )
+            original_replace = __import__("os").replace
+            observations = []
+
+            def observe_atomic_replace(source, destination, **kwargs):
+                if destination == "current":
+                    observations.append((base / "current").is_symlink())
+                    self.assertEqual(__import__("os").readlink(base / "current"),
+                                     "generations/gen_sync")
+                return original_replace(source, destination, **kwargs)
+
+            with mock.patch("os.replace", side_effect=observe_atomic_replace):
+                service.publish_sync(second)
+            self.assertEqual(observations, [True])
+            self.assertEqual(__import__("os").readlink(base / "current"),
+                             "generations/gen_atomic")
+
+    def test_sync_cleanup_refuses_empty_directory_replacement(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp) / "parent"
+            parent.mkdir()
+            victim = parent / "victim"
+            victim.mkdir()
+            original_scandir = __import__("os").scandir
+            parent_fd = __import__("os").open(parent, __import__("os").O_RDONLY)
+            swapped = False
+
+            class SwapAfterInventory:
+                def __init__(self, descriptor):
+                    self._iterator = original_scandir(descriptor)
+
+                def __enter__(self):
+                    return self._iterator.__enter__()
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    nonlocal swapped
+                    result = self._iterator.__exit__(exc_type, exc_value, traceback)
+                    if not swapped:
+                        swapped = True
+                        (parent / "victim").rename(parent / "validated-away")
+                        (parent / "victim").mkdir()
+                    return result
+
+            try:
+                with mock.patch("os.scandir", side_effect=SwapAfterInventory):
+                    with self.assertRaises(Exception) as refused:
+                        workspace_module._remove_tree_at(parent_fd, "victim")
+                self.assertEqual(refused.exception.code, "sync_namespace_changed")
+                self.assertTrue(victim.is_dir())
+                self.assertTrue((parent / "validated-away").is_dir())
+            finally:
+                __import__("os").close(parent_fd)
 
     def test_create_rejects_namespace_traversal_and_symlink_without_residue(self):
         with tempfile.TemporaryDirectory() as temp:

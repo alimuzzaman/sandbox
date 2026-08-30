@@ -520,6 +520,7 @@ def _child_directory(parent_fd: int, name: str, *, create: bool = True) -> int:
 def _remove_tree_at(parent_fd: int, name: str) -> None:
     descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
     try:
+        bound = os.fstat(descriptor)
         with os.scandir(descriptor) as iterator:
             names = [entry.name for entry in iterator]
         for child in names:
@@ -528,9 +529,15 @@ def _remove_tree_at(parent_fd: int, name: str) -> None:
                 _remove_tree_at(descriptor, child)
             else:
                 os.unlink(child, dir_fd=descriptor)
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode)
+                or (observed.st_dev, observed.st_ino, observed.st_mode)
+                != (bound.st_dev, bound.st_ino, bound.st_mode)):
+            raise WorkspaceIndexError(
+                "sync_namespace_changed", "cleanup directory changed concurrently")
+        os.rmdir(name, dir_fd=parent_fd)
     finally:
         os.close(descriptor)
-    os.rmdir(name, dir_fd=parent_fd)
 
 
 def _write_archive_file(root_fd: int, path: PurePosixPath, content: bytes, mode: int) -> None:
@@ -700,45 +707,99 @@ def _observe_current(workspace_fd: int) -> tuple[Any, ...] | None:
             os.readlink("current", dir_fd=workspace_fd))
 
 
+@dataclass(frozen=True)
+class _CurrentCommit:
+    committed: tuple[Any, ...]
+    previous_name: str | None
+
+
 def _commit_current(workspace_fd: int, generation_id: str,
-                    observed: tuple[Any, ...] | None) -> None:
+                    observed: tuple[Any, ...] | None) -> _CurrentCommit:
     temporary = ".current-" + uuid.uuid4().hex
     previous = ".previous-" + uuid.uuid4().hex
     target = "generations/" + generation_id
     os.symlink(target, temporary, dir_fd=workspace_fd)
-    moved_previous = False
+    temporary_observed = _observe_named_pointer(workspace_fd, temporary)
+    if temporary_observed is None:
+        try:
+            os.unlink(temporary, dir_fd=workspace_fd)
+        except OSError:
+            pass
+        raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
+    saved_previous = False
+    committed = False
     try:
         if _observe_current(workspace_fd) != observed:
             raise WorkspaceIndexError(
                 "sync_pointer_conflict", "current generation pointer changed concurrently")
         if observed is not None:
-            os.rename("current", previous, src_dir_fd=workspace_fd, dst_dir_fd=workspace_fd)
-            moved_previous = True
+            os.link("current", previous, src_dir_fd=workspace_fd,
+                    dst_dir_fd=workspace_fd, follow_symlinks=False)
+            saved_previous = True
             if _observe_named_pointer(workspace_fd, previous) != observed:
                 raise WorkspaceIndexError(
                     "sync_pointer_conflict", "current generation pointer changed concurrently")
-        try:
-            os.link(temporary, "current", src_dir_fd=workspace_fd,
-                    dst_dir_fd=workspace_fd, follow_symlinks=False)
-        except FileExistsError:
+            if _observe_current(workspace_fd) != observed:
+                raise WorkspaceIndexError(
+                    "sync_pointer_conflict", "current generation pointer changed concurrently")
+            os.replace(temporary, "current", src_dir_fd=workspace_fd,
+                       dst_dir_fd=workspace_fd)
+            committed = True
+        else:
+            try:
+                os.link(temporary, "current", src_dir_fd=workspace_fd,
+                        dst_dir_fd=workspace_fd, follow_symlinks=False)
+            except FileExistsError:
+                raise WorkspaceIndexError(
+                    "sync_pointer_conflict",
+                    "current generation pointer changed concurrently") from None
+            os.unlink(temporary, dir_fd=workspace_fd)
+            committed = True
+        current = _observe_current(workspace_fd)
+        if current != temporary_observed:
             raise WorkspaceIndexError(
-                "sync_pointer_conflict", "current generation pointer changed concurrently") from None
-        os.unlink(temporary, dir_fd=workspace_fd)
-        if moved_previous:
-            os.unlink(previous, dir_fd=workspace_fd)
+                "sync_pointer_conflict", "current generation pointer changed concurrently")
+        return _CurrentCommit(current, previous if saved_previous else None)
     except Exception:
+        if committed:
+            try:
+                if _observe_current(workspace_fd) == temporary_observed:
+                    if saved_previous:
+                        os.replace(previous, "current", src_dir_fd=workspace_fd,
+                                   dst_dir_fd=workspace_fd)
+                        saved_previous = False
+                    else:
+                        os.unlink("current", dir_fd=workspace_fd)
+            except OSError:
+                pass
         try:
             os.unlink(temporary, dir_fd=workspace_fd)
         except OSError:
             pass
-        if moved_previous:
+        if saved_previous:
             try:
-                os.link(previous, "current", src_dir_fd=workspace_fd,
-                        dst_dir_fd=workspace_fd, follow_symlinks=False)
-                os.unlink(previous, dir_fd=workspace_fd)
+                if _observe_current(workspace_fd) == temporary_observed:
+                    os.replace(previous, "current", src_dir_fd=workspace_fd,
+                               dst_dir_fd=workspace_fd)
+                else:
+                    os.unlink(previous, dir_fd=workspace_fd)
             except OSError:
                 pass
         raise
+
+
+def _finish_current(workspace_fd: int, commit: _CurrentCommit, *, rollback: bool) -> None:
+    if rollback:
+        if _observe_current(workspace_fd) != commit.committed:
+            raise WorkspaceIndexError(
+                "sync_pointer_conflict", "current generation pointer changed concurrently")
+        if commit.previous_name is None:
+            os.unlink("current", dir_fd=workspace_fd)
+        else:
+            os.replace(commit.previous_name, "current", src_dir_fd=workspace_fd,
+                       dst_dir_fd=workspace_fd)
+    elif commit.previous_name is not None:
+        os.unlink(commit.previous_name, dir_fd=workspace_fd)
 
 
 def _observe_named_pointer(workspace_fd: int, name: str) -> tuple[Any, ...] | None:
@@ -842,9 +903,24 @@ def _publish_sync_archive(root: Path, request: SyncPublishRequest) -> None:
                 if _snapshot_sync_fd(generation_fd, request) != snapshot:
                     raise WorkspaceIndexError(
                         "sync_manifest_invalid", "generation changed before publication")
+                bound_generation = os.fstat(generation_fd)
                 os.rename(incoming_name, request.generation_id,
                           src_dir_fd=staging_fd, dst_dir_fd=generations_fd)
                 incoming_name = None
+                published_fd = _published_generation_fd(
+                    generations_fd, request.generation_id)
+                if published_fd is None:
+                    raise WorkspaceIndexError(
+                        "sync_namespace_changed", "published generation changed concurrently")
+                published = os.fstat(published_fd)
+                if ((published.st_dev, published.st_ino, published.st_mode)
+                        != (bound_generation.st_dev, bound_generation.st_ino,
+                            bound_generation.st_mode)):
+                    os.close(published_fd)
+                    raise WorkspaceIndexError(
+                        "sync_namespace_changed", "published generation changed concurrently")
+                os.close(generation_fd)
+                generation_fd = published_fd
             _assert_namespace_bindings(bindings)
             if _snapshot_sync_fd(generation_fd, request) != snapshot:
                 raise WorkspaceIndexError(
@@ -857,11 +933,16 @@ def _publish_sync_archive(root: Path, request: SyncPublishRequest) -> None:
                     raise WorkspaceIndexError(
                         "sync_manifest_invalid", "published generation changed")
                 return
-            _commit_current(workspace_fd, request.generation_id, observed)
-            _assert_namespace_bindings(bindings)
-            if _snapshot_sync_fd(generation_fd, request) != snapshot:
-                raise WorkspaceIndexError(
-                    "sync_manifest_invalid", "generation changed during current commit")
+            commit = _commit_current(workspace_fd, request.generation_id, observed)
+            try:
+                _assert_namespace_bindings(bindings)
+                if _snapshot_sync_fd(generation_fd, request) != snapshot:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation changed during current commit")
+            except Exception:
+                _finish_current(workspace_fd, commit, rollback=True)
+                raise
+            _finish_current(workspace_fd, commit, rollback=False)
             os.fsync(workspace_fd)
         finally:
             os.close(generation_fd)

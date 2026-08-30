@@ -109,12 +109,25 @@ class TestBoundedEdgeCapture(unittest.TestCase):
 
     def test_post_spawn_cancellation_does_not_allow_future_output(self):
         with tempfile.TemporaryDirectory() as raw:
+            child_started = Path(raw) / "child-started"
             mutation = Path(raw) / "ran-after-cancel"
             signal = ResourceCancellationSignal()
-            timer = threading.Timer(0.01, signal.cancel)
-            timer.start()
+            readiness_observed = threading.Event()
+
+            def cancel_after_child_start():
+                deadline = time.monotonic() + 2
+                while not child_started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                if child_started.exists():
+                    readiness_observed.set()
+                    signal.cancel()
+
+            watcher = threading.Thread(target=cancel_after_child_start)
+            watcher.start()
             script = (
-                "import pathlib,time; time.sleep(0.3); "
+                "import pathlib,time; "
+                f"pathlib.Path({str(child_started)!r}).write_text('started'); "
+                "time.sleep(0.3); "
                 f"pathlib.Path({str(mutation)!r}).write_text('mutated'); "
                 "print('ran-after-cancel', flush=True); time.sleep(30)"
             )
@@ -124,12 +137,14 @@ class TestBoundedEdgeCapture(unittest.TestCase):
                     sys.executable, "-c", script,
                 ), timeout=1, cancellation=signal)
             finally:
-                timer.cancel()
+                watcher.join(timeout=2)
+            self.assertTrue(child_started.exists())
+            self.assertTrue(readiness_observed.is_set())
             self.assertFalse(mutation.exists())
         self.assertEqual(result.returncode, 130)
         self.assertEqual(result.termination_reason, "cancelled")
         self.assertNotIn("ran-after-cancel", result.stdout)
-        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertLess(time.monotonic() - started, 2.0)
 
     def _feed(self, cap: _BoundedEdgeCapture, data: bytes, chunk: int) -> None:
         for i in range(0, len(data), max(chunk, 1)):

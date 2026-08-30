@@ -10,6 +10,7 @@ usage() {
     echo "usage: resolver-helper.sh check-candidate ROOT FILE SUFFIX ADDRESS PORT" >&2
     echo "       resolver-helper.sh install" >&2
     echo "       resolver-helper.sh installed-status" >&2
+    echo "       resolver-helper.sh resolved-status" >&2
     echo "       resolver-helper.sh authorize ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
     echo "       resolver-helper.sh authorization-status ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
     echo "       resolver-helper.sh revoke-authorization ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
@@ -392,7 +393,7 @@ case "$verb" in
         if [ "$(uname -s)" = "Darwin" ]; then
             allowed="/usr/local/libexec/sandbox-resolver-helper installed-status, /usr/local/libexec/sandbox-resolver-helper authorization-status *, /usr/local/libexec/sandbox-resolver-helper revoke-authorization *, /usr/local/libexec/sandbox-resolver-helper macos-apply *, /usr/local/libexec/sandbox-resolver-helper macos-remove *"
         else
-            allowed="/usr/local/libexec/sandbox-resolver-helper installed-status, /usr/local/libexec/sandbox-resolver-helper authorization-status *, /usr/local/libexec/sandbox-resolver-helper revoke-authorization *, /usr/local/libexec/sandbox-resolver-helper resolved-apply *, /usr/local/libexec/sandbox-resolver-helper resolved-remove *"
+            allowed="/usr/local/libexec/sandbox-resolver-helper installed-status, /usr/local/libexec/sandbox-resolver-helper resolved-status, /usr/local/libexec/sandbox-resolver-helper authorization-status *, /usr/local/libexec/sandbox-resolver-helper revoke-authorization *, /usr/local/libexec/sandbox-resolver-helper resolved-apply *, /usr/local/libexec/sandbox-resolver-helper resolved-remove *"
         fi
         printf '%s ALL=(root) NOPASSWD: %s\n' "$login" "$allowed" > "$sudoers_temporary"
         chown root:root "$sudoers_temporary"
@@ -447,6 +448,36 @@ case "$verb" in
         require_installed_helper
         check_authorization "$@" >/dev/null
         echo "authorized"
+        ;;
+    resolved-status)
+        [ "$#" -eq 0 ] || usage
+        require_root
+        require_installed_helper
+        [ "$(uname -s)" = "Linux" ] || fail "systemd-resolved is unavailable on this platform"
+        systemctl is-active --quiet systemd-resolved.service \
+            || fail "systemd-resolved is not active"
+        service_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
+            || fail "systemd-resolved pid is unavailable"
+        case "$service_pid" in ''|*[!0-9]*|0) fail "systemd-resolved pid is invalid" ;; esac
+        [ -r "/proc/$service_pid/stat" ] || fail "systemd-resolved process is unavailable"
+        service_stat=$(cat "/proc/$service_pid/stat") \
+            || fail "systemd-resolved process identity is unavailable"
+        service_tail=${service_stat##*) }
+        service_start=$(printf '%s\n' "$service_tail" | awk '{print $20}')
+        case "$service_start" in ''|*[!0-9]*|0) fail "systemd-resolved start identity is invalid" ;; esac
+        service_uid=$(stat -c '%u' -- "/proc/$service_pid") \
+            || fail "systemd-resolved owner identity is unavailable"
+        case "$service_uid" in ''|*[!0-9]*) fail "systemd-resolved owner identity is invalid" ;; esac
+        service_control=$(systemctl show --property=ControlGroup --value systemd-resolved.service) \
+            || fail "systemd-resolved control identity is unavailable"
+        [ "$service_control" = "/system.slice/systemd-resolved.service" ] \
+            || fail "systemd-resolved control identity is invalid"
+        confirmed_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
+            || fail "systemd-resolved pid confirmation is unavailable"
+        [ "$confirmed_pid" = "$service_pid" ] \
+            || fail "systemd-resolved changed during observation"
+        printf 'sandbox-resolved-service-v1 owner=systemd-resolved:host unit=systemd-resolved.service pid=%s start=%s uid=%s control=%s\n' \
+            "$service_pid" "$service_start" "$service_uid" "$service_control"
         ;;
     resolved-apply)
         [ "$#" -eq 5 ] || usage

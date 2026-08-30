@@ -43,6 +43,20 @@ class TestResolverHelper(unittest.TestCase):
         self.assertNotIn("sandbox-resolver-helper authorize *", text)
         self.assertIn("visudo -cf", text)
 
+    def test_resolved_status_is_read_only_and_binds_live_service_identity(self):
+        text = HELPER.read_text()
+        status = text.split("    resolved-status)", 1)[1].split(
+            "    resolved-apply)", 1,
+        )[0]
+        self.assertIn("MainPID", status)
+        self.assertIn("/proc/$service_pid/stat", status)
+        self.assertIn("ControlGroup", status)
+        self.assertIn("sandbox-resolved-service-v1", status)
+        self.assertNotIn("install ", status)
+        self.assertNotIn("rm -f", status)
+        self.assertNotIn("systemctl reload", status)
+        self.assertIn("sandbox-resolver-helper resolved-status", text)
+
     def test_apply_and_remove_require_exact_root_authorization_receipts(self):
         text = HELPER.read_text()
         resolved_apply = text.split("    resolved-apply)", 1)[1].split(

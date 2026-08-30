@@ -38,6 +38,19 @@ CI return `pending_consent` or
 override beats project configuration, which beats detection, and status reports that
 source.
 
+Ordinary production composition advertises one host-owned path: Linux
+`systemd-resolved`, exact names only, bound to checked-in evidence
+`038-t034-ubuntu-2404`. No string, mapping, typed object, CLI option, config, environment,
+MCP input, or harness input can add or widen that qualification. Before endpoint or DNS
+mutation, the installed helper performs a read-only preflight and binds the observed
+`systemd-resolved` owner to the active unit's PID, process start identity, owner UID, and
+control group. A missing helper, inactive or replaced service, second resolver owner,
+NetworkManager owner, wildcard request, non-Linux platform, or foreign authority state
+fails closed. The executable name and a boolean readiness result are not qualification.
+An unselected host resolver is never auto-adopted; Sandbox-owned Docker/Caddy resolution
+remains the default. Explicit `./sb domains use systemd-resolved` changes only the
+resolver selection, preserving the persisted hostname and existing instance.
+
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
 authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.
 Use `domains reconsider --resolver ID` to clear remembered consent after reviewing a
@@ -104,11 +117,10 @@ pair, has no upstream resolver, ignores host resolver files, and answers only ow
 Resolver adoption does not provide workload isolation; managed native runtimes enforce
 their own network namespace and default-deny egress separately.
 
-The disposable live conformance harness may inject an in-memory typed proof attestation.
-No CLI flag, project setting, machine override, string, or mapping can promote an adapter.
-The attestation affects only that composed service object and never changes the built-in
-manifest, MCP behavior, or later commands. Evidence review and a separate manifest change
-are required before support is advertised.
+The historical disposable conformance harness used an invocation-scoped attestation to
+capture evidence. Production qualification no longer accepts any proof input. Evidence
+review and a checked-in manifest/qualification change are required before another
+adapter, platform, or capability can be advertised.
 
 Legacy `domains setup|up|down|teardown` remains a rollback control while adoption is
 unadvertised. Instance lifecycle entry points first offer the composed ingress→DNS→ingress

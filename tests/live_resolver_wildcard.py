@@ -40,11 +40,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from sandbox.application.context import domain_service
-    from sandbox.network.manifest import ResolverProofAttestation
-
-    service = domain_service(
-        None, proof_attestation=ResolverProofAttestation("systemd-resolved", args.evidence_id),
-        consent_decider=lambda _owner: True)
+    service = domain_service(None, consent_decider=lambda _owner: True)
 
     observed = {"evidence_id": args.evidence_id}
     applied = _result(service.apply(args.project_dir, label=args.label, interactive=True))

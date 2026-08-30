@@ -5,9 +5,16 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 
 
 INSTALLED_HELPER = "/usr/local/libexec/sandbox-resolver-helper"
+_PREFLIGHT = re.compile(
+    r"^sandbox-resolved-service-v1 "
+    r"owner=systemd-resolved:host unit=systemd-resolved\.service "
+    r"pid=([1-9][0-9]*) start=([1-9][0-9]*) uid=([0-9]+) "
+    r"control=(/system\.slice/systemd-resolved\.service)$"
+)
 
 
 class ResolvedAdapter:
@@ -26,6 +33,31 @@ class ResolvedAdapter:
     def plan(self, suffix: str, address: str, port: int) -> dict:
         return {"kind": "resolved-route", "suffix": suffix, "address": address,
                 "port": port, "global_takeover": False}
+
+    def qualification_preflight(self, observation) -> dict | None:
+        """Read and bind the installed helper to the observed live service."""
+        if (observation.owner_id != "systemd-resolved:host"
+                or observation.manager != "resolved"):
+            return None
+        status = self.process.run(
+            ("sudo", "-n", self.helper, "resolved-status"), timeout=5,
+        )
+        if status.returncode != 0:
+            return None
+        output = (status.stdout or "").strip()
+        match = _PREFLIGHT.fullmatch(output)
+        if match is None:
+            return None
+        pid, start_ticks, uid, control_group = match.groups()
+        return {
+            "schema": "sandbox-resolved-service-v1",
+            "owner_id": observation.owner_id,
+            "unit": "systemd-resolved.service",
+            "pid": int(pid),
+            "start_ticks": int(start_ticks),
+            "uid": int(uid),
+            "control_group": control_group,
+        }
 
     @staticmethod
     def _content(suffix: str, address: str, port: int) -> bytes:

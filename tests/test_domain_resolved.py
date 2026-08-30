@@ -19,6 +19,55 @@ class RecordingProcess:
 
 
 class TestResolvedAdapter(unittest.TestCase):
+    def test_qualification_preflight_parses_identity_bound_helper_evidence(self):
+        from sandbox.network.adapters.resolved import ResolvedAdapter
+        from sandbox.network.models import ResolverObservation
+
+        process = RecordingProcess(stdout=(
+            "sandbox-resolved-service-v1 "
+            "owner=systemd-resolved:host unit=systemd-resolved.service "
+            "pid=321 start=654321 uid=0 "
+            "control=/system.slice/systemd-resolved.service\n"
+        ))
+        observed = ResolverObservation.create(
+            owner_id="systemd-resolved:host", manager="resolved", mode="stub",
+            support_tier="adoptable",
+            extension={"kind": "route-only-domain", "global_takeover": False},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = ResolvedAdapter(process=process, network_root=Path(tmp))
+            evidence = adapter.qualification_preflight(observed)
+
+        self.assertEqual(evidence["pid"], 321)
+        self.assertEqual(evidence["start_ticks"], 654321)
+        self.assertEqual(evidence["owner_id"], observed.owner_id)
+        self.assertEqual(process.calls[0][0], (
+            "sudo", "-n", "/usr/local/libexec/sandbox-resolver-helper",
+            "resolved-status",
+        ))
+
+    def test_qualification_preflight_rejects_malformed_or_changed_owner(self):
+        from sandbox.network.adapters.resolved import ResolvedAdapter
+        from sandbox.network.models import ResolverObservation
+
+        observed = ResolverObservation.create(
+            owner_id="systemd-resolved:host", manager="resolved", mode="stub",
+            support_tier="adoptable",
+            extension={"kind": "route-only-domain", "global_takeover": False},
+        )
+        outputs = (
+            "ready\n",
+            "sandbox-resolved-service-v1 owner=networkmanager:host "
+            "unit=NetworkManager.service pid=321 start=654321 uid=0 "
+            "control=/system.slice/NetworkManager.service\n",
+        )
+        for output in outputs:
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
+                adapter = ResolvedAdapter(
+                    process=RecordingProcess(stdout=output), network_root=Path(tmp),
+                )
+                self.assertIsNone(adapter.qualification_preflight(observed))
+
     def test_apply_uses_fixed_helper_and_preserves_resolv_conf_symlink(self):
         from sandbox.network.adapters.resolved import ResolvedAdapter
 

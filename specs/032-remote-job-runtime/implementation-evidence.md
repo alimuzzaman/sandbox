@@ -1258,3 +1258,23 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   deployment, cleanup command, secret, or machine-local feedback status was
   changed. Live disposable-remote acceptance and disk-reclamation proof remain
   pending under separate authorization.
+- Independent review of `b84879c5` reproduced three further local races. An
+  empty owned quarantine could be replaced before removal, a new submission
+  could be durably accepted after cleanup's last active-job check, and a
+  retained archive could be replaced between digest validation and extraction
+  or retirement. Named regressions now cover the empty-quarantine replacement,
+  concurrent acceptance during deletion, restore-time archive replacement,
+  failed-restore rollback, and retirement-time archive replacement.
+- The corrected candidate serializes CI workspace validation, acceptance, and
+  terminal cleanup with one stable project/label operation lock. Quarantine
+  removal revalidates the owned entry against its continuously open descriptor.
+  Restore and retirement hash, size-check, extract, move, revalidate, and unlink
+  through one open no-follow archive descriptor; failed restore removes its
+  staging checkout without publishing it.
+- After merging `origin/latest` at
+  `065b91b81901d41b2af6042c346c059402d9635a`, including Spec 037, the
+  adversarial/transport/architecture suite passed 135 tests with one Linux-only
+  mount observation skipped on macOS. All 181 job tests, 133 workspace tests,
+  155 hosting tests, and 69 Spec 037 ingress tests passed. Compile and diff
+  checks also passed. These remain local unit/static gates only; T171/T172 and
+  live disposable-remote reclamation evidence remain open.

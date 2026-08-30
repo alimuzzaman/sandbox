@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -85,6 +87,8 @@ class TestRemoteWpCliTransport(unittest.TestCase):
               "error": {"code": "runtime_revision_mismatch"}}, "revision"),
             ({"ok": False, "wp_cli_schema": 1, "transport": "control",
               "error": {"code": "remote_service_ownership_unknown"}}, "ownership"),
+            ({"ok": False, "wp_cli_schema": 1, "transport": "control",
+              "error": {"code": "host_file_staging_unsupported"}}, "host-file"),
         ):
             with self.subTest(message=message):
                 request.return_value = response
@@ -280,6 +284,26 @@ class TestRemoteWpCliCommand(unittest.TestCase):
             command.cmd_wp({}, args)
         wpcli.assert_called_once()
         remote_wp_cli.assert_not_called()
+
+    def test_local_host_file_staging_behavior_remains_available(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            package = project / "plugin.zip"
+            package.write_bytes(b"local-package")
+            with patch.object(command, "RUNTIME_DIR", root / "runtime"), \
+                    patch.object(command, "_is_herd_instance", return_value=False):
+                rewritten, staged = command._stage_host_package_paths(
+                    ["plugin", "install", "plugin.zip"], "local-instance", project,
+                )
+            try:
+                self.assertTrue(rewritten[2].startswith("/sandbox-dl-cache/"))
+                self.assertEqual(len(staged), 1)
+                self.assertEqual(staged[0].read_bytes(), b"local-package")
+            finally:
+                for path in staged:
+                    path.unlink(missing_ok=True)
 
     @patch("sandbox.commands.wp._remote.remote_wp_cli")
     @patch("sandbox.commands.wp._remote.get_remote")

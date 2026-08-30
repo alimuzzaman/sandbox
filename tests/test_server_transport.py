@@ -226,6 +226,38 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
             server._remote_wp_contract({**base, "argv": ["core", "version"],
                                         "allow_missing": "yes"})
 
+    def test_wp_contract_refuses_remote_host_file_staging_commands(self):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        for argv in (
+            ["eval-file", "/etc/passwd"],
+            ["media", "import", "/var/tmp/image.jpg"],
+            ["plugin", "install", "/var/tmp/plugin.zip"],
+            ["theme", "install", "linked-theme.zip"],
+        ):
+            with self.subTest(argv=argv), patch("server._run_remote_wp_process") as run:
+                result = server._remote_wp_contract({**base, "argv": argv})
+            self.assertEqual(result["error"]["code"], "host_file_staging_unsupported")
+            run.assert_not_called()
+
+    def test_wp_contract_refuses_symlink_operand_without_following_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            outside = Path(raw) / "outside.php"
+            outside.write_text("<?php echo 'secret';")
+            linked = Path(raw) / "linked.php"
+            linked.symlink_to(outside)
+            result = server._remote_wp_contract({
+                "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+                "label": "default", "argv": ["eval-file", str(linked)],
+                "timeout_seconds": 7, "expected_runtime_revision": "a" * 24,
+                "expected_ownership_marker": "b" * 24,
+            })
+        self.assertEqual(result["error"]["code"], "host_file_staging_unsupported")
+
     @patch("server._run_remote_wp_process")
     @patch.dict(os.environ, {
         "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,

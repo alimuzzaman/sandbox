@@ -87,6 +87,23 @@ class TestBoundedEdgeCapture(unittest.TestCase):
         self.assertIn("completed", result.stdout)
         self.assertLess(time.monotonic() - started, 2.0)
 
+    def test_post_spawn_cancellation_keeps_delayed_startup_output_within_deadline(self):
+        signal = ResourceCancellationSignal()
+        timer = threading.Timer(0.01, signal.cancel)
+        timer.start()
+        started = time.monotonic()
+        try:
+            result = BoundedProcessRunner(max_output=1024).run((
+                sys.executable, "-c",
+                "import time; time.sleep(0.1); print('late-retained', flush=True); time.sleep(30)",
+            ), timeout=1, cancellation=signal)
+        finally:
+            timer.cancel()
+        self.assertEqual(result.returncode, 130)
+        self.assertEqual(result.termination_reason, "cancelled")
+        self.assertIn("late-retained", result.stdout)
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def _feed(self, cap: _BoundedEdgeCapture, data: bytes, chunk: int) -> None:
         for i in range(0, len(data), max(chunk, 1)):
             cap.append(data[i:i + chunk])

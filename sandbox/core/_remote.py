@@ -2361,6 +2361,9 @@ def remote_wp_cli(
             "unsafe_argv": "remote WordPress argv was refused by the controller",
             "remote_deploy_path_unsafe": "the remote deployment path is unsafe",
             "remote_deploy_path_changed": "the remote deployment path changed before dispatch",
+            "host_file_staging_unsupported": (
+                "remote WordPress host-file staging commands are unsupported"
+            ),
         }
         raise RemoteWpRefusalError(
             str(code or "remote_wp_refused"),

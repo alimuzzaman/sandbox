@@ -208,6 +208,14 @@ def _run_remote_wp_process(command: list[str], *, cwd: str, timeout: int,
     }
 
 
+def _remote_wp_may_stage_host_files(argv) -> bool:
+    """Refuse command families whose local boundary can copy host operands."""
+    return (
+        tuple(argv[:2]) in (("plugin", "install"), ("theme", "install"), ("media", "import"))
+        or tuple(argv[:1]) == ("eval-file",)
+    )
+
+
 def _remote_wp_contract(payload: dict) -> dict:
     """Execute only bounded ``sb wp --local`` for an existing deployment."""
     from sandbox.core import resolve_registered_instance
@@ -234,6 +242,11 @@ def _remote_wp_contract(payload: dict) -> dict:
         require_safe_argv(argv)
     except ValueError:
         return _remote_wp_error("unsafe_argv", "the explicit argv was refused")
+    if _remote_wp_may_stage_host_files(argv):
+        return _remote_wp_error(
+            "host_file_staging_unsupported",
+            "remote WP-CLI does not accept commands that can stage host files",
+        )
     if "allow_missing" in payload and not isinstance(payload.get("allow_missing"), bool):
         raise ValueError("remote WP-CLI allow_missing must be boolean")
     installed_revision = os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "")

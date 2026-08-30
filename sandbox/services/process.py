@@ -109,6 +109,8 @@ class BoundedProcessRunner:
     """Argument-list-only subprocess runner with bounded, redacted output."""
 
     _TERMINATION_GRACE = 0.2
+    _READER_START_GRACE = 0.1
+    _CANCELLATION_CAPTURE_GRACE = 0.5
     _DRAIN_GRACE = 0.2
 
     def __init__(self, *, max_output: int = 1_048_576,
@@ -245,13 +247,17 @@ class BoundedProcessRunner:
         output = {name: _BoundedEdgeCapture(self.max_output)
                   for name in ("stdout", "stderr")}
         output_limit_reached = threading.Event()
+        output_seen = threading.Event()
+        reader_started = {name: threading.Event() for name in ("stdout", "stderr")}
 
         def drain(name: str, stream) -> None:
+            reader_started[name].set()
             try:
                 while True:
                     chunk = stream.read(65_536)
                     if not chunk:
                         return
+                    output_seen.set()
                     output[name].append(chunk)
                     if output[name].truncated:
                         output_limit_reached.set()
@@ -266,11 +272,28 @@ class BoundedProcessRunner:
         )
         for reader in readers:
             reader.start()
+        # Enter both drains before timeout/cancellation can close their pipes.
+        # This bounded scheduling grace remains inside the caller's deadline.
+        for started in reader_started.values():
+            remaining = self._remaining(deadline)
+            started.wait(timeout=min(remaining, self._READER_START_GRACE)
+                         if remaining is not None else self._READER_START_GRACE)
         timed_out = False
         cancelled = False
         output_overflow = False
         cancellation_probe_failed = False
         leader_reaped = False
+
+        def await_cancellation_capture() -> None:
+            """Give already-starting output one bounded chance to reach its drain."""
+            if output_seen.is_set():
+                return
+            remaining = self._remaining(deadline)
+            output_seen.wait(
+                timeout=min(remaining, self._CANCELLATION_CAPTURE_GRACE)
+                if remaining is not None else self._CANCELLATION_CAPTURE_GRACE
+            )
+
         if cancellation is None and not self.terminate_on_output_limit:
             try:
                 process.wait(timeout=self._remaining(deadline))
@@ -288,6 +311,7 @@ class BoundedProcessRunner:
                     except Exception:
                         cancellation_probe_failed = True
                         cancelled = True
+                        await_cancellation_capture()
                         break
                     if state is not None and (
                         type(state) is not str
@@ -295,9 +319,11 @@ class BoundedProcessRunner:
                     ):
                         cancellation_probe_failed = True
                         cancelled = True
+                        await_cancellation_capture()
                         break
                     if type(state) is str and state in {"cancelled", "disconnected"}:
                         cancelled = True
+                        await_cancellation_capture()
                         break
                 remaining = self._remaining(deadline)
                 if remaining is not None and remaining <= 0:

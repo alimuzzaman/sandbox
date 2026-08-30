@@ -4,11 +4,13 @@ import hmac
 import json
 import math
 import os
+import platform
 import shlex
 import stat
 import subprocess
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -100,6 +102,10 @@ def _diagnostic_process_snapshot() -> dict:
 
 def _resource_contract(payload: dict) -> dict:
     """Execute only the fixed resource probe contract on the co-located host."""
+    # Feature 046 exposes only the completed read-only MVP. Planning, history,
+    # and protected apply remain unreachable until their ordered gates are green.
+    if payload.get("action") in {"host_memory_status"}:
+        return _host_memory_contract(payload)
     from sandbox.resources.remote import LocalProbeAdapter
 
     action = payload.get("action")
@@ -128,6 +134,48 @@ def _resource_contract(payload: dict) -> dict:
     if result is None:
         result = {"ok": False, "reason": "resource_response_invalid"}
     return {"resource_schema": 1, "transport": "control", "result": result}
+
+
+def _host_memory_contract(payload: dict) -> dict:
+    """Dispatch the fixed read-only Feature 046 status action."""
+    import hashlib
+
+    from sandbox.resources.host_memory.models import RemoteSwapState
+    from sandbox.resources.host_memory.provider import HostProvider, HISTORY, STATE
+    from sandbox.resources.host_memory.remote import validate_request
+    from sandbox.resources.host_memory.repository import HostMemoryRepository
+
+    request = validate_request(payload)
+    marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
+    revision = _live_runtime_revision()
+    if request["action"] != "host_memory_status":
+        raise ValueError("host-memory action is not registered")
+    identity_seed = platform.node().encode("utf-8", "replace")
+    target_identity = hashlib.sha256(identity_seed).hexdigest()[:24]
+    provider = HostProvider(target_identity=target_identity)
+    repository = HostMemoryRepository(STATE,history_path=HISTORY,history_owner_uid=0,
+                                      history_ancestor_root=Path("/"))
+    deadline=time.monotonic()+float(request["budget_seconds"])
+    try:
+        result = provider.observe(deadline=deadline)
+        history = repository.status_monitor_evidence(now=provider.now(),deadline=deadline)
+        history_complete = history.pop("history_complete")
+        result = dict(result)
+        result.pop("observation_digest", None)
+        result["monitor"] = {**result["monitor"], **history}
+        if not history_complete and result["evidence_state"] == "known":
+            result["evidence_state"] = "partial"
+        result = RemoteSwapState.from_dict(result).to_dict()
+    except Exception:
+        result = {"status": "failed", "data": {}, "error": {
+            "code": "response_invalid", "message": "bounded host evidence unavailable",
+            "retryable": True,
+        }}
+    return {
+        "resource_schema": 1, "host_memory_schema": 1, "transport": "control",
+        "service": {"ownership_marker": marker, "runtime_revision": revision},
+        "result": result,
+    }
 
 
 def _remote_wp_error(code: str, message: str, *, status: str = "blocked") -> dict:

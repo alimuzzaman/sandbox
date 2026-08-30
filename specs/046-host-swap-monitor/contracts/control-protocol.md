@@ -29,6 +29,10 @@ SSH/direct-host fallback and no automatic service migration.
 
 ## Actions
 
+The only host-memory wire actions are the three underscore-named actions below. Planning is
+controller-owned: `swap-plan` obtains `host_memory_status`, computes and stores the immutable
+plan locally, and never submits a remote plan action.
+
 ### `host_memory_status`
 
 ```json
@@ -85,7 +89,9 @@ Protected. The remote service accepts only the canonical plan fields and recompu
 plan/operation identities before obtaining the host mutation lock. `confirmed` must be the
 literal boolean `true`. Missing, extra, mismatched, expired, or malformed values are refused
 before provider mutation. Apply never accepts a path, command, unit body, file body, or
-credential.
+credential. For enable, canonical `effective_policy.size_gib` is an integer from 1 through 8
+that was selected by controller planning and bound into the plan ID; the remote revalidates
+that size and every capacity calculation. A top-level size or policy override is refused.
 
 ## Host-side phase and replay rules
 
@@ -102,8 +108,15 @@ credential.
 7. Report `rollback_complete` only after every recorded prior-state element verifies
    restored. Otherwise retain `rollback_incomplete` and the unrelated-mutation block.
 
+Disable stops and removes only proven active configuration. It stops future samples but
+preserves prior bounded aggregate history under an atomically minimized disabled-state
+receipt. History deletion is not an apply phase in the first version.
+
 Transport loss does not erase the journal. The client performs status/read-only
-reconciliation and may resubmit only the same operation identity.
+reconciliation and may resubmit only the same operation identity. A conflicting active
+operation is `refused` with `operation_in_progress`; unknown delivery or invalid response
+evidence is `partial` with `response_invalid`. No additional top-level outcome vocabulary is
+introduced by the transport.
 
 ## Fixed host authority
 

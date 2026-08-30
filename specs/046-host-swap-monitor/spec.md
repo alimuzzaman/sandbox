@@ -163,8 +163,9 @@ Verify exact cleanup or refusal without collateral changes.
    leaves the working setup intact.
 3. **Given** a current disable plan, sufficient headroom, unchanged fully owned state, and
    explicit confirmation, **When** disable completes, **Then** only the owned active swap,
-   persistence, preference, monitor, history policy, and ownership evidence are reconciled,
-   and the result verifies their intended final state.
+   persistence, preference, monitor, retention policy, and ownership evidence are reconciled;
+   future sampling stops, while prior bounded aggregate history and a minimal disabled-state
+   ownership receipt remain read-only for recovery, and the result verifies that final state.
 4. **Given** ownership or current state cannot be proven completely, **When** disable is
    requested, **Then** it refuses rather than removing a subset or touching unmanaged state.
 
@@ -329,7 +330,8 @@ state restoration, while unrelated intents remain blocked after an unproven roll
 - **FR-028**: A disable plan MUST identify the exact Sandbox-owned active, persistent,
   preference, monitoring, retention, history, and receipt state proposed for reconciliation,
   plus current swap use, RAM availability, safety calculation, drift observations, rollback
-  scope, and stable plan identity.
+  scope, stable plan identity, and the required preservation of prior bounded aggregate
+  history plus a minimal disabled-state ownership receipt.
 - **FR-029**: Disable MUST refuse unless available RAM is strictly greater than current swap
   use plus the larger of 1 GiB or 10% of physical RAM.
 - **FR-030**: Disable MUST require explicit confirmation of a current matching plan and MUST
@@ -337,7 +339,10 @@ state restoration, while unrelated intents remain blocked after an unproven roll
   concurrent state immediately before consequential phases.
 - **FR-031**: A successful disable MUST reconcile only fully proven Sandbox-owned state and
   MUST verify the intended final active swap, persistence, preference, monitoring,
-  retention, history, and receipt state before reporting `applied`.
+  retention, history, and receipt state before reporting `applied`. It MUST stop future
+  sampling but MUST preserve previously retained bounded aggregate history and a minimal
+  disabled-state ownership receipt for read-only recovery; first-version disable MUST NOT
+  delete that history.
 - **FR-032**: If safe removal, complete ownership, or final-state verification cannot be
   proven, disable MUST refuse or enter reconciliation and MUST leave a working owned setup
   intact whenever no protected phase has begun.
@@ -370,9 +375,13 @@ state restoration, while unrelated intents remain blocked after an unproven roll
   repository's explicit command and protocol registration contracts and MUST carry matching
   operator documentation, tests, and remote revision evidence before release.
 - **FR-040**: Release acceptance MUST include an authorized disposable or explicitly
-  approved supported Linux remote and MUST demonstrate status, all refusal classes, enable,
-  immediate replay, bounded history, sustained-use warning behavior, partial-operation
-  reconciliation, disable, cleanup, privacy, and rollback outcomes.
+  approved supported Linux remote and MUST demonstrate status, eligible enable, immediate
+  replay, bounded history, sustained-use warning behavior, partial-operation reconciliation,
+  disable, cleanup, privacy, and rollback outcomes. The complete refusal matrix MUST also be
+  demonstrated: cases safe to create on that live target run there, while cases that would
+  require an unsupported target, service skew, unsafe host damage, or unapproved capacity
+  pressure use the fixed authenticated transport/provider acceptance harness. The evidence
+  ledger MUST label synthetic, human-review, live-Linux, and reboot proof separately.
 
 ### Key Entities
 
@@ -427,7 +436,9 @@ state restoration, while unrelated intents remain blocked after an unproven roll
   files and no more than 32 MiB total in 100% of retention-boundary acceptance runs.
 - **SC-008**: Disable is refused whenever available RAM is less than or equal to swap use
   plus the larger of 1 GiB or 10% of RAM; every successful disable removes only proven
-  Sandbox-owned state and verifies its intended final state.
+  Sandbox-owned active configuration, stops future sampling, preserves prior bounded
+  aggregate history plus the disabled-state ownership receipt, and verifies that intended
+  final state.
 - **SC-009**: Every interrupted protected-operation acceptance ends with one truthful stable
   outcome: the same intent reaches verified state, every prior-state element is verified
   restored as `rollback_complete`, or unresolved elements remain explicit as
@@ -448,6 +459,9 @@ state restoration, while unrelated intents remain blocked after an unproven roll
 - One Sandbox-owned swap file is the only swap form created or removed in the first version;
   arbitrary paths, swap partitions, multiple owned files, and autonomous sizing are future
   scope.
+- First-version disable preserves already retained bounded aggregate history and a minimal
+  disabled-state ownership receipt. Deleting that recovery evidence requires a separately
+  specified ownership-safe cleanup operation and is out of scope.
 - The default 4 GiB buffer is an emergency buffer for the observed class of host, not a
   universal RAM-sizing recommendation or a substitute for workload limits and right-sizing.
 - The existing protected-operation confirmation, replay identity, revision evidence,
@@ -461,7 +475,8 @@ state restoration, while unrelated intents remain blocked after an unproven roll
 
 - **In scope**: Read-only remote swap/monitor status, bounded enable and disable planning,
   confirmed ownership-scoped lifecycle changes, aggregate sampling, bounded history,
-  retention, typed outcomes, replay, rollback evidence, and operator documentation.
+  retention, disabled-state history preservation, typed outcomes, replay, rollback evidence,
+  and operator documentation.
 - **Out of scope**: Threshold-triggered swap activation, autonomous sizing, RAM
   right-sizing, process or cgroup killing, container swap management, container-limit
   changes, arbitrary swap partitions or paths, host reboot, raw host command/file access,

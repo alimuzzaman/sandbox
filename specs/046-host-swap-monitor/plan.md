@@ -30,7 +30,9 @@ registered-remote lookup and authenticated control HTTP transport in
 **Storage**: owner-only local immutable plans under
 `$SANDBOX_HOME/runtime/resources/host-memory/plans/`; fixed root-owned remote operation
 journal, ownership receipt, swap file, systemd units, sysctl drop-in, current aggregate
-JSONL history, and at most eight owned weekly history files totaling at most 32 MiB
+JSONL history, and at most eight owned weekly history files totaling at most 32 MiB. Disable
+stops future sampling but preserves that bounded history and an atomically minimized
+disabled-state receipt for read-only recovery
 
 **Testing**: Python `unittest`; pure policy/model/store tests; fake authenticated transport
 and fixed host-runner tests; CLI and remote-control contract tests; privacy/size/timeout,
@@ -98,8 +100,8 @@ specs/046-host-swap-monitor/
     └── requirements.md
 ```
 
-`tasks.md` is intentionally absent; it belongs to `/speckit-tasks`, not this planning
-phase.
+The generated [tasks.md](tasks.md) is the implementation sequence and must remain
+synchronized with this plan and the approved contracts.
 
 ### Source Code (repository root)
 
@@ -149,6 +151,10 @@ and privacy contract. CLI remains a thin extension of the already registered glo
 the controller never sends executable source, argv, paths, or shell text. No first-version
 MCP tool is added: automation receives the stable `--json` envelope, while future MCP
 exposure can adapt the same service without creating a second policy implementation.
+Enable and disable plans are constructed and stored only by the controller service from the
+read-only `host_memory_status` response. The remote protocol has no planning action; it
+exposes only `host_memory_status`, `host_memory_history`, and protected
+`host_memory_apply`.
 
 ## Research
 
@@ -178,6 +184,9 @@ resolved; no open clarification remains.
   authentication, ownership marker, and runtime revision. Feature 046 extends the fixed
   co-located resource protocol only after those facts match; it never installs, migrates,
   restarts, stops, or repairs the remote service itself.
+- Disable removes only the proven active configuration and stops future samples. Existing
+  bounded aggregate history is retained under a minimal disabled-state receipt so rollback
+  and incident evidence are not destroyed. History deletion is outside Feature 046.
 
 ## Complexity Tracking
 

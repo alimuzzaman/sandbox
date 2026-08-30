@@ -27,6 +27,9 @@ sb resources swap-plan --remote NAME --operation disable
 
 - Enable defaults to 4 GiB, swappiness 15, five-minute sampling, current plus eight weekly
   history files, and 32 MiB total history.
+- `--size-gib` is parsed by the controller as an integer from 1 through 8 inclusive, retained
+  in requested/effective policy, checked against every RAM/filesystem/free-reserve bound, and
+  bound into the immutable plan identity. The remote has no planning action.
 - Every observed value, threshold, comparator, reserve, result, intended fixed artifact,
   rollback element, expiry, and plan ID is returned.
 - `--size-gib` with disable is `invalid_mode`.
@@ -42,6 +45,8 @@ sb resources swap-apply --remote NAME --plan-id ID --confirm
 
 - `--confirm` is mandatory and checked before service/provider construction.
 - Apply accepts no operation, size, swap path, artifact, command, or policy override.
+- The canonical plan carries the already reviewed effective `size_gib`; the controller and
+  remote revalidate it and all capacity inputs. A top-level apply size remains an unknown key.
 - Target, plan identity, first-acceptance expiry, service marker/revision, host identity,
   observation digest, ownership, capacity, RAM headroom, monitor state, and operation lock
   are revalidated. An already journaled same operation may reconcile after expiry; an
@@ -51,6 +56,13 @@ sb resources swap-apply --remote NAME --plan-id ID --confirm
   blocks mutation.
 - Empty, malformed, duplicated, late, or unavailable transport output returns `partial` or
   a typed failure; it never authorizes a second identity or reports success.
+- An active conflicting operation renders as `refused` with `operation_in_progress`.
+  Unknown delivery or invalid response evidence renders as `partial` with
+  `response_invalid`. No additional top-level result statuses are permitted.
+
+For disable, the confirmed plan removes only verified active configuration and stops future
+sampling. Previously retained bounded aggregate history remains readable under a minimal
+disabled-state ownership receipt; first-version disable does not delete it.
 
 ## Bounded read-only history
 

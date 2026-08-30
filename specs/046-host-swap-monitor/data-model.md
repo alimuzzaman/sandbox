@@ -142,9 +142,14 @@ Root-owned proof for the one Sandbox-created configuration.
 | `prior_swappiness` | object | bounded prior effective/persistence evidence for disable restoration |
 | `verified_at` | UTC timestamp | latest complete verification |
 | `reboot_verification` | object | separate authorized observation or `unverified` |
+| `lifecycle_state` | enum | `enabled|disabled`; disabled retains only bounded recovery/history ownership evidence |
 
 The receipt never authorizes adoption. Missing, foreign, duplicated, malformed, or
-digest-drifted evidence is ambiguous and blocks mutation.
+digest-drifted evidence is ambiguous and blocks mutation. A successful disable rewrites the
+receipt atomically to a minimal `disabled` record after final verification. That record owns
+the preserved bounded aggregate history, proves future sampling is stopped, and contains no
+active swap, persistence, preference, or monitor authority. First-version disable does not
+delete prior history.
 
 ## AggregateMemorySample
 

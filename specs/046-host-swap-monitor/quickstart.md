@@ -82,6 +82,8 @@ Using the fake authenticated control service, run:
 ```sh
 ./sb resources swap-status --remote approved-swap-fixture --json
 ./sb resources swap-plan --remote approved-swap-fixture --operation enable --json
+./sb resources swap-plan --remote approved-swap-fixture --operation enable --size-gib 1 --json
+./sb resources swap-plan --remote approved-swap-fixture --operation enable --size-gib 8 --json
 ./sb resources swap-apply --remote approved-swap-fixture --plan-id fixture-plan --json
 ./sb resources swap-history --remote approved-swap-fixture --limit 288 --json
 ```
@@ -89,12 +91,24 @@ Using the fake authenticated control service, run:
 Expected:
 
 - status/plan/history are read-only;
+- valid 1-8 GiB sizes propagate through requested/effective policy and plan identity, while
+  invalid integer, RAM, filesystem, and reserve boundaries refuse before mutation;
 - apply without `--confirm` is `confirmation_required` before provider construction;
 - every result uses the common envelope and contains only bounded allowlisted fields.
 
 Then run the confirmed apply against the fake provider with the exact plan ID returned by
 the fixture plan. Replay it and require `already_current`. Inject transport loss after each
 phase and require the same operation identity to reconcile; never issue a second identity.
+
+Use this authenticated transport/provider harness for the complete refusal matrix:
+unregistered target, unsupported platform/facility, service ownership or protocol/revision
+mismatch, transport failure, invalid size/range, insufficient disk or RAM, unmanaged or
+multiple swap, unsafe/foreign path, missing/mismatched/expired/drifted/replay-incompatible
+plan, missing confirmation, concurrent operation, incomplete rollback, malformed/empty/
+duplicate/late response, and unknown required evidence. Record these as synthetic acceptance,
+not live-host proof. Expected outcomes use only the contract statuses; for example,
+conflicting work is `refused` with `operation_in_progress`, and unknown delivery is `partial`
+with `response_invalid`.
 
 ## 5. Adjacent regression gates
 
@@ -158,8 +172,9 @@ Plan disable and review the strict headroom calculation:
 ```
 
 After separate confirmation, apply that exact disable plan. Verify only receipt-owned swap,
-persistence, swappiness policy, monitor, history, and receipt state are reconciled. Status
-must show the intended final state with no unmanaged artifact change.
+persistence, swappiness policy, monitor, retention, and receipt state are reconciled. Future
+sampling must stop. Previously retained bounded aggregate history must remain readable under
+the minimal disabled-state receipt, with no new samples and no unmanaged artifact change.
 
 ## 7. Failure and rollback acceptance
 
@@ -190,6 +205,9 @@ Release remains blocked until:
   ownership, rollback, privacy, cryptographic identities, and dependency trust;
 - the approved disposable Linux matrix proves status, refusals, enable, replay, history,
   warning behavior, partial reconciliation, disable, cleanup, privacy, and rollback;
+- the fixed authenticated transport/provider matrix proves every refusal class that would be
+  unsafe, impossible, or unauthorized to create on the approved live host, with its synthetic
+  evidence kept distinct from live-Linux evidence;
 - operator docs, command help, skill routing, runtime digest/revision evidence, and the
   installed remote revision match the accepted source.
 

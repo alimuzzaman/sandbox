@@ -643,6 +643,30 @@ def ssh_run(remote: dict, command: str, timeout: int = 30,
     return ssh_process(remote, command, input_data=input_data, timeout=timeout)
 
 
+def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
+                    max_output: int = 65_536,
+                    terminate_on_output_limit: bool = True):
+    """Run SSH with concurrent, separately capped stdout and stderr drains.
+
+    Stateful callers use the returned ``termination_reason`` to distinguish a
+    normal child exit from local timeout or output-limit termination. The
+    command is never replayed here because either termination leaves remote
+    completion unknown.
+    """
+    from sandbox.services.process import BoundedProcessRunner
+
+    multiplex = True
+    try:
+        _ensure_ssh_control_dir()
+    except OSError:
+        multiplex = False
+    args = ssh_command_args(remote_or_target, command, multiplex=multiplex)
+    return BoundedProcessRunner(
+        max_output=max_output,
+        terminate_on_output_limit=terminate_on_output_limit,
+    ).run(tuple(args), timeout=timeout)
+
+
 def ssh_stream(remote_or_target, command: str, *, timeout: int = 30,
                on_line=None) -> subprocess.CompletedProcess:
     """Run one SSH command while forwarding complete output lines.

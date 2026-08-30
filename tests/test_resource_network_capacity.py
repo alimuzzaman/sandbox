@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -258,7 +259,7 @@ else:
                 'Path("/etc/docker/daemon.json")',
                 f"Path({str(config)!r})",
             )
-            env = dict(os.environ)
+            env = synthetic_environment()
             env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
             process = subprocess.run(
                 [sys.executable, "-c", source],
@@ -339,7 +340,7 @@ else:
                 'Path("/etc/docker/daemon.json")',
                 f"Path({str(config)!r})",
             )
-            env = dict(os.environ)
+            env = synthetic_environment()
             env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
             env["INSPECT_ARGS"] = str(inspect_args)
 
@@ -414,7 +415,7 @@ else:
                 'Path("/etc/docker/daemon.json")',
                 f"Path({str(config)!r})",
             )
-            env = dict(os.environ)
+            env = synthetic_environment()
             env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
             process = subprocess.run(
                 [sys.executable, "-c", source],

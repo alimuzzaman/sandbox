@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,7 +33,7 @@ class SpeckitFeatureSelectionTests(unittest.TestCase):
         return project, selected
 
     def _run(self, project: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        env = os.environ.copy()
+        env = synthetic_environment()
         env["SPECIFY_INIT_DIR"] = str(project)
         return subprocess.run(
             [str(project / ".specify/scripts/bash/check-prerequisites.sh"), *args],

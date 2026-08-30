@@ -1,5 +1,6 @@
 import ast
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,77 @@ def production_python_files():
 
 
 class TestArchitectureBoundaries(unittest.TestCase):
+    def test_tests_cannot_materialize_or_pass_parent_environment(self):
+        from sandbox.testing_boundaries import inspect_test_environment_boundaries
+
+        violations = inspect_test_environment_boundaries(ROOT / "tests")
+        self.assertEqual([str(item) for item in violations], [])
+
+    def test_test_environment_boundary_reports_location_and_rule_only(self):
+        from sandbox.testing_boundaries import inspect_test_environment_boundaries
+
+        source = """\
+import os
+import subprocess
+parent = os.environ
+copied = parent.copy()
+materialized = dict(os.environ)
+unpacked = {**parent}
+target = {}
+target.update(parent)
+merged_left = os.environ | {"FIXTURE": "value"}
+merged_right = {"FIXTURE": "value"} | parent
+for item in os.environ:
+    pass
+subprocess.run(("fixture",), env=parent)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.py"
+            path.write_text(source)
+            violations = inspect_test_environment_boundaries(Path(directory))
+
+        rendered = [str(item) for item in violations]
+        self.assertEqual({item.rule for item in violations}, {
+            "parent-env-copy",
+            "parent-env-materialize",
+            "parent-env-unpack",
+            "parent-env-update",
+            "parent-env-union",
+            "parent-env-iteration",
+            "parent-env-direct",
+        })
+        self.assertTrue(all(value.startswith("fixture.py:") for value in rendered))
+        self.assertTrue(all(value.count(":") == 2 for value in rendered))
+
+    def test_environment_boundary_handles_import_aliases_and_nested_enumeration(self):
+        from sandbox.testing_boundaries import inspect_test_environment_boundaries
+
+        source = """\
+import os as operating
+from os import environ
+from os import environ as imported_parent
+alias = operating.environ
+assigned = alias
+print(assigned.items())
+list(environ.keys())
+target = {}
+target.update(imported_parent.values())
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adversarial.py"
+            path.write_text(source)
+            violations = inspect_test_environment_boundaries(Path(directory))
+
+        observed = {(item.line, item.rule) for item in violations}
+        self.assertTrue({
+            (6, "parent-env-iteration"),
+            (7, "parent-env-iteration"),
+            (7, "parent-env-materialize"),
+            (9, "parent-env-iteration"),
+            (9, "parent-env-update"),
+        }.issubset(observed))
+        self.assertTrue(all(str(item).count(":") == 2 for item in violations))
+
     def test_native_proof_opt_in_cannot_enter_payload_or_persisted_models(self):
         opt_in = "SANDBOX_NATIVE_PROOF_CANDIDATE"
         launcher = (ROOT / "sandbox/isolation/launcher.py").read_text()

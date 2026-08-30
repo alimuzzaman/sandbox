@@ -9,6 +9,7 @@ code review caught once already.
 import os
 import json
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -239,7 +240,7 @@ class TestMcpServerSplit(unittest.TestCase):
             hint.parent.mkdir(parents=True)
             hint.write_text(str(selected) + "\n")
 
-            env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT)}
+            env = synthetic_environment({"HOME": str(home), "PYTHONPATH": str(ROOT)})
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)
             register = (
@@ -276,12 +277,10 @@ class TestMcpServerSplit(unittest.TestCase):
             hint = home / ".config" / "sandbox" / "home"
             hint.parent.mkdir(parents=True)
             hint.write_text("relative-state\n")
-            env = {
-                **os.environ,
-                "HOME": str(home),
+            env = synthetic_environment({"HOME": str(home),
                 "PYTHONPATH": str(MCP_DIR) + os.pathsep + str(ROOT),
                 "SANDBOX_ROOT": str(ROOT),
-            }
+            })
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)
             probe = "import app; print(app._sandbox_base())"
@@ -303,8 +302,10 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
         result = subprocess.run(
             [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
-                 "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+            env=synthetic_environment({
+                "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+                "PYTHONPATH": str(ROOT),
+            }),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "True")
@@ -313,7 +314,9 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all"})
+            env=synthetic_environment({
+                "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+            }))
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         schema_line = next(line for line in r.stdout.splitlines() if line.startswith("SCHEMA "))
         actual = __import__("json").loads(schema_line.removeprefix("SCHEMA "))
@@ -401,7 +404,9 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all"})
+            env=synthetic_environment({
+                "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+            }))
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         out = dict(
             line.split() for line in r.stdout.split("\n")
@@ -570,7 +575,7 @@ print("WP_RESET_RESULT", json.dumps({{"result": result, "calls": calls}}, defaul
         completed = subprocess.run(
             [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT)},
+            env=synthetic_environment({"SANDBOX_ROOT": str(ROOT)}),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         line = next(line for line in completed.stdout.splitlines()
@@ -715,8 +720,9 @@ print(json.dumps(states, sort_keys=True))
         completed = subprocess.run(
             [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT),
-                 "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+            env=synthetic_environment({
+                "SANDBOX_ROOT": str(ROOT), "PYTHONPATH": str(ROOT),
+            }),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout.strip())

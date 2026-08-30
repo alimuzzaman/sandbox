@@ -1,15 +1,58 @@
+import json
 import os
 from pathlib import Path
 import signal
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sandbox.services.process import BoundedProcessRunner
 
 
 class TestBoundedProcessRunner(unittest.TestCase):
+    @patch("sandbox.services.process.subprocess.Popen")
+    def test_none_environment_preserves_native_inheritance_without_materializing_it(self, popen):
+        process = MagicMock()
+        process.stdout.read.return_value = b""
+        process.stderr.read.return_value = b""
+        process.wait.return_value = 0
+        process.returncode = 0
+        popen.return_value = process
+
+        BoundedProcessRunner().run(("fixture",), env=None, timeout=1)
+
+        self.assertIsNone(popen.call_args.kwargs["env"])
+
+    @patch("sandbox.services.process.subprocess.Popen")
+    def test_explicit_environment_is_complete_and_never_merged(self, popen):
+        process = MagicMock()
+        process.stdout.read.return_value = b""
+        process.stderr.read.return_value = b""
+        process.wait.return_value = 0
+        process.returncode = 0
+        popen.return_value = process
+        sentinel = "explicit-environment-sentinel"
+        supplied = {"ONLY_SYNTHETIC": sentinel}
+
+        BoundedProcessRunner().run(("fixture",), env=supplied, timeout=1)
+
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(child_environment, supplied)
+        self.assertNotIn("UNRELATED_SYNTHETIC", child_environment)
+        self.assertNotIn(sentinel, repr(child_environment))
+        self.assertNotIn(sentinel, str(child_environment))
+        self.assertNotIn(sentinel, repr(popen.call_args))
+        with self.assertRaises(TypeError):
+            json.dumps(child_environment)
+
+    def test_process_result_repr_excludes_captured_streams(self):
+        from sandbox.services.process import ProcessResult
+
+        rendered = repr(ProcessResult(("fixture",), 1, "stdout-sentinel", "stderr-sentinel"))
+        self.assertNotIn("stdout-sentinel", rendered)
+        self.assertNotIn("stderr-sentinel", rendered)
+
     @staticmethod
     def _linux_process_is_running(pid):
         stat_path = Path(f"/proc/{pid}/stat")

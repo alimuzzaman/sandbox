@@ -469,11 +469,16 @@ def cmd_selftest(cfg, args) -> None:
     plugin. Uses the .cli-venv python (PyYAML available); falls back to the
     current interpreter."""
     import subprocess
+    from sandbox.services.environment import compatible_subprocess_environment
     py = CLI_VENV / "bin" / "python"
     py = str(py) if py.exists() else sys.executable
     rc = subprocess.run(
         [py, "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-v"],
-        cwd=str(ROOT)).returncode
+        cwd=str(ROOT),
+        env=compatible_subprocess_environment({"PYTHONUTF8": "1"}),
+        timeout=1800,
+        shell=False,
+    ).returncode
     if rc != 0:
         die("selftest: FAILED")
     ok("selftest: passed")

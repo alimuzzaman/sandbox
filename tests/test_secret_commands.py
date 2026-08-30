@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -226,11 +227,9 @@ class SecretCommandTests(unittest.TestCase):
                 "private_key": "SB_SYNTHETIC_PRIVATE_KEY_NOT_REAL",
             }))
             structured.chmod(0o600)
-            environment = {
-                **os.environ,
-                "SANDBOX_HOME": str(home),
+            environment = synthetic_environment({"SANDBOX_HOME": str(home),
                 "SANDBOX_PROJECT_ROOTS": str(root.parent),
-            }
+            })
 
             def invoke(*arguments, input_text=None):
                 result = subprocess.run(

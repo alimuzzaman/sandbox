@@ -697,7 +697,6 @@ def _observe_current(workspace_fd: int) -> tuple[Any, ...] | None:
     if not stat.S_ISLNK(details.st_mode):
         raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
     return (details.st_dev, details.st_ino, details.st_mode,
-            details.st_mtime_ns, details.st_ctime_ns,
             os.readlink("current", dir_fd=workspace_fd))
 
 
@@ -750,7 +749,6 @@ def _observe_named_pointer(workspace_fd: int, name: str) -> tuple[Any, ...] | No
     if not stat.S_ISLNK(details.st_mode):
         return None
     return (details.st_dev, details.st_ino, details.st_mode,
-            details.st_mtime_ns, details.st_ctime_ns,
             os.readlink(name, dir_fd=workspace_fd))
 
 

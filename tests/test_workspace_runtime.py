@@ -393,6 +393,32 @@ class WorkspaceRuntimeTests(unittest.TestCase):
                 "tampered\n")
             self.assertEqual(service.reconcile_sync(reconcile)["status"], "unknown")
 
+    def test_sync_publication_conditionally_replaces_exact_observed_current(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            service.publish_sync(request)
+            output = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(request.archive_bytes), mode="r:gz") as source, \
+                    tarfile.open(fileobj=output, mode="w:gz") as target:
+                for member in source.getmembers():
+                    content = source.extractfile(member).read()
+                    if member.name == ".sandbox-sync-manifest.json":
+                        document = json.loads(content)
+                        document["generation_id"] = "gen_second"
+                        document["manifest_digest"] = "3" * 64
+                        content = json.dumps(
+                            document, sort_keys=True, separators=(",", ":")).encode()
+                        member.size = len(content)
+                    target.addfile(member, io.BytesIO(content))
+            second = replace(
+                request, generation_id="gen_second", manifest_digest="3" * 64,
+                archive_bytes=output.getvalue(),
+            )
+            result = service.publish_sync(second)
+            self.assertTrue(result["ok"])
+            self.assertEqual(__import__("os").readlink(base / "current"),
+                             "generations/gen_second")
+
     def test_create_rejects_namespace_traversal_and_symlink_without_residue(self):
         with tempfile.TemporaryDirectory() as temp:
             storage = JobStorage(temp, free_disk_reserve=0)

@@ -76,6 +76,14 @@ lock, re-reads ownership, readiness, and live source binding, then holds that
 lock through atomic generation publication. Destroy, migration, adoption, or
 ownership drift after preflight therefore refuses publication.
 
+The controller validates the exact directory inventory through no-follow
+directory handles, including broken links and non-file entries, and revalidates
+file identities and digests after generation rename and across the `current`
+pointer commit. A failed pointer commit rolls the exact generation back to
+staging when possible; if rollback is interrupted, replay recognizes and
+revalidates that exact published generation before completing. Filesystem
+failures use bounded typed errors and never include protected controller paths.
+
 ## Job launch boundary
 
 Remote job submission MUST include the accepted generation ID in its durable

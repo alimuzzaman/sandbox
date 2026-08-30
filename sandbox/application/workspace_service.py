@@ -276,34 +276,40 @@ def _assert_sync_ready(record, repository: WorkspaceRepository,
         )
 
 
-def _publish_sync_generation(root: Path, request: SyncPublishRequest) -> None:
-    """Verify and atomically publish one already-uploaded staged generation."""
-    project_hash = hashlib.sha256(request.project_identity.encode()).hexdigest()[:32]
-    base = root / "sync" / project_hash / request.workspace_id
-    staging = base / "staging" / request.generation_id
-    published = base / "generations" / request.generation_id
-    current = base / "current"
-    manifest_path = staging / ".sandbox-sync-manifest.json"
-
-    for directory in (root, root / "sync", root / "sync" / project_hash, base,
-                      base / "staging", staging, base / "generations"):
-        try:
-            details = directory.lstat()
-        except OSError as exc:
-            raise WorkspaceIndexError(
-                "sync_staging_unavailable", "staged generation is unavailable") from exc
-        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
-            raise WorkspaceIndexError(
-                "sync_staging_unsafe", "staged generation path is unsafe")
+def _sync_manifest(
+    root_fd: int, request: SyncPublishRequest,
+) -> tuple[list[dict[str, Any]], tuple[Any, ...]]:
+    """Read the manifest through a no-follow directory handle."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(".sandbox-sync-manifest.json", flags, dir_fd=root_fd)
     try:
-        manifest_details = manifest_path.lstat()
-        if (stat.S_ISLNK(manifest_details.st_mode)
-                or not stat.S_ISREG(manifest_details.st_mode)):
-            raise OSError("manifest is not a regular file")
-        document = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise WorkspaceIndexError("sync_manifest_invalid", "generation manifest is invalid")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        manifest_identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_size,
+            before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if manifest_identity != (
+            after.st_dev, after.st_ino, after.st_mode, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        ):
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation manifest changed during validation")
+        manifest_bytes = b"".join(chunks)
+        document = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise WorkspaceIndexError(
-            "sync_manifest_invalid", "staged generation manifest is invalid") from exc
+            "sync_manifest_invalid", "generation manifest is invalid") from exc
+    finally:
+        os.close(descriptor)
     expected_keys = {
         "schema_version", "generation_id", "manifest_digest",
         "archive_manifest_digest", "file_count", "byte_count", "entries",
@@ -322,63 +328,220 @@ def _publish_sync_generation(root: Path, request: SyncPublishRequest) -> None:
         or len(entries) != request.file_count
     ):
         raise WorkspaceIndexError(
-            "sync_manifest_invalid", "staged generation manifest binding is invalid")
+            "sync_manifest_invalid", "generation manifest binding is invalid")
     canonical = json.dumps(
         entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode()
     if hashlib.sha256(canonical).hexdigest() != request.archive_manifest_digest:
         raise WorkspaceIndexError(
-            "sync_manifest_invalid", "staged generation manifest digest is invalid")
-    seen: set[str] = set()
-    total = 0
-    for item in entries:
-        if not isinstance(item, dict) or set(item) != {
-            "path", "size", "sha256", "executable",
-        }:
-            raise WorkspaceIndexError("sync_manifest_invalid", "manifest entry is invalid")
-        path = item["path"]
-        parts = PurePosixPath(path).parts if isinstance(path, str) else ()
-        if (not isinstance(path, str) or not path or path.startswith("/")
-                or any(part in {"", ".", ".."} for part in parts) or path in seen):
-            raise WorkspaceIndexError("sync_manifest_invalid", "manifest path is invalid")
-        target = staging / path
-        try:
-            target.resolve(strict=True).relative_to(staging.resolve(strict=True))
-            details = target.lstat()
-            content = target.read_bytes()
-        except (OSError, ValueError) as exc:
+            "sync_manifest_invalid", "generation manifest digest is invalid")
+    return entries, (*manifest_identity, hashlib.sha256(manifest_bytes).hexdigest())
+
+
+def _validate_sync_tree(directory: Path, request: SyncPublishRequest) -> tuple[Any, ...]:
+    """Validate the exact tree through directory FDs, including every entry type."""
+    root_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                  | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    root_fd = os.open(directory, root_flags)
+    try:
+        root_details = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_details.st_mode):
+            raise WorkspaceIndexError("sync_staging_unsafe", "generation root is unsafe")
+        entries, manifest_identity = _sync_manifest(root_fd, request)
+        expected: dict[str, dict[str, Any]] = {}
+        expected_directories: set[str] = set()
+        for item in entries:
+            if not isinstance(item, dict) or set(item) != {
+                "path", "size", "sha256", "executable",
+            }:
+                raise WorkspaceIndexError("sync_manifest_invalid", "manifest entry is invalid")
+            path = item["path"]
+            parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+            if (not isinstance(path, str) or not path or path.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or path in expected):
+                raise WorkspaceIndexError("sync_manifest_invalid", "manifest path is invalid")
+            expected[path] = item
+            for index in range(1, len(parts)):
+                expected_directories.add(PurePosixPath(*parts[:index]).as_posix())
+
+        observed: dict[str, tuple[Any, ...]] = {}
+        total = 0
+
+        def walk(directory_fd: int, prefix: str = "") -> None:
+            nonlocal total
+            with os.scandir(directory_fd) as iterator:
+                names = sorted(entry.name for entry in iterator)
+            for name in names:
+                relative = f"{prefix}/{name}" if prefix else name
+                details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if relative == ".sandbox-sync-manifest.json" and not prefix:
+                    if not stat.S_ISREG(details.st_mode):
+                        raise WorkspaceIndexError(
+                            "sync_manifest_invalid", "generation manifest is invalid")
+                    continue
+                if stat.S_ISLNK(details.st_mode):
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation contains an unlisted entry")
+                if stat.S_ISDIR(details.st_mode):
+                    if relative not in expected_directories:
+                        raise WorkspaceIndexError(
+                            "sync_manifest_invalid", "generation contains an unlisted entry")
+                    child_fd = os.open(name, root_flags, dir_fd=directory_fd)
+                    try:
+                        walk(child_fd, relative)
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(details.st_mode) or relative not in expected:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation contains an unlisted entry")
+                item = expected[relative]
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    before = os.fstat(descriptor)
+                    digest = hashlib.sha256()
+                    size = 0
+                    while True:
+                        chunk = os.read(descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        size += len(chunk)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+                identity = (
+                    before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns,
+                )
+                if identity != (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns,
+                ) or (
+                    isinstance(item["size"], bool) or item["size"] != size
+                    or not isinstance(item["sha256"], str)
+                    or digest.hexdigest() != item["sha256"]
+                    or not isinstance(item["executable"], bool)
+                    or bool(before.st_mode & stat.S_IXUSR) != item["executable"]
+                ):
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation member mismatch")
+                observed[relative] = (*identity, digest.hexdigest())
+                total += size
+
+        walk(root_fd)
+        if set(observed) != set(expected) or total != request.byte_count:
             raise WorkspaceIndexError(
-                "sync_manifest_invalid", "manifest member is unavailable") from exc
-        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode)
-                or isinstance(item["size"], bool) or item["size"] != len(content)
-                or not isinstance(item["sha256"], str)
-                or hashlib.sha256(content).hexdigest() != item["sha256"]
-                or not isinstance(item["executable"], bool)
-                or bool(details.st_mode & stat.S_IXUSR) != item["executable"]):
-            raise WorkspaceIndexError("sync_manifest_invalid", "manifest member mismatch")
-        seen.add(path)
-        total += len(content)
-    actual = {
-        member.relative_to(staging).as_posix()
-        for member in staging.rglob("*")
-        if member.name != ".sandbox-sync-manifest.json" and member.is_file()
-    }
-    if actual != seen or total != request.byte_count:
-        raise WorkspaceIndexError("sync_manifest_invalid", "generation inventory mismatch")
-    if published.exists() or published.is_symlink():
-        raise WorkspaceIndexError("sync_generation_exists", "generation is already published")
+                "sync_manifest_invalid", "generation inventory mismatch")
+        return (
+            (".sandbox-sync-manifest.json", *manifest_identity),
+            *((path, *observed[path]) for path in sorted(observed)),
+        )
+    finally:
+        os.close(root_fd)
+
+
+def _current_points_to(current: Path, published: Path) -> bool:
+    if not current.is_symlink():
+        return False
+    try:
+        return current.resolve(strict=True) == published.resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _publish_sync_generation_unchecked(root: Path, request: SyncPublishRequest) -> None:
+    project_hash = hashlib.sha256(request.project_identity.encode()).hexdigest()[:32]
+    base = root / "sync" / project_hash / request.workspace_id
+    staging = base / "staging" / request.generation_id
+    published = base / "generations" / request.generation_id
+    current = base / "current"
+    for directory in (root, root / "sync", root / "sync" / project_hash, base,
+                      base / "staging", base / "generations"):
+        details = directory.lstat()
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise WorkspaceIndexError("sync_staging_unsafe", "generation path is unsafe")
+    staging_present = staging.exists() and not staging.is_symlink()
+    published_present = published.exists() and not published.is_symlink()
+    if staging_present and published_present:
+        raise WorkspaceIndexError(
+            "sync_generation_conflict", "staged and published generations are ambiguous")
+    if not staging_present and not published_present:
+        raise WorkspaceIndexError("sync_staging_unavailable", "staged generation is unavailable")
+    source = published if published_present else staging
+    fingerprint = _validate_sync_tree(source, request)
+    if published_present and _current_points_to(current, published):
+        return
     if os.path.lexists(current) and not current.is_symlink():
         raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
-    published.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.replace(staging, published)
+    old_target = os.readlink(current) if current.is_symlink() else None
+    renamed = False
+    committed = False
     temporary = current.with_name(".current-" + request.generation_id)
+    rollback = current.with_name(".rollback-" + request.generation_id)
     try:
-        temporary.unlink()
-    except FileNotFoundError:
-        pass
-    os.symlink(str(published), str(temporary), target_is_directory=True)
-    os.replace(temporary, current)
-    os.chmod(published, 0o700)
+        if not published_present:
+            os.replace(staging, published)
+            renamed = True
+        if _validate_sync_tree(published, request) != fingerprint:
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation changed during publication")
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        os.symlink(str(published), str(temporary), target_is_directory=True)
+        if _validate_sync_tree(published, request) != fingerprint:
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation changed during publication")
+        os.replace(temporary, current)
+        committed = True
+        if _validate_sync_tree(published, request) != fingerprint:
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation changed during publication")
+        os.chmod(published, 0o700)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        if committed:
+            try:
+                if old_target is None:
+                    current.unlink()
+                else:
+                    try:
+                        rollback.unlink()
+                    except FileNotFoundError:
+                        pass
+                    os.symlink(old_target, rollback, target_is_directory=True)
+                    os.replace(rollback, current)
+            except OSError:
+                pass
+        if renamed:
+            try:
+                if not staging.exists() and published.exists():
+                    os.replace(published, staging)
+            except OSError:
+                pass
+        raise
+
+
+def _publish_sync_generation(root: Path, request: SyncPublishRequest) -> None:
+    """Publish with exact-tree replay recovery and bounded filesystem errors."""
+    try:
+        _publish_sync_generation_unchecked(root, request)
+    except WorkspaceIndexError:
+        raise
+    except (OSError, UnicodeError, ValueError):
+        raise WorkspaceIndexError(
+            "sync_publication_failed", "generation publication failed safely") from None
 
 
 def _is_remote_target(target) -> bool:

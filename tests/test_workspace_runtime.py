@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from sandbox.application.workspace_service import SyncPublishRequest, WorkspaceService
@@ -150,6 +151,130 @@ class WorkspaceRuntimeTests(unittest.TestCase):
                     service.publish_sync(request)
             self.assertEqual(refused.exception.code, "workspace_ownership_drift")
             self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_rejects_unlisted_broken_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            (base / "staging" / request.generation_id / "broken").symlink_to(
+                "missing-target")
+            with self.assertRaises(Exception) as refused:
+                service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_revalidates_bytes_after_generation_rename(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            staging = base / "staging" / request.generation_id
+            published = base / "generations" / request.generation_id
+            original_replace = __import__("os").replace
+
+            def mutate_then_replace(source, destination):
+                if Path(source) == staging and Path(destination) == published:
+                    (staging / "source.txt").write_text("changed after validation\n")
+                return original_replace(source, destination)
+
+            with mock.patch("os.replace", side_effect=mutate_then_replace):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_current_failure_is_redacted_and_retryable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            current = base / "current"
+            original_replace = __import__("os").replace
+            failed = False
+
+            def fail_current_once(source, destination):
+                nonlocal failed
+                if Path(destination) == current and not failed:
+                    failed = True
+                    raise OSError(f"cannot replace protected path {destination}")
+                return original_replace(source, destination)
+
+            with mock.patch("os.replace", side_effect=fail_current_once):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_publication_failed")
+            self.assertNotIn(str(base), str(refused.exception))
+            self.assertTrue((base / "staging" / request.generation_id).is_dir())
+
+            result = service.publish_sync(request)
+            self.assertTrue(result["ok"])
+            self.assertTrue(current.is_symlink())
+
+    def test_sync_publication_filesystem_error_never_leaks_protected_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            protected = str(base / "staging" / request.generation_id)
+            with mock.patch("os.scandir", side_effect=OSError(protected)):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_publication_failed")
+            self.assertNotIn(protected, str(refused.exception))
+
+    def test_sync_publication_recovers_exact_orphan_when_rollback_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            current = base / "current"
+            staging = base / "staging" / request.generation_id
+            published = base / "generations" / request.generation_id
+            original_replace = __import__("os").replace
+            failed_current = False
+            failed_rollback = False
+
+            def fail_commit_and_rollback(source, destination):
+                nonlocal failed_current, failed_rollback
+                if Path(destination) == current and not failed_current:
+                    failed_current = True
+                    raise OSError("current commit failed")
+                if (Path(source) == published and Path(destination) == staging
+                        and not failed_rollback):
+                    failed_rollback = True
+                    raise OSError("rollback failed")
+                return original_replace(source, destination)
+
+            with mock.patch("os.replace", side_effect=fail_commit_and_rollback):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_publication_failed")
+            self.assertTrue(published.is_dir())
+            self.assertFalse(staging.exists())
+
+            result = service.publish_sync(request)
+            self.assertTrue(result["ok"])
+            self.assertTrue(current.is_symlink())
+
+    def test_sync_publication_hidden_cli_redacts_filesystem_path(self):
+        from io import StringIO
+        from sandbox.commands.workspaces import cmd_workspace
+
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            protected = str(base / "staging" / request.generation_id)
+            args = SimpleNamespace(
+                action="publish-sync", project_dir=".", local=False, remote=None,
+                workspace="default", workspace_id=request.workspace_id,
+                project_identity=request.project_identity,
+                generation_id=request.generation_id,
+                manifest_digest=request.manifest_digest,
+                archive_manifest_digest=request.archive_manifest_digest,
+                file_count=request.file_count, byte_count=request.byte_count,
+                expected_index_generation=request.expected_index_generation,
+                confirm=False, json=True,
+            )
+            output = StringIO()
+            with mock.patch(
+                "sandbox.commands.workspaces.durable_job_dependencies",
+                return_value={"workspace_service": service},
+            ), mock.patch("os.scandir", side_effect=OSError(protected)), \
+                    mock.patch("sys.stdout", output), self.assertRaises(SystemExit):
+                cmd_workspace(None, args)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["error"]["code"], "sync_publication_failed")
+            self.assertNotIn(protected, output.getvalue())
 
     def test_create_rejects_namespace_traversal_and_symlink_without_residue(self):
         with tempfile.TemporaryDirectory() as temp:

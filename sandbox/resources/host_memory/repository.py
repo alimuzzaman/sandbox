@@ -73,13 +73,18 @@ class HostMemoryRepository:
             self._validate_directory(after)
             for component in relative.parts[:-1]:
                 self._check_deadline(deadline)
-                before=os.stat(component,dir_fd=directory_fd,follow_symlinks=False)
-                next_fd=os.open(component,directory_flags,dir_fd=directory_fd)
-                after=os.fstat(next_fd)
-                if not self._same_identity(before,after):
-                    os.close(next_fd); raise RepositoryError("history_unavailable")
-                self._validate_directory(after)
-                os.close(directory_fd); directory_fd=next_fd
+                next_fd=None
+                try:
+                    before=os.stat(component,dir_fd=directory_fd,follow_symlinks=False)
+                    next_fd=os.open(component,directory_flags,dir_fd=directory_fd)
+                    after=os.fstat(next_fd)
+                    if not self._same_identity(before,after):
+                        raise RepositoryError("history_unavailable")
+                    self._validate_directory(after)
+                    previous_fd=directory_fd; directory_fd=next_fd; next_fd=None
+                    os.close(previous_fd)
+                finally:
+                    if next_fd is not None: os.close(next_fd)
             self._check_deadline(deadline)
             try:
                 before=os.stat(relative.parts[-1],dir_fd=directory_fd,follow_symlinks=False)
@@ -98,8 +103,6 @@ class HostMemoryRepository:
                 raise RepositoryError("history_unavailable")
             result_fd=file_fd; file_fd=None
             return result_fd,after
-        except FileNotFoundError:
-            return None
         except RepositoryError:
             raise
         except OSError:

@@ -188,14 +188,23 @@ class HostProvider:
                     if memory_text is None or memsw_text is None: raise ValueError
                     memory_value=self._bounded_integer(memory_text)
                     memsw_value=self._bounded_integer(memsw_text)
-                    # Cgroup v1 represents an unlimited value with a page-rounded
-                    # number close to LONG_MAX rather than the v2 "max" token.
-                    memory_values.append(None if memory_value >= 1 << 60 else memory_value)
-                    memsw_values.append(None if memsw_value >= 1 << 60 else memsw_value)
+                    # Normalize the v1 page-rounded LONG_MAX sentinel before
+                    # comparing effective per-level limits.
+                    memory_value=(None if memory_value is None or memory_value>=1<<60
+                                  else memory_value)
+                    memsw_value=(None if memsw_value is None or memsw_value>=1<<60
+                                 else memsw_value)
+                    if ((memory_value is None and memsw_value is not None)
+                            or (memory_value is not None and memsw_value is not None
+                                and memsw_value<memory_value)):
+                        raise ValueError("contradictory cgroup v1 limits")
+                    memory_values.append(memory_value)
+                    memsw_values.append(memsw_value)
                 leaf=prefixes[0]
                 memory_used=self._bounded_integer(self._optional_text(leaf+"/memory.usage_in_bytes",deadline))
                 memsw_used=self._bounded_integer(self._optional_text(leaf+"/memory.memsw.usage_in_bytes",deadline))
                 if memory_used is None or memsw_used is None: raise ValueError
+                if memsw_used<memory_used: raise ValueError("contradictory cgroup v1 usage")
                 finite_memory=[value for value in memory_values if value is not None]
                 finite_memsw=[value for value in memsw_values if value is not None]
                 memory_limit=min(finite_memory) if finite_memory else None

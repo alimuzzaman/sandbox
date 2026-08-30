@@ -113,3 +113,43 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         if history.is_symlink(): history.unlink()
         repo.append_sample(sample())
         race("oversized")
+
+    def test_history_disappearance_after_stat_is_not_clean_missing(self):
+        history=Path(self.tmp.name)/"safe/history.jsonl"
+        repo=HostMemoryRepository(Path(self.tmp.name)/"state",history_path=history,
+                                  history_ancestor_root=Path(self.tmp.name))
+        original_open=os.open
+
+        def run_race(kind):
+            history.parent.mkdir(mode=0o700,exist_ok=True)
+            history.write_text("{}"); history.chmod(0o600)
+            moved=Path(self.tmp.name)/"moved"
+            if moved.exists(): moved.rename(Path(self.tmp.name)/"old-moved")
+            fired=False
+            def racing_open(path,flags,*args,**kwargs):
+                nonlocal fired
+                if not fired and ((kind=="leaf" and path==history.name)
+                                  or (kind=="ancestor" and path==history.parent.name)):
+                    fired=True
+                    if kind=="leaf": history.unlink()
+                    else: history.parent.rename(moved)
+                return original_open(path,flags,*args,**kwargs)
+            with mock.patch("sandbox.resources.host_memory.repository.os.open",
+                            side_effect=racing_open):
+                with self.assertRaises(RepositoryError): repo.history_window(limit=3)
+            if moved.exists(): moved.rename(history.parent)
+
+        run_race("leaf")
+        run_race("ancestor")
+
+    def test_rejected_unsafe_ancestor_calls_do_not_leak_descriptors(self):
+        history=Path(self.tmp.name)/"unsafe/history.jsonl"
+        repo=HostMemoryRepository(Path(self.tmp.name)/"state",history_path=history,
+                                  history_ancestor_root=Path(self.tmp.name))
+        history.parent.mkdir(mode=0o700); history.write_text("{}\n"); history.chmod(0o600)
+        history.parent.chmod(0o777)
+        before=len(os.listdir("/dev/fd"))
+        for _index in range(40):
+            with self.assertRaises(RepositoryError): repo.history_window(limit=3)
+        after=len(os.listdir("/dev/fd"))
+        self.assertLessEqual(after,before+1)

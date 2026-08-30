@@ -60,6 +60,17 @@ safety or release readiness.
   transport, interface, and help gate ran 98 tests and passed in 1.091 seconds; and the 50
   bounded remote-ensure adjacent tests passed in 1.118 seconds. Compilation and diff checks
   passed. No remote or live host was accessed.
+- Post-open race and cgroup-v1 re-review RED was captured with three focused tests: leaf or
+  ancestor disappearance after a successful stat was misreported as clean missing, 40
+  rejected unsafe-ancestor calls leaked 40 directory descriptors, and contradictory v1
+  memsw limit/usage arithmetic was reported as known. All three failed before correction.
+- After narrowing clean-missing to only the initial leaf stat, making every opened directory
+  FD use explicit ownership transfer/final cleanup, and rejecting per-level v1 memsw
+  contradictions, the exact T027 gate ran 71 tests and passed in 0.253 seconds. The broader
+  Feature 046, focused transport, interface, and help gate ran 101 tests and passed in 1.144
+  seconds; 50 adjacent bounded remote-ensure tests passed in 1.095 seconds. Current
+  `origin/latest` remained `a0845e0f9438788820199ee4229f4484a93466f9`; compilation and
+  diff checks passed, with no remote or live-host action.
 - Independent-review correction RED was captured before the production fixes with
   `python3 -m unittest -v tests.test_host_memory_remote tests.test_host_memory_service
   tests.test_host_memory_provider tests.test_host_memory_repository

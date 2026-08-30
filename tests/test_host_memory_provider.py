@@ -273,3 +273,17 @@ class HostMemoryProviderTest(unittest.TestCase):
                 result=HostProvider(read_text=lambda path:values[str(path)],target_identity=TARGET).observe()
             self.assertEqual(result["container_eligibility"]["state"],"unknown")
             self.assertEqual(result["evidence_state"],"partial")
+
+    def test_cgroup_v1_contradictory_memsw_limits_or_usage_are_partial(self):
+        for field,value in (
+            ("/sys/fs/cgroup/memory/fixture.scope/memory.memsw.limit_in_bytes",11*1024**3),
+            ("/sys/fs/cgroup/memory/fixture.scope/memory.memsw.usage_in_bytes",5*1024**3),
+        ):
+            reads={"/proc/meminfo":PROC_MEMINFO,"/proc/swaps":PROC_SWAPS_EMPTY,
+                   "/proc/sys/vm/swappiness":"60\n",**CGROUP_V1,field:str(value)}
+            with self.subTest(field=field),patch("platform.system",return_value="Linux"), \
+                 patch("shutil.disk_usage",return_value=Usage()):
+                result=HostProvider(read_text=lambda path:reads[str(path)],
+                                    target_identity=TARGET).observe()
+            self.assertEqual(result["container_eligibility"]["state"],"unknown")
+            self.assertEqual(result["evidence_state"],"partial")

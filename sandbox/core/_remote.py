@@ -58,6 +58,7 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._config import ensure_pyyaml, _local_yaml
 from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
 from sandbox.services.redaction import redact_structure, redact_text
+from sandbox.services.runtime_revision import runtime_revision, runtime_revision_sources
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
@@ -2083,6 +2084,22 @@ _REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
 _REMOTE_MCP_REVISION_RE = re.compile(r"[0-9a-f]{24}")
 
 
+class RemoteWpControlError(RuntimeError):
+    """Stable typed base for remote WP control failures."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+class RemoteWpRefusalError(RemoteWpControlError):
+    """The controller proved that it refused dispatch."""
+
+
+class RemoteWpCompletionUnknown(RemoteWpControlError):
+    """Dispatch may have occurred but terminal completion is not proven."""
+
+
 def _remote_mcp_bind_allowed(bind: str) -> bool:
     """Return whether ``bind`` is private enough for remote MCP.
 
@@ -2105,27 +2122,12 @@ def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> s
 def _remote_mcp_revision_sources(root: Path | None = None) -> tuple[Path, ...]:
     """Return the deterministic shipped CLI/MCP source surface."""
     root = root or Path(__file__).resolve().parents[2]
-    parts = [root / "VERSION", root / "sb"]
-    for source_root in (root / "sandbox", root / "mcp" / "wp-server"):
-        parts.extend(source_root.rglob("*.py"))
-    return tuple(sorted(
-        (source for source in parts if source.is_file() and
-         ".venv" not in source.parts and "__pycache__" not in source.parts and
-         not is_appledouble_basename(source)),
-        key=lambda source: source.relative_to(root).as_posix(),
-    ))
+    return runtime_revision_sources(root)
 
 
 def _remote_mcp_runtime_revision() -> str:
     """Return a non-secret identity for the complete staged runtime surface."""
-    root = Path(__file__).resolve().parents[2]
-    digest = hashlib.sha256()
-    for source in _remote_mcp_revision_sources(root):
-        relative = source.relative_to(root).as_posix().encode()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        digest.update(source.read_bytes())
-    return digest.hexdigest()[:24]
+    return runtime_revision(Path(__file__).resolve().parents[2])
 
 
 def remote_mcp_service_record(bind: str, port: int, public_url: str | None = None) -> dict:
@@ -2280,6 +2282,119 @@ def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dic
     result = _remote_control_request(remote, "/resources", timeout=timeout, payload=payload)
     if result.get("resource_schema") != 1:
         raise RuntimeError("remote resource service does not support resource schema 1")
+    return result
+
+
+def remote_wp_cli(
+    remote: dict,
+    *,
+    project_slug: str,
+    label: str,
+    argv: list[str],
+    timeout: int,
+    allow_missing: bool = False,
+) -> dict:
+    """Run bounded WP-CLI against an existing deploy over authenticated control."""
+    from sandbox.jobs.models import validate_argv
+    from sandbox.services.redaction import require_safe_argv
+
+    if not isinstance(project_slug, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,62}", project_slug):
+        raise ValueError("remote WordPress project identity is invalid")
+    if not isinstance(label, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
+        raise ValueError("remote WordPress instance label is invalid")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        raise ValueError("remote WordPress timeout must be between 1 and 3600 seconds")
+    try:
+        validated_argv = validate_argv(argv)
+        require_safe_argv(validated_argv)
+    except ValueError:
+        raise ValueError("remote WordPress requires a safe, explicit argv list") from None
+    service = remote.get("mcp_service") if isinstance(remote, dict) else None
+    marker = service.get("ownership_marker") if isinstance(service, dict) else None
+    if not isinstance(marker, str) or not _REMOTE_MCP_REVISION_RE.fullmatch(marker):
+        raise RemoteWpRefusalError(
+            "remote_service_ownership_unavailable",
+            "remote service ownership evidence is unavailable; update the registered remote",
+        )
+    revision = _remote_mcp_runtime_revision()
+    payload = {
+        "schema_version": 1, "action": "wp_cli", "project_slug": project_slug,
+        "label": label, "argv": list(validated_argv), "timeout_seconds": timeout,
+        "expected_runtime_revision": revision,
+        "expected_ownership_marker": marker,
+    }
+    if allow_missing:
+        payload["allow_missing"] = True
+    try:
+        result = _remote_control_request(
+            remote, "/wp-cli", timeout=timeout + 10, payload=payload,
+        )
+    except (OSError, RuntimeError, ValueError, TimeoutError):
+        raise RemoteWpCompletionUnknown(
+            "remote_wp_transport_unknown",
+            "remote WP-CLI control result was unavailable; completion is unknown and was not retried",
+        ) from None
+    if result.get("wp_cli_schema") != 1 or result.get("transport") != "control":
+        raise RemoteWpCompletionUnknown(
+            "remote_wp_contract_unknown",
+            "remote WP-CLI returned an unsupported control contract; completion is unknown",
+        )
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    if result.get("ok") is not True:
+        code = error.get("code")
+        if code == "runtime_revision_mismatch":
+            raise RemoteWpRefusalError(code, "remote runtime revision does not match this Sandbox build")
+        if code == "remote_service_ownership_unknown":
+            raise RemoteWpRefusalError(code, "remote service ownership could not be proven")
+        if code == "output_too_large":
+            raise RemoteWpCompletionUnknown(
+                code,
+                "remote WP-CLI output was incomplete; completion is unknown and was not retried",
+            )
+        messages = {
+            "remote_deploy_not_found": "no existing remote deployment was found for this project",
+            "remote_instance_unavailable": "the deployed remote project has no registered instance",
+            "remote_instance_ambiguous": "the deployed remote project label is ambiguous",
+            "unsupported_project_kind": "the selected remote deployment is not a WordPress project",
+            "unsafe_argv": "remote WordPress argv was refused by the controller",
+            "remote_deploy_path_unsafe": "the remote deployment path is unsafe",
+            "remote_deploy_path_changed": "the remote deployment path changed before dispatch",
+            "host_file_staging_unsupported": (
+                "remote WordPress host-file staging commands are unsupported"
+            ),
+        }
+        raise RemoteWpRefusalError(
+            str(code or "remote_wp_refused"),
+            messages.get(code, "remote WP-CLI control request was refused"),
+        )
+    if result.get("ownership") != "proven" or result.get("runtime_revision") != revision:
+        raise RemoteWpCompletionUnknown(
+            "remote_wp_attestation_unknown",
+            "remote WP-CLI response lacks exact ownership and revision evidence; completion is unknown",
+        )
+    if any(not isinstance(result.get(field), expected) for field, expected in (
+        ("stdout", str), ("stderr", str), ("exit_code", int), ("instance", str),
+    )) or isinstance(result.get("exit_code"), bool) or not result.get("instance"):
+        raise RemoteWpCompletionUnknown(
+            "remote_wp_envelope_unknown",
+            "remote WP-CLI returned an invalid result envelope; completion is unknown",
+        )
+    status, exit_code = result.get("status"), result["exit_code"]
+    overflow = error.get("code") == "wp_cli_output_overflow"
+    mapping_valid = (
+        (status == "complete" and exit_code == 0)
+        or (status == "failed" and exit_code not in {0, 124} and not overflow)
+        or (status == "unknown" and (
+            exit_code == 124 or (exit_code == 125 and overflow)
+        ))
+    )
+    if not mapping_valid:
+        raise RemoteWpCompletionUnknown(
+            "remote_wp_completion_invalid",
+            "remote WP-CLI returned an invalid completion state; completion is unknown",
+        )
     return result
 
 

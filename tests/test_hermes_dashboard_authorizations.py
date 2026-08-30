@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tarfile
 import tempfile
@@ -168,8 +169,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             ]}))
             hermes.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERMES_EDIT_LOG\"\n")
             hermes.chmod(0o700)
-            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
-                           "HERMES_BIN": str(hermes), "HERMES_EDIT_LOG": str(edits)}
+            environment = synthetic_environment({
+                "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                "HERMES_BIN": str(hermes), "HERMES_EDIT_LOG": str(edits),
+            })
             result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
                                     text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -190,7 +193,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             catalog.write_text(json.dumps({"jobs": [{"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}]}))
             templates.write_text(json.dumps({"templates": [{"id": "fixed", "job_name": "job", "scope": "preview-overlay", "replay_origin": "https://lenzora.dev", "rationale": "safe", "expires_in_minutes": 60}]}))
             config.write_text(json.dumps({"state_path": str(state), "catalog_path": str(catalog)}))
-            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "SANDBOX_AUTHORIZATION_TEMPLATES": str(templates)}
+            environment = synthetic_environment({
+                "SANDBOX_AUTHORIZATION_CONFIG": str(config),
+                "SANDBOX_AUTHORIZATION_TEMPLATES": str(templates),
+            })
             first = subprocess.run([sys.executable, str(companion), "--template", "fixed"], env=environment, text=True, capture_output=True, check=False)
             second = subprocess.run([sys.executable, str(companion), "--template", "fixed"], env=environment, text=True, capture_output=True, check=False)
             denied = subprocess.run([sys.executable, str(companion), "--template", "other"], env=environment, text=True, capture_output=True, check=False)
@@ -220,8 +226,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             hermes = root / "hermes"
             hermes.write_text("#!/bin/sh\nexit 0\n")
             hermes.chmod(0o700)
-            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
-                           "HERMES_BIN": str(hermes)}
+            environment = synthetic_environment({
+                "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                "HERMES_BIN": str(hermes),
+            })
             result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
                                     text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -245,8 +253,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"id": "deadbeef1234", "name": "job", "enabled": True}]}))
             hermes_bin.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERMES_EDIT_LOG\"\n")
             hermes_bin.chmod(0o700)
-            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
-                           "HERMES_BIN": str(hermes_bin), "HERMES_EDIT_LOG": str(edits)}
+            environment = synthetic_environment({
+                "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                "HERMES_BIN": str(hermes_bin), "HERMES_EDIT_LOG": str(edits),
+            })
             result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
                                     text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)

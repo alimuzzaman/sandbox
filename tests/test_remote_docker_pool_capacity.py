@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import os
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -50,7 +51,7 @@ else:
                 'pathlib.Path("/run/lock/sandbox-docker-pool.lock")',
                 f"pathlib.Path({str(root / 'pool.lock')!r})",
             )
-            environment = dict(os.environ)
+            environment = synthetic_environment()
             environment["PATH"] = str(binary) + os.pathsep + environment.get("PATH", "")
             result = subprocess.run(
                 [sys.executable, "-c", source],

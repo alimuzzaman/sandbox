@@ -15,6 +15,7 @@ import io
 import os
 import shlex
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tarfile
 import tempfile
@@ -2406,7 +2407,7 @@ json.load(open(path))
         source = source.replace(
             'pathlib.Path("/run/lock/sandbox-docker-pool.lock")',
             f'pathlib.Path({str(root / "transaction.lock")!r})')
-        env = dict(os.environ)
+        env = synthetic_environment()
         env["PATH"] = str(binary) + os.pathsep + env.get("PATH", "")
         result = subprocess.run(
             [sys.executable, "-c", source], text=True, capture_output=True,

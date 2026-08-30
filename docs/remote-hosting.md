@@ -802,6 +802,7 @@ reference. Summary:
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
+| `./sb wp --remote <name> --project-dir <dir> --timeout <seconds> -- <wp args...>` | Run bounded WP-CLI against that project's existing deployed WordPress instance through authenticated control HTTP; request/unit/live runtime digests and stable non-symlink deploy identity must match; host-file staging command families are refused; timeout or output overflow is nonzero unknown; no workspace creation, generic exec, SSH fallback, or automatic retry |
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.

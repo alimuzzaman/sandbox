@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import signal
 import threading
@@ -9,6 +9,7 @@ from typing import Mapping, Protocol, Sequence
 import os
 import subprocess
 
+from .environment import ExplicitEnvironment
 from .redaction import redact_text
 
 
@@ -69,6 +70,10 @@ class _BoundedEdgeCapture:
             return bytes(self._data)
         return bytes(self._head) + self._marker + bytes(self._tail)
 
+    @property
+    def truncated(self) -> bool:
+        return self._truncated
+
 
 def _decode_bounded_output(raw: bytes, limit: int) -> str:
     """Decode captured bytes without expanding a split UTF-8 edge past bound."""
@@ -88,8 +93,11 @@ def _decode_bounded_output(raw: bytes, limit: int) -> str:
 class ProcessResult:
     argv: tuple[str, ...]
     returncode: int
-    stdout: str
-    stderr: str
+    stdout: str = field(repr=False)
+    stderr: str = field(repr=False)
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    termination_reason: str | None = None
 
 
 class ProcessRunner(Protocol):
@@ -99,19 +107,28 @@ class ProcessRunner(Protocol):
 
 
 class BoundedProcessRunner:
-    """Argument-list-only subprocess runner with bounded, redacted output."""
+    """Argument-list-only subprocess runner with bounded, redacted output.
+
+    ``env=None`` leaves native OS inheritance to ``Popen`` without reading the
+    parent environment. Any explicit mapping is the complete child environment.
+    """
 
     _TERMINATION_GRACE = 0.2
+    _READER_START_GRACE = 0.1
     _DRAIN_GRACE = 0.2
 
     def __init__(self, *, max_output: int = 1_048_576,
-                 secret_values: Sequence[str] = ()) -> None:
+                 secret_values: Sequence[str] = (),
+                 terminate_on_output_limit: bool = False) -> None:
         if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output < 0:
             raise ValueError("max_output must be a non-negative integer")
         if not all(isinstance(value, str) for value in secret_values):
             raise ValueError("secret_values must contain strings")
+        if not isinstance(terminate_on_output_limit, bool):
+            raise ValueError("terminate_on_output_limit must be boolean")
         self.max_output = max_output
         self._secrets = tuple(value for value in secret_values if value)
+        self.terminate_on_output_limit = terminate_on_output_limit
 
     def _redact(self, value: str) -> str:
         """Redact and re-bound one stream without losing its retained tail."""
@@ -222,22 +239,30 @@ class BoundedProcessRunner:
             ):
                 raise ValueError("cancellation returned an invalid terminal state")
             if initial_state is not None:
-                return ProcessResult(command, 130, "", "process cancelled")
+                return ProcessResult(
+                    command, 130, "", "process cancelled",
+                    termination_reason="cancelled",
+                )
         process = subprocess.Popen(
-            command, cwd=cwd, env={**os.environ, **dict(env or {})},
+            command, cwd=cwd, env=None if env is None else ExplicitEnvironment(env),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             start_new_session=os.name == "posix", bufsize=0,
         )
         output = {name: _BoundedEdgeCapture(self.max_output)
                   for name in ("stdout", "stderr")}
+        output_limit_reached = threading.Event()
+        reader_started = {name: threading.Event() for name in ("stdout", "stderr")}
 
         def drain(name: str, stream) -> None:
+            reader_started[name].set()
             try:
                 while True:
                     chunk = stream.read(65_536)
                     if not chunk:
                         return
                     output[name].append(chunk)
+                    if output[name].truncated:
+                        output_limit_reached.set()
             except (OSError, ValueError):
                 # A bounded timeout can close a pipe while its daemon reader is
                 # still draining an escaped or otherwise uncooperative child.
@@ -249,11 +274,19 @@ class BoundedProcessRunner:
         )
         for reader in readers:
             reader.start()
+        # Enter both drains before timeout/cancellation can close their pipes.
+        # This bounded scheduling grace remains inside the caller's deadline.
+        for started in reader_started.values():
+            remaining = self._remaining(deadline)
+            started.wait(timeout=min(remaining, self._READER_START_GRACE)
+                         if remaining is not None else self._READER_START_GRACE)
         timed_out = False
         cancelled = False
+        output_overflow = False
         cancellation_probe_failed = False
         leader_reaped = False
-        if cancellation is None:
+
+        if cancellation is None and not self.terminate_on_output_limit:
             try:
                 process.wait(timeout=self._remaining(deadline))
                 leader_reaped = True
@@ -261,22 +294,26 @@ class BoundedProcessRunner:
                 timed_out = True
         else:
             while True:
-                try:
-                    state = terminal_status()
-                except Exception:
-                    cancellation_probe_failed = True
-                    cancelled = True
+                if self.terminate_on_output_limit and output_limit_reached.is_set():
+                    output_overflow = True
                     break
-                if state is not None and (
-                    type(state) is not str
-                    or state not in {"cancelled", "disconnected"}
-                ):
-                    cancellation_probe_failed = True
-                    cancelled = True
-                    break
-                if type(state) is str and state in {"cancelled", "disconnected"}:
-                    cancelled = True
-                    break
+                if cancellation is not None:
+                    try:
+                        state = terminal_status()
+                    except Exception:
+                        cancellation_probe_failed = True
+                        cancelled = True
+                        break
+                    if state is not None and (
+                        type(state) is not str
+                        or state not in {"cancelled", "disconnected"}
+                    ):
+                        cancellation_probe_failed = True
+                        cancelled = True
+                        break
+                    if type(state) is str and state in {"cancelled", "disconnected"}:
+                        cancelled = True
+                        break
                 remaining = self._remaining(deadline)
                 if remaining is not None and remaining <= 0:
                     timed_out = True
@@ -291,7 +328,11 @@ class BoundedProcessRunner:
         if not timed_out and not cancelled:
             timed_out = not self._join_readers(readers, self._remaining(deadline))
 
-        if timed_out or cancelled:
+        if self.terminate_on_output_limit and output_limit_reached.is_set():
+            output_overflow = True
+            timed_out = False
+
+        if timed_out or cancelled or output_overflow:
             # Group signals are safe only while this Popen still owns the
             # leader PID/PGID. If the leader was already reaped, an inherited
             # pipe holder can delay readers, but its old numeric group ID may
@@ -311,7 +352,7 @@ class BoundedProcessRunner:
                 process.stderr.close()
             return ProcessResult(
                 command,
-                130 if cancelled else 124,
+                130 if cancelled else 125 if output_overflow else 124,
                 self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
                 self._redact(
                     _decode_bounded_output(output["stderr"].render(), self.max_output)
@@ -319,9 +360,15 @@ class BoundedProcessRunner:
                         "\ncancellation probe failed"
                         if cancellation_probe_failed else
                         "\nprocess cancelled" if cancelled else
+                        "\nprocess output limit exceeded; completion is unknown"
+                        if output_overflow else
                         "\nprocess timed out"
                     )
                 ),
+                output["stdout"].truncated,
+                output["stderr"].truncated,
+                ("cancelled" if cancelled else
+                 "output_overflow" if output_overflow else "timeout"),
             )
         process.stdout.close()
         process.stderr.close()
@@ -329,4 +376,6 @@ class BoundedProcessRunner:
             command, process.returncode,
             self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
             self._redact(_decode_bounded_output(output["stderr"].render(), self.max_output)),
+            output["stdout"].truncated,
+            output["stderr"].truncated,
         )

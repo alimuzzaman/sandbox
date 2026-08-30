@@ -27,6 +27,15 @@ Any interpreter may run the suite, but it must have PyYAML (the `.cli-venv`
 already does). A bare interpreter without PyYAML fails fast with guidance; the
 CLI never re-execs a foreign process to bootstrap it.
 
+Tests must not copy, unpack, enumerate, print, or pass through the parent
+`os.environ`. Use `tests.subprocess_support.synthetic_environment` for explicit
+synthetic overrides, including for every new or changed captured child process.
+Prefer `run_test_process` as the default: it always supplies that explicit
+environment, a finite timeout, an argument list, and `shell=False`. A direct
+captured call is allowed only with `synthetic_environment`; fixed uncaptured
+setup commands may remain direct when they do not inspect or serialize their
+environment.
+
 `sb test` is a different command. Its `auto` plugin mode resolves to `unit` or
 `integration`; `integration` provisions and runs the external WordPress/PHPUnit
 harness, while `unit` runs plugin unit PHPUnit with the runner tools. Declared Compose modes and `matrix` are separate

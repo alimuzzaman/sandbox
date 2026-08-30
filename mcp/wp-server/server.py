@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
+import hmac
 import json
 import math
 import os
 import shlex
+import stat
 import subprocess
 import shutil
 import sqlite3
@@ -26,6 +28,7 @@ from tools.manifest import DEFAULT_MCP_GROUPS, built_in_tool_registry, project_d
 _DIAGNOSTICS_SCHEMA_VERSION = 2
 _DIAGNOSTICS_PROBE_TIMEOUT_SECONDS = 5
 _DIAGNOSTICS_MAX_PROBE_ROWS = 101
+_REMOTE_WP_MAX_STREAM_BYTES = 1024 * 1024
 
 
 def _job_counts() -> dict:
@@ -125,6 +128,209 @@ def _resource_contract(payload: dict) -> dict:
     if result is None:
         result = {"ok": False, "reason": "resource_response_invalid"}
     return {"resource_schema": 1, "transport": "control", "result": result}
+
+
+def _remote_wp_error(code: str, message: str, *, status: str = "blocked") -> dict:
+    return {
+        "ok": False, "wp_cli_schema": 1, "transport": "control", "status": status,
+        "error": {"code": code, "message": message},
+    }
+
+
+def _live_runtime_revision() -> str:
+    """Recompute the digest from the source this controller will execute."""
+    from sandbox.services.runtime_revision import runtime_revision
+
+    return runtime_revision(Path(SANDBOX_ROOT))
+
+
+def _lexical_absolute(path: str | os.PathLike) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _capture_deploy_identity(home: Path, slug: str) -> tuple[tuple[Path, int, int], ...]:
+    """Attest the configured home, deploy root, and leaf without following links."""
+    home = _lexical_absolute(home)
+    project_root = home / "deploy-src" / slug
+    current = Path(project_root.anchor)
+    paths = [current]
+    for part in project_root.parts[1:]:
+        current = current / part
+        paths.append(current)
+    identities = []
+    for path in paths:
+        try:
+            details = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"remote deploy path is unavailable: {path.name}") from exc
+        if stat.S_ISLNK(details.st_mode):
+            raise ValueError(f"remote deploy path contains a symlink: {path.name}")
+        if not stat.S_ISDIR(details.st_mode):
+            raise ValueError(f"remote deploy path is not a directory: {path.name}")
+        identities.append((path, details.st_dev, details.st_ino))
+    return tuple(identities)
+
+
+def _revalidate_deploy_identity(identity: tuple[tuple[Path, int, int], ...]) -> None:
+    """Refuse ancestor or leaf replacement immediately before process launch."""
+    for path, expected_device, expected_inode in identity:
+        try:
+            details = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"remote deploy path changed before launch: {path.name}") from exc
+        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode)
+                or details.st_dev != expected_device or details.st_ino != expected_inode):
+            raise ValueError(f"remote deploy path changed before launch: {path.name}")
+
+
+def _run_remote_wp_process(command: list[str], *, cwd: str, timeout: int,
+                           max_stream_bytes: int = _REMOTE_WP_MAX_STREAM_BYTES) -> dict:
+    """Run explicit argv with concurrent bounded drains and fail-closed overflow."""
+    from sandbox.services.process import BoundedProcessRunner
+
+    result = BoundedProcessRunner(
+        max_output=max_stream_bytes,
+        terminate_on_output_limit=True,
+    ).run(command, cwd=cwd, timeout=timeout)
+    overflow = result.termination_reason == "output_overflow"
+    unknown = result.returncode == 124 or overflow
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.returncode,
+        "status": "unknown" if unknown else "complete" if result.returncode == 0 else "failed",
+        "error_code": (
+            "wp_cli_timeout" if result.returncode == 124 else
+            "wp_cli_output_overflow" if overflow else None
+        ),
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+    }
+
+
+def _remote_wp_may_stage_host_files(argv) -> bool:
+    """Refuse command families whose local boundary can copy host operands."""
+    return (
+        tuple(argv[:2]) in (("plugin", "install"), ("theme", "install"), ("media", "import"))
+        or tuple(argv[:1]) == ("eval-file",)
+    )
+
+
+def _remote_wp_contract(payload: dict) -> dict:
+    """Execute only bounded ``sb wp --local`` for an existing deployment."""
+    from sandbox.core import resolve_registered_instance
+    from sandbox.jobs.models import validate_argv
+    from sandbox.services.redaction import require_safe_argv
+
+    if payload.get("schema_version") != 1 or payload.get("action") != "wp_cli":
+        raise ValueError("unsupported remote WP-CLI contract")
+    slug, label, argv = payload.get("project_slug"), payload.get("label"), payload.get("argv")
+    timeout = payload.get("timeout_seconds")
+    expected_revision = payload.get("expected_runtime_revision")
+    expected_marker = payload.get("expected_ownership_marker")
+    if not isinstance(slug, str) or not _re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,62}", slug):
+        raise ValueError("remote WP-CLI project identity is invalid")
+    if not isinstance(label, str) or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
+        raise ValueError("remote WP-CLI label is invalid")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        raise ValueError("remote WP-CLI timeout is invalid")
+    try:
+        argv = validate_argv(argv)
+    except ValueError:
+        raise ValueError("remote WP-CLI requires an explicit argv list") from None
+    try:
+        require_safe_argv(argv)
+    except ValueError:
+        return _remote_wp_error("unsafe_argv", "the explicit argv was refused")
+    if _remote_wp_may_stage_host_files(argv):
+        return _remote_wp_error(
+            "host_file_staging_unsupported",
+            "remote WP-CLI does not accept commands that can stage host files",
+        )
+    if "allow_missing" in payload and not isinstance(payload.get("allow_missing"), bool):
+        raise ValueError("remote WP-CLI allow_missing must be boolean")
+    installed_revision = os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "")
+    installed_marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
+    try:
+        live_revision = _live_runtime_revision()
+    except OSError:
+        live_revision = ""
+    if (not isinstance(expected_revision, str)
+            or not _re.fullmatch(r"[0-9a-f]{24}", expected_revision)
+            or not _re.fullmatch(r"[0-9a-f]{24}", installed_revision)
+            or not _re.fullmatch(r"[0-9a-f]{24}", live_revision)
+            or not hmac.compare_digest(installed_revision, expected_revision)
+            or not hmac.compare_digest(live_revision, expected_revision)):
+        return _remote_wp_error("runtime_revision_mismatch",
+            "the request, service receipt, and live remote runtime do not match")
+    if (not isinstance(expected_marker, str)
+            or not _re.fullmatch(r"[0-9a-f]{24}", expected_marker)
+            or not hmac.compare_digest(installed_marker, expected_marker)):
+        return _remote_wp_error("remote_service_ownership_unknown",
+            "the authenticated service does not match the registered ownership marker")
+
+    home = _lexical_absolute(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+    try:
+        deploy_identity = _capture_deploy_identity(home, slug)
+    except ValueError:
+        return _remote_wp_error("remote_deploy_path_unsafe",
+                                "the exact deployed project path is unavailable or unsafe")
+    deploy_root = home / "deploy-src"
+    project_root = deploy_root / slug
+    try:
+        project = _core().load_project_config(str(project_root), label=label)
+    except Exception:
+        return _remote_wp_error("remote_deploy_not_found", "the exact deployed project is unavailable")
+    if project.get("kind", "wordpress") != "wordpress":
+        return _remote_wp_error("unsupported_project_kind", "the selected deployment is not WordPress")
+    try:
+        selected = resolve_registered_instance(str(project_root), label=label)
+    except Exception:
+        return _remote_wp_error("remote_instance_ambiguous",
+                                "the exact deployed instance could not be selected")
+    if not isinstance(selected, dict):
+        return _remote_wp_error("remote_instance_unavailable",
+                                "the deployed project has no registered instance")
+    instance = selected.get("instance")
+    selected_root = selected.get("root") or project.get("root")
+    if (not isinstance(instance, str)
+            or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", instance)
+            or not isinstance(selected_root, (str, os.PathLike))
+            or _lexical_absolute(selected_root) != project_root
+            or selected.get("label", "default") != label):
+        return _remote_wp_error("remote_instance_unavailable",
+                                "the registered instance does not own the exact deployment")
+
+    command = [str(SANDBOX_ROOT / "sb"), "--instance", instance, "wp", "--local",
+               "--project-dir", str(project_root), "--timeout", str(timeout)]
+    if payload.get("allow_missing") is True:
+        command.append("--allow-missing")
+    command.extend(["--", *argv])
+    try:
+        if not hmac.compare_digest(_live_runtime_revision(), expected_revision):
+            return _remote_wp_error("runtime_revision_mismatch",
+                                    "the live remote runtime changed before dispatch")
+        _revalidate_deploy_identity(deploy_identity)
+    except (OSError, ValueError):
+        return _remote_wp_error("remote_deploy_path_changed",
+                                "the deployed project path changed before dispatch")
+    process_result = _run_remote_wp_process(
+        command, cwd=str(project_root), timeout=timeout + 5,
+    )
+    stdout = process_result["stdout"]
+    stderr = process_result["stderr"]
+    exit_code = process_result["exit_code"]
+    status = process_result["status"]
+    return {
+        "ok": True, "wp_cli_schema": 1, "transport": "control", "status": status,
+        "ownership": "proven", "runtime_revision": live_revision,
+        "instance": instance, "stdout": stdout, "stderr": stderr,
+        "exit_code": exit_code, "retried": False, "workspace_created": False,
+        "stdout_truncated": process_result["stdout_truncated"],
+        "stderr_truncated": process_result["stderr_truncated"],
+        "error": ({"code": process_result["error_code"]}
+                  if process_result["error_code"] else None),
+    }
 
 
 def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
@@ -556,6 +762,25 @@ def _run_streamable_http(bind: str, port: int, token: str,
             _hosted_inventory_snapshot, deep=bool(query),
         ))
 
+    async def wp_cli_control(request):
+        body_bytes = await request.body()
+        if len(body_bytes) > 256 * 1024:
+            return JSONResponse({"ok": False, "error": "WP-CLI request is too large"},
+                                status_code=413)
+        try:
+            body = json.loads(body_bytes)
+        except (ValueError, json.JSONDecodeError):
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "WP-CLI request must be an object"},
+                                status_code=400)
+        try:
+            result = await asyncio.to_thread(_remote_wp_contract, body)
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "invalid WP-CLI request"},
+                                status_code=400)
+        return JSONResponse(result)
+
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             if request.headers.get("authorization") != f"Bearer {token}":
@@ -582,6 +807,7 @@ def _run_streamable_http(bind: str, port: int, token: str,
     app.routes.append(Route("/diagnostics", diagnostics, methods=["GET"]))
     app.routes.append(Route("/resources", resources, methods=["POST"]))
     app.routes.append(Route("/inventory", inventory, methods=["GET"]))
+    app.routes.append(Route("/wp-cli", wp_cli_control, methods=["POST"]))
     app.add_middleware(_BearerAuthMiddleware)
     uvicorn.run(app, host=bind, port=port)
 

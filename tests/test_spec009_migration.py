@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import threading
@@ -445,7 +446,7 @@ with base_maintenance_lock(base, exclusive=False):
     record = repository.register('project:two', 'second')
 print(record.workspace_id, flush=True)
 """
-        env = dict(os.environ)
+        env = synthetic_environment()
         env["PYTHONPATH"] = str(project_root) + os.pathsep + env.get("PYTHONPATH", "")
         process = subprocess.Popen(
             [sys.executable, "-c", script, str(old_base)],
@@ -871,7 +872,7 @@ print(record.workspace_id, flush=True)
         hint = home / ".config" / "sandbox" / "home"
         hint.parent.mkdir(parents=True)
         hint.write_text(f"  {selected}  \n")
-        env = os.environ.copy()
+        env = synthetic_environment()
         env["HOME"] = str(home)
         env.pop("SANDBOX_HOME", None)
         env.pop("SANDBOX_RUNTIME", None)
@@ -884,7 +885,7 @@ print(record.workspace_id, flush=True)
         hint = home / ".config" / "sandbox" / "home"
         hint.parent.mkdir(parents=True)
         hint.write_text(str(selected) + "\n")
-        env = os.environ.copy()
+        env = synthetic_environment()
         env["HOME"] = str(home)
         env["SANDBOX_HOME"] = str(explicit)
         env.pop("SANDBOX_RUNTIME", None)
@@ -894,7 +895,7 @@ print(record.workspace_id, flush=True)
         home = self.root / "process-home"
         default = (home / "sandbox").resolve()
         hint = home / ".config" / "sandbox" / "home"
-        env = os.environ.copy()
+        env = synthetic_environment()
         env["HOME"] = str(home)
         env.pop("SANDBOX_HOME", None)
         env.pop("SANDBOX_RUNTIME", None)
@@ -929,7 +930,7 @@ print(record.workspace_id, flush=True)
         cwd_b = self.root / "cwd-b"
         cwd_a.mkdir()
         cwd_b.mkdir()
-        env = os.environ.copy()
+        env = synthetic_environment()
         env["HOME"] = str(home)
         env.pop("SANDBOX_HOME", None)
         env.pop("SANDBOX_RUNTIME", None)

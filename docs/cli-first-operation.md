@@ -213,6 +213,7 @@ select --local/--remote`.
 ./sb status
 ./sb wp --timeout 60 -- plugin list
 ./sb wp --project-dir <dir> --timeout 60 -- plugin list
+./sb wp --remote <name> --project-dir <dir> --timeout 60 -- plugin list
 ./sb test
 ./sb test unit --project-dir <dir> --label <label> --remote <name> --timeout 500 -- --filter Smoke
 ./sb deploy --remote <name> --ensure --expose
@@ -240,6 +241,23 @@ timeout therefore reports completion as unknown—inspect state before retrying,
 or use `--async` for long work. Sandbox never retries a timed-out command
 automatically, and synchronous WP stdout remains raw rather than wrapped in
 JSON.
+
+After `sb deploy --remote NAME --ensure --expose`, `sb wp --remote NAME`
+targets that exact deployed project and label through authenticated control
+HTTP. The controller requires matching runtime-revision and service-ownership
+evidence, then invokes only the co-located `sb wp --local` boundary. It does
+not stage source, create a job workspace, route through generic `sb exec`, fall
+back to SSH, or retry an unknown result. Generic Compose projects are refused
+before dispatch.
+The controller also requires the request revision, service-unit receipt, and
+digest of its live staged source to match, then revalidates the stable identity
+of a non-symlink deploy path immediately before launch. Stdout and stderr are
+drained concurrently into fixed-size edge buffers. Bounded termination on
+timeout or output overflow is limited to the owned process group and returns a
+nonzero unknown result.
+Remote `plugin install`, `theme install`, `media import`, and `eval-file` are
+refused because their local forms can stage host-file operands. Use a
+non-staging WP command or a separately reviewed artifact workflow.
 
 `wp post list` does not support a `--search` query argument: WP-CLI forwards
 that unknown spelling to `WP_Query`, which can silently return an unfiltered

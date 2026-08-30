@@ -8,6 +8,7 @@ import os
 import io
 import json
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -24,7 +25,7 @@ SB = ROOT / "sb"
 def run_sb(*args, cwd="/tmp"):
     return subprocess.run(
         [str(SB), *args], cwd=cwd, capture_output=True, text=True,
-        env={**os.environ, "SANDBOX_INSTANCE": ""}, timeout=90)
+        env=synthetic_environment({"SANDBOX_INSTANCE": ""}), timeout=90)
 
 
 class TestResolutionGate(unittest.TestCase):
@@ -1013,6 +1014,19 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("explicitly select the local WordPress runtime", r.stdout)
 
+    def test_wp_help_exposes_bounded_remote_selector(self):
+        r = run_sb("wp", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--remote REMOTE", r.stdout)
+        self.assertIn("--timeout TIMEOUT", r.stdout)
+
+    def test_remote_wp_refuses_instance_selector_before_project_or_remote_work(self):
+        r = run_sb("wp", "--remote", "contract-only", "--instance", "other",
+                   "--project-dir", "/missing", "--", "core", "version")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot combine --instance", r.stderr)
+        self.assertNotIn("could not resolve", r.stderr)
+
     def test_wp_project_dir_resolves_registered_instance_outside_project_cwd(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate
@@ -1410,7 +1424,7 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint.parent.mkdir(parents=True)
             hint.write_text(str(selected) + "\n")
 
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["HOME"] = str(home)
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)
@@ -1446,7 +1460,7 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint = home / ".config" / "sandbox" / "home"
             hint.parent.mkdir(parents=True)
             hint.write_text("relative-state\n")
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["HOME"] = str(home)
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)

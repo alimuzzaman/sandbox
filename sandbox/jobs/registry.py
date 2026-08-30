@@ -16,7 +16,7 @@ from sandbox.services.redaction import require_safe_argv
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_SUBMISSION_SNAPSHOT_BYTES = 65_536
 MAX_SUBMISSION_ITEMS = 256
 MAX_SUBMISSION_TEXT = 4_096
@@ -140,6 +140,9 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "remote_name": _bounded_text(raw.get("remote_name"), "remote name", maximum=64, allow_none=True),
         "workspace_label": _bounded_text(raw["workspace_label"], "workspace label", maximum=64),
         "workspace_mode": raw["workspace_mode"],
+        "materialization_source_root": _bounded_text(
+            raw.get("materialization_source_root"),
+            "materialization source root", allow_none=True),
         "argv": _bounded_argv(raw["argv"]),
         "cwd_relative": _bounded_text(raw["cwd_relative"], "working directory"),
         "execution_profile": _bounded_text(raw["execution_profile"], "execution profile", maximum=64),
@@ -246,6 +249,7 @@ class JobRepository:
             target_kind TEXT NOT NULL,
             remote_name TEXT,
             workspace_id TEXT,
+            workspace_authority_digest TEXT,
             workspace_label TEXT NOT NULL,
             workspace_mode TEXT NOT NULL,
             lifecycle TEXT NOT NULL,
@@ -416,6 +420,7 @@ class JobRepository:
                 ("source_access", "TEXT"),
                 ("parallel_safe", "INTEGER NOT NULL DEFAULT 0"),
                 ("workspace_id", "TEXT"),
+                ("workspace_authority_digest", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -468,7 +473,9 @@ class JobRepository:
         return dict(row)
 
     def accept(self, submission: JobSubmission, *,
-               workspace_id: str | None = None) -> tuple[dict[str, Any], bool]:
+               workspace_id: str | None = None,
+               workspace_authority_digest: str | None = None,
+               ) -> tuple[dict[str, Any], bool]:
         # Persisted argv is later executed verbatim. Refuse credential-bearing
         # forms instead of redacting them into a different command.
         require_safe_argv(submission.argv)
@@ -476,6 +483,10 @@ class JobRepository:
                 (not isinstance(workspace_id, str) or
                  not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id))):
             raise ValueError("workspace id is invalid")
+        if (workspace_authority_digest is not None and
+                (not isinstance(workspace_authority_digest, str) or
+                 not re.fullmatch(r"sha256:[0-9a-f]{64}", workspace_authority_digest))):
+            raise ValueError("workspace authority digest is invalid")
         digest = submission.canonical_digest()
         now = _now()
         with self.transaction(immediate=True) as connection:
@@ -493,6 +504,9 @@ class JobRepository:
                             existing["workspace_id"] != workspace_id):
                         raise JobRepositoryError(
                             "request workspace identity changed")
+                    if existing["workspace_authority_digest"] != workspace_authority_digest:
+                        raise JobRepositoryError(
+                            "request workspace authority changed")
                     return dict(existing), True
             submission_json = _canonical_submission_snapshot(submission)
             job_id = new_job_id()
@@ -500,7 +514,8 @@ class JobRepository:
                 job_id, submission.request_id, digest, submission.parent_job_id, None,
                 submission.retry_of_job_id, submission.attempt, submission.kind,
                 submission.project_root, submission.project_identity, submission.target_kind,
-                submission.remote_name, workspace_id, submission.workspace_label, submission.workspace_mode,
+                submission.remote_name, workspace_id, workspace_authority_digest,
+                submission.workspace_label, submission.workspace_mode,
                 Lifecycle.ACCEPTED.value, Health.UNKNOWN.value,
                 json.dumps(list(submission.depends_on)), submission.failure_policy, None, None,
                 json.dumps(list(submission.argv)),
@@ -520,7 +535,8 @@ class JobRepository:
                 """INSERT INTO jobs(
                     job_id, request_id, request_digest, parent_job_id, root_job_id,
                     retry_of_job_id, attempt, kind, project_root, project_identity,
-                    target_kind, remote_name, workspace_id, workspace_label, workspace_mode, lifecycle,
+                    target_kind, remote_name, workspace_id, workspace_authority_digest,
+                    workspace_label, workspace_mode, lifecycle,
                     health, depends_on_json, failure_policy, queue_reason, queue_position,
                     command_json, cwd_relative, environment_keys_json,
                     execution_profile, output_profile, deadline_seconds, deadline_source,
@@ -529,7 +545,7 @@ class JobRepository:
                     source_commit, source_dirty_digest, sync_relationship_id,
                     sync_generation_id, source_access, parallel_safe,
                     accepted_at, updated_at, submission_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id

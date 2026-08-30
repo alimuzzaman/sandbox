@@ -83,6 +83,7 @@ One durable accepted execution or aggregate parent.
 | `target_kind` | TEXT | `local` or `remote` as submitted/result provenance |
 | `remote_name` | TEXT nullable | registered remote selected by caller/config |
 | `workspace_id` | TEXT nullable | exact opaque workspace owner fixed before acceptance; null only for legacy/unindexed rows |
+| `workspace_authority_digest` | TEXT nullable | immutable controller CI-materialization authority fixed before acceptance; null for generic/reusable/legacy references |
 | `workspace_label` | TEXT | validated label |
 | `workspace_mode` | TEXT | persistent or isolated/ephemeral |
 | `lifecycle` | TEXT | lifecycle enum |
@@ -122,11 +123,15 @@ Indexes: `(project_identity, accepted_at)`, `(workspace_label, lifecycle)`,
 `(target_kind, COALESCE(remote_name,''), project_identity, request_id)` when request ID
 is non-null.
 
-For terminal workspace cleanup, `workspace_id` is the only deletion identity.
+For terminal workspace cleanup, `workspace_id` plus the accepted
+`workspace_authority_digest` identify the exact controller-materialized CI generation.
 `project_identity`, `workspace_label`, paths, age, and naming patterns are
 cross-check evidence and can never substitute for a missing or conflicting ID.
-Terminal job/result rows remain retained even after an authorized disposable
-checkout is released.
+Mode/policy and job-supplied paths never create cleanup authority. A fresh
+process/container/mount/binding/lease/job observation must prove zero live references,
+then the owned filesystem identity is atomically quarantined and revalidated before
+deletion. Terminal job/result rows and the source materialization receipt remain
+retained; retry publishes a fresh authority generation after rematerialization.
 
 ### `process_identities`
 

@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import tarfile
 import tempfile
 import time
 import uuid
@@ -18,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from sandbox.workspaces import WorkspaceIndexError, WorkspaceRepository
+from sandbox.jobs.process import ProcessIdentity, capture_process_identity, verify_process_identity
 
 
 class WorkspaceServiceProtocol(Protocol):
@@ -93,6 +96,124 @@ def _legacy_namespace(project_root: str, target_scope: str,
 
 def _durable_namespace(project_identity: str) -> str:
     return "project-" + hashlib.sha256(project_identity.encode()).hexdigest()[:24]
+
+
+def _digest_payload(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _filesystem_identity(path: Path) -> dict[str, int]:
+    observed = os.stat(path, follow_symlinks=False)
+    return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
+
+
+def _path_is_within(candidate: str, root: Path) -> bool:
+    try:
+        Path(candidate).resolve(strict=False).relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
+    """Return positive host/container mount absence or unknown on probe failure."""
+    mounts: int | None = None
+    mountinfo = Path("/proc/self/mountinfo")
+    if mountinfo.is_file():
+        try:
+            mounts = 0
+            for line in mountinfo.read_text(errors="replace").splitlines():
+                fields = line.split()
+                if len(fields) > 4:
+                    mountpoint = fields[4].replace("\\040", " ")
+                    if _path_is_within(mountpoint, checkout):
+                        mounts += 1
+        except OSError:
+            mounts = None
+    containers: int | None = None
+    try:
+        from sandbox.services.environment import compatible_subprocess_environment
+        listed = subprocess.run(
+            ["docker", "ps", "-aq"], capture_output=True, text=True,
+            timeout=10, check=False, env=compatible_subprocess_environment(),
+        )
+        if listed.returncode == 0 and len(listed.stdout) <= 131_072:
+            all_identifiers = tuple(
+                line.strip() for line in listed.stdout.splitlines() if line.strip())
+            identifiers = all_identifiers if len(all_identifiers) <= 1000 else ()
+            if not identifiers:
+                containers = 0 if not all_identifiers else None
+            else:
+                inspected = subprocess.run(
+                    ["docker", "inspect", *identifiers], capture_output=True,
+                    text=True, timeout=20, check=False,
+                    env=compatible_subprocess_environment(),
+                )
+                if inspected.returncode == 0 and len(inspected.stdout) <= 16_777_216:
+                    rows = json.loads(inspected.stdout)
+                    if isinstance(rows, list):
+                        containers = sum(
+                            any(isinstance(mount, dict) and
+                                isinstance(mount.get("Source"), str) and
+                                _path_is_within(mount["Source"], checkout)
+                                for mount in (row.get("Mounts") or ()))
+                            for row in rows if isinstance(row, dict)
+                        )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        containers = None
+    return {"containers": containers, "mounts": mounts}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _archive_checkout(checkout: Path, artifact: Path) -> str:
+    artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".ci-materialization-", suffix=".tar.gz", dir=artifact.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary)
+    try:
+        with tarfile.open(temporary_path, "w:gz") as archive:
+            archive.add(checkout, arcname="workspace", recursive=True)
+        os.chmod(temporary_path, 0o600)
+        digest = _file_sha256(temporary_path)
+        os.replace(temporary_path, artifact)
+        return digest
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _restore_checkout(artifact: Path, expected_digest: str,
+                      checkout: Path) -> None:
+    if (not artifact.is_file() or artifact.is_symlink() or
+            _file_sha256(artifact) != expected_digest or checkout.exists()):
+        raise WorkspaceIndexError(
+            "workspace_materialization_unavailable",
+            "retained CI materialization artifact is unavailable")
+    staging = checkout.parent / f".{checkout.name}.restore-{uuid.uuid4().hex}"
+    try:
+        staging.mkdir(mode=0o700)
+        with tarfile.open(artifact, "r:gz") as archive:
+            archive.extractall(staging, filter="data")
+        restored = staging / "workspace"
+        if not restored.is_dir() or restored.is_symlink():
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "retained CI materialization artifact is invalid")
+        os.rename(restored, checkout)
+    except (OSError, tarfile.TarError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_materialization_failed",
+            "retained CI materialization restore failed") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _public_record(record, repository: WorkspaceRepository, *,
@@ -173,6 +294,7 @@ class WorkspaceService:
     repository: WorkspaceRepository | None = None
     lifecycle_gateway: Any | None = None
     resource_binding_resolver: Any | None = None
+    cleanup_reference_observer: Any | None = None
     deployment_receipt_resolver: Any | None = None
     deployment_root: Path | None = None
     # Remote workspace control is allowed only after the selected MCP service
@@ -632,7 +754,97 @@ class WorkspaceService:
             raise
         return record, True
 
-    def ensure_submission(self, submission):
+    def _materialize_ci_checkout(self, submission, *,
+                                 restore_authority: dict[str, Any] | None = None,
+                                 ) -> dict[str, Any] | None:
+        source_value = getattr(submission, "materialization_source_root", None)
+        if submission.kind != "ci" or not isinstance(source_value, str):
+            return None
+        if self.deployment_root is None:
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "CI cleanup requires a controller deployment root")
+        source = Path(source_value).resolve(strict=False)
+        checkout = Path(submission.project_root).resolve(strict=False)
+        deployment_root = Path(self.deployment_root).resolve(strict=False)
+        try:
+            source.relative_to(deployment_root)
+            checkout.relative_to(deployment_root)
+        except ValueError as exc:
+            raise WorkspaceIndexError(
+                "workspace_path_escape",
+                "CI materialization must stay inside deploy storage") from exc
+        if source == checkout or source.parent != checkout.parent:
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "CI source and disposable checkout must be distinct siblings")
+        if restore_authority is not None:
+            artifact = Path(str(restore_authority.get("artifact_locator")))
+            artifact_digest = restore_authority.get("artifact_digest")
+            artifact_root = self._repo().index_path.parent / "ci-materializations"
+            try:
+                artifact.resolve(strict=False).relative_to(
+                    artifact_root.resolve(strict=False))
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape",
+                    "retained CI materialization artifact escapes its owner root") from exc
+            if (not isinstance(artifact_digest, str) or
+                    not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest)):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_unavailable",
+                    "retained CI materialization artifact proof is incomplete")
+            _restore_checkout(artifact, artifact_digest, checkout)
+            receipt_payload = {
+                "schema": 1, "workspace_path": str(checkout),
+                "source_identity": submission.source.identity,
+                "history_mode": "retained-artifact", "hardlinked_files": 0,
+                "copied_git_entries": 0, "fallback_reason": None,
+                "source_mutation_check": "artifact-digest-verified",
+                "lock": {"key": "retained-artifact", "acquired": True,
+                         "released": True},
+            }
+        else:
+            from sandbox.workspaces.checkout import (
+                WorkspaceMaterializationError, materialize, plan_materialization,
+            )
+            source_identity = (submission.source.identity
+                               if re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                               submission.source.identity)
+                               else None)
+            try:
+                receipt = materialize(plan_materialization(
+                    source, checkout, source_identity=source_identity,
+                    workspace_label=submission.workspace_label,
+                ))
+            except WorkspaceMaterializationError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_materialization_failed",
+                    "controller CI materialization failed") from exc
+            receipt_payload = receipt.to_dict()
+        generation = uuid.uuid4().hex
+        artifact = self._repo().index_path.parent / "ci-materializations" / (
+            generation + ".tar.gz")
+        artifact_digest = _archive_checkout(checkout, artifact)
+        authority = {
+            "schema": 1,
+            "owner": "controller-ci-materialization",
+            "job_kind": "ci",
+            "checkout_locator": str(checkout),
+            "source_checkout_locator": str(source),
+            "source_identity": submission.source.identity,
+            "workspace_label": submission.workspace_label,
+            "checkout_identity": _filesystem_identity(checkout),
+            "receipt": receipt_payload,
+            "generation": generation,
+            "artifact_locator": str(artifact),
+            "artifact_digest": artifact_digest,
+        }
+        authority["digest"] = _digest_payload(authority)
+        return authority
+
+    def ensure_submission(self, submission, *,
+                          expected_previous_authority_digest: str | None = None):
         repo = self._repo()
         existing = repo.find(
             submission.project_identity, submission.workspace_label)
@@ -650,28 +862,72 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_index_incomplete",
                     "legacy workspace metadata must be migrated before accepting a job")
-        namespace = _durable_namespace(submission.project_identity)
         checkout = str(Path(submission.project_root).resolve(strict=False))
+        if existing is not None:
+            # Supported reusable/index/legacy workspaces remain authoritative.
+            # A job may reference them, but never upgrades them into disposable
+            # cleanup authority.
+            if existing.source != "ci-materialization":
+                return existing
+            if existing.lifecycle != "destroyed":
+                return existing
+            previous_authority = existing.metadata.get("ci_cleanup_authority")
+            if (not isinstance(previous_authority, dict) or
+                    expected_previous_authority_digest is None or
+                    previous_authority.get("digest") !=
+                    expected_previous_authority_digest or
+                    previous_authority.get("digest") != _digest_payload({
+                        key: value for key, value in previous_authority.items()
+                        if key != "digest"
+                    })):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retry materialization authority changed")
+            authority = self._materialize_ci_checkout(
+                submission,
+                restore_authority=(previous_authority
+                                   if isinstance(previous_authority, dict)
+                                   else None),
+            )
+            if authority is None:
+                return existing
+            metadata_path = Path(str(existing.path))
+            metadata_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._write_json_atomic(metadata_path, {
+                "label": existing.label, "target": "local",
+                "namespace": existing.namespace,
+                "mode": submission.workspace_mode,
+                "path": str(metadata_path.parent),
+                "project_identity": submission.project_identity,
+                "workspace_id": existing.workspace_id,
+            })
+            return repo.revive_destroyed(existing.workspace_id, metadata={
+                "checkout_locator": checkout,
+                "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    checkout.encode()).hexdigest(),
+                "source_checkout_locator": authority["source_checkout_locator"],
+                "source_checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    authority["source_checkout_locator"].encode()).hexdigest(),
+                "ci_cleanup_authority": authority,
+            })
+        namespace = _durable_namespace(submission.project_identity)
+        authority = self._materialize_ci_checkout(submission)
         proof = {
             "checkout_locator": checkout,
             "checkout_locator_digest": "sha256:" + hashlib.sha256(
                 checkout.encode()).hexdigest(),
-            "workspace_mode": submission.workspace_mode,
-            "job_owned": True,
+            **({
+                "source_checkout_locator": authority["source_checkout_locator"],
+                "source_checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    authority["source_checkout_locator"].encode()).hexdigest(),
+                "ci_cleanup_authority": authority,
+            } if authority is not None else {}),
         }
-        if existing is not None:
-            existing_locator = existing.metadata.get("checkout_locator")
-            existing_mode = existing.metadata.get("workspace_mode")
-            if (existing.source != "job" or
-                    existing_locator not in {None, checkout} or
-                    existing_mode not in {None, submission.workspace_mode}):
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "job workspace identity conflicts with an existing workspace")
         record, _created = self._register(
             project_identity=submission.project_identity,
             label=submission.workspace_label, namespace=namespace,
-            checkout_locator=checkout, source="job",
+            checkout_locator=checkout,
+            source="ci-materialization" if authority is not None else "job-reference",
             deployment_proof=proof, mode=submission.workspace_mode,
         )
         if self.resource_binding_resolver is not None:
@@ -703,12 +959,7 @@ class WorkspaceService:
                 "active_job_protected", "workspace cleanup requires a terminal job")
         policy = job.get("cleanup_policy")
         mode = job.get("workspace_mode")
-        authorized = (
-            mode in {"isolated", "ephemeral"}
-            and (policy in {"always", "ephemeral"}
-                 or policy == "on-success" and job.get("lifecycle") == "succeeded")
-        )
-        if not authorized:
+        if job.get("kind") != "ci":
             job_repository.set_cleanup_state(job["job_id"], "retained")
             return {"ok": True, "status": "retained"}
         workspace_id = job.get("workspace_id")
@@ -730,14 +981,33 @@ class WorkspaceService:
                 return {"ok": True, "status": "already_released"}
             checkout = str(Path(str(job.get("project_root"))).resolve(strict=False))
             expected_digest = "sha256:" + hashlib.sha256(checkout.encode()).hexdigest()
+            authority = record.metadata.get("ci_cleanup_authority")
+            authority_digest = (authority.get("digest")
+                                if isinstance(authority, dict) else None)
+            authorized_policy = (
+                mode in {"isolated", "ephemeral"}
+                and (policy in {"always", "ephemeral"}
+                     or policy == "on-success" and
+                     job.get("lifecycle") == "succeeded")
+            )
+            if not authorized_policy or job.get("workspace_authority_digest") is None:
+                job_repository.set_cleanup_state(job["job_id"], "retained")
+                return {"ok": True, "status": "retained"}
             if (record.project_identity != job.get("project_identity") or
                     record.label != job.get("workspace_label") or
-                    record.source != "job" or
+                    record.source != "ci-materialization" or
                     record.lifecycle != "ready" or record.status != "ready" or
-                    record.metadata.get("job_owned") is not True or
-                    record.metadata.get("workspace_mode") != mode or
                     record.metadata.get("checkout_locator") != checkout or
-                    record.metadata.get("checkout_locator_digest") != expected_digest):
+                    record.metadata.get("checkout_locator_digest") != expected_digest or
+                    authority.get("owner") != "controller-ci-materialization" or
+                    authority.get("job_kind") != "ci" or
+                    authority.get("checkout_locator") != checkout or
+                    authority.get("workspace_label") != record.label or
+                    authority_digest != job.get("workspace_authority_digest") or
+                    authority_digest != _digest_payload({
+                        key: value for key, value in authority.items()
+                        if key != "digest"
+                    })):
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "terminal job does not exactly own the indexed workspace")
@@ -750,6 +1020,39 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_busy",
                     "another active job still owns the disposable workspace")
+            lease = job_repository.connection.execute(
+                "SELECT lease_id FROM workspace_leases WHERE project_identity=? "
+                "AND workspace_label=? LIMIT 1",
+                (job.get("project_identity"), job.get("workspace_label")),
+            ).fetchone()
+            if lease is not None:
+                raise WorkspaceIndexError(
+                    "workspace_busy", "workspace lease is still live")
+            process = job_repository.snapshot(job["job_id"]).get("process") or {}
+            for role, pid_key, identity_key in (
+                    ("supervisor", "supervisor_pid", "supervisor_start_identity"),
+                    ("child", "child_pid", "child_start_identity")):
+                pid = process.get(pid_key)
+                identity = process.get(identity_key)
+                if not pid or not identity:
+                    continue
+                observed = capture_process_identity(int(pid))
+                if observed is not None:
+                    observed = ProcessIdentity(
+                        observed.host_boot_id, observed.pid, observed.start_identity,
+                        process.get("supervisor_nonce_hash") or "",
+                        observed.process_group_id,
+                    )
+                expected = ProcessIdentity(
+                    process.get("host_boot_id") or "", int(pid), identity,
+                    process.get("supervisor_nonce_hash") or "",
+                    process.get("child_pgid") if role == "child" else None,
+                )
+                if verify_process_identity(expected, observed):
+                    if role == "supervisor" and int(pid) == os.getpid():
+                        continue
+                    raise WorkspaceIndexError(
+                        "workspace_busy", f"recorded {role} process is still live")
             if self.deployment_root is None:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
@@ -766,6 +1069,17 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_path_unsafe",
                     "terminal workspace locator is unsafe")
+            references = (
+                self.cleanup_reference_observer(checkout_path, record)
+                if self.cleanup_reference_observer is not None
+                else _observe_cleanup_references(checkout_path)
+            )
+            if (not isinstance(references, dict) or
+                    references.get("containers") != 0 or
+                    references.get("mounts") != 0 or record.bindings):
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "live container, mount, or binding absence is not proven")
             metadata_path = Path(record.path) if isinstance(record.path, str) else None
             legacy_root = repo.legacy_root.resolve(strict=False)
             if (metadata_path is None or metadata_path.name != "workspace.json" or
@@ -795,6 +1109,17 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "workspace metadata directory is not an exact owned leaf")
+            expected_identity = authority.get("checkout_identity")
+            if (not isinstance(expected_identity, dict) or
+                    _filesystem_identity(checkout_path) != expected_identity):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal checkout filesystem identity changed")
+            quarantine = checkout_path.parent / (
+                f".sandbox-ci-cleanup-{workspace_id}-{authority_digest[-12:]}")
+            if quarantine.exists() or quarantine.is_symlink():
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "cleanup quarantine is occupied")
             repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
             try:
                 if checkout_path.exists():
@@ -802,7 +1127,24 @@ class WorkspaceService:
                         raise WorkspaceIndexError(
                             "workspace_ownership_drift",
                             "terminal workspace is not a directory")
-                    shutil.rmtree(checkout_path)
+                    parent_fd = os.open(checkout_path.parent, os.O_RDONLY)
+                    try:
+                        os.rename(
+                            checkout_path.name, quarantine.name,
+                            src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                        )
+                        if _filesystem_identity(quarantine) != expected_identity:
+                            if not checkout_path.exists():
+                                os.rename(
+                                    quarantine.name, checkout_path.name,
+                                    src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                                )
+                            raise WorkspaceIndexError(
+                                "workspace_ownership_drift",
+                                "quarantined checkout identity changed")
+                    finally:
+                        os.close(parent_fd)
+                    shutil.rmtree(quarantine)
                 metadata_path.unlink()
                 metadata_path.parent.rmdir()
             except Exception:
@@ -1088,7 +1430,9 @@ class WorkspaceService:
 
 
 def finalize_terminal_workspace(job_repository, job_id: str,
-                                context: dict[str, Any] | None) -> dict[str, Any]:
+                                context: dict[str, Any] | None, *,
+                                workspace_service: WorkspaceService | None = None,
+                                ) -> dict[str, Any]:
     """Run the shared fail-closed cleanup seam without changing job result truth."""
     job = job_repository.get(job_id)
     if job.get("cleanup_state") in {"completed", "retained"}:
@@ -1112,16 +1456,19 @@ def finalize_terminal_workspace(job_repository, job_id: str,
             raise WorkspaceIndexError(
                 "workspace_ownership_drift",
                 "terminal cleanup context does not match the job registry owner")
-        repository = WorkspaceRepository(
-            context["index_path"], context["legacy_root"],
-            job_index_reader=lambda: __import__(
-                "sandbox.jobs.registry", fromlist=["read_resource_index"]
-            ).read_resource_index(job_repository.path),
-        )
-        service = WorkspaceService(
-            None, repository=repository,
-            deployment_root=Path(context["deployment_root"]),
-        )
+        if workspace_service is None:
+            repository = WorkspaceRepository(
+                context["index_path"], context["legacy_root"],
+                job_index_reader=lambda: __import__(
+                    "sandbox.jobs.registry", fromlist=["read_resource_index"]
+                ).read_resource_index(job_repository.path),
+            )
+            service = WorkspaceService(
+                None, repository=repository,
+                deployment_root=Path(context["deployment_root"]),
+            )
+        else:
+            service = workspace_service
         result = service.release_terminal_job(job, job_repository)
         job_repository.append_event(
             job_id, "workspace_cleanup", {"status": result["status"]})

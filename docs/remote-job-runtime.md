@@ -143,12 +143,17 @@ workspace leases.
 Remote CI uses the built-in `ci` execution profile when no project/workspace profile
 is declared; that profile requests `ephemeral` cleanup for its isolated cells. After
 the job has a durable terminal row and complete retained output/artifact evidence, the
-supervisor releases only the exact indexed `workspace_id` owned by that job. The same
-seam covers a pre-launch `supervisor_launch_failed` transition. `retain`, failed
-`on-success`, persistent/reusable mode, another active exact owner, missing IDs,
-ownership drift, foreign records, unsafe paths, and incomplete evidence all prevent
-deletion. Cleanup state becomes `failed` when release fails, while lifecycle, exit
-code, result, logs, metrics, and artifacts keep their original truth.
+supervisor may release only an exact indexed `workspace_id` backed by a controller-run
+CI materialization receipt whose immutable digest was stored with acceptance. A fresh
+check must prove no live recorded child/supervisor, container mount, host mount,
+resource binding, lease, or other active job. The owned filesystem identity is then
+renamed into an owner-only quarantine and revalidated before deletion, closing pathname
+replacement races. The same seam covers `supervisor_launch_failed`; a retry
+rematerializes from the retained exact source tree. Generic jobs, reusable/index/legacy
+workspaces, `retain`, failed `on-success`, missing authority, unknown observations,
+ownership drift, and unsafe paths all prevent deletion. Cleanup failure is separate
+from lifecycle, exit code, result, logs, metrics, and artifacts. This is local candidate
+behavior until the open remote and measured-reclamation gates in Spec 032 pass.
 
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
 For scheduled/maintenance cleanup, apply the configured age explicitly with

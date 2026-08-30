@@ -472,6 +472,7 @@ class JobSubmission:
     sync_generation_id: str | None = None
     source_access: str | None = None
     parallel_safe: bool = False
+    materialization_source_root: str | None = None
 
     def __post_init__(self) -> None:
         _safe_name(self.kind, "job kind")
@@ -552,6 +553,10 @@ class JobSubmission:
             raise ValueError("source access requires a synchronized generation")
         if not isinstance(self.parallel_safe, bool):
             raise ValueError("parallel-safe policy must be boolean")
+        if self.materialization_source_root is not None:
+            source_root = Path(self.materialization_source_root)
+            if not source_root.is_absolute() or ".." in source_root.parts:
+                raise ValueError("materialization source root must be absolute")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -588,6 +593,7 @@ class JobSubmission:
             "sync_generation_id": self.sync_generation_id,
             "source_access": self.source_access,
             "parallel_safe": self.parallel_safe,
+            "materialization_source_root": self.materialization_source_root,
             "source": asdict(self.source),
         }
 

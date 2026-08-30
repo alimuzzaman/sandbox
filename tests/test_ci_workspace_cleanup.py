@@ -1,11 +1,14 @@
 import tempfile
 import unittest
+import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 from sandbox.application.job_service import JobService
 from sandbox.application.workspace_service import WorkspaceService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
+from sandbox.jobs.process import ProcessIdentity
 from sandbox.jobs.registry import JobRepository, read_resource_index
 from sandbox.jobs.storage import JobStorage
 from sandbox.jobs.supervisor import run_descriptor
@@ -29,16 +32,22 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             None,
             repository=self.workspace_repository,
             deployment_root=self.deploy_root,
+            cleanup_reference_observer=lambda _checkout, _record: {
+                "containers": 0, "mounts": 0},
         )
+        self.sources = {}
 
     def tearDown(self):
         self.job_repository.close()
         self.temporary.cleanup()
 
     def _checkout(self, name):
+        source = self.deploy_root / f"{name}-source"
+        source.mkdir()
+        (source / "retained-evidence.txt").write_text("fixture")
         checkout = self.deploy_root / name
-        checkout.mkdir()
-        (checkout / "retained-evidence.txt").write_text("fixture")
+        shutil.copytree(source, checkout)
+        self.sources[str(checkout)] = source
         return checkout
 
     def _submission(self, checkout, *, request_id, mode="isolated", cleanup="ephemeral"):
@@ -46,6 +55,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "ci", str(checkout), "project:ci", "local", checkout.name,
             ("/bin/sh", "-c", "true"), 20, SourceIdentity("source"),
             request_id=request_id, workspace_mode=mode, cleanup_policy=cleanup,
+            materialization_source_root=str(self.sources[str(checkout)]),
         )
 
     def _service(self, launcher):
@@ -89,7 +99,10 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 })
                 accepted = service.submit(submission)
 
-                run_descriptor(descriptors[0])
+                with patch(
+                        "sandbox.application.workspace_service._observe_cleanup_references",
+                        return_value={"containers": 0, "mounts": 0}):
+                    run_descriptor(descriptors[0])
 
                 row = self.job_repository.get(accepted["job_id"])
                 self.assertEqual(row["lifecycle"], lifecycle)
@@ -150,7 +163,10 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(row["lifecycle"], "succeeded")
         self.assertEqual(row["exit_code"], 0)
         self.assertEqual(row["cleanup_state"], "failed")
-        self.assertTrue(checkout.exists())
+        self.assertFalse(checkout.exists())
+        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup-*"))
+        self.assertEqual(len(quarantines), 1)
+        self.assertTrue((quarantines[0] / "retained-evidence.txt").is_file())
         self.assertEqual(
             self.workspace_repository.get(row["workspace_id"]).lifecycle,
             "indeterminate",
@@ -221,6 +237,145 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         projected = next(item for item in after if item["workspace_id"] == workspace_id)
         self.assertEqual(projected["active_references"]["jobs"], 0)
         self.assertEqual(projected["lifecycle"], "destroyed")
+
+    def test_reconciled_terminal_job_refuses_cleanup_while_recorded_child_is_live(self):
+        checkout = self._checkout("live-child")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="live-child-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.put_process_identity(
+            accepted["job_id"], host_boot_id="boot", supervisor_pid=101,
+            supervisor_start_identity="gone", supervisor_nonce_hash="nonce",
+            child_pid=202, child_pgid=202, child_start_identity="live-child",
+        )
+        self.job_repository.transition(
+            accepted["job_id"], "interrupted",
+            termination_reason="supervisor_lost")
+
+        def observed(pid):
+            if pid == 202:
+                return ProcessIdentity("boot", 202, "live-child", "", 202)
+            return None
+
+        with patch(
+                "sandbox.application.workspace_service.capture_process_identity",
+                side_effect=observed, create=True):
+            row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["lifecycle"], "interrupted")
+        self.assertEqual(row["cleanup_state"], "failed")
+        self.assertTrue(checkout.exists())
+
+    def test_cleanup_requires_positive_zero_container_mount_and_binding_proof(self):
+        cases = (
+            ("container", {"containers": 1, "mounts": 0}, ()),
+            ("mount", {"containers": 0, "mounts": 1}, ()),
+            ("unknown", {"containers": None, "mounts": 0}, ()),
+            ("binding", {"containers": 0, "mounts": 0},
+             (("compose_project", "owned-runtime"),)),
+        )
+        for name, observed, bindings in cases:
+            with self.subTest(name=name):
+                checkout = self._checkout(f"reference-{name}")
+                self.workspaces.cleanup_reference_observer = (
+                    lambda _checkout, _record, result=observed: result)
+                self.workspaces.resource_binding_resolver = (
+                    lambda _submission, result=bindings: result)
+                service = self._service(lambda _descriptor: None)
+                accepted = service.submit(self._submission(
+                    checkout, request_id=f"reference-{name}-request"))
+                self.job_repository.transition(accepted["job_id"], "running")
+                self.job_repository.transition(
+                    accepted["job_id"], "succeeded", exit_code=0)
+
+                row = service.get(accepted["job_id"])
+
+                self.assertEqual(row["cleanup_state"], "failed")
+                self.assertTrue(checkout.exists())
+
+    def test_cleanup_quarantines_owned_inode_and_never_deletes_path_replacement(self):
+        checkout = self._checkout("pathname-aba")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="pathname-aba-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        moved = self.deploy_root / "reviewer-moved-owned"
+        real_rename = os.rename
+        attacked = False
+
+        def replace_before_quarantine(src, dst, *args, **kwargs):
+            nonlocal attacked
+            if not attacked and src == checkout.name:
+                attacked = True
+                real_rename(checkout, moved)
+                checkout.mkdir()
+                (checkout / "foreign.txt").write_text("must survive")
+            return real_rename(src, dst, *args, **kwargs)
+
+        with patch(
+                "sandbox.application.workspace_service.os.rename",
+                side_effect=replace_before_quarantine):
+            row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "failed")
+        self.assertEqual((checkout / "foreign.txt").read_text(), "must survive")
+        self.assertTrue((moved / "retained-evidence.txt").is_file())
+
+    def test_retry_rematerializes_fresh_disposable_checkout_after_auto_release(self):
+        checkout = self._checkout("retry-after-release")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="retry-after-release-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"], "completed")
+        self.assertFalse(checkout.exists())
+
+        retry = service.retry(
+            accepted["job_id"], request_id="retry-rematerialized-request")
+
+        self.assertTrue(checkout.is_dir())
+        self.assertEqual((checkout / "retained-evidence.txt").read_text(), "fixture")
+        self.assertNotEqual(retry["job_id"], accepted["job_id"])
+
+    def test_non_ci_mode_and_policy_cannot_self_authorize_checkout_deletion(self):
+        checkout = self._checkout("non-ci")
+        service = self._service(lambda _descriptor: None)
+        submission = self._submission(
+            checkout, request_id="non-ci-request")
+        submission = JobSubmission(**{**submission.__dict__, "kind": "test"})
+        accepted = service.submit(submission)
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+
+        row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "retained")
+        self.assertTrue(checkout.exists())
+
+    def test_supported_index_workspace_remains_compatible_and_is_not_reclassified(self):
+        checkout = self._checkout("supported-index")
+        namespace = "project-" + __import__("hashlib").sha256(
+            b"project:ci").hexdigest()[:24]
+        existing, _created = self.workspaces._register(
+            project_identity="project:ci", label=checkout.name,
+            namespace=namespace, checkout_locator=str(checkout), source="index",
+        )
+        service = self._service(lambda _descriptor: None)
+
+        accepted = service.submit(self._submission(
+            checkout, request_id="supported-index-request",
+            mode="persistent", cleanup="retain"))
+
+        row = self.job_repository.get(accepted["job_id"])
+        self.assertEqual(row["workspace_id"], existing.workspace_id)
+        self.assertEqual(self.workspace_repository.get(existing.workspace_id).source, "index")
+        self.assertTrue(checkout.exists())
 
 
 if __name__ == "__main__":

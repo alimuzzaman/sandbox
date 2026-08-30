@@ -36,12 +36,12 @@ not close the external or human gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
-- [x] **Locally implement fail-closed disposable CI workspace terminal cleanup.**
-  Jobs now retain an exact `workspace_id`; terminal success/failure and
-  `supervisor_launch_failed` use one cleanup seam; persistent, retained,
-  foreign, ambiguous, unsafe, or still-active workspaces are protected; cleanup
-  failure does not rewrite the job result. Local focused/adjacent proof is
-  recorded in Spec 032. Live disposable-remote acceptance is still pending.
+- [ ] **Prove fail-closed disposable CI workspace terminal cleanup.**
+  The local candidate binds controller materialization authority to the accepted
+  job, refuses live process/container/mount/binding references, quarantines and
+  revalidates the owned inode before deletion, and rematerializes retries.
+  Reviewer reproductions and local focused/adjacent proof are recorded in Spec
+  032, but live disposable-remote and measured reclamation gates remain open.
   Feedback/incident evidence: `52622c4577419a51f02d728f886b40f0`,
   `7ba71712a512c41794c72116ab503b70`. This repository note does not change the
   machine-local feedback status.

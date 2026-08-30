@@ -1178,6 +1178,39 @@ class WorkspaceRepository:
                 connection.close()
         return self.get(workspace_id)  # type: ignore[return-value]
 
+    def revive_destroyed(self, workspace_id: str, *,
+                         metadata: Mapping[str, Any]) -> WorkspaceRecord:
+        """Publish a freshly materialized generation for one destroyed identity."""
+        now = _timestamp(self.clock)
+        with _WRITE_LOCK:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._row_for(connection, workspace_id)
+                if current is None or current["lifecycle"] != "destroyed":
+                    raise WorkspaceIndexError(
+                        "workspace_recovery_required",
+                        "only a destroyed workspace can be rematerialized")
+                connection.execute(
+                    "UPDATE workspaces SET lifecycle='ready',status='ready',"
+                    "metadata_json=?,updated_at=? WHERE workspace_id=?",
+                    (_json(metadata), now, workspace_id),
+                )
+                self._bump_generation(connection)
+                connection.execute(
+                    "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) "
+                    "VALUES(?,?,?,?)",
+                    ("workspace_rematerialized", workspace_id,
+                     _json({"status": "ready"}), now),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.close()
+        return self.get(workspace_id)  # type: ignore[return-value]
+
     def reconcile_startup(self) -> list[str]:
         """Mark interrupted operations indeterminate; never retry mutation."""
         changed: list[str] = []

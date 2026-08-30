@@ -16,6 +16,11 @@
 | `indexed` | bool | present in the workspace index |
 | `hosted` | bool | belongs to a registered hosted site |
 | `active_job` | bool | bound by a non-terminal job through exact `workspace_id`; terminal evidence remains retained without an active projection |
+
+An inactive projection is reporting evidence only. Automatic CI checkout release
+also requires the accepted controller materialization-authority digest, fresh zero
+process/container/mount/binding/lease/job observations, and quarantine identity
+revalidation. Names and path correlation never supply that authority.
 | `protections` | list[str] | protection reasons already known host-side |
 
 ## ClassifiedEntry (decision, produced by `reclaim.py`)

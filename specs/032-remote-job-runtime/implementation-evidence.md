@@ -1214,24 +1214,20 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 
 - Feedback `52622c4577419a51f02d728f886b40f0` and incident
   `7ba71712a512c41794c72116ab503b70` exposed a missing lifecycle seam: terminal
-  jobs retained their evidence but did not release their job-owned disposable
+  jobs retained their evidence but did not release their disposable
   checkout, including the pre-launch `supervisor_launch_failed` path.
-- Jobs now persist the exact workspace ID established before acceptance. One
-  terminal cleanup seam covers supervisor completion, launch failure, startup
-  reconciliation, dependency failure, and pre-start cancellation. It authorizes
-  deletion only from the exact owned workspace ID plus matching project,
-  checkout digest, mode, policy, containment, and inactive-reference evidence.
-  Persistent, retained, foreign, ambiguous, legacy, and still-active workspaces
-  fail closed.
-- `.cli-venv/bin/python -m unittest -v tests.test_ci_workspace_cleanup
-  tests.test_job_service tests.test_job_supervisor tests.test_job_registry
-  tests.test_job_scheduler tests.test_job_cancellation
-  tests.test_job_reconciliation tests.test_job_retry tests.test_job_matrix
-  tests.test_workspace_runtime tests.test_workspace_repository
-  tests.test_workspace_concurrency tests.test_workspace_resource_ownership
-  tests.test_resource_adapters tests.test_remote_ci_jobs
-  tests.test_runtime_config tests.test_remote_job_transport tests.test_job_mcp
-  tests.test_architecture_boundaries` passed 286 tests.
+- The first local implementation was rejected by Sol High review. Reproductions
+  proved it could delete while an orphan child lived, delete a foreign pathname
+  replacement, break retry after release, let a non-CI job self-authorize, and
+  reject supported reusable/index/legacy records. Therefore the earlier 286-test
+  result is regression history, not acceptance proof, and T171/T172 remain open.
+- The revised local candidate stores an immutable controller CI-materialization
+  authority digest with acceptance, makes zero live process/container/mount/
+  binding/lease/job references a prerequisite, quarantines and revalidates the
+  owned filesystem identity before deletion, rematerializes retry from retained
+  source evidence, and leaves generic/reusable/index/legacy workspaces retained.
+  All five reviewer reproductions are named regressions in
+  `tests/test_ci_workspace_cleanup.py`.
 - Full unittest discovery was attempted but stopped during the unrelated live
   resource-probe suite after it produced large machine-state observations. Four
   failures observed earlier in that run reproduce independently on unchanged

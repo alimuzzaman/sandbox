@@ -65,13 +65,30 @@ class JobService:
         # capable of identifying its workspace.  The dependency stays optional
         # for compatibility adapters and isolated repository tests.
         workspace_id = None
+        workspace_authority_digest = None
         if self.workspace_registry is not None:
-            workspace = self.workspace_registry.ensure_submission(submission)
+            previous_authority_digest = None
+            if submission.retry_of_job_id is not None:
+                previous_authority_digest = self.repository.get(
+                    submission.retry_of_job_id).get("workspace_authority_digest")
+            workspace = (
+                self.workspace_registry.ensure_submission(
+                    submission,
+                    expected_previous_authority_digest=previous_authority_digest,
+                )
+                if submission.retry_of_job_id is not None
+                else self.workspace_registry.ensure_submission(submission)
+            )
             workspace_id = getattr(workspace, "workspace_id", None)
             if not isinstance(workspace_id, str):
                 raise RuntimeError("workspace_identity_ambiguous")
+            authority = getattr(workspace, "metadata", {}).get(
+                "ci_cleanup_authority")
+            if isinstance(authority, dict):
+                workspace_authority_digest = authority.get("digest")
         row, replay = self.repository.accept(
-            submission, workspace_id=workspace_id)
+            submission, workspace_id=workspace_id,
+            workspace_authority_digest=workspace_authority_digest)
         if replay:
             return self._accepted(row, replay=True)
         if submission.compatibility_differences:
@@ -340,7 +357,9 @@ class JobService:
         if self.workspace_registry is not None and hasattr(
                 self.workspace_registry, "terminal_cleanup_context"):
             context = self.workspace_registry.terminal_cleanup_context()
-        return finalize_terminal_workspace(self.repository, job_id, context)
+        return finalize_terminal_workspace(
+            self.repository, job_id, context,
+            workspace_service=self.workspace_registry)
 
     @staticmethod
     def _supervisor_is_owned(snapshot: dict) -> bool:
@@ -761,6 +780,8 @@ class JobService:
                 cancel_grace_seconds=canonical.get("cancel_grace_seconds", 20),
                 cancel_on_stall=bool(canonical["cancel_on_stall"]),
                 cleanup_policy=canonical["cleanup_policy"],
+                materialization_source_root=canonical.get(
+                    "materialization_source_root"),
                 execution_policy_provenance=canonical.get("execution_policy_provenance"),
                 environment_keys=tuple(canonical.get("environment_keys", ())),
                 artifact_paths=tuple(canonical.get("artifact_paths", ())),

@@ -266,11 +266,16 @@ workspace cleanup, reset, destroy, or network release as part of indexing.
   indeterminate; it MUST not infer ownership from path or network names.
 - **FR-054**: After terminal evidence is durable, including
   `supervisor_launch_failed`, Sandbox MUST automatically release only the exact
-  job-owned workspace whose durable `workspace_id`, isolated/ephemeral mode,
-  cleanup policy, project identity, checkout digest, and containment all agree.
+  controller-materialized CI workspace whose durable `workspace_id`, immutable
+  materialization-authority digest, isolated/ephemeral mode, cleanup policy,
+  project identity, checkout filesystem identity, and containment all agree.
+  A fresh observation MUST prove no live recorded process, container mount,
+  host mount, resource binding, lease, or active job before an atomic owned
+  quarantine/rename; the quarantined identity MUST be revalidated before delete.
   Persistent, reusable, retained, shared, foreign, ambiguous, or actively
   referenced workspaces MUST NOT be deleted. Cleanup failure MUST be recorded
   separately without changing the terminal job lifecycle, exit code, or result.
+  Retry after release MUST rematerialize from the retained exact source receipt.
 
 ### Acceptance evidence required before closing this amendment
 

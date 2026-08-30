@@ -1,15 +1,20 @@
 # Linux adoption proof runbook
 
-Every remaining task in specs 037, 038, and 039 is blocked on the same thing: no adapter
-is `adoptable`, and the only adapters that can ever be promoted live on Linux —
-`IngressProofAttestation` accepts `system-caddy` alone, `ResolverProofAttestation` accepts
-`systemd-resolved` alone. Until one of those is proven on a real Linux host, adoption
-cannot serve a single clean URL, and the dependent cleanup, drift, wildcard, and
-round-trip tasks have nothing to operate on.
+The remaining tasks in specs 037, 038, and 039 need live Linux host proof. Spec 037 now
+contains a source-owned qualification for one incumbent shape: system Caddy, Linux, exact
+HTTP. Selection succeeds only when the fixed helper proves that the observed listener's
+PID, start time, socket inode, executable digest, and listen endpoint belong to the active
+`caddy.service` MainPID before DNS mutation. HTTPS, wildcard naming, foreign or second
+Caddy owners, and executables outside the supported system binary roots remain refused.
+
+That source gate is local/static evidence, not the still-missing normal CLI proof. A real
+Linux run must still show `./sb domains use system-caddy` and setup applying a working
+route within those constraints. The resolver and managed-native work retain their own
+live host gates.
 
 This runbook is the exact sequence to run when such a host is available. It does not
-change what is advertised: promotion still requires the captured evidence plus the
-invocation-scoped attestation.
+broaden what is advertised: only the checked-in exact-HTTP system-Caddy qualification may
+adopt, and its helper proof is invocation-scoped.
 
 ## Host requirements
 
@@ -24,9 +29,10 @@ booted host, which is precisely the case the adapters must be honest about.
 
 ## Order
 
-038 T034 first. Ingress adoption (037 T044) needs a verified hostname from the resolver
-side before it will activate a route at all, so proving the resolver unblocks the ingress
-run, which in turn unblocks every cleanup and round-trip task.
+Use a host that satisfies both naming and ingress prerequisites. Establish the verified
+hostname first, then run the Spec 037 exact-HTTP lifecycle. This preserves the A→B→A
+sequence: ingress qualification is read-only, B proves naming, and only then may A add a
+route.
 
 ## 038 T034 — systemd-resolved exact name
 
@@ -53,11 +59,12 @@ Capture into `specs/038-tld-dns-adoption/evidence/systemd-resolved.md`: resolver
 after, the fresh lookup, the HTTP request through the selected ingress, both apply runs,
 and both cleanup runs.
 
-## 037 T044 — system Caddy lifecycle
+## 037 T078 — source-qualified system Caddy lifecycle
 
 ```bash
 ./sb domains ingress detect --json
 ./sb domains ingress plan --project-dir <project> --json
+./sb domains use system-caddy
 ./sb domains apply --project-dir <project> --json      # A→B→A, adds one owned fragment
 curl -sS -o /dev/null -w '%{http_code}\n' http://<hostname>/
 ./sb domains apply --project-dir <project> --json      # update, still one fragment
@@ -65,7 +72,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://<hostname>/
 ./sb domains cleanup --project-dir <project> --json
 ```
 
-Capture into `specs/037-host-ingress-adoption/evidence/system-caddy.md`: a bounded sample
+Capture into `specs/037-host-ingress-adoption/evidence/system-caddy.md`: the selected
+listener and active `caddy.service` identity match before naming changes; a bounded sample
 of pre-existing Caddy routes healthy before and after, the owned fragment appearing and
 disappearing, the foreign-collision refusal, and a rollback case (invalid candidate or
 failed reload) restoring prior state byte-for-byte.

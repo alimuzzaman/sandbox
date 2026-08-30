@@ -104,8 +104,13 @@ class FileFragmentAdapter:
                 "mutated": result.returncode == 0,
                 "error": _diagnostic(result.stderr)}
 
-    def ready(self):
-        result = self._run("preflight", self.network_root, self.adapter_id, timeout=10)
+    def ready(self, authority):
+        result = self._run(
+            "preflight", self.network_root, self.adapter_id,
+            authority["pid"], authority["start"], authority["executable_digest"],
+            ",".join(authority["socket_ids"]), authority["listen_address"],
+            authority["listen_port"], timeout=10,
+        )
         return result.returncode == 0
 
     def baseline_urls(self, plan):

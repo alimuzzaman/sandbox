@@ -88,6 +88,20 @@ class TestIngressHelper(unittest.TestCase):
         self.assertIn("selected Caddy process was replaced", text)
         self.assertIn("Caddy executable digest changed", text)
 
+    def test_read_only_preflight_binds_the_selected_listener_to_systemd(self):
+        text = HELPER.read_text()
+        preflight = text[text.index('    preflight)'):text.index('    validate-current)')]
+        self.assertIn('verify_caddy_authority', preflight)
+        self.assertIn('"$pid" "$start" "$executable_digest"', preflight)
+        self.assertIn('"$socket_ids" "$listen" "$listen_port"', preflight)
+        self.assertLess(preflight.index('validate_current'),
+                        preflight.index('verify_caddy_authority'))
+
+    def test_system_caddy_executable_is_limited_to_system_binary_roots(self):
+        text = HELPER.read_text()
+        self.assertIn('/usr/bin/caddy|/usr/sbin/caddy|/usr/local/bin/caddy|/usr/local/sbin/caddy',
+                      text)
+
     def test_hostname_collision_uses_full_adapted_policy(self):
         text = HELPER.read_text()
         self.assertIn("hostname_unclaimed", text)

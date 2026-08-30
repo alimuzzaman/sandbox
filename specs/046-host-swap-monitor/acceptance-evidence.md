@@ -42,6 +42,12 @@ safety or release readiness.
   seconds. The broader foundation, User Story 1, focused transport, interface, and help gate
   ran 97 tests and passed in 1.030 seconds. Python compilation and `git diff --check` passed.
   The evidence is local and synthetic only; no remote, apply, live-host, or reboot action ran.
+- After the required normal merge of `origin/latest` at
+  `a0845e0f9438788820199ee4229f4484a93466f9`, the exact T027 set ran 70 tests and
+  passed in 0.285 seconds; the broader 97-test gate passed in 1.167 seconds. The 50 focused
+  tests for the newly merged bounded remote-ensure transport passed in 1.114 seconds, proving
+  the Feature 046 merge did not overwrite that reviewed behavior. Compilation and diff checks
+  remained clean.
 - Independent-review correction RED was captured before the production fixes with
   `python3 -m unittest -v tests.test_host_memory_remote tests.test_host_memory_service
   tests.test_host_memory_provider tests.test_host_memory_repository

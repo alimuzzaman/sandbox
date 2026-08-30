@@ -140,6 +140,35 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertNotIn("stdout: beginning", result.data["stderr"])
             self.assertIsNone(registry.registry_get(str(root)))
 
+    def test_start_missing_network_returns_typed_failure_without_registry_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+            registry.registry_put(
+                str(root), instance="demo", label="default", service="web",
+                http_port=49152,
+            )
+            before = dict(registry.records)
+
+            def fail(argv, *, cwd=None, env=None, timeout=None):
+                return ProcessResult(
+                    tuple(argv), 1, "",
+                    "Error response from daemon: network sandbox-demo_default not found",
+                )
+
+            process.run = fail
+            result = adapter.invoke(OperationRequest(str(root), "start"))
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["error"]["code"], "stale_container_network")
+            self.assertFalse(result.data["mutated"])
+            self.assertEqual(
+                result.data["recovery"]["command"],
+                "./sb down --instance demo && ./sb up --instance demo",
+            )
+            self.assertEqual(registry.records, before)
+
     def test_exec_failure_bounds_custom_stream_and_retains_both_edges(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

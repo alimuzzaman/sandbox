@@ -28,6 +28,9 @@ _WORKSPACE_FAMILY_MARKER = re.compile(r"-workspace-[0-9a-f]{14}")
 # exit summary that explains a failed test.
 _MAX_EXEC_OUTPUT = 1_048_576
 _EXEC_OUTPUT_TRUNCATION_MARKER = "\n...[output truncated]...\n"
+_MISSING_NETWORK = re.compile(
+    r"\bnetwork\b[^\r\n]{0,240}\bnot found\b", re.IGNORECASE,
+)
 
 
 def _bounded_exec_output(value: object) -> str:
@@ -45,6 +48,15 @@ def _bounded_exec_output(value: object) -> str:
     # Ignore only incomplete UTF-8 endpoints; replacing them can expand the
     # byte count beyond the declared bound.
     return (encoded[:head] + marker + encoded[-tail:]).decode(errors="ignore")
+
+
+def _missing_network_failure(stdout: object, stderr: object) -> bool:
+    """Classify one bounded Compose missing-network diagnostic."""
+    evidence = "\n".join(
+        value[-4096:] for value in (stdout, stderr)
+        if isinstance(value, str) and value
+    )
+    return bool(_MISSING_NETWORK.search(evidence))
 
 
 def _valid_port(value: object) -> bool:
@@ -417,6 +429,28 @@ class ComposeAdapter:
                         "stderr": _bounded_exec_output(result.stderr),
                         "exit_code": int(result.returncode),
                         "reason": {"code": "compose_exec_failed"},
+                    },
+                )
+            if op == "start" and _missing_network_failure(result.stdout, result.stderr):
+                recovery = (
+                    f"./sb down --instance {runtime_id} && "
+                    f"./sb up --instance {runtime_id}"
+                )
+                return OperationResult(
+                    False, op, descriptor["root"], "compose",
+                    {
+                        "instance": runtime_id,
+                        "status": "error",
+                        "lifecycleState": "error",
+                        "mutated": False,
+                        "error": {
+                            "code": "stale_container_network",
+                            "message": (
+                                "the managed Docker network is missing; no containers "
+                                "or volumes were removed"
+                            ),
+                        },
+                        "recovery": {"command": recovery},
                     },
                 )
             detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())

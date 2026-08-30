@@ -204,6 +204,52 @@ def _compose_up(
     die(f"docker compose up failed with exit code {returncode}{suffix}",
         code=returncode)
 
+def _emit_generic_up_failure(
+    instance: str,
+    code: object,
+    message: object,
+    *,
+    mutated: bool = False,
+    recovery: Mapping[str, object] | None = None,
+    exit_code: object = None,
+) -> None:
+    """Emit one bounded, redacted generic-up failure and exit nonzero."""
+    from sandbox.services.redaction import redact_structure, redact_text
+
+    safe_code = (
+        code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code)
+        else "compose_up_failed"
+    )
+    raw_message = message if isinstance(message, str) else "generic Compose instance failed to start"
+    safe_message = " ".join(redact_text(raw_message).split())[:500]
+    if not safe_message:
+        safe_message = "generic Compose instance failed to start"
+    payload = {
+        "ok": False,
+        "mutated": mutated,
+        "command": "up",
+        "instance": instance,
+        "runtime": "compose",
+        "error": {"code": safe_code, "message": safe_message},
+    }
+    if recovery is not None and isinstance(recovery.get("command"), str):
+        payload["recovery"] = {"command": recovery["command"][:500]}
+    public = redact_structure(payload)
+    if not isinstance(public, Mapping):
+        public = {
+            "ok": False,
+            "mutated": False,
+            "command": "up",
+            "instance": instance,
+            "runtime": "compose",
+            "error": {
+                "code": "redaction_failed",
+                "message": "startup failure could not be rendered safely",
+            },
+        }
+    print(json.dumps(public, sort_keys=True))
+    code_value = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else 1
+    raise SystemExit(max(1, min(code_value, 255)) if code_value > 0 else 1)
 
 
 def cmd_up(cfg: dict, args) -> None:
@@ -213,7 +259,22 @@ def cmd_up(cfg: dict, args) -> None:
     if owner and owner.get("kind") == "compose":
         result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "start", label=owner.get("label", "default")))
         if isinstance(result, OperationError):
+            if json_output:
+                _emit_generic_up_failure(inst, result.code, result.message)
             die(result.message)
+        if not result.ok:
+            error = result.data.get("error")
+            error = error if isinstance(error, Mapping) else {}
+            code = error.get("code", "compose_up_failed")
+            message = error.get("message", "generic Compose instance failed to start")
+            recovery = result.data.get("recovery")
+            if json_output:
+                _emit_generic_up_failure(
+                    inst, code, message, mutated=result.data.get("mutated") is True,
+                    recovery=recovery if isinstance(recovery, Mapping) else None,
+                    exit_code=result.data.get("exit_code"),
+                )
+            die(str(message))
         url = result.data.get("url", "")
         if json_output:
             print(json.dumps({

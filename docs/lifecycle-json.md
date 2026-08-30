@@ -25,6 +25,7 @@ URL:
 ```
 
 Generic Compose and Herd responses use the same envelope and omit
-`mailpit_url` when that service is not part of the runtime. Startup failures
-still use the normal nonzero CLI error path; callers must treat a missing
-success document as unsuccessful and inspect the error stream.
+`mailpit_url` when that service is not part of the runtime. For Generic Compose,
+startup failures emit one bounded, redacted JSON failure document on stdout and
+exit nonzero; stderr remains empty. Machine callers should branch on
+`error.code`. Human output without `--json` keeps the normal error path.

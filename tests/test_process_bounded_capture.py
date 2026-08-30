@@ -6,6 +6,7 @@ must never exceed the limit, and — the subtle first-overflow case where the
 overflowing chunk itself is smaller than the tail window — the tail must be
 the TRUE last bytes of the full stream, never a duplicated prefix fragment.
 """
+import os
 import sys
 import tempfile
 import threading
@@ -18,6 +19,7 @@ from sandbox.resources.models import ResourceCancellationSignal
 from sandbox.services.process import (
     BoundedProcessRunner, _EDGE_TRUNCATION_MARKER, _BoundedEdgeCapture,
 )
+from tests.subprocess_support import synthetic_environment
 
 MARKER = _EDGE_TRUNCATION_MARKER
 
@@ -33,6 +35,43 @@ def stream_of(seed: int, total: int) -> bytes:
 
 
 class TestBoundedEdgeCapture(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
+    def test_output_overflow_promptly_terminates_and_reaps_long_lived_child(self):
+        with tempfile.TemporaryDirectory() as raw:
+            pid_file = Path(raw) / "pid"
+            script = (
+                "import os,pathlib,sys,time; "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                "sys.stdout.write('x' * 4096); sys.stdout.flush(); "
+                "time.sleep(30)"
+            )
+            drain_threads_before = {
+                thread.ident for thread in threading.enumerate()
+                if "(drain)" in thread.name
+            }
+            started = time.monotonic()
+            result = BoundedProcessRunner(
+                max_output=128, terminate_on_output_limit=True,
+            ).run(
+                (sys.executable, "-c", script),
+                env=synthetic_environment(), timeout=3,
+            )
+            elapsed = time.monotonic() - started
+            pid = int(pid_file.read_text())
+
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(result.termination_reason, "output_overflow")
+        self.assertTrue(result.stdout_truncated)
+        self.assertIn("completion is unknown", result.stderr)
+        self.assertLess(elapsed, 2.0)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        drain_threads_after = {
+            thread.ident for thread in threading.enumerate()
+            if "(drain)" in thread.name
+        }
+        self.assertEqual(drain_threads_after, drain_threads_before)
+
     def test_invalid_cancellation_is_rejected_before_spawn(self):
         with patch("sandbox.services.process.subprocess.Popen") as popen:
             with self.assertRaisesRegex(ValueError, "terminal_status"):

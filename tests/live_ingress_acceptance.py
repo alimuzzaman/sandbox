@@ -3,8 +3,8 @@
 
 Drives the composed clean-URL handshake (ingress capabilities -> resolver naming
 -> route activation) against a REAL incumbent and records before/after route
-health. Both typed proof attestations are constructed here, for this invocation
-only: no CLI flag or configuration value can promote an adapter.
+health. Ingress and resolver qualification come only from checked-in source;
+the evidence flag labels this live run and cannot widen either path.
 
 Usage:
     python3 tests/live_ingress_acceptance.py --project-dir <dir> [--label L]
@@ -63,23 +63,14 @@ def main() -> None:
     args = parser.parse_args()
 
     from sandbox.application.context import clean_url_service, domain_service, ingress_service
-    from sandbox.ingress.manifest import IngressProofAttestation
-
     baseline = tuple(args.baseline_url)
     observed: dict[str, object] = {"evidence_id": args.evidence_id,
                                    "before": incumbent_state(baseline)}
 
-    ingress_unproven = ingress_service(None)
-    observed["advertised_without_attestation"] = {
-        item["adapter_id"]: item["adoptable"]
-        for item in ingress_unproven.support()["adapters"]
-    }
-
     ingress = ingress_service(
-        None, proof_attestation=IngressProofAttestation("system-caddy", args.evidence_id),
-        consent_decider=lambda _identity: bool(args.consent),
+        None, consent_decider=lambda _identity: bool(args.consent),
     )
-    observed["advertised_with_attestation"] = {
+    observed["advertised_from_source"] = {
         item["adapter_id"]: item["adoptable"]
         for item in ingress.support()["adapters"]
     }

@@ -11,6 +11,7 @@ from pathlib import Path
 from sandbox.ingress.models import CredentialReference, IngressSelection, ListenerEndpoint
 from sandbox.ingress.models import RouteRecord
 from sandbox.ingress.models import digest
+from sandbox.ingress.qualification import SYSTEM_CADDY_QUALIFICATION
 
 
 PROTOCOL_PORTS = {"http": 80, "https": 443}
@@ -77,7 +78,8 @@ class IngressService:
     def __init__(self, *, detector, registry, bind_address="127.0.0.77",
                  bind_probe=None, repository=None, transaction_runner=None,
                  consent_decider=None, route_verifier=None, credential_lookup=None,
-                 clock=None, sandbox_owner=None, caddy_health=None):
+                 clock=None, sandbox_owner=None, caddy_health=None,
+                 platform="unknown"):
         self.detector = detector
         self.registry = registry
         self.bind_address = bind_address
@@ -98,6 +100,7 @@ class IngressService:
         self.sandbox_owner = sandbox_owner or (lambda _endpoint: False)
         self.caddy_health = caddy_health
         self.clock = clock
+        self.platform = platform
 
     def support(self):
         return {"ok": True, "operation": "ingress_support", "state": "ready",
@@ -259,35 +262,31 @@ class IngressService:
             ):
                 foreign_endpoint_owner = True
                 continue
-            # A wildcard listener serves loopback too, so require that the
-            # endpoint COVERS loopback rather than that its address literally is
-            # one: the documented conformance host runs system Caddy on `*:80`,
-            # which the stricter reading rejected as an unavailable control
-            # surface.
-            if candidate.adapter_id == "system-caddy" and any(
-                endpoint.owner_confidence != "proven"
-                or not (ipaddress.ip_address(endpoint.address).is_loopback
-                        or ipaddress.ip_address(endpoint.address).is_unspecified)
-                for endpoint in observation.endpoints
-                if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
-            ):
-                control_unavailable = True
-                continue
             if candidate.adapter_id == "system-caddy":
-                relevant = tuple(
-                    endpoint for endpoint in observation.endpoints
-                    if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
+                authority = SYSTEM_CADDY_QUALIFICATION.authority(
+                    observation=observation,
+                    platform=self.platform,
+                    protocols=protocols,
+                    capabilities=capabilities,
                 )
-                identities = {
-                    (str((endpoint.process or {}).get("pid") or ""),
-                     str((endpoint.process or {}).get("start") or ""),
-                     str((endpoint.process or {}).get("executable") or ""))
-                    for endpoint in relevant
-                }
-                if len(identities) != 1 or any(not endpoint.socket_id for endpoint in relevant):
+                if authority is None:
                     control_unavailable = True
                     continue
-            if hasattr(candidate.adapter, "ready") and not candidate.adapter.ready():
+                try:
+                    ready = (candidate.adapter.ready(authority)
+                             if hasattr(candidate.adapter, "ready") else False)
+                except Exception:
+                    ready = False
+                if not SYSTEM_CADDY_QUALIFICATION.qualifies(
+                    observation=observation,
+                    platform=self.platform,
+                    protocols=protocols,
+                    capabilities=capabilities,
+                    control_ready=ready,
+                ):
+                    control_unavailable = True
+                    continue
+            elif hasattr(candidate.adapter, "ready") and not candidate.adapter.ready():
                 control_unavailable = True
                 continue
             accepted = self._accepted_addresses(observation, protocols)
@@ -307,7 +306,11 @@ class IngressService:
             )
         pinned = self.registry.get(pin) if pin else None
         pinned_observed = pin and any(item.adapter_id == pin for item in observations)
-        if pinned and pinned_observed:
+        if foreign_endpoint_owner:
+            reason = "foreign_endpoint_owner"
+        elif control_unavailable:
+            reason = "ingress_control_unavailable"
+        elif pinned and pinned_observed:
             tier = pinned.declaration.support_tier
             reason = "credential_pending" if tier == "credential_pending" \
                 else "detected_not_adoptable"
@@ -443,7 +446,13 @@ class IngressService:
                 executable_path = Path(executable)
                 if not pid.isdigit() or not start.isdigit() or not executable_path.is_absolute():
                     raise ValueError("selected Caddy process identity is incomplete")
-                executable_digest = hashlib.sha256(executable_path.read_bytes()).hexdigest()
+                executable_digest = str(
+                    (relevant[0].process or {}).get("executable_digest") or ""
+                )
+                if (len(executable_digest) != 64
+                        or any(char not in "0123456789abcdef"
+                               for char in executable_digest)):
+                    raise ValueError("selected Caddy executable digest is incomplete")
                 authority = {
                     "pid": int(pid), "start": start,
                     "executable_digest": executable_digest,

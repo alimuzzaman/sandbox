@@ -24,8 +24,8 @@ class Process:
 
 
 # `ss` prints a dual-stack wildcard as `*`; /proc reports `::`.
-HELPER_OUTPUT = """* 80 4242 caddy /usr/bin/caddy 99187
-:: 443 4242 caddy /usr/bin/caddy 99187
+HELPER_OUTPUT = """* 80 4242 caddy /usr/bin/caddy 99187 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+:: 443 4242 caddy /usr/bin/caddy 99187 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 127.0.0.1 9120 771 hermes - -
 """
 
@@ -40,6 +40,7 @@ class TestHelperOutputParsing(unittest.TestCase):
             self.assertEqual(found[(wildcard, 80)]["executable"], "/usr/bin/caddy")
         self.assertIsNone(found[("127.0.0.1", 9120)]["executable"])
         self.assertEqual(found[("0.0.0.0", 80)]["start"], "99187")
+        self.assertEqual(found[("0.0.0.0", 80)]["executable_digest"], "a" * 64)
         self.assertIsNone(found[("127.0.0.1", 9120)]["start"])
 
     def test_malformed_lines_are_ignored(self):

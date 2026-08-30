@@ -47,7 +47,6 @@ def main() -> None:
     args = parser.parse_args()
 
     from sandbox.application.context import clean_url_service, domain_service, ingress_service
-    from sandbox.ingress.manifest import IngressProofAttestation
     from sandbox.ingress.models import RouteRecord
     import sandbox_core as sc
 
@@ -57,9 +56,7 @@ def main() -> None:
     backend = {"address": "127.0.0.1",
                "port": record.get("wordpress_port") or record.get("http_port")}
 
-    ingress = ingress_service(
-        None, proof_attestation=IngressProofAttestation("system-caddy", args.evidence_id),
-        consent_decider=lambda _identity: True)
+    ingress = ingress_service(None, consent_decider=lambda _identity: True)
     domains = domain_service(None, consent_decider=lambda _owner: True)
     service = clean_url_service(None, ingress=ingress, domains=domains)
 

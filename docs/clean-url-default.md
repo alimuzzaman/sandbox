@@ -109,9 +109,16 @@ intercepted 443 listener.
 
 The Docker/Caddy path was disabled in place on 2026-08-02 (`_ensure_url_proxy` stubbed to
 return `False`, `tools/proxy-helper.sh` replaced by a refusal). Effect: every instance on
-macOS silently fell back to `http://localhost:<port>`, because no resolver or ingress
-adapter can reach `adoptable` on darwin — `ResolverProofAttestation` only accepts
-`systemd-resolved` and `IngressProofAttestation` only accepts `system-caddy`.
+macOS silently fell back to `http://localhost:<port>`. The replacement adoption path had
+no usable Darwin adapter, so it could not provide parity with the cross-platform default.
+
+Linux system-Caddy adoption now has one source-owned production qualification: exact HTTP
+only, with a supported system executable and a read-only helper preflight that binds the
+observed PID, start time, socket inode, and listen endpoint to the active
+`caddy.service` MainPID before DNS may change. A same-name process, a second Caddy owning
+the selected socket, or a binary below `/tmp` or `/home` is not qualified. Normal live
+Linux CLI adoption through this path has not yet been recaptured, so Spec 037 T078 remains
+open. This narrow opt-in path does not change the Docker/Caddy default.
 
 Under constitution principle VI, disabling this path in place counts as removal. It
 requires recorded live parity of the replacement plus explicit human approval. Guard tests

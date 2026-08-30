@@ -327,7 +327,7 @@ def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
     parser.add_argument(
         "action", choices=("status", "plan", "cleanup", "monitor", "schedule",
-                           "swap-status", "swap-plan", "swap-apply", "swap-history")
+                           "swap-status")
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
@@ -383,11 +383,6 @@ def configure_parser(parser) -> None:
     # job-status/job-output rather than invoking the worker directly.
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-id", default=None)
-    parser.add_argument("--operation", choices=("enable", "disable"), default=None)
-    parser.add_argument("--size-gib", type=int, default=None)
-    parser.add_argument("--since", default=None)
-    parser.add_argument("--until", default=None)
-    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--node-store-family", default=None,
         help="exact canonical Compose family for named node-store plan/apply",
@@ -1064,7 +1059,7 @@ def _tier_action(args) -> bool:
 
 
 def _host_memory_cli(args):
-    """Run the four remote-only host-memory CLI actions."""
+    """Run the completed remote-only host-memory status action."""
     action = args.action
     remote = getattr(args, "remote", None)
     target = {"kind": "remote", "name": remote} if remote else None
@@ -1076,24 +1071,9 @@ def _host_memory_cli(args):
                       "message": "--remote is required for host-memory operations",
                       "retryable": False},
         }
-    allowed = {
-        "swap-status": set(),
-        "swap-plan": {"operation", "size_gib"},
-        "swap-apply": {"plan_id", "confirm"},
-        "swap-history": {"since", "until", "limit"},
-    }[action]
-    option_values = {
-        "operation": getattr(args, "operation", None),
-        "size_gib": getattr(args, "size_gib", None),
-        "plan_id": getattr(args, "plan_id", None),
-        "confirm": bool(getattr(args, "confirm", False)),
-        "since": getattr(args, "since", None), "until": getattr(args, "until", None),
-        "limit": getattr(args, "limit", None),
-    }
-    invalid = next((name for name, value in option_values.items()
-                    if name not in allowed and value not in (None, False)), None)
-    if invalid or any(getattr(args, name, None) for name in
-                      ("scope", "tier", "node_store_family", "detach", "request_id")):
+    if (getattr(args,"plan_id",None) or bool(getattr(args,"confirm",False))
+            or any(getattr(args, name, None) for name in
+                      ("scope", "tier", "node_store_family", "detach", "request_id"))):
         return {"schema_version": 1, "ok": False, "action": action,
                 "status": "refused", "target": target, "data": {},
                 "error": {"code": "invalid_mode", "message": "option is not valid for this host-memory action", "retryable": False}}
@@ -1108,23 +1088,7 @@ def _host_memory_cli(args):
                 "status": "refused", "target": target, "data": {},
                 "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
     budget = args.budget
-    if action == "swap-status": return service.status(budget or 15)
-    if action == "swap-plan":
-        if not args.operation:
-            return {"schema_version":1,"ok":False,"action":action,"status":"refused","target":target,"data":{},"error":{"code":"invalid_mode","message":"--operation is required","retryable":False}}
-        if args.operation == "disable" and args.size_gib is not None:
-            return {"schema_version":1,"ok":False,"action":action,"status":"refused","target":target,"data":{},"error":{"code":"invalid_mode","message":"--size-gib is valid only for enable","retryable":False}}
-        return service.plan(args.operation,
-                            size_gib=4 if args.size_gib is None else args.size_gib,
-                            budget_seconds=budget or 15)
-    if action == "swap-apply":
-        if not args.plan_id:
-            return {"schema_version":1,"ok":False,"action":action,"status":"refused","target":target,"data":{},"error":{"code":"plan_not_found","message":"--plan-id is required","retryable":False}}
-        return service.apply(args.plan_id, confirm=bool(args.confirm),
-                             budget_seconds=budget or 300)
-    return service.history(since=args.since, until=args.until,
-                           limit=288 if args.limit is None else args.limit,
-                           budget_seconds=budget or 15)
+    return service.status(budget or 15)
 
 
 def _emit_host_memory(payload, json_output):
@@ -1135,7 +1099,6 @@ def _emit_host_memory(payload, json_output):
     error = payload.get("error") or {}
     if error: print(f"  {error.get('code')}: {error.get('message')}")
     data = payload.get("data") or {}
-    if data.get("plan_id"): print(f"  plan: {data['plan_id']} expires: {data.get('expires_at')}")
     memory = data.get("memory") or {}
     if memory: print(f"  memory available: {_human_bytes(memory.get('available_bytes'))} / {_human_bytes(memory.get('total_bytes'))}")
     if "ownership" in data: print(f"  ownership: {data.get('ownership', 'unknown')}")
@@ -1196,7 +1159,7 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
-    if action in {"swap-status", "swap-plan", "swap-apply", "swap-history"}:
+    if action == "swap-status":
         payload = _host_memory_cli(args)
         _emit_host_memory(payload, bool(args.json))
         if not payload.get("ok"):

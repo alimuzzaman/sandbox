@@ -174,6 +174,7 @@ class HostMemoryStatusProjection:
 @dataclass(frozen=True)
 class RemoteSwapState:
     observed_at: str
+    target_identity: str
     memory: Mapping[str, Optional[int]]
     filesystem: Mapping[str, Optional[int]]
     swap_areas: Sequence[Mapping[str, Any]]
@@ -187,23 +188,32 @@ class RemoteSwapState:
     observation_digest: str
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]):
-        required = {"observed_at", "memory", "filesystem", "swap_areas", "swappiness",
+    def from_dict(cls, value: Mapping[str, Any], *, require_digest: bool = False):
+        required = {"observed_at", "target_identity", "memory", "filesystem", "swap_areas", "swappiness",
                     "monitor", "container_eligibility", "reboot_verification",
                     "operation_block", "ownership", "evidence_state"}
-        if not isinstance(value, Mapping) or set(value) - (required | {"observation_digest", "target_identity"}) or not required.issubset(value):
+        allowed = required | {"observation_digest"}
+        if (not isinstance(value, Mapping) or set(value) - allowed
+                or not required.issubset(value) or (require_digest and set(value) != allowed)):
             raise ValueError("invalid remote swap state fields")
         parse_utc(value["observed_at"])
+        if (not isinstance(value["target_identity"], str) or not value["target_identity"]
+                or len(value["target_identity"]) > 128):
+            raise ValueError("invalid target identity")
         memory = value["memory"]
-        if not isinstance(memory, Mapping):
+        if not isinstance(memory, Mapping) or set(memory) != {"total_bytes", "available_bytes", "state"}:
             raise ValueError("invalid memory evidence")
+        if memory["state"] not in {"known", "unknown", "malformed"}:
+            raise ValueError("invalid memory evidence state")
         total = _non_negative(memory.get("total_bytes"), "memory total", optional=True)
         available = _non_negative(memory.get("available_bytes"), "memory available", optional=True)
         if total is not None and available is not None and available > total:
             raise ValueError("available memory exceeds total")
         filesystem = value["filesystem"]
-        if not isinstance(filesystem, Mapping):
+        if not isinstance(filesystem, Mapping) or set(filesystem) != {"total_bytes", "free_bytes", "state"}:
             raise ValueError("invalid filesystem evidence")
+        if filesystem["state"] not in {"known", "unknown", "malformed"}:
+            raise ValueError("invalid filesystem evidence state")
         fs_total = _non_negative(filesystem.get("total_bytes"), "filesystem total", optional=True)
         fs_free = _non_negative(filesystem.get("free_bytes"), "filesystem free", optional=True)
         if fs_total is not None and fs_free is not None and fs_free > fs_total:
@@ -212,12 +222,57 @@ class RemoteSwapState:
         if not isinstance(areas, (list, tuple)) or len(areas) > 32:
             raise ValueError("invalid swap areas")
         for area in areas:
-            if not isinstance(area, Mapping):
+            area_fields = {"area_id", "type", "total_bytes", "used_bytes", "active",
+                           "persistent", "priority", "ownership"}
+            if not isinstance(area, Mapping) or set(area) != area_fields:
                 raise ValueError("invalid swap area")
+            if not HEX24.fullmatch(str(area["area_id"])) or area["type"] not in {"file", "partition"}:
+                raise ValueError("invalid swap area identity")
             area_total = _non_negative(area.get("total_bytes"), "swap total")
             area_used = _non_negative(area.get("used_bytes"), "swap used")
             if area_used > area_total:
                 raise ValueError("swap used exceeds total")
+            if not isinstance(area["active"], bool) or area["persistent"] not in {True, False, "unknown"}:
+                raise ValueError("invalid swap state")
+            if isinstance(area["priority"], bool) or not isinstance(area["priority"], int):
+                raise ValueError("invalid swap priority")
+            if area["ownership"] not in {"owned", "unmanaged", "unknown"}:
+                raise ValueError("invalid swap ownership")
+        swappiness = value["swappiness"]
+        if (not isinstance(swappiness, Mapping)
+                or set(swappiness) != {"effective", "owned", "drifted"}):
+            raise ValueError("invalid swappiness evidence")
+        effective = swappiness["effective"]
+        if effective is not None and (isinstance(effective, bool) or not isinstance(effective, int)
+                                      or not 0 <= effective <= 200):
+            raise ValueError("invalid swappiness value")
+        if not isinstance(swappiness["owned"], bool) or not isinstance(swappiness["drifted"], bool):
+            raise ValueError("invalid swappiness state")
+        MonitorHealth(**dict(value["monitor"]))
+        container = value["container_eligibility"]
+        container_fields = {"state", "version", "memory_limit_bytes", "memory_used_bytes",
+                            "swap_limit_bytes", "swap_used_bytes", "evidence_state"}
+        if not isinstance(container, Mapping) or set(container) != container_fields:
+            raise ValueError("invalid cgroup evidence")
+        if container["state"] not in {"eligible", "limited", "mixed", "unknown", "unsupported"}:
+            raise ValueError("invalid cgroup state")
+        if container["version"] not in {"v1", "v2", "unknown"} or container["evidence_state"] not in {"known", "partial", "unsupported"}:
+            raise ValueError("invalid cgroup evidence state")
+        for name in ("memory_limit_bytes", "memory_used_bytes", "swap_limit_bytes", "swap_used_bytes"):
+            _non_negative(container[name], name, optional=True)
+        reboot = value["reboot_verification"]
+        if (not isinstance(reboot, Mapping) or set(reboot) != {"state", "observed_at"}
+                or reboot["state"] not in {"verified", "unverified", "unknown"}):
+            raise ValueError("invalid reboot evidence")
+        if reboot["observed_at"] is not None: parse_utc(reboot["observed_at"])
+        block = value["operation_block"]
+        if block is not None:
+            if (not isinstance(block, Mapping) or set(block) != {"operation_id", "reason"}
+                    or not HEX64.fullmatch(str(block["operation_id"]))
+                    or not isinstance(block["reason"], str) or len(block["reason"]) > 64):
+                raise ValueError("invalid operation block")
+        if value["ownership"] not in {"owned", "absent", "unknown", "unmanaged"}:
+            raise ValueError("invalid ownership evidence")
         if value["evidence_state"] not in {item.value for item in EvidenceState}:
             raise ValueError("invalid evidence state")
         payload = {key: value[key] for key in required}
@@ -322,11 +377,18 @@ class MonitorHealth:
             raise ValueError("invalid pressure state")
         _non_negative(self.interval_seconds, "monitor interval", optional=True)
         _non_negative(self.age_seconds, "sample age", optional=True)
+        if self.sustained_swap_use is not None and not isinstance(self.sustained_swap_use, bool):
+            raise ValueError("invalid sustained swap state")
         if self.latest_sample_at is not None: parse_utc(self.latest_sample_at)
         if self.next_sample_at is not None: parse_utc(self.next_sample_at)
         required = {"current_files", "history_files", "total_bytes", "compliant", "truncated"}
         if not isinstance(self.retention, Mapping) or set(self.retention) != required:
             raise ValueError("invalid retention evidence")
+        for name in ("current_files", "history_files", "total_bytes"):
+            _non_negative(self.retention[name], "retention " + name)
+        if (not isinstance(self.retention["compliant"], bool)
+                or not isinstance(self.retention["truncated"], bool)):
+            raise ValueError("invalid retention state")
 
     def to_dict(self): return bounded(asdict(self), 16 * 1024)
 

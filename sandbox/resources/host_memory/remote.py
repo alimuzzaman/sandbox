@@ -7,7 +7,7 @@ import math
 import numbers
 from typing import Callable, Mapping
 
-from .models import HEX24, HEX64, bounded, parse_utc
+from .models import HEX24, HEX64, RemoteSwapState, bounded, parse_utc
 
 ACTIONS = frozenset({"host_memory_status", "host_memory_history", "host_memory_apply"})
 
@@ -55,7 +55,7 @@ def validate_request(payload):
     return bounded(payload,64*1024)
 
 
-def validate_response(response, *, marker, revision):
+def validate_response(response, *, marker, revision, action):
     envelope_fields={"resource_schema","host_memory_schema","transport","service","result"}
     if not isinstance(response,dict) or set(response)!=envelope_fields or response.get("resource_schema")!=1:
         raise RemoteProtocolError("remote_swap_protocol_mismatch","resource protocol is unavailable")
@@ -67,6 +67,8 @@ def validate_response(response, *, marker, revision):
     result=response.get("result")
     if not isinstance(result,dict): raise RemoteProtocolError("response_invalid","remote response is invalid")
     try:
+        if action == "host_memory_status":
+            return RemoteSwapState.from_dict(result, require_digest=True).to_dict()
         return bounded(result)
     except (TypeError, ValueError):
         raise RemoteProtocolError("response_invalid", "remote evidence is invalid or oversized") from None
@@ -84,4 +86,5 @@ class HostMemoryRemote:
         payload=validate_request({"action":action,"remote_name":self.name,**fields})
         try: response=self.request(self.record,payload)
         except Exception as exc: raise RemoteProtocolError("remote_unreachable","remote control endpoint is unreachable") from exc
-        return validate_response(response,marker=self.marker,revision=self.revision)
+        return validate_response(response,marker=self.marker,revision=self.revision,
+                                 action=action)

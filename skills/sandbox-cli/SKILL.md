@@ -478,14 +478,9 @@ tools and a WordPress project does not receive generic container-exec tools.
 
 ## Remote host memory
 
-Use `sb resources swap-status|swap-plan|swap-apply|swap-history --remote NAME`; never replace
-these commands with SSH or direct host access. Planning stays on the controller and sends
-only `host_memory_status`. The only other wire actions are `host_memory_history` and the
-confirmation-gated `host_memory_apply`. Apply accepts a stored `--plan-id --confirm`, never
-an operation, size, path, argv, shell, unit, or file override. Reuse the same plan identity
-after ambiguous delivery and inspect status before replay; never create a second identity.
-Treat `rollback_incomplete`, revision/protocol mismatch, ownership ambiguity, and unmanaged
-swap as non-authorizing. Live mutation, remote runtime updates, and reboot checks need their
-own approval; synthetic-provider evidence is not live proof.
-On the current implementation lane, `host_memory_apply` dispatch stays unreachable until
-T047 is GREEN; do not work around that gate.
+Use `sb resources swap-status --remote NAME`; never replace it with SSH or direct host access.
+The current MVP registers only the read-only `host_memory_status` action. Planning, apply,
+disable, and history commands are not available. Treat revision/protocol mismatch, partial
+cgroup evidence, ownership ambiguity, and unmanaged swap as non-authorizing. Live mutation,
+remote runtime updates, and reboot checks need their own approval; synthetic-provider
+evidence is not live proof.

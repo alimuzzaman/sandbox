@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+import hashlib
+import json
 
 GIB = 1024 ** 3
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
@@ -27,17 +29,21 @@ PROC_SWAPS_OWNED = (
 )
 CGROUP_V2 = {
     "/proc/self/cgroup": "0::/fixture.scope\n",
-    "/sys/fs/cgroup/memory.max": str(12 * GIB),
-    "/sys/fs/cgroup/memory.current": str(6 * GIB),
-    "/sys/fs/cgroup/memory.swap.max": str(2 * GIB),
-    "/sys/fs/cgroup/memory.swap.current": str(256 * 1024 ** 2),
+    "/sys/fs/cgroup/fixture.scope/memory.max": str(12 * GIB),
+    "/sys/fs/cgroup/fixture.scope/memory.current": str(6 * GIB),
+    "/sys/fs/cgroup/fixture.scope/memory.swap.max": str(2 * GIB),
+    "/sys/fs/cgroup/fixture.scope/memory.swap.current": str(256 * 1024 ** 2),
+    "/sys/fs/cgroup/memory.max": "max",
+    "/sys/fs/cgroup/memory.swap.max": "max",
 }
 CGROUP_V1 = {
     "/proc/self/cgroup": "5:memory:/fixture.scope\n",
-    "/sys/fs/cgroup/memory/memory.limit_in_bytes": str(12 * GIB),
-    "/sys/fs/cgroup/memory/memory.usage_in_bytes": str(6 * GIB),
-    "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes": str(14 * GIB),
-    "/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes": str(7 * GIB),
+    "/sys/fs/cgroup/memory/fixture.scope/memory.limit_in_bytes": str(12 * GIB),
+    "/sys/fs/cgroup/memory/fixture.scope/memory.usage_in_bytes": str(6 * GIB),
+    "/sys/fs/cgroup/memory/fixture.scope/memory.memsw.limit_in_bytes": str(14 * GIB),
+    "/sys/fs/cgroup/memory/fixture.scope/memory.memsw.usage_in_bytes": str(7 * GIB),
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes": str(16 * GIB),
+    "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes": str(20 * GIB),
 }
 
 
@@ -57,6 +63,40 @@ def eligible_state(**overrides):
         "evidence_state": "known",
     }
     state.update(overrides)
+    return state
+
+
+def status_state(**overrides):
+    state = {
+        "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+        "target_identity": TARGET,
+        "memory": {"total_bytes": 16 * GIB, "available_bytes": 12 * GIB,
+                   "state": "known"},
+        "filesystem": {"total_bytes": 100 * GIB, "free_bytes": 80 * GIB,
+                       "state": "known"},
+        "swap_areas": [],
+        "swappiness": {"effective": 60, "owned": False, "drifted": False},
+        "monitor": {
+            "service_state": "missing", "timer_state": "missing",
+            "interval_seconds": None, "latest_sample_at": None,
+            "age_seconds": None, "freshness": "missing", "next_sample_at": None,
+            "sustained_swap_use": None, "pressure_state": "unknown",
+            "retention": {"current_files": 0, "history_files": 0,
+                          "total_bytes": 0, "compliant": True, "truncated": False},
+        },
+        "container_eligibility": {
+            "state": "eligible", "version": "v2", "memory_limit_bytes": None,
+            "memory_used_bytes": 6 * GIB, "swap_limit_bytes": None,
+            "swap_used_bytes": 0, "evidence_state": "known",
+        },
+        "reboot_verification": {"state": "unverified", "observed_at": None},
+        "operation_block": None, "ownership": "absent", "evidence_state": "known",
+    }
+    state.update(overrides)
+    state["observation_digest"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in state.items() if key != "observation_digest"},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
     return state
 
 

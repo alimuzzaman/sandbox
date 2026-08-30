@@ -24,6 +24,15 @@ class HostMemoryInterfacesTest(unittest.TestCase):
         dispatch=source.split("def _resource_contract",1)[1].split("def _host_memory_contract",1)[0]
         self.assertNotIn('"host_memory_apply"',dispatch)
 
+    def test_status_server_joins_repository_monitor_evidence_only(self):
+        source=Path("mcp/wp-server/server.py").read_text()
+        dispatch=source.split("def _resource_contract",1)[1].split("def _host_memory_contract",1)[0]
+        self.assertIn('{"host_memory_status"}',dispatch)
+        self.assertNotIn("host_memory_history",dispatch)
+        contract=source.split("def _host_memory_contract",1)[1].split("def _remote_wp_error",1)[0]
+        self.assertIn("status_monitor_evidence",contract)
+        self.assertNotIn("provider.apply",contract)
+
     def test_context_projection_adapter_returns_no_service(self):
         from sandbox.resources import context
         status = {"target_identity":"host", "observed_at":"2026-08-30T12:00:00Z",

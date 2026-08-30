@@ -49,3 +49,15 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         files = list(Path(self.tmp.name).glob("history*.jsonl"))
         self.assertLessEqual(len(files), 9)
         self.assertLessEqual(sum(path.stat().st_size for path in files), 700)
+
+    def test_status_monitor_evidence_uses_real_history(self):
+        for minute in (45, 50, 55):
+            self.repo.append_sample(sample(
+                f"2026-08-30T11:{minute}:00Z", 512 * 1024 ** 2,
+            ))
+        monitor = self.repo.status_monitor_evidence(now=NOW)
+        self.assertEqual(monitor["latest_sample_at"], "2026-08-30T11:55:00Z")
+        self.assertEqual(monitor["next_sample_at"], "2026-08-30T12:00:00Z")
+        self.assertEqual(monitor["freshness"], "fresh")
+        self.assertTrue(monitor["sustained_swap_use"])
+        self.assertEqual(monitor["retention"]["current_files"], 1)

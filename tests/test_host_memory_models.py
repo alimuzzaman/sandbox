@@ -8,7 +8,7 @@ from sandbox.resources.host_memory.models import (
 )
 from tests.host_memory_assertions import assert_privacy_bounded
 from tests.host_memory_fixtures import (
-    MARKER, NOW, REVISION, TARGET, eligible_state, ownership_receipt, sample,
+    MARKER, NOW, REVISION, TARGET, eligible_state, ownership_receipt, sample, status_state,
 )
 
 
@@ -31,7 +31,7 @@ class HostMemoryModelsTest(unittest.TestCase):
         self.assertEqual(len(canonical_digest({"a":1})),64)
 
     def test_remote_state_validates_bytes_and_derives_digest(self):
-        state = RemoteSwapState.from_dict(eligible_state())
+        state = RemoteSwapState.from_dict(status_state(), require_digest=True)
         self.assertEqual(len(state.observation_digest), 64)
         malformed = eligible_state(memory={"total_bytes": 1, "available_bytes": 2})
         with self.assertRaises(ValueError):

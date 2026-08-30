@@ -31,6 +31,21 @@ safety or release readiness.
 - `tests.test_server_transport` could not run under system Python because `httpx` is absent,
   and `mcp/wp-server/.venv/bin/python` does not exist in this worktree. This is an explicit
   local dependency gap, not a passing server-transport result.
+- Independent-review correction RED was captured before the production fixes with
+  `python3 -m unittest -v tests.test_host_memory_remote tests.test_host_memory_service
+  tests.test_host_memory_provider tests.test_host_memory_repository
+  tests.test_host_memory_interfaces tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`:
+  42 tests ran with three failures and 15 errors. The failures covered strict full-status
+  validation, target-bound swap ownership, retained-history status composition, hierarchical
+  cgroup evidence, and status-only reachability. A follow-up nested retention-type regression
+  also failed alone before its validator was tightened.
+- After those bounded corrections, the exact T027 module set ran 65 tests and passed in
+  0.247 seconds. The broader foundation, User Story 1, focused transport, interface, and help
+  command ran 90 tests and passed in 1.128 seconds. Future `swap-plan`, `swap-apply`, and
+  `swap-history` parser attempts intentionally emitted argparse rejection text during these
+  passing tests. A fresh `origin/latest` fetch followed by the required normal merge reported
+  `Already up to date`. Python compilation and `git diff --check` passed. This remains local
+  synthetic evidence only; no remote, live host, apply, or reboot action was performed.
 
 - The requested `.cli-venv/bin/python` runtime was absent (`no such file or directory`).
 - `python3 -m unittest -v tests.test_host_memory_models tests.test_host_memory_policy

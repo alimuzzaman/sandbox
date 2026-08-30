@@ -986,38 +986,15 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         parser=argparse.ArgumentParser(); configure_parser(parser)
         return parser.parse_args(argv)
 
-    def test_host_memory_actions_and_options_are_registered(self):
-        for action in ("swap-status","swap-plan","swap-apply","swap-history"):
-            self.assertEqual(self._args([action,"--remote","fixture"]).action,action)
-        parsed=self._args(["swap-plan","--remote","fixture","--operation","enable","--size-gib","8"])
-        self.assertEqual((parsed.operation,parsed.size_gib),("enable",8))
+    def test_only_completed_status_action_is_registered(self):
+        self.assertEqual(self._args(["swap-status","--remote","fixture"]).action,"swap-status")
+        for action in ("swap-plan","swap-apply","swap-history"):
+            with self.assertRaises(SystemExit): self._args([action,"--remote","fixture"])
 
     def test_remote_is_required_before_service_construction(self):
         from sandbox.commands.resources import _host_memory_cli
         result=_host_memory_cli(self._args(["swap-status"]))
         self.assertEqual(result["error"]["code"],"remote_required")
-
-    def test_apply_requires_confirm_before_transport(self):
-        from sandbox.commands.resources import _host_memory_cli
-        class Service:
-            def apply(self,plan_id,*,confirm,budget_seconds):
-                self.confirm=confirm
-                return {"schema_version":1,"ok":False,"action":"swap-apply","status":"refused","target":{},"data":{},"error":{"code":"confirmation_required","message":"required","retryable":False}}
-        service=Service()
-        with patch("sandbox.commands.resources.host_memory_service",return_value=service):
-            result=_host_memory_cli(self._args(["swap-apply","--remote","fixture","--plan-id","a"*64]))
-        self.assertFalse(service.confirm); self.assertEqual(result["error"]["code"],"confirmation_required")
-
-    def test_zero_size_and_limit_are_not_rewritten_to_defaults(self):
-        from sandbox.commands.resources import _host_memory_cli
-        class Service:
-            def plan(self,operation,*,size_gib,budget_seconds): self.size=size_gib; return {"ok":False}
-            def history(self,*,since,until,limit,budget_seconds): self.limit=limit; return {"ok":False}
-        service=Service()
-        with patch("sandbox.commands.resources.host_memory_service",return_value=service):
-            _host_memory_cli(self._args(["swap-plan","--remote","fixture","--operation","enable","--size-gib","0"]))
-            _host_memory_cli(self._args(["swap-history","--remote","fixture","--limit","0"]))
-        self.assertEqual((service.size,service.limit),(0,0))
 
     def test_status_text_and_json_share_the_same_bounded_envelope(self):
         from sandbox.commands import resources

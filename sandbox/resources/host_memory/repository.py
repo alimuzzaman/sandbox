@@ -6,9 +6,11 @@ import json
 import os
 import re
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
-from .models import AggregateMemorySample, HEX64, OwnershipReceipt, bounded
+from .models import AggregateMemorySample, HEX64, OwnershipReceipt, bounded, parse_utc, utc_text
+from .policy import freshness, sustained_swap_use
 
 
 class RepositoryError(RuntimeError): pass
@@ -135,3 +137,42 @@ class HostMemoryRepository:
             "samples":samples,"counts":{"returned":len(samples),"malformed":malformed},
             "freshness":"unknown" if not samples else "observed","complete":malformed==0,
             "truncated":len(samples)>=limit})
+
+    def status_monitor_evidence(self, *, now, interval_seconds=300):
+        """Derive bounded monitor health from the retained aggregate history."""
+        window=self.history_window(limit=3)
+        samples=window["samples"]
+        latest=samples[0] if samples else None
+        latest_at=latest.get("sampled_at") if latest else None
+        history_files=sorted(self.root.glob("history.*.jsonl"))
+        current=self.root/"history.jsonl"
+        paths=([current] if current.exists() else [])+history_files
+        total_bytes=sum(path.stat().st_size for path in paths)
+        retention={"current_files":1 if current.exists() else 0,
+                   "history_files":len(history_files),"total_bytes":total_bytes,
+                   "compliant":(len(history_files)<=8 and total_bytes<=32*1024*1024
+                                and window["counts"]["malformed"]==0),
+                   "truncated":bool(window["truncated"])}
+        if latest_at is None:
+            return {"latest_sample_at":None,"age_seconds":None,"freshness":"missing",
+                    "next_sample_at":None,"sustained_swap_use":None,
+                    "pressure_state":"unknown","retention":retention,
+                    "history_complete":bool(window["complete"])}
+        latest_time=parse_utc(latest_at)
+        age=(now-latest_time).total_seconds()
+        pressure=latest.get("pressure")
+        pressure_state="unknown"
+        if isinstance(pressure,dict):
+            values=[]
+            for group in ("some","full"):
+                item=pressure.get(group)
+                if isinstance(item,dict) and isinstance(item.get("avg10"),(int,float)):
+                    values.append(float(item["avg10"]))
+            if values: pressure_state="pressured" if any(value>0 for value in values) else "normal"
+        return {"latest_sample_at":latest_at,
+                "age_seconds":int(age) if age>=0 else None,
+                "freshness":freshness(latest_at,now),
+                "next_sample_at":utc_text(latest_time+timedelta(seconds=interval_seconds)),
+                "sustained_swap_use":sustained_swap_use(list(reversed(samples))),
+                "pressure_state":pressure_state,"retention":retention,
+                "history_complete":bool(window["complete"])}

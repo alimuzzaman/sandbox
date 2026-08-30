@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
 import platform
 import shutil
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AggregateMemorySample, OwnershipReceipt, bounded, canonical_digest
-from .policy import PolicyRefusal, plan_current
+from .models import AggregateMemorySample, OwnershipReceipt, RemoteSwapState, canonical_digest
 
 STATE=Path("/var/lib/sandbox/host-memory")
 SWAP=STATE/"sandbox.swap"
@@ -33,11 +29,15 @@ FIXED_ARTIFACTS={
 
 
 class HostProvider:
-    def __init__(self, *, read_text=None, stat=None, run=None, now=None):
+    def __init__(self, *, read_text=None, stat=None, run=None, now=None,
+                 target_identity=None):
         self.read_text=read_text or (lambda path: Path(path).read_text())
         self.stat=stat or (lambda path: Path(path).lstat())
         self.run=run or self._run
         self.now=now or (lambda: datetime.now(timezone.utc))
+        self.target_identity=(target_identity or hashlib.sha256(
+            platform.node().encode("utf-8", "replace")
+        ).hexdigest()[:24])
 
     @staticmethod
     def _run(argv, timeout=5):
@@ -75,55 +75,77 @@ class HostProvider:
         if cgroup is None:
             return {"state": "unknown", "version": "unknown",
                     "memory_limit_bytes": None, "memory_used_bytes": None,
-                    "swap_limit_bytes": None, "swap_used_bytes": None}
+                    "swap_limit_bytes": None, "swap_used_bytes": None,
+                    "evidence_state": "partial"}
         try:
             v2_line = next((line for line in cgroup.splitlines() if line.startswith("0::")), None)
             if v2_line is not None:
                 relative = v2_line[3:].strip().strip("/")
                 if relative and (".." in relative.split("/") or "\x00" in relative):
                     raise ValueError("invalid cgroup locator")
-                prefix = "/sys/fs/cgroup" + ("/" + relative if relative else "")
-                def v2(name):
-                    value = self._optional_text(prefix + "/" + name)
-                    if value is None and prefix != "/sys/fs/cgroup":
-                        value = self._optional_text("/sys/fs/cgroup/" + name)
-                    return self._bounded_integer(value)
-                memory_limit = v2("memory.max")
-                memory_used = v2("memory.current")
-                swap_limit = v2("memory.swap.max")
-                swap_used = v2("memory.swap.current")
+                parts = relative.split("/") if relative else []
+                prefixes = ["/sys/fs/cgroup" + ("/" + "/".join(parts[:index]) if index else "")
+                            for index in range(len(parts), -1, -1)]
+                memory_values=[]; swap_values=[]
+                for prefix in prefixes:
+                    memory_text=self._optional_text(prefix+"/memory.max")
+                    swap_text=self._optional_text(prefix+"/memory.swap.max")
+                    if memory_text is None or swap_text is None: raise ValueError
+                    memory_values.append(self._bounded_integer(memory_text))
+                    swap_values.append(self._bounded_integer(swap_text))
+                leaf=prefixes[0]
+                memory_used=self._bounded_integer(self._optional_text(leaf+"/memory.current"))
+                swap_used=self._bounded_integer(self._optional_text(leaf+"/memory.swap.current"))
+                if memory_used is None or swap_used is None: raise ValueError
+                finite_memory=[value for value in memory_values if value is not None]
+                finite_swap=[value for value in swap_values if value is not None]
+                memory_limit=min(finite_memory) if finite_memory else None
+                swap_limit=min(finite_swap) if finite_swap else None
                 state = "limited" if memory_limit is not None or swap_limit is not None else "eligible"
                 return {"state": state, "version": "v2", "memory_limit_bytes": memory_limit,
                         "memory_used_bytes": memory_used, "swap_limit_bytes": swap_limit,
-                        "swap_used_bytes": swap_used}
+                        "swap_used_bytes": swap_used, "evidence_state": "known"}
             v1_line = next((line for line in cgroup.splitlines() if ":memory:" in line), None)
             if v1_line is not None:
                 relative = v1_line.split(":", 2)[2].strip().strip("/")
                 if relative and (".." in relative.split("/") or "\x00" in relative):
                     raise ValueError("invalid cgroup locator")
-                prefix = "/sys/fs/cgroup/memory" + ("/" + relative if relative else "")
-                def v1(name):
-                    value = self._optional_text(prefix + "/" + name)
-                    if value is None and prefix != "/sys/fs/cgroup/memory":
-                        value = self._optional_text("/sys/fs/cgroup/memory/" + name)
-                    return self._bounded_integer(value)
-                memory_limit = v1("memory.limit_in_bytes")
-                memory_used = v1("memory.usage_in_bytes")
-                memsw_limit = v1("memory.memsw.limit_in_bytes")
-                memsw_used = v1("memory.memsw.usage_in_bytes")
+                parts=relative.split("/") if relative else []
+                prefixes=["/sys/fs/cgroup/memory"+("/"+"/".join(parts[:index]) if index else "")
+                          for index in range(len(parts),-1,-1)]
+                memory_values=[]; memsw_values=[]
+                for prefix in prefixes:
+                    memory_text=self._optional_text(prefix+"/memory.limit_in_bytes")
+                    memsw_text=self._optional_text(prefix+"/memory.memsw.limit_in_bytes")
+                    if memory_text is None or memsw_text is None: raise ValueError
+                    memory_value=self._bounded_integer(memory_text)
+                    memsw_value=self._bounded_integer(memsw_text)
+                    # Cgroup v1 represents an unlimited value with a page-rounded
+                    # number close to LONG_MAX rather than the v2 "max" token.
+                    memory_values.append(None if memory_value >= 1 << 60 else memory_value)
+                    memsw_values.append(None if memsw_value >= 1 << 60 else memsw_value)
+                leaf=prefixes[0]
+                memory_used=self._bounded_integer(self._optional_text(leaf+"/memory.usage_in_bytes"))
+                memsw_used=self._bounded_integer(self._optional_text(leaf+"/memory.memsw.usage_in_bytes"))
+                if memory_used is None or memsw_used is None: raise ValueError
+                finite_memory=[value for value in memory_values if value is not None]
+                finite_memsw=[value for value in memsw_values if value is not None]
+                memory_limit=min(finite_memory) if finite_memory else None
+                memsw_limit=min(finite_memsw) if finite_memsw else None
                 swap_limit = (max(0, memsw_limit - memory_limit)
                               if memsw_limit is not None and memory_limit is not None else None)
                 swap_used = (max(0, memsw_used - memory_used)
                              if memsw_used is not None and memory_used is not None else None)
-                return {"state": "limited" if memory_limit is not None else "unknown",
+                return {"state": "limited" if memory_limit is not None or memsw_limit is not None else "eligible",
                         "version": "v1", "memory_limit_bytes": memory_limit,
                         "memory_used_bytes": memory_used, "swap_limit_bytes": swap_limit,
-                        "swap_used_bytes": swap_used}
+                        "swap_used_bytes": swap_used, "evidence_state": "known"}
         except (TypeError, ValueError):
             pass
         return {"state": "unknown", "version": "unknown",
                 "memory_limit_bytes": None, "memory_used_bytes": None,
-                "swap_limit_bytes": None, "swap_used_bytes": None}
+                "swap_limit_bytes": None, "swap_used_bytes": None,
+                "evidence_state": "partial"}
 
     def _unit_state(self, unit):
         try:
@@ -139,25 +161,33 @@ class HostProvider:
 
     def observe(self):
         observed_at = self.now().isoformat().replace("+00:00", "Z")
-        empty = {"observed_at": observed_at, "memory": {"total_bytes": None,
-            "available_bytes": None}, "filesystem": {"total_bytes": None, "free_bytes": None},
+        retention={"current_files":0,"history_files":0,"total_bytes":0,
+                   "compliant":True,"truncated":False}
+        empty = {"observed_at": observed_at, "target_identity":self.target_identity,
+            "memory": {"total_bytes": None, "available_bytes": None,"state":"unknown"},
+            "filesystem": {"total_bytes": None, "free_bytes": None,"state":"unknown"},
             "swap_areas": [], "swappiness": {"effective": None, "owned": False,
             "drifted": False}, "monitor": {"service_state": "unknown",
             "timer_state": "unknown", "freshness": "unknown", "interval_seconds": None,
-            "latest_sample_at": None, "next_sample_at": None, "sustained_swap_use": None,
-            "pressure_state": "unknown"}, "ownership": "unknown",
-            "container_eligibility": {"state": "unsupported"},
-            "reboot_verification": "unverified", "operation_block": None}
+            "latest_sample_at": None,"age_seconds":None,"next_sample_at": None,
+            "sustained_swap_use": None,"pressure_state": "unknown","retention":retention},
+            "ownership": "unknown", "container_eligibility": {"state": "unsupported",
+            "version":"unknown","memory_limit_bytes":None,"memory_used_bytes":None,
+            "swap_limit_bytes":None,"swap_used_bytes":None,"evidence_state":"unsupported"},
+            "reboot_verification": {"state":"unverified","observed_at":None},
+            "operation_block": None}
         if platform.system() != "Linux":
-            return bounded({**empty, "evidence_state": "unsupported"}, 256 * 1024)
+            return RemoteSwapState.from_dict({**empty,"evidence_state":"unsupported"}).to_dict()
         complete = True
         try:
             memory = self._kv(self.read_text("/proc/meminfo"))
             swap_lines = self.read_text("/proc/swaps").splitlines()
             disk = shutil.disk_usage(STATE.parent)
         except (OSError, KeyError, TypeError, ValueError):
-            return bounded({**empty, "container_eligibility": {"state": "unknown"},
-                            "evidence_state": "partial"}, 256 * 1024)
+            return RemoteSwapState.from_dict({**empty,"container_eligibility":{
+                "state":"unknown","version":"unknown","memory_limit_bytes":None,
+                "memory_used_bytes":None,"swap_limit_bytes":None,"swap_used_bytes":None,
+                "evidence_state":"partial"},"evidence_state":"partial"}).to_dict()
         memory_total = memory.get("MemTotal"); memory_available = memory.get("MemAvailable")
         if not isinstance(memory_total, int) or not isinstance(memory_available, int):
             complete = False
@@ -166,6 +196,8 @@ class HostProvider:
         if receipt_text is not None:
             try: receipt = OwnershipReceipt.from_dict(json.loads(receipt_text)).to_dict()
             except (TypeError, ValueError): receipt_malformed = True
+        receipt_target_match=bool(receipt and receipt["target_identity"]==self.target_identity)
+        if receipt and not receipt_target_match: receipt_malformed=True
         swappiness = None
         try: swappiness = self._bounded_integer(self._optional_text("/proc/sys/vm/swappiness"))
         except ValueError: complete = False
@@ -179,48 +211,50 @@ class HostProvider:
                 if total < 0 or used < 0 or used > total: raise ValueError
             except ValueError:
                 malformed_swap = True; continue
-            area_id = canonical_digest({"type": parts[1], "total_bytes": total,
-                                        "priority": priority})[:24]
-            owned = bool(receipt and receipt.get("swap_area_id") == area_id)
+            owned_id=canonical_digest({"target_identity":self.target_identity,
+                "logical_id":"swap_file","type":parts[1],"total_bytes":total,
+                "priority":priority})[:24]
+            area_id=(owned_id if parts[0]==str(SWAP) else canonical_digest({
+                "target_identity":self.target_identity,"locator":parts[0],"type":parts[1],
+                "total_bytes":total,"priority":priority})[:24])
+            owned=bool(receipt_target_match and parts[0]==str(SWAP)
+                       and receipt.get("swap_area_id")==owned_id)
             areas.append({"area_id": area_id, "type": parts[1], "total_bytes": total,
                           "used_bytes": used, "active": True,
                           "persistent": bool(owned and receipt["lifecycle_state"] == "enabled"),
                           "priority": priority, "ownership": "owned" if owned else "unmanaged"})
         unmanaged = any(area["ownership"] != "owned" for area in areas)
         if malformed_swap or receipt_malformed: complete = False
-        monitor_owned = bool(receipt and receipt["lifecycle_state"] == "enabled")
+        monitor_owned = bool(receipt_target_match and receipt["lifecycle_state"] == "enabled")
         service_state = self._unit_state("sandbox-host-memory-monitor.service") if monitor_owned else "missing"
         timer_state = self._unit_state("sandbox-host-memory-monitor.timer") if monitor_owned else "missing"
-        target_identity = receipt.get("target_identity") if receipt else None
-        result = {"observed_at": observed_at,
-            "memory": {"total_bytes": memory_total, "available_bytes": memory_available},
-            "filesystem": {"total_bytes": disk.total, "free_bytes": disk.free},
+        container=self._container_limits()
+        if container["evidence_state"]!="known": complete=False
+        result = {"observed_at": observed_at,"target_identity":self.target_identity,
+            "memory": {"total_bytes": memory_total,"available_bytes":memory_available,
+                       "state":"known" if memory_total is not None and memory_available is not None else "unknown"},
+            "filesystem": {"total_bytes":disk.total,"free_bytes":disk.free,"state":"known"},
             "swap_areas": areas,
             "swappiness": {"effective": swappiness, "owned": monitor_owned,
                             "drifted": bool(monitor_owned and swappiness != 15)},
             "monitor": {"service_state": service_state, "timer_state": timer_state,
                         "freshness": "unknown", "interval_seconds": 300 if monitor_owned else None,
-                        "latest_sample_at": None, "next_sample_at": None,
-                        "sustained_swap_use": None, "pressure_state": "unknown"},
-            "container_eligibility": self._container_limits(),
-            "reboot_verification": (receipt or {}).get("reboot_verification", "unverified"),
+                        "latest_sample_at":None,"age_seconds":None,"next_sample_at":None,
+                        "sustained_swap_use":None,"pressure_state":"unknown",
+                        "retention":retention},
+            "container_eligibility":container,
+            "reboot_verification":((receipt or {}).get("reboot_verification")
+                                   or {"state":"unverified","observed_at":None}),
             "operation_block": None,
             "ownership": "unknown" if receipt_malformed else "owned" if receipt else "absent",
             "evidence_state": ("unmanaged" if unmanaged else "partial" if not complete
                                else "drifted" if monitor_owned and swappiness != 15 else "known")}
-        if target_identity: result["target_identity"] = target_identity
-        return bounded(result, 256 * 1024)
+        return RemoteSwapState.from_dict(result).to_dict()
 
     def sample(self):
         state=self.observe(); memory=state.get("memory") or {}; areas=state.get("swap_areas") or []
         complete=all(isinstance(memory.get(k),int) for k in ("total_bytes","available_bytes"))
-        return AggregateMemorySample(sampled_at=self.now().isoformat().replace("+00:00","Z"),status="valid" if complete else "partial",memory=memory,swap={"total_bytes":sum(a.get("total_bytes",0) for a in areas),"free_bytes":sum(a.get("total_bytes",0)-a.get("used_bytes",0) for a in areas),"used_bytes":sum(a.get("used_bytes",0) for a in areas)},errors=() if complete else ("memory_evidence_partial",)).to_dict()
-
-    def apply(self, plan, operation_id):
-        # This narrow provider is intentionally fail-closed until root preflight proves every
-        # fixed ancestor/artifact. Synthetic tests inject a provider for transaction proof.
-        current=self.observe(); plan_current(plan,current)
-        if os.geteuid()!=0: raise PolicyRefusal("required_facility_unavailable","fixed host provider requires root service authority")
-        for path in FIXED_ARTIFACTS.values():
-            if path.exists() and path.is_symlink(): raise PolicyRefusal("unsafe_swap_artifact","owned artifact cannot be a symlink")
-        raise PolicyRefusal("required_facility_unavailable","live mutation requires separately accepted provider revision")
+        counters={key:value for key,value in memory.items() if key in {
+            "total_bytes","available_bytes","free_bytes","buffers_bytes","cached_bytes"}
+            and isinstance(value,int)}
+        return AggregateMemorySample(sampled_at=self.now().isoformat().replace("+00:00","Z"),status="valid" if complete else "partial",memory=counters,swap={"total_bytes":sum(a.get("total_bytes",0) for a in areas),"free_bytes":sum(a.get("total_bytes",0)-a.get("used_bytes",0) for a in areas),"used_bytes":sum(a.get("used_bytes",0) for a in areas)},errors=() if complete else ("memory_evidence_partial",)).to_dict()

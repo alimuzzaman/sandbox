@@ -20,7 +20,9 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 from sandbox.application.context import (
     managed_native_instance_selected, preflight_instance_capability,
+    preflight_project_capability,
 )
+import sandbox.core._remote as _remote
 
 
 def _timeout_stream(value) -> str:
@@ -270,10 +272,63 @@ def _stage_host_package_paths(
     return rewritten, staged
 
 
+def _remote_project_slug(project_root: Path) -> str:
+    return _remote.deploy_target_slug(project_root)
+
+
+def _cmd_remote_wp(cfg, args, pt: list[str], *, allow_missing: bool) -> None:
+    """Run WP-CLI through the authenticated co-located remote controller."""
+    if getattr(args, "run_async", False):
+        die("remote wp does not support --async; use a finite --timeout and inspect state before retrying")
+    if getattr(args, "instance", None):
+        die("remote wp is project-scoped and cannot combine --instance; use --project-dir and an exact --label")
+    project_dir = getattr(args, "project_dir", None) or str(Path.cwd())
+    try:
+        project = _core().load_project_config(project_dir)
+    except Exception as exc:
+        die(f"could not resolve remote WordPress project: {exc}")
+    root = Path(project.get("root") or project_dir).expanduser().resolve()
+    if project.get("kind", "wordpress") != "wordpress":
+        die("project kind 'compose' does not support WordPress CLI; use sb exec for generic Compose")
+    label = getattr(args, "label", None) or "default"
+    capability_error = preflight_project_capability(
+        cfg, str(root), "wordpress.cli", label=label,
+    )
+    if capability_error is not None:
+        die(capability_error.message)
+    remote_name = getattr(args, "remote", None)
+    remote = _remote.get_remote(remote_name)
+    if not isinstance(remote, dict):
+        die(f"remote {remote_name!r} is not registered")
+    if remote.get("provisioned") is not True:
+        die(f"remote {remote_name!r} is not provisioned")
+    try:
+        result = _remote.remote_wp_cli(
+            remote,
+            project_slug=_remote_project_slug(root),
+            label=label,
+            argv=pt,
+            timeout=getattr(args, "timeout", 60),
+            allow_missing=allow_missing,
+        )
+    except (RuntimeError, ValueError) as exc:
+        die(str(exc))
+    _print_stream(result.get("stdout", ""))
+    _print_stream(result.get("stderr", ""), stderr=True)
+    exit_code = result.get("exit_code", 0)
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        exit_code = 1
+    if exit_code:
+        raise SystemExit(max(1, min(exit_code, 255)))
+
+
 def cmd_wp(cfg, args) -> None:
-    error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
-    if error is not None:
-        die(error.message)
+    if not getattr(args, "remote", None):
+        error = preflight_instance_capability(
+            cfg, args.resolved_instance, "wordpress.cli",
+        )
+        if error is not None:
+            die(error.message)
     if not args.passthrough:
         die("usage: ./sb wp <wp-cli args>")
     pt = list(args.passthrough)
@@ -289,6 +344,9 @@ def cmd_wp(cfg, args) -> None:
         die("--allow-missing is only valid with `option get KEY` or an explicit "
             "`plugin deactivate SLUG...` command; no command was executed.")
     _reject_ignored_post_list_search(pt)
+    if getattr(args, "remote", None):
+        _cmd_remote_wp(cfg, args, pt, allow_missing=allow_missing)
+        return
     if allow_missing and plugin_partial:
         if getattr(args, "run_async", False):
             die("--allow-missing plugin deactivation requires synchronous state "

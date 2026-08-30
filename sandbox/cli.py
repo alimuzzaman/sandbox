@@ -435,8 +435,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     configure_lifecycle_parser(sub)
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
-    w.add_argument("--local", action="store_true",
-                   help="explicitly select the local WordPress runtime")
+    wp_target = w.add_mutually_exclusive_group()
+    wp_target.add_argument("--local", action="store_true",
+                           help="explicitly select the local WordPress runtime")
+    wp_target.add_argument("--remote",
+                           help="run against this provisioned remote's existing deployed WordPress instance")
     w.add_argument("--project-dir", default=None,
                    help="project directory whose registered instance should run wp-cli")
     w.add_argument("--allow-missing", action="store_true",
@@ -1194,6 +1197,14 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    if (args.cmd == "wp" and getattr(args, "remote", None)
+            and _explicit_global_option(raw_argv, "--instance")):
+        die(
+            "wp with --remote is project-scoped and cannot combine --instance; "
+            "use --project-dir and an exact --label.",
+            2,
+        )
+
     # A remote status/logs request has two deliberately separate target
     # domains. The outer remote form is dispatched directly to the remote
     # lifecycle adapter: it must not require a local sandbox config, registry
@@ -1280,7 +1291,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     archive_plugin_check = (
         args.cmd == "plugin-check" and bool(getattr(args, "archive", None))
     )
-    predispatch_skip = archive_plugin_check or bool(
+    predispatch_skip = archive_plugin_check or (
+        args.cmd == "wp" and bool(getattr(args, "remote", None))
+    ) or bool(
         command_spec is not None
         and command_spec.predispatch_policy is not None
         and command_spec.predispatch_policy(args)
@@ -1352,6 +1365,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                 except Exception as exc:
                     die(str(exc), 2)
                 chosen = selected.get("instance") if selected else None
+            elif args.cmd == "wp" and getattr(args, "remote", None):
+                chosen = None
             elif args.cmd in {"wp", "exec"}:
                 try:
                     selected = resolve_registered_instance(
@@ -1449,6 +1464,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     durable_exec = args.cmd == "exec" and bool(
         getattr(args, "local", False) or getattr(args, "remote", None) or getattr(args, "detach", False)
     )
+    remote_wp = args.cmd == "wp" and bool(getattr(args, "remote", None))
     if chosen is None:
         if inner_local_observation:
             project_root = Path(getattr(args, "project_dir", "")).expanduser().resolve()
@@ -1458,7 +1474,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                 "run `sb ensure --project-dir DIR` to create one.",
                 2,
             )
-        if args.cmd in INSTANCE_SCOPED and not durable_exec and not direct_instance_exec:
+        if (args.cmd in INSTANCE_SCOPED and not durable_exec and
+                not direct_instance_exec and not remote_wp):
             # Distinguish "no instance at all for this cwd" from "cwd's
             # project owns MULTIPLE instances and neither --label nor a
             # default disambiguates" (multi-instance-per-root) — the latter

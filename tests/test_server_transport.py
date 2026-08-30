@@ -110,10 +110,142 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         self.assertTrue(any(getattr(route, "path", None) == "/diagnostics" for route in app.routes))
         self.assertTrue(any(getattr(route, "path", None) == "/resources" for route in app.routes))
         self.assertTrue(any(getattr(route, "path", None) == "/inventory" for route in app.routes))
+        self.assertTrue(any(getattr(route, "path", None) == "/wp-cli" for route in app.routes))
 
     def test_resource_contract_rejects_arbitrary_actions(self):
         with self.assertRaisesRegex(ValueError, "unsupported resource action"):
             server._resource_contract({"action": "shell", "command": "id"})
+
+    @patch("server.subprocess.run")
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+        "SANDBOX_HOME": "/srv/sandbox",
+    }, clear=False)
+    def test_wp_contract_selects_existing_instance_without_workspace_or_shell(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, "raw stdout\n", "raw stderr\n",
+        )
+        registry = types.SimpleNamespace(
+            load_project_config=lambda path, label=None: {
+                "root": path, "kind": "wordpress", "slug": "project",
+            },
+        )
+        with patch("server._core", return_value=registry), \
+                patch("sandbox.core.resolve_registered_instance", return_value={
+                    "root": "/srv/sandbox/deploy-src/project",
+                    "label": "default", "instance": "project-default",
+                }):
+            result = server._remote_wp_contract({
+                "schema_version": 1,
+                "action": "wp_cli",
+                "project_slug": "project",
+                "label": "default",
+                "argv": ["option", "get", "siteurl"],
+                "timeout_seconds": 7,
+                "expected_runtime_revision": "a" * 24,
+                "expected_ownership_marker": "b" * 24,
+            })
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["instance"], "project-default")
+        self.assertEqual(result["stdout"], "raw stdout\n")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], [str(server.SANDBOX_ROOT / "sb"), "--instance",
+                                    "project-default", "wp"])
+        self.assertIn("--local", argv)
+        self.assertNotIn("exec", argv)
+        self.assertFalse(any("workspace" in value for value in argv))
+        self.assertNotIn("shell", run.call_args.kwargs)
+
+    @patch("server.subprocess.run")
+    def test_wp_contract_rejects_revision_ownership_and_generic_before_dispatch(self, run):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        with patch.dict(os.environ, {
+            "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "c" * 24,
+            "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+        }, clear=False):
+            mismatch = server._remote_wp_contract(base)
+        self.assertEqual(mismatch["error"]["code"], "runtime_revision_mismatch")
+        with patch.dict(os.environ, {
+            "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+            "SANDBOX_REMOTE_MCP_MARKER": "c" * 24,
+        }, clear=False):
+            mismatch = server._remote_wp_contract(base)
+        self.assertEqual(mismatch["error"]["code"], "remote_service_ownership_unknown")
+        run.assert_not_called()
+
+    @patch("server.subprocess.run")
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+        "SANDBOX_HOME": "/srv/sandbox",
+    }, clear=False)
+    def test_wp_contract_refuses_generic_and_credential_like_argv(self, run):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        unsafe = server._remote_wp_contract({**base, "argv": ["option", "get", "--password=secret"]})
+        self.assertEqual(unsafe["error"]["code"], "unsafe_argv")
+        registry = types.SimpleNamespace(load_project_config=lambda path, label=None: {
+            "root": path, "kind": "compose", "slug": "project",
+        })
+        with patch("server._core", return_value=registry):
+            generic = server._remote_wp_contract(base)
+        self.assertEqual(generic["error"]["code"], "unsupported_project_kind")
+        self.assertNotIn("secret", json.dumps(unsafe))
+        run.assert_not_called()
+
+    def test_wp_contract_refuses_non_argv_and_non_boolean_options(self):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": "core version", "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        with self.assertRaisesRegex(ValueError, "explicit argv"):
+            server._remote_wp_contract(base)
+        with self.assertRaisesRegex(ValueError, "allow_missing"):
+            server._remote_wp_contract({**base, "argv": ["core", "version"],
+                                        "allow_missing": "yes"})
+
+    @patch("server.subprocess.run")
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+        "SANDBOX_HOME": "/srv/sandbox",
+    }, clear=False)
+    def test_wp_contract_timeout_preserves_partial_streams_and_unknown_state(self, run):
+        run.side_effect = subprocess.TimeoutExpired(
+            ["sb", "wp"], 12, output=b"partial out\n", stderr=b"partial err\n",
+        )
+        registry = types.SimpleNamespace(load_project_config=lambda path, label=None: {
+            "root": path, "kind": "wordpress", "slug": "project",
+        })
+        with patch("server._core", return_value=registry), \
+                patch("sandbox.core.resolve_registered_instance", return_value={
+                    "root": "/srv/sandbox/deploy-src/project",
+                    "label": "default", "instance": "project-default",
+                }):
+            result = server._remote_wp_contract({
+                "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+                "label": "default", "argv": ["option", "update", "flag", "1"],
+                "timeout_seconds": 7, "expected_runtime_revision": "a" * 24,
+                "expected_ownership_marker": "b" * 24,
+            })
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["exit_code"], 124)
+        self.assertEqual(result["stdout"], "partial out\n")
+        self.assertIn("partial err\n", result["stderr"])
+        self.assertFalse(result["retried"])
+        run.assert_called_once()
 
     def test_inventory_route_accepts_fast_and_explicit_deep_modes(self):
         with patch("uvicorn.run") as run:

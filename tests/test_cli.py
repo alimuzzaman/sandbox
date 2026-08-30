@@ -1013,6 +1013,19 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("explicitly select the local WordPress runtime", r.stdout)
 
+    def test_wp_help_exposes_bounded_remote_selector(self):
+        r = run_sb("wp", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--remote REMOTE", r.stdout)
+        self.assertIn("--timeout TIMEOUT", r.stdout)
+
+    def test_remote_wp_refuses_instance_selector_before_project_or_remote_work(self):
+        r = run_sb("wp", "--remote", "contract-only", "--instance", "other",
+                   "--project-dir", "/missing", "--", "core", "version")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot combine --instance", r.stderr)
+        self.assertNotIn("could not resolve", r.stderr)
+
     def test_wp_project_dir_resolves_registered_instance_outside_project_cwd(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

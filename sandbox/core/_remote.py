@@ -2283,6 +2283,86 @@ def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dic
     return result
 
 
+def remote_wp_cli(
+    remote: dict,
+    *,
+    project_slug: str,
+    label: str,
+    argv: list[str],
+    timeout: int,
+    allow_missing: bool = False,
+) -> dict:
+    """Run bounded WP-CLI against an existing deploy over authenticated control."""
+    from sandbox.jobs.models import validate_argv
+    from sandbox.services.redaction import require_safe_argv
+
+    if not isinstance(project_slug, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,62}", project_slug):
+        raise ValueError("remote WordPress project identity is invalid")
+    if not isinstance(label, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
+        raise ValueError("remote WordPress instance label is invalid")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        raise ValueError("remote WordPress timeout must be between 1 and 3600 seconds")
+    try:
+        validated_argv = validate_argv(argv)
+        require_safe_argv(validated_argv)
+    except ValueError:
+        raise ValueError("remote WordPress requires a safe, explicit argv list") from None
+    service = remote.get("mcp_service") if isinstance(remote, dict) else None
+    marker = service.get("ownership_marker") if isinstance(service, dict) else None
+    if not isinstance(marker, str) or not _REMOTE_MCP_REVISION_RE.fullmatch(marker):
+        raise RuntimeError("remote service ownership evidence is unavailable; update the registered remote")
+    revision = _remote_mcp_runtime_revision()
+    payload = {
+        "schema_version": 1, "action": "wp_cli", "project_slug": project_slug,
+        "label": label, "argv": list(validated_argv), "timeout_seconds": timeout,
+        "expected_runtime_revision": revision,
+        "expected_ownership_marker": marker,
+    }
+    if allow_missing:
+        payload["allow_missing"] = True
+    try:
+        result = _remote_control_request(
+            remote, "/wp-cli", timeout=timeout + 10, payload=payload,
+        )
+    except (OSError, RuntimeError, ValueError, TimeoutError):
+        raise RuntimeError(
+            "remote WP-CLI control result was unavailable; completion is unknown and was not retried"
+        ) from None
+    if result.get("wp_cli_schema") != 1 or result.get("transport") != "control":
+        raise RuntimeError("remote WP-CLI returned an unsupported control contract")
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    if result.get("ok") is not True:
+        code = error.get("code")
+        if code == "runtime_revision_mismatch":
+            raise RuntimeError("remote runtime revision does not match this Sandbox build")
+        if code == "remote_service_ownership_unknown":
+            raise RuntimeError("remote service ownership could not be proven")
+        if code == "output_too_large":
+            raise RuntimeError(
+                "remote WP-CLI output was incomplete; completion is unknown and was not retried"
+            )
+        messages = {
+            "remote_deploy_not_found": "no existing remote deployment was found for this project",
+            "remote_instance_unavailable": "the deployed remote project has no registered instance",
+            "remote_instance_ambiguous": "the deployed remote project label is ambiguous",
+            "unsupported_project_kind": "the selected remote deployment is not a WordPress project",
+            "unsafe_argv": "remote WordPress argv was refused by the controller",
+        }
+        raise RuntimeError(messages.get(code, "remote WP-CLI control request was refused"))
+    if result.get("ownership") != "proven" or result.get("runtime_revision") != revision:
+        raise RuntimeError("remote WP-CLI response lacks exact ownership and revision evidence")
+    if any(not isinstance(result.get(field), expected) for field, expected in (
+        ("stdout", str), ("stderr", str), ("exit_code", int), ("instance", str),
+    )) or isinstance(result.get("exit_code"), bool) or not result.get("instance"):
+        raise RuntimeError("remote WP-CLI returned an invalid result envelope")
+    if (result.get("status") not in {"complete", "failed", "unknown"}
+            or (result["exit_code"] == 124 and result.get("status") != "unknown")):
+        raise RuntimeError("remote WP-CLI returned an invalid completion state")
+    return result
+
+
 def remote_inventory(remote: dict, *, timeout: int = 15,
                      mode: str = "fast") -> dict:
     """Read the safe hosted-instance and host-resource dashboard inventory."""

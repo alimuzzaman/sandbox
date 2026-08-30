@@ -564,6 +564,7 @@ Use the same runtime operations without an MCP client:
 ./sb exec -- sh -lc 'npm test'    # generic Compose projects only
 ./sb exec --project-dir <dir> -- sh -lc 'npm test'  # select project from any cwd
 ./sb deploy --remote <name> --ensure --expose
+./sb wp --remote <name> --project-dir . --timeout 60 -- plugin list
 ```
 
 `--json` output is redacted: every credential-shaped field, including the

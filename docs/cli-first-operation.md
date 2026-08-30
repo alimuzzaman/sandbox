@@ -213,6 +213,7 @@ select --local/--remote`.
 ./sb status
 ./sb wp --timeout 60 -- plugin list
 ./sb wp --project-dir <dir> --timeout 60 -- plugin list
+./sb wp --remote <name> --project-dir <dir> --timeout 60 -- plugin list
 ./sb test
 ./sb test unit --project-dir <dir> --label <label> --remote <name> --timeout 500 -- --filter Smoke
 ./sb deploy --remote <name> --ensure --expose
@@ -240,6 +241,14 @@ timeout therefore reports completion as unknown—inspect state before retrying,
 or use `--async` for long work. Sandbox never retries a timed-out command
 automatically, and synchronous WP stdout remains raw rather than wrapped in
 JSON.
+
+After `sb deploy --remote NAME --ensure --expose`, `sb wp --remote NAME`
+targets that exact deployed project and label through authenticated control
+HTTP. The controller requires matching runtime-revision and service-ownership
+evidence, then invokes only the co-located `sb wp --local` boundary. It does
+not stage source, create a job workspace, route through generic `sb exec`, fall
+back to SSH, or retry an unknown result. Generic Compose projects are refused
+before dispatch.
 
 `wp post list` does not support a `--search` query argument: WP-CLI forwards
 that unknown spelling to `WP_Query`, which can silently return an unfiltered

@@ -391,6 +391,12 @@ Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
 
+After a successful deploy, `sb wp --remote NAME --project-dir DIR` targets the
+existing deployed WordPress instance through authenticated control HTTP. It
+requires exact installed-runtime revision and service-ownership evidence,
+runs the co-located `sb wp --local` boundary, and never creates a workspace,
+uses generic `sb exec`, falls back to SSH, or retries an unknown result.
+
 Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
 through 3600 with `--timeout` before the `--` delimiter to change that bound:
 `sb wp --timeout 120 -- plugin list`. The Compose client wait is a caller

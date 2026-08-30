@@ -980,5 +980,64 @@ class TestAlwaysAvailableAttribution(unittest.TestCase):
         self.assertIn("--deep --refresh", text)
 
 
+class TestHostMemoryResourceInterfaces(unittest.TestCase):
+    def _args(self, argv):
+        from sandbox.commands.resources import configure_parser
+        parser=argparse.ArgumentParser(); configure_parser(parser)
+        return parser.parse_args(argv)
+
+    def test_only_completed_status_action_is_registered(self):
+        self.assertEqual(self._args(["swap-status","--remote","fixture"]).action,"swap-status")
+        for action in ("swap-plan","swap-apply","swap-history"):
+            with self.assertRaises(SystemExit): self._args([action,"--remote","fixture"])
+
+    def test_remote_is_required_before_service_construction(self):
+        from sandbox.commands.resources import _host_memory_cli
+        result=_host_memory_cli(self._args(["swap-status"]))
+        self.assertEqual(result["error"]["code"],"remote_required")
+
+    def test_status_text_and_json_share_the_same_bounded_envelope(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        payload={"schema_version":1,"ok":True,"action":"swap-status","status":"complete",
+                 "target":{"kind":"remote","name":"fixture"},
+                 "data":{"memory":{"total_bytes":16*1024**3,"available_bytes":12*1024**3},
+                         "swap_areas":[],"ownership":"absent",
+                         "monitor":{"freshness":"missing"},
+                         "container_eligibility":{"state":"unknown"}},"error":None}
+        class Service:
+            def status(self,budget_seconds): return payload
+        with patch.object(resources,"host_memory_status",side_effect=lambda remote,budget_seconds:Service().status(budget_seconds)):
+            human=StringIO()
+            with redirect_stdout(human): resources.cmd_resources({},self._args(["swap-status","--remote","fixture"]))
+            structured=StringIO()
+            with redirect_stdout(structured): resources.cmd_resources({},self._args(["swap-status","--remote","fixture","--json"]))
+        self.assertIn("ownership: absent", human.getvalue())
+        self.assertIn("monitor: missing", human.getvalue())
+        self.assertEqual(json.loads(structured.getvalue()),payload)
+
+    def test_explicit_zero_budget_is_not_replaced_by_default(self):
+        from sandbox.commands import resources
+        seen=[]
+        with patch.object(resources,"host_memory_status",
+                          side_effect=lambda remote,budget_seconds:seen.append(budget_seconds) or {
+                              "schema_version":1,"ok":False,"action":"swap-status","status":"failed",
+                              "target":None,"data":{},"error":{"code":"response_invalid",
+                              "message":"invalid budget","retryable":False}}):
+            resources._host_memory_cli(self._args(["swap-status","--remote","fixture","--budget","0"]))
+        self.assertEqual(seen,[0.0])
+
+    def test_status_refusal_uses_exit_one_and_safe_json(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        output=StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            resources.cmd_resources({},self._args(["swap-status","--json"]))
+        self.assertEqual(raised.exception.code,1)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"],"remote_required")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -475,3 +475,12 @@ after the push succeeds.
 Use `sb mcp --project-dir .` only when an MCP client needs live tool calls.
 It remains runtime-scoped, so a generic project does not receive WordPress
 tools and a WordPress project does not receive generic container-exec tools.
+
+## Remote host memory
+
+Use `sb resources swap-status --remote NAME`; never replace it with SSH or direct host access.
+The current MVP registers only the read-only `host_memory_status` action. Planning, apply,
+disable, and history commands are not available. Treat revision/protocol mismatch, partial
+cgroup evidence, ownership ambiguity, and unmanaged swap as non-authorizing. Live mutation,
+remote runtime updates, and reboot checks need their own approval; synthetic-provider
+evidence is not live proof.

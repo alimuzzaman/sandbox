@@ -569,3 +569,30 @@ match `status --fast` and `status --refresh`; passing both is refused with
 `invalid_mode`.
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.
+
+## Remote host swap and memory status
+
+Feature 046 adds a remote-only, authenticated-control surface. It never falls back to SSH:
+
+```sh
+./sb resources swap-status --remote NAME --json
+```
+
+The current MVP registers only `host_memory_status`. It validates the complete typed status
+schema, composes attested fixed host history into monitor freshness and sustained-pressure
+state, and reports only aggregate evidence. Planning, apply, disable, and history commands
+remain unimplemented and are not registered or reachable.
+
+This completed boundary is observation only. It can report an owned area only after the
+fixed receipt and swap file pass owner, type, mode, link-count, and target checks, and the
+fixed persistence unit and swappiness policy also match their receipt-bound digests. Any
+missing, malformed, contradictory, or partial
+evidence stays non-authorizing. The later planning, mutation, rollback, disable, and public
+history stories remain unchecked in the Feature 046 task ledger; their design contracts do
+not describe currently available commands.
+
+Process/container identity, PID, command/argument/environment data, raw output, credentials,
+and private paths are never collected into the result. Reboot persistence stays `unverified`
+until a separately authorized reboot acceptance.
+Feature 047 may consume only `HostMemoryStatusProjection`; it receives no planning,
+provider, repository, apply, rollback, or disable authority.

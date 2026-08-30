@@ -16,6 +16,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(runtime["remote"], "scaleway-sandbox")
         self.assertEqual(runtime["workspace"], "node-unit")
         self.assertEqual(runtime["executionProfiles"]["unit"]["timeoutSeconds"], 1800)
+        self.assertEqual(runtime["executionProfiles"]["ci"]["cleanup"], "ephemeral")
         self.assertLessEqual(runtime["executionProfiles"]["overnight"]["timeoutSeconds"], 604800)
 
     def test_custom_execution_and_output_profiles_are_declarative(self):

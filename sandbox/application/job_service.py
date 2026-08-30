@@ -7,6 +7,7 @@ this module so CLI and MCP adapters share one service contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -56,14 +57,44 @@ class JobService:
             if self.sync_gateway is None:
                 raise RuntimeError("synchronized_job_authority_unavailable")
             submission = self.sync_gateway.prepare_submission(submission)
-        # Production composition supplies the durable workspace boundary.  It
-        # must commit ownership before the job repository can acknowledge an
-        # acceptance, otherwise a detached job can outlive the only metadata
-        # capable of identifying its workspace.  The dependency stays optional
-        # for compatibility adapters and isolated repository tests.
-        if self.workspace_registry is not None:
-            self.workspace_registry.ensure_submission(submission)
-        row, replay = self.repository.accept(submission)
+        guard = (
+            self.workspace_registry.submission_guard(submission)
+            if (self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "submission_guard"))
+            else nullcontext()
+        )
+        with guard:
+            replay = self.repository.replay(submission)
+            if replay is not None:
+                return self._accepted(replay, replay=True)
+            # Workspace validation/materialization and durable acceptance share
+            # the same controller lock as terminal deletion. A checkout cannot
+            # disappear between these two commits.
+            workspace_id = None
+            workspace_authority_digest = None
+            if self.workspace_registry is not None:
+                previous_authority_digest = None
+                if submission.retry_of_job_id is not None:
+                    previous_authority_digest = self.repository.get(
+                        submission.retry_of_job_id).get("workspace_authority_digest")
+                workspace = (
+                    self.workspace_registry.ensure_submission(
+                        submission,
+                        expected_previous_authority_digest=previous_authority_digest,
+                    )
+                    if submission.retry_of_job_id is not None
+                    else self.workspace_registry.ensure_submission(submission)
+                )
+                workspace_id = getattr(workspace, "workspace_id", None)
+                if not isinstance(workspace_id, str):
+                    raise RuntimeError("workspace_identity_ambiguous")
+                authority = getattr(workspace, "metadata", {}).get(
+                    "ci_cleanup_authority")
+                if isinstance(authority, dict):
+                    workspace_authority_digest = authority.get("digest")
+            row, replay = self.repository.accept(
+                submission, workspace_id=workspace_id,
+                workspace_authority_digest=workspace_authority_digest)
         if replay:
             return self._accepted(row, replay=True)
         if submission.compatibility_differences:
@@ -78,6 +109,7 @@ class JobService:
                 row = self.repository.transition(row["job_id"], Lifecycle.CANCELLED,
                     termination_reason="dependency_failed",
                     result_json=__import__("json").dumps({"dependencies": list(submission.depends_on)}, sort_keys=True))
+                self._finalize_terminal_workspace(row["job_id"])
                 return self._accepted(row, replay=False)
             if dependency_state != "ready":
                 row = self.repository.transition(row["job_id"], Lifecycle.QUEUED,
@@ -104,6 +136,7 @@ class JobService:
             if self.scheduler is not None:
                 self.scheduler.release(row["job_id"])
             self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed")
+            self._finalize_terminal_workspace(row["job_id"])
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
 
@@ -145,6 +178,10 @@ class JobService:
                     row["project_root"], label="default",
                 ) else "host"
             )
+        cleanup_context = None
+        if self.workspace_registry is not None and hasattr(
+                self.workspace_registry, "terminal_cleanup_context"):
+            cleanup_context = self.workspace_registry.terminal_cleanup_context()
         return {"job_id": row["job_id"], "registry_path": str(self.repository.path),
                 "runtime_dir": str(self.storage.root.parent), "argv": __import__("json").loads(row["command_json"]),
                 "project_root": row["project_root"], "label": "default",
@@ -155,6 +192,7 @@ class JobService:
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
                 "execution_runtime": execution_runtime,
                 "artifact_paths": list(submission.artifact_paths),
+                "workspace_cleanup": cleanup_context,
                 "generation": ({
                     "relationship_id": submission.sync_relationship_id,
                     "generation_id": submission.sync_generation_id,
@@ -307,11 +345,27 @@ class JobService:
             snapshot["health_evidence"] = evidence
         if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             self.scheduler.release(job_id)
+        if snapshot["lifecycle"] in {item.value for item in (
+                Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            self._finalize_terminal_workspace(job_id)
+            snapshot = self.repository.snapshot(job_id)
         if self.scheduler is not None and snapshot["lifecycle"] == Lifecycle.QUEUED.value:
             queue = self.scheduler.queue_details(snapshot)
             snapshot["queue"] = queue
             snapshot["queue_position"] = queue["position"]
         return snapshot
+
+    def _finalize_terminal_workspace(self, job_id: str) -> dict:
+        from sandbox.application.workspace_service import finalize_terminal_workspace
+
+        context = None
+        if self.workspace_registry is not None and hasattr(
+                self.workspace_registry, "terminal_cleanup_context"):
+            context = self.workspace_registry.terminal_cleanup_context()
+        return finalize_terminal_workspace(
+            self.repository, job_id, context,
+            workspace_service=self.workspace_registry)
 
     @staticmethod
     def _supervisor_is_owned(snapshot: dict) -> bool:
@@ -602,6 +656,8 @@ class JobService:
             except ValueError:
                 pass
         stale = self.scheduler.reconcile_stale() if self.scheduler is not None else []
+        for job_id in interrupted:
+            self._finalize_terminal_workspace(job_id)
         return {"ok": True, "interrupted": interrupted, "released_leases": stale}
 
     def read_output(self, job_id: str, query: OutputQuery | None = None):
@@ -658,8 +714,12 @@ class JobService:
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
             if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
-                return self.repository.transition(job_id, Lifecycle.CANCELLED,
+                self.repository.transition(job_id, Lifecycle.CANCELLED,
                     termination_reason="cancelled_before_process_start")
+                if self.scheduler is not None:
+                    self.scheduler.release(job_id)
+                self._finalize_terminal_workspace(job_id)
+                return self.repository.snapshot(job_id)
             raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
@@ -726,6 +786,8 @@ class JobService:
                 cancel_grace_seconds=canonical.get("cancel_grace_seconds", 20),
                 cancel_on_stall=bool(canonical["cancel_on_stall"]),
                 cleanup_policy=canonical["cleanup_policy"],
+                materialization_source_root=canonical.get(
+                    "materialization_source_root"),
                 execution_policy_provenance=canonical.get("execution_policy_provenance"),
                 environment_keys=tuple(canonical.get("environment_keys", ())),
                 artifact_paths=tuple(canonical.get("artifact_paths", ())),
@@ -782,6 +844,10 @@ class JobService:
         if artifacts:
             artifact_dir = directory / "artifacts"
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
+            if (self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "retire_terminal_materialization") and
+                    self.workspace_registry.retire_terminal_materialization(state)):
+                removed.append("workspace_materialization")
         if metrics:
             metric_file = directory / "metrics.jsonl"
             metric_dir = directory / "metrics"
@@ -797,6 +863,10 @@ class JobService:
         self.repository.mark_retained_metadata_unavailable(
             job_id, logs=logs, artifacts=artifacts, metrics=metrics)
         remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
+        if (self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "has_retained_materialization")):
+            remaining = (remaining or
+                         self.workspace_registry.has_retained_materialization(state))
         cleanup_state = "retained" if remaining else "completed"
         self.repository.set_cleanup_state(job_id, cleanup_state)
         return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
@@ -822,7 +892,14 @@ class JobService:
                 finished = datetime.fromisoformat(row["finished_at"].replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if (storage_pressure or finished <= cutoff) and row.get("cleanup_state") != "completed":
+            retained_materialization = (
+                self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "has_retained_materialization") and
+                self.workspace_registry.has_retained_materialization(row)
+            )
+            if ((storage_pressure or finished <= cutoff) and
+                    (row.get("cleanup_state") != "completed" or
+                     retained_materialization)):
                 cleaned.append(self.cleanup(row["job_id"]))
             if storage_pressure and not self.storage.is_under_pressure():
                 break

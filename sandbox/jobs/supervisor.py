@@ -21,6 +21,18 @@ from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
 
 
+def _linux_cgroup_path(pid: int) -> str | None:
+    try:
+        for line in Path(f"/proc/{pid}/cgroup").read_text(
+                encoding="ascii").splitlines():
+            hierarchy, controllers, path = line.split(":", 2)
+            if hierarchy == "0" and controllers == "" and path.startswith("/"):
+                return path
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
 def run_descriptor(path: str | Path) -> int:
     descriptor_path = Path(path).resolve()
     descriptor = json.loads(descriptor_path.read_text())
@@ -59,7 +71,11 @@ def run_descriptor(path: str | Path) -> int:
         repository.put_process_identity(job_id, host_boot_id=identity.host_boot_id,
             supervisor_pid=identity.pid, supervisor_start_identity=identity.start_identity,
             supervisor_nonce_hash=descriptor["nonce_hash"], child_pid=command.pid,
-            child_pgid=command.pid, child_start_identity=child.start_identity)
+            child_pgid=command.pid,
+            child_cgroup_path=(
+                child_cgroup if (child_cgroup := _linux_cgroup_path(command.pid))
+                not in {None, "/", _linux_cgroup_path(os.getpid())} else None),
+            child_start_identity=child.start_identity)
         observed_at = _iso()
         repository.put_heartbeat(job_id, supervisor_at=observed_at, health_evidence={
             "process_alive": True, "child_observed": True,
@@ -125,6 +141,9 @@ def run_descriptor(path: str | Path) -> int:
                 else:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
+        selector.close()
+        command.stdout.close()
+        command.stderr.close()
         output.finish("stdout"); output.finish("stderr")
         integrity = output.complete()
         # Artifacts describe successful job output. Do not let a missing
@@ -171,6 +190,14 @@ def run_descriptor(path: str | Path) -> int:
         try:
             repository.release_leases(job_id)
         except Exception:
+            pass
+        try:
+            from sandbox.application.workspace_service import finalize_terminal_workspace
+            finalize_terminal_workspace(
+                repository, job_id, descriptor.get("workspace_cleanup"))
+        except Exception:
+            # Terminal command truth is already durable. Cleanup failures are
+            # recorded by the shared seam and must never rewrite that result.
             pass
         repository.close()
 

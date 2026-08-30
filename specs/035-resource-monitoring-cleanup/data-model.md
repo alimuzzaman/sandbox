@@ -73,6 +73,16 @@ Thorough host-root observations are capacity-accounted. Nested Docker,
 workspace, volume, image, and build-cache observations are detail-only so they
 can be ranked without inflating attributed host bytes.
 
+Job-to-workspace references use the job row's exact `workspace_id` when present.
+A terminal job no longer contributes an active reference, but its retained job
+and evidence rows remain visible. Missing/legacy IDs may support reporting only;
+they never authorize automatic workspace deletion by label or path correlation.
+Deletion additionally requires an accepted controller CI-materialization authority
+digest and a fresh zero-reference observation for recorded processes, residual owned
+groups/cgroups, containers, mountpoints and bind sources, bindings, leases, and jobs.
+Unknown values are refusal, not zero. Retained CI materializations expose bounded count
+and bytes in the workspace projection until job retention retires the exact artifact.
+
 ## StorageScan
 
 Aggregates capacity and resource observations for one target.

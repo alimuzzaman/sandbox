@@ -264,6 +264,30 @@ workspace cleanup, reset, destroy, or network release as part of indexing.
 - **FR-053**: Resource monitoring MUST consume a typed workspace ownership projection
   keyed by `workspace_id` and MUST classify duplicate or stale bindings as unknown/
   indeterminate; it MUST not infer ownership from path or network names.
+- **FR-054**: After terminal evidence is durable, including
+  `supervisor_launch_failed`, Sandbox MUST automatically release only the exact
+  controller-materialized CI workspace whose durable `workspace_id`, immutable
+  materialization-authority digest, isolated/ephemeral mode, cleanup policy,
+  project identity, checkout filesystem identity, and containment all agree.
+  A fresh observation MUST prove no live recorded process, residual owned process
+  group/cgroup, container mount, host mountpoint or bind-source use, resource binding,
+  lease, or active job before an atomic move into a private owner-only cleanup root.
+  Deletion MUST stay bound to the opened and revalidated directory identity through
+  completion, never a reusable pathname.
+  A platform without an identity-conditional final removal operation MUST retain the
+  emptied quarantine and verified archive, record cleanup failure/indeterminate truth,
+  and MUST NOT report the workspace released or the archive retired. An isolated cleanup
+  broker or equivalent private ownership boundary is required to complete automatic reap.
+  Workspace validation/materialization and durable job acceptance MUST share the same
+  controller lock as terminal cleanup through its final active-job check and deletion.
+  Persistent, reusable, retained, shared, foreign, ambiguous, or actively
+  referenced workspaces MUST NOT be deleted. Cleanup failure MUST be recorded
+  separately without changing the terminal job lifecycle, exit code, or result.
+  Retry after release MUST rematerialize from one bounded, reserve-checked retained
+  artifact without accumulating superseded generations. Inventory and retention MUST
+  report and retire that exact artifact. Digest, size, extraction, quarantine, and
+  retirement MUST use one identity-checked open artifact descriptor; path replacement
+  or failed restore MUST preserve foreign bytes and publish no checkout.
 
 ### Acceptance evidence required before closing this amendment
 

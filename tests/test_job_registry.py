@@ -37,7 +37,7 @@ class JobRegistryTests(unittest.TestCase):
 
     def test_schema_uses_wal_foreign_keys_and_version(self):
         repo = self.repository()
-        self.assertEqual(repo.schema_version(), 4)
+        self.assertEqual(repo.schema_version(), 6)
         self.assertEqual(repo.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(repo.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         names = {row[0] for row in repo.connection.execute(
@@ -140,7 +140,8 @@ class JobRegistryTests(unittest.TestCase):
         from sandbox.jobs.registry import read_resource_index
 
         repo = self.repository()
-        row, _ = repo.accept(submission())
+        workspace_id = "ws_" + "a" * 32
+        row, _ = repo.accept(submission(), workspace_id=workspace_id)
         indexed = read_resource_index(self.path)["jobs"]
         self.assertEqual(len(indexed), 1)
         self.assertEqual(indexed[0]["job_id"], row["job_id"])
@@ -148,6 +149,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(indexed[0]["project_root"], "/tmp/project")
         self.assertEqual(indexed[0]["target_kind"], "local")
         self.assertIsNone(indexed[0]["remote_name"])
+        self.assertEqual(indexed[0]["workspace_id"], workspace_id)
 
     def test_heartbeat_updates_preserve_prior_observation_timestamps(self):
         repo = self.repository()
@@ -224,7 +226,7 @@ class JobRegistryTests(unittest.TestCase):
         legacy_payload = item.as_dict()
         for field in (
                 "sync_relationship_id", "sync_generation_id", "source_access",
-                "parallel_safe"):
+                "parallel_safe", "materialization_source_root"):
             legacy_payload.pop(field)
         legacy_json = json.dumps(
             legacy_payload, sort_keys=True, separators=(",", ":"),
@@ -239,6 +241,29 @@ class JobRegistryTests(unittest.TestCase):
             (legacy_digest, original["job_id"]),
         )
         replayed, replay = repo.accept(submission("legacy-digest"))
+        self.assertTrue(replay)
+        self.assertEqual(replayed["job_id"], original["job_id"])
+
+    def test_unset_materialization_source_preserves_v5_request_digest_and_replay(self):
+        item = submission("v5-materialization-replay")
+        legacy_payload = item.as_dict()
+        for field in (
+                "sync_relationship_id", "sync_generation_id", "source_access",
+                "parallel_safe", "materialization_source_root"):
+            legacy_payload.pop(field)
+        legacy_json = json.dumps(
+            legacy_payload, sort_keys=True, separators=(",", ":"),
+        )
+        legacy_digest = hashlib.sha256(legacy_json.encode()).hexdigest()
+        self.assertEqual(item.canonical_digest(), legacy_digest)
+
+        repo = self.repository()
+        original, _ = repo.accept(item)
+        repo.connection.execute(
+            "UPDATE jobs SET request_digest=?, submission_json=NULL WHERE job_id=?",
+            (legacy_digest, original["job_id"]),
+        )
+        replayed, replay = repo.accept(submission("v5-materialization-replay"))
         self.assertTrue(replay)
         self.assertEqual(replayed["job_id"], original["job_id"])
 
@@ -267,7 +292,7 @@ class JobRegistryTests(unittest.TestCase):
                 connection.execute("ALTER TABLE jobs DROP COLUMN submission_json")
             connection.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
         reopened = self.repository()
-        self.assertEqual(reopened.schema_version(), 4)
+        self.assertEqual(reopened.schema_version(), 6)
         self.assertIsNone(reopened.submission_snapshot(row["job_id"]))
         self.assertEqual(reopened.get(row["job_id"])["lifecycle"], "accepted")
 
@@ -310,7 +335,8 @@ class JobRegistryTests(unittest.TestCase):
         repo.transition(job_id, "queued")
         repo.transition(job_id, "running")
         repo.put_process_identity(job_id, host_boot_id="boot", supervisor_pid=10,
-                                  supervisor_start_identity="100", supervisor_nonce_hash="hash")
+                                  supervisor_start_identity="100", supervisor_nonce_hash="hash",
+                                  child_cgroup_path="/sandbox/job-fixture")
         repo.put_heartbeat(job_id, supervisor_at="2026-07-18T00:00:00Z",
                            health_evidence={"reason": "alive"})
         repo.append_event(job_id, "progress", {"current": 1})
@@ -323,6 +349,8 @@ class JobRegistryTests(unittest.TestCase):
         snapshot = repo.snapshot(job_id)
         self.assertEqual(snapshot["lifecycle"], "running")
         self.assertEqual(snapshot["process"]["supervisor_pid"], 10)
+        self.assertEqual(snapshot["process"]["child_cgroup_path"],
+                         "/sandbox/job-fixture")
         self.assertEqual(snapshot["heartbeat"]["health_evidence"]["reason"], "alive")
         self.assertEqual(snapshot["output"][0]["bytes_stored"], 4)
         self.assertEqual(snapshot["metrics"]["samples"], 1)

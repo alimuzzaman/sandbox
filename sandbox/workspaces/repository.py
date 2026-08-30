@@ -1178,6 +1178,50 @@ class WorkspaceRepository:
                 connection.close()
         return self.get(workspace_id)  # type: ignore[return-value]
 
+    def revive_destroyed(self, workspace_id: str, *,
+                         metadata: Mapping[str, Any]) -> WorkspaceRecord:
+        """Publish a freshly materialized generation for one destroyed identity."""
+        return self.revive_disposable(
+            workspace_id, metadata=metadata, allowed_lifecycles=("destroyed",))
+
+    def revive_disposable(self, workspace_id: str, *,
+                          metadata: Mapping[str, Any],
+                          allowed_lifecycles: tuple[str, ...] =
+                          ("destroyed", "indeterminate")) -> WorkspaceRecord:
+        """Publish a verified retry for one terminal disposable identity."""
+        now = _timestamp(self.clock)
+        with _WRITE_LOCK:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._row_for(connection, workspace_id)
+                if (current is None or
+                        current["lifecycle"] not in allowed_lifecycles):
+                    raise WorkspaceIndexError(
+                        "workspace_recovery_required",
+                        "workspace cannot be rematerialized from this lifecycle")
+                previous_lifecycle = current["lifecycle"]
+                connection.execute(
+                    "UPDATE workspaces SET lifecycle='ready',status='ready',"
+                    "metadata_json=?,updated_at=? WHERE workspace_id=?",
+                    (_json(metadata), now, workspace_id),
+                )
+                self._bump_generation(connection)
+                connection.execute(
+                    "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) "
+                    "VALUES(?,?,?,?)",
+                    ("workspace_rematerialized", workspace_id,
+                     _json({"status": "ready",
+                            "previous_lifecycle": previous_lifecycle}), now),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.close()
+        return self.get(workspace_id)  # type: ignore[return-value]
+
     def reconcile_startup(self) -> list[str]:
         """Mark interrupted operations indeterminate; never retry mutation."""
         changed: list[str] = []
@@ -1441,15 +1485,19 @@ class WorkspaceRepository:
                 connection.close()
         def project(item: WorkspaceRecord) -> dict[str, Any]:
             active_jobs = sum(
-                row.get("project_identity") == item.project_identity
-                and row.get("workspace_label") == item.label
+                (row.get("workspace_id") == item.workspace_id
+                 if row.get("workspace_id") is not None
+                 else (row.get("project_identity") == item.project_identity
+                       and row.get("workspace_label") == item.label))
                 and row.get("lifecycle") in {
                     "accepted", "queued", "running", "cancelling"}
                 for row in projection_jobs
             )
             active_leases = sum(
-                row.get("project_identity") == item.project_identity
-                and row.get("workspace_label") == item.label
+                (row.get("workspace_id") == item.workspace_id
+                 if row.get("workspace_id") is not None
+                 else (row.get("project_identity") == item.project_identity
+                       and row.get("workspace_label") == item.label))
                 and row.get("lifecycle") in {"running", "cancelling"}
                 for row in projection_jobs
             )
@@ -1483,6 +1531,13 @@ class WorkspaceRepository:
                 "aliases": list(item.aliases),
                 "bindings": binding_rows,
             })
+            authority = item.metadata.get("ci_cleanup_authority")
+            retained_materializations = {"count": 0, "bytes": 0}
+            if (isinstance(authority, dict) and
+                    not item.metadata.get("ci_materialization_retired", False)):
+                size = authority.get("artifact_size_bytes")
+                if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                    retained_materializations = {"count": 1, "bytes": size}
             return {
                 "workspace_id": item.workspace_id,
                 "owner_kind": "workspace",
@@ -1508,6 +1563,7 @@ class WorkspaceRepository:
                 "observed_at": item.updated_at,
                 "aliases": list(item.aliases),
                 "bindings": binding_rows,
+                "retained_materializations": retained_materializations,
             }
 
         projected = [project(item) for item in records]

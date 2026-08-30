@@ -1209,3 +1209,97 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   Compose/initializers regardless of phase, while a different known v2 dirty artifact is
   treated as a real source change and takes full convergence. Only the exact unversioned
   v1 empty-overlay proof migrates. These remain local code/test claims.
+
+## Disposable CI terminal-workspace cleanup — 2026-08-31
+
+- Feedback `52622c4577419a51f02d728f886b40f0` and incident
+  `7ba71712a512c41794c72116ab503b70` exposed a missing lifecycle seam: terminal
+  jobs retained their evidence but did not release their disposable
+  checkout, including the pre-launch `supervisor_launch_failed` path.
+- The first local implementation was rejected by Sol High review. Reproductions
+  proved it could delete while an orphan child lived, delete a foreign pathname
+  replacement, break retry after release, let a non-CI job self-authorize, and
+  reject supported reusable/index/legacy records. Therefore the earlier 286-test
+  result is regression history, not acceptance proof, and T171/T172 remain open.
+- The revised local candidate stores an immutable controller CI-materialization
+  authority digest with acceptance, makes zero live process/container/mount/
+  binding/lease/job references a prerequisite, quarantines and revalidates the
+  owned filesystem identity before deletion, rematerializes retry from retained
+  source evidence, and leaves generic/reusable/index/legacy workspaces retained.
+  All five reviewer reproductions are named regressions in
+  `tests/test_ci_workspace_cleanup.py`.
+- A final Sol High review at `63d2464` found five more unsafe gaps: residual
+  process groups after leader exit, a second quarantine pathname race, v5 replay
+  drift from the nullable v6 field, bind-source mounts missed by the observer,
+  and unbounded retained archive generations. The current candidate records and
+  checks the owned PGID/dedicated cgroup, parses mount roots and mountpoints,
+  performs owner-only FD-bound deletion, omits the unset v6 field from canonical
+  input, and retains one archive with 512 MiB input/output, 100,000-entry, and
+  1 GiB reserve bounds. Workspace inventory reports the retained count/bytes;
+  job retention digest-verifies and retires it. Reviewer reproductions cover
+  background children, both pathname replacements, migrated-v5 replay,
+  bind-source mounts, reserve/size refusal, retry reuse, and retirement.
+- After merging `origin/latest` at
+  `a0845e0f9438788820199ee4229f4484a93466f9`, the focused lifecycle, workspace,
+  transport, MCP, architecture, remote-ensure, and bounded-process suites passed
+  355 tests. This validates local behavior only; it does not close T171/T172.
+- After merging the reviewed Feature 046 `origin/latest` at
+  `74fcb955384bc69aa07062b9c901556a37121ab6`, the adversarial/transport/
+  architecture/bounded-process suite passed 130 tests with one Linux-only
+  mountinfo test skipped on macOS; all 181 job tests and all 133 workspace tests
+  also passed. These are local gates only. T171/T172 remain unchecked pending
+  disposable remote and measured reclamation proof.
+- Full unittest discovery was attempted but stopped during the unrelated live
+  resource-probe suite after it produced large machine-state observations. Four
+  failures observed earlier in that run reproduce independently on unchanged
+  files: three tests mutate the immutable `ExplicitEnvironment` test helper and
+  one stale guidance assertion expects `--async` in a catalog description.
+- This is local unit/static evidence only. No remote runtime, live workspace,
+  deployment, cleanup command, secret, or machine-local feedback status was
+  changed. Live disposable-remote acceptance and disk-reclamation proof remain
+  pending under separate authorization.
+- Independent review of `b84879c5` reproduced three further local races. An
+  empty owned quarantine could be replaced before removal, a new submission
+  could be durably accepted after cleanup's last active-job check, and a
+  retained archive could be replaced between digest validation and extraction
+  or retirement. Named regressions now cover the empty-quarantine replacement,
+  concurrent acceptance during deletion, restore-time archive replacement,
+  failed-restore rollback, and retirement-time archive replacement.
+- The subsequently rejected candidate serialized CI workspace validation,
+  acceptance, and terminal cleanup with one stable project/label operation lock,
+  but its final quarantine/archive pathname removals remained unsafe. The shared
+  transition and open-descriptor restore/rollback portions remain valid; the
+  final-removal claim does not.
+- After merging `origin/latest` at
+  `065b91b81901d41b2af6042c346c059402d9635a`, including Spec 037, the
+  adversarial/transport/architecture suite passed 135 tests with one Linux-only
+  mount observation skipped on macOS. All 181 job tests, 133 workspace tests,
+  155 hosting tests, and 69 Spec 037 ingress tests passed. Compile and diff
+  checks also passed. These remain local unit/static gates only; T171/T172 and
+  live disposable-remote reclamation evidence remain open.
+- Review of `9b69a5ba` reproduced swaps after the last entry recheck but before
+  `rmdir`/`unlink`. Standard macOS/Linux removal remains pathname-based and cannot
+  condition the mutation on the still-open target descriptor. The earlier final-removal
+  wording was therefore an overclaim.
+- The safe partial candidate removes checkout contents only through the verified open
+  quarantine descriptor, then retains the empty quarantine and records cleanup
+  failed/indeterminate. Archive retirement verifies the exact open descriptor but retains
+  it and does not mark it retired. Explicit retry can rematerialize from that retained
+  archive; ordinary acceptance remains blocked while the workspace is indeterminate.
+  Post-recheck replacement regressions assert that neither pathname removal is invoked.
+- Automatic terminal reap remains incomplete. T171/T172 now explicitly require a private
+  cleanup broker or equivalent ownership boundary inaccessible to the submitting UID and
+  capable of identity-bound final removal. No live or remote cleanup proof is claimed.
+- With both post-recheck regressions included, the local adversarial/transport/
+  architecture suite passed 137 tests with one Linux-only skip. All 181 job tests,
+  133 workspace tests, 155 hosting tests, and 69 Spec 037 ingress tests passed.
+  These are local gates for fail-closed retention, not automatic reap acceptance.
+- A final pre-quarantine race regression moves the exact validated checkout away before
+  the descriptor-relative rename. Cleanup now keeps an open parent-relative descriptor
+  for the expected checkout across that rename, reports failed/indeterminate when the
+  entry disappears or is replaced, and preserves workspace metadata plus the retained
+  materialization archive. It does not report cleanup completed.
+- The final local gates passed: 137 adversarial/transport/architecture/bounded-process
+  tests with one Linux-only skip, 181 job tests, 133 workspace tests, 155 hosting tests,
+  and the current 182-test Spec 037 ingress suite. Focused compile and diff checks also
+  passed. T171/T172 remain open; no remote, broker, or measured-reclamation proof ran.

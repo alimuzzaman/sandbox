@@ -1228,6 +1228,10 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   source evidence, and leaves generic/reusable/index/legacy workspaces retained.
   All five reviewer reproductions are named regressions in
   `tests/test_ci_workspace_cleanup.py`.
+- After merging `origin/latest` at
+  `a0845e0f9438788820199ee4229f4484a93466f9`, the focused lifecycle, workspace,
+  transport, MCP, architecture, remote-ensure, and bounded-process suites passed
+  355 tests. This validates local behavior only; it does not close T171/T172.
 - Full unittest discovery was attempted but stopped during the unrelated live
   resource-probe suite after it produced large machine-state observations. Four
   failures observed earlier in that run reproduce independently on unchanged

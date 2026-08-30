@@ -294,6 +294,29 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 self.assertEqual(row["cleanup_state"], "failed")
                 self.assertTrue(checkout.exists())
 
+    def test_cleanup_refuses_a_residual_workspace_lease(self):
+        checkout = self._checkout("reference-lease")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="reference-lease-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        self.job_repository.connection.execute(
+            "INSERT INTO workspace_leases(lease_id,target_namespace,"
+            "project_identity,workspace_label,job_id,mode,parallel_safe,"
+            "acquired_at,expires_at,heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("lease-residual", "local", "project:ci", checkout.name,
+             accepted["job_id"], "isolated", 0,
+             "2026-08-31T00:00:00Z", "2026-09-01T00:00:00Z",
+             "2026-08-31T00:00:00Z"),
+        )
+
+        row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "failed")
+        self.assertTrue(checkout.exists())
+
     def test_cleanup_quarantines_owned_inode_and_never_deletes_path_replacement(self):
         checkout = self._checkout("pathname-aba")
         service = self._service(lambda _descriptor: None)

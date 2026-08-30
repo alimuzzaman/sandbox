@@ -87,3 +87,44 @@ def node_store_service(remote: str | None = None):
     return NodeStoreReclaimService(
         service.adapter, Path(RUNTIME_DIR) / "resource-plans",
     )
+
+
+def _build_host_memory_service(remote: str | None = None):
+    """Build the remote-only Feature 046 controller service."""
+    if not remote:
+        raise ValueError("remote_required")
+    from sandbox.core import _remote
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    from .host_memory.service import HostMemoryService
+
+    record = _remote.get_remote(remote)
+    if not isinstance(record, dict):
+        raise ValueError("unknown_remote")
+    service = record.get("mcp_service") or {}
+    local_revision = _remote._remote_mcp_runtime_revision()
+    if service.get("runtime_revision") != local_revision:
+        raise RemoteProtocolError(
+            "remote_runtime_revision_mismatch",
+            "installed remote runtime does not match this controller",
+        )
+
+    def request(selected, payload):
+        return _remote.remote_host_memory_request(selected, payload)
+
+    adapter = HostMemoryRemote(remote, record, request)
+    return HostMemoryService(adapter)
+
+
+def host_memory_status(remote: str, *, budget_seconds: float = 15):
+    """Return the bounded status envelope without exposing service authority."""
+    return _build_host_memory_service(remote).status(budget_seconds)
+
+
+def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
+    """Return Feature 046's immutable read-only governance projection only."""
+    service = _build_host_memory_service(remote)
+    result = service.status(budget_seconds)
+    if not result.get("ok"):
+        error = result.get("error") or {}
+        raise ValueError(error.get("code", "response_invalid"))
+    return service.projection(result["data"])

@@ -90,15 +90,87 @@ class SyncService:
         })
 
     @staticmethod
-    def _accepted_transport_result(result: Any, generation, manifest) -> bool:
+    def _accepted_transport_result(
+        result: Any, generation, *, require_request_id: bool = False,
+    ) -> bool:
         return (
             isinstance(result, dict)
             and result.get("status") == "accepted"
             and result.get("accepted_generation") == generation.generation_id
-            and result.get("manifest_digest") == manifest.manifest_digest
-            and result.get("file_count") == manifest.file_count
-            and result.get("byte_count") == manifest.byte_count
+            and result.get("manifest_digest") == generation.manifest_digest
+            and result.get("file_count") == generation.file_count
+            and result.get("byte_count") == generation.byte_count
+            and (
+                not require_request_id
+                or result.get("request_id") == generation.request_id
+            )
         )
+
+    def _reconcile_generation(self, relationship, generation, *, remote: str) -> dict:
+        """Probe uncertain acceptance once and require exact generation evidence."""
+        with self.coordinator.serialize_reconciliation(relationship.relationship_id):
+            current = (
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship
+            )
+            current_generation = (
+                self.repository.get_generation(generation.generation_id)
+                or generation
+            )
+            if current_generation.lifecycle == "accepted":
+                return success_envelope(
+                    current, current_generation, status="accepted",
+                    active_generation=current_generation.generation_id,
+                )
+            if current_generation.lifecycle != "transferring":
+                return failure_envelope(
+                    code="transport_unknown", status="unknown",
+                    relationship_id=current.relationship_id, remote_name=remote,
+                    request_id=current_generation.request_id,
+                    accepted_generation=current.accepted_generation_id,
+                    pending_generation=current.pending_generation_id,
+                    retryable=False,
+                )
+            try:
+                transport = self.transport_factory()
+                reconcile = getattr(transport, "reconcile", None)
+                result = (
+                    reconcile(current, current_generation)
+                    if callable(reconcile)
+                    else {"status": "unknown"}
+                )
+            except Exception:
+                result = {"status": "unknown"}
+            if self._accepted_transport_result(
+                result, current_generation, require_request_id=True,
+            ):
+                accepted = self.repository.transition_generation(
+                    current_generation.generation_id, "accepted", accepted_at=utc_now(),
+                )
+                self.repository.record_metrics(
+                    current.relationship_id, outcome="accepted",
+                    file_count=accepted.file_count, byte_count=accepted.byte_count,
+                )
+                current = (
+                    self.repository.get_relationship(current.relationship_id)
+                    or current
+                )
+                return success_envelope(
+                    current, accepted, status="accepted",
+                    active_generation=accepted.generation_id,
+                )
+            self.repository.record_metrics(
+                current.relationship_id, outcome="unknown",
+                file_count=current_generation.file_count,
+                byte_count=current_generation.byte_count,
+            )
+            return failure_envelope(
+                code="transport_unknown", status="unknown",
+                relationship_id=current.relationship_id, remote_name=remote,
+                request_id=current_generation.request_id,
+                accepted_generation=current.accepted_generation_id,
+                pending_generation=current_generation.generation_id, retryable=False,
+            )
 
     def once(self, project_dir: str | Path, *, remote: str, workspace_id: str,
              request_id: str, explicit_includes: tuple[str, ...] = (),
@@ -148,6 +220,10 @@ class SyncService:
                 self.repository.get_relationship(relationship.relationship_id) or relationship,
                 generation, status="accepted", active_generation=generation.generation_id,
             )
+        if replay and generation.lifecycle == "transferring":
+            current = (self.repository.get_relationship(relationship.relationship_id)
+                       or relationship)
+            return self._reconcile_generation(current, generation, remote=remote)
         if replay and generation.lifecycle != "pending":
             return failure_envelope(
                 code="transport_unknown", status="unknown",
@@ -172,7 +248,7 @@ class SyncService:
                 self.repository.get_relationship(relationship.relationship_id) or relationship,
                 generation,
             )
-            if not self._accepted_transport_result(transport_result, generation, manifest):
+            if not self._accepted_transport_result(transport_result, generation):
                 raise SyncServiceError(
                     "remote acceptance is incomplete", "transport_unknown",
                     retryable=False,
@@ -287,48 +363,7 @@ class SyncService:
         generation = self.repository.get_generation(pending_id) if pending_id else None
         if generation is None or generation.lifecycle != "transferring":
             return self.status(project_dir, remote=remote, workspace_id=workspace_id)
-        transport = self.transport_factory()
-        reconcile = getattr(transport, "reconcile", None)
-        if not callable(reconcile):
-            return failure_envelope(
-                code="transport_unknown", status="unknown",
-                relationship_id=relationship.relationship_id, remote_name=remote,
-                request_id=generation.request_id,
-                accepted_generation=relationship.accepted_generation_id,
-                pending_generation=generation.generation_id, retryable=False,
-            )
-        try:
-            result = reconcile(relationship, generation)
-        except Exception:
-            result = {"status": "unknown"}
-        if (isinstance(result, dict) and result.get("status") == "accepted" and
-                result.get("accepted_generation") == generation.generation_id and
-                result.get("manifest_digest") == generation.manifest_digest and
-                result.get("file_count") == generation.file_count and
-                result.get("byte_count") == generation.byte_count):
-            accepted = self.repository.transition_generation(
-                generation.generation_id, "accepted", accepted_at=utc_now(),
-            )
-            self.repository.record_metrics(
-                relationship.relationship_id, outcome="accepted",
-                file_count=accepted.file_count, byte_count=accepted.byte_count,
-            )
-            current = self.repository.get_relationship(relationship.relationship_id) or relationship
-            return success_envelope(
-                current, accepted, status="accepted",
-                active_generation=accepted.generation_id,
-            )
-        self.repository.record_metrics(
-            relationship.relationship_id, outcome="unknown",
-            file_count=generation.file_count, byte_count=generation.byte_count,
-        )
-        return failure_envelope(
-            code="transport_unknown", status="unknown",
-            relationship_id=relationship.relationship_id, remote_name=remote,
-            request_id=generation.request_id,
-            accepted_generation=relationship.accepted_generation_id,
-            pending_generation=generation.generation_id, retryable=False,
-        )
+        return self._reconcile_generation(relationship, generation, remote=remote)
 
     def resolve(self, project_dir: str | Path, *, remote: str,
                 workspace_id: str, resolution: str, confirm: bool,

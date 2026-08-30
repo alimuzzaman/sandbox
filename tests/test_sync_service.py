@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -92,19 +93,31 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(status["status"], "pending")
         self.assertEqual(status["generation"]["state"], "pending")
 
-    def test_unknown_or_failed_acknowledgment_never_launches_twice(self):
-        calls = []
+    def test_lost_acknowledgment_replay_reconciles_without_second_transfer(self):
+        transfers = []
+        reconciliations = []
 
-        class Unknown:
+        class LostAcknowledgment:
             def transfer(self, *_args, **_kwargs):
-                calls.append("launch")
+                transfers.append("launch")
                 error = RuntimeError("lost acknowledgment")
                 error.code = "transport_unknown"
                 error.retryable = True
                 raise error
 
+            def reconcile(self, relationship, generation):
+                reconciliations.append((relationship.relationship_id, generation.generation_id))
+                return {
+                    "status": "accepted",
+                    "accepted_generation": generation.generation_id,
+                    "manifest_digest": generation.manifest_digest,
+                    "file_count": generation.file_count,
+                    "byte_count": generation.byte_count,
+                    "request_id": generation.request_id,
+                }
+
         service = SyncService(
-            self.repository, lambda: Unknown(),
+            self.repository, lambda: LostAcknowledgment(),
             identity_resolver=lambda _root, *, remote: {
                 "identity": "project:fixture", "root": str(self.root),
             },
@@ -114,9 +127,162 @@ class SyncServiceTests(unittest.TestCase):
         replay = service.once(self.root, remote="remote", workspace_id="workspace",
                               request_id="request-unknown")
         self.assertEqual(first["status"], "unknown")
-        self.assertEqual(replay["status"], "unknown")
+        self.assertEqual(replay["status"], "accepted")
         self.assertFalse(first["retryable"])
-        self.assertEqual(calls, ["launch"])
+        self.assertEqual(replay["generation"]["id"], first["pending_generation"])
+        self.assertEqual(transfers, ["launch"])
+        self.assertEqual(len(reconciliations), 1)
+        self.assertEqual(reconciliations[0][1], first["pending_generation"])
+        relationship = self.repository.list_relationships()[0]
+        self.assertEqual(len(self.repository.list_generations(relationship.relationship_id)), 1)
+        accepted_replay = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-unknown",
+        )
+        self.assertEqual(accepted_replay["generation"]["id"], first["pending_generation"])
+        self.assertEqual(transfers, ["launch"])
+        self.assertEqual(len(reconciliations), 1)
+
+    def test_bad_reconciliation_evidence_stays_unknown_on_same_generation(self):
+        scenarios = {
+            "missing seam": None,
+            "unknown": {"status": "unknown"},
+            "malformed": {"status": "accepted"},
+            "generation mismatch": {
+                "status": "accepted", "accepted_generation": "gen_wrong",
+            },
+            "manifest mismatch": {"status": "accepted", "manifest_digest": "0" * 64},
+            "file count mismatch": {"status": "accepted", "file_count": -1},
+            "byte count mismatch": {"status": "accepted", "byte_count": -1},
+            "request mismatch": {"status": "accepted", "request_id": "request-other"},
+        }
+        for label, evidence in scenarios.items():
+            with self.subTest(label=label):
+                repository = SyncRepository(
+                    Path(self.temporary.name) / f"journal-{label.replace(' ', '-')}.json"
+                )
+                transfers = []
+                reconciliations = []
+
+                class Uncertain:
+                    def transfer(inner, *_args, **_kwargs):
+                        transfers.append("launch")
+                        error = RuntimeError("lost acknowledgment")
+                        error.code = "transport_unknown"
+                        raise error
+
+                    if evidence is not None:
+                        def reconcile(inner, relationship, generation):
+                            reconciliations.append(generation.generation_id)
+                            if label in {"unknown", "malformed"}:
+                                return dict(evidence)
+                            result = {
+                                "status": "accepted",
+                                "accepted_generation": generation.generation_id,
+                                "manifest_digest": generation.manifest_digest,
+                                "file_count": generation.file_count,
+                                "byte_count": generation.byte_count,
+                                "request_id": generation.request_id,
+                            }
+                            result.update(evidence)
+                            return result
+
+                service = SyncService(
+                    repository, lambda: Uncertain(),
+                    identity_resolver=lambda _root, *, remote: {
+                        "identity": "project:fixture", "root": str(self.root),
+                    },
+                )
+                first = service.once(
+                    self.root, remote="remote", workspace_id="workspace",
+                    request_id="request-unknown",
+                )
+                replay = service.once(
+                    self.root, remote="remote", workspace_id="workspace",
+                    request_id="request-unknown",
+                )
+                second_replay = service.once(
+                    self.root, remote="remote", workspace_id="workspace",
+                    request_id="request-unknown",
+                )
+
+                self.assertEqual(first["status"], "unknown")
+                self.assertEqual(replay["status"], "unknown")
+                self.assertEqual(second_replay, replay)
+                self.assertEqual(replay["code"], "transport_unknown")
+                self.assertFalse(replay["retryable"])
+                self.assertEqual(replay["pending_generation"], first["pending_generation"])
+                self.assertEqual(transfers, ["launch"])
+                self.assertEqual(len(reconciliations), 0 if evidence is None else 2)
+                relationship = repository.list_relationships()[0]
+                generations = repository.list_generations(relationship.relationship_id)
+                self.assertEqual(len(generations), 1)
+                self.assertEqual(generations[0].generation_id, first["pending_generation"])
+                self.assertEqual(generations[0].lifecycle, "transferring")
+
+    def test_concurrent_reconciliation_probes_accept_and_record_metrics_once(self):
+        calls = []
+        start = threading.Barrier(3)
+
+        class LostAcknowledgment:
+            def transfer(self, *_args, **_kwargs):
+                error = RuntimeError("lost acknowledgment")
+                error.code = "transport_unknown"
+                raise error
+
+            def reconcile(self, relationship, generation):
+                calls.append(generation.generation_id)
+                return {
+                    "status": "accepted",
+                    "accepted_generation": generation.generation_id,
+                    "manifest_digest": generation.manifest_digest,
+                    "file_count": generation.file_count,
+                    "byte_count": generation.byte_count,
+                    "request_id": generation.request_id,
+                }
+
+        service = SyncService(
+            self.repository, lambda: LostAcknowledgment(),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:fixture", "root": str(self.root),
+            },
+        )
+        unknown = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-race",
+        )
+        results = []
+        errors = []
+
+        def reconcile() -> None:
+            try:
+                start.wait(timeout=2)
+                results.append(service.reconcile(
+                    self.root, remote="remote", workspace_id="workspace",
+                ))
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=reconcile) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=2)
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result["status"] == "accepted" for result in results))
+        self.assertTrue(all(
+            result["generation"]["id"] == unknown["pending_generation"]
+            for result in results
+        ))
+        self.assertEqual(calls, [unknown["pending_generation"]])
+        relationship = self.repository.list_relationships()[0]
+        metrics = self.repository.metrics(relationship.relationship_id)
+        self.assertEqual(metrics["accepted"], 1)
+        self.assertEqual(metrics["unknown"], 1)
 
     def test_incomplete_transport_acceptance_is_unknown_not_current(self):
         class Incomplete:
@@ -223,6 +389,7 @@ class SyncServiceTests(unittest.TestCase):
                     "manifest_digest": generation.manifest_digest,
                     "file_count": generation.file_count,
                     "byte_count": generation.byte_count,
+                    "request_id": generation.request_id,
                 }
 
         service = SyncService(

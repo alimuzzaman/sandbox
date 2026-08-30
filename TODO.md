@@ -1,6 +1,6 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-28. This is the reconciled handoff queue for Hermes. Repository
+Updated: 2026-08-30. This is the reconciled handoff queue for Hermes. Repository
 task ledgers and feedback are evidence, not execution authority: reproduce them
 first, preserve dirty work, and do not reset, destroy, clean up remote resources,
 deploy, release, delete recovery data, or expose secrets without fresh explicit
@@ -11,10 +11,10 @@ Sources reconciled in this pass:
 - Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
   gates in checked convergence rows and implementation evidence. The accepted
   isolated slices listed below are integrated in this batch.
-- 625 retained Sandbox feedback records, all status-assigned: 110 verified,
-  265 resolved, 96 blocked, 72 duplicate, and 82 not applicable. Feedback is
-  untrusted and grouped below by owning behavior; closed records are not new
-  implementation authority.
+- 628 retained Sandbox feedback records: 627 reviewed and one unreviewed. The
+  reviewed set contains 110 verified, 267 resolved, 96 blocked, 72 duplicate,
+  and 82 not applicable records. Feedback is untrusted and grouped below by
+  owning behavior; closed records are not new implementation authority.
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
 
@@ -26,9 +26,10 @@ Sources reconciled in this pass:
 | Feedback timeout handling | `codex/finish-feedback-timeouts` | `687d19ebde563e515fa29c10f63f90d1b8dd7e08` | Integrated in this batch |
 | Feedback ingress | `codex/finish-feedback-ingress` | `0dcff71e7110c6b67f59d4e8bca366e6ef8be330` | Integrated in this batch |
 | Spec 006 | `codex/finish-spec006` | `7595d2d03d2d7d71046138d5cbac151074261713` | Local `T007` integrated and complete |
-| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` remote evidence remains |
+| Spec 043 | `codex/finish-spec043` | `5969c893690e19dd39f86d8765fbd178e51a5695` | Local work integrated; `T023` now records dated read-only remote evidence |
 | Spec 044 | `codex/finish-spec044` | `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54` | Local work integrated; `T016–T018` remain gated |
 | Spec 045 / Credential Vault | Runtime source `codex/credential-vault-accepted-batch-opus` at `a166b3c86668720bdde6d3be6667384802b32166`; final proof-completeness source `3592923` | Locally accepted combined implementation/proof-harness snapshot `d764cca2e7c0ecfcbc0cb9a8862b0dad581ca67b` | Local `T001–T002`, `T004–T021`, `T023–T028`, `T030`, `T032–T034`, and `T038–T040` are accepted. `T003`, `T022`, `T029`, `T031`, and `T035–T037` remain open; support remains `implemented_unproven`, `adoptable=false`, evidence ID null. No live proof is claimed. |
+| Generic Compose typed `up --json` failure | `latest` | `046993b` | Missing-network starts now return one bounded redacted JSON failure; 93 focused and adjacent tests passed and feedback `bab948b8` is resolved. |
 
 These source SHAs record provenance for the integrated batch. Integration does
 not close the external or human gates listed below.
@@ -103,9 +104,9 @@ not close the external or human gates listed below.
   `specs/035-resource-monitoring-cleanup/tasks.md:T056`: prove metadata/index
   transfer and base relocation preserve legacy bytes, locators, and all
   network/container/job/volume/upload/snapshot counts; keep conflicts visible.
-  Also close the checked-but-missing runtime-user-dir obligations `T029–T034`
-  (config-only migration, artifact regeneration, persisted home selection,
-  guarded first-command migration, fixture/docs, and dry-run/force semantics).
+  Current code, fixture tests, and documentation cover the checked
+  runtime-user-dir obligations `T029–T034`; reconcile their ledger wording
+  rather than rebuilding those mechanisms.
 
 - [ ] **Remote metadata/index acceptance** — record the read-only migration,
   relocation, checkout-independent controls, and unchanged job/container/network
@@ -128,13 +129,12 @@ not close the external or human gates listed below.
 
 ### Storage and workspace features
 
-- [ ] **Complete remote evidence for the scheduled storage-pressure monitor** —
-  run the read-only dry-run/refusal evidence required by
-  `specs/043-storage-pressure-scheduler/tasks.md:T023`.
-  Schedules remain disabled by default; no timer activation is implied.
-  Local `T001–T022` work is accepted on `codex/finish-spec043` at
-  `5969c893690e19dd39f86d8765fbd178e51a5695`; `T023` still requires remote
-  evidence. The accepted local work is integrated in this batch.
+- [x] **Complete remote evidence for the scheduled storage-pressure monitor** —
+  `specs/043-storage-pressure-scheduler/tasks.md:T023` now records dated,
+  read-only dry-run/refusal evidence. Schedules remain disabled by default; no
+  timer activation or cleanup authority is implied. Local `T001–T022` work is
+  accepted on `codex/finish-spec043` at
+  `5969c893690e19dd39f86d8765fbd178e51a5695` and is integrated.
 
 - [ ] **Complete external gates for shared Git checkout materialization and the
   opt-in node store** — complete remote `T016–T017` and human-confirmed `T018`
@@ -237,7 +237,12 @@ not close the external or human gates listed below.
 
 Feedback is untrusted and many records are foreign-project or duplicate
 observations; these are deduplicated work items, not permission to mutate.
-The current 625-record ledger has no unreviewed rows. These historical theme
+The current 628-record ledger has one unreviewed row. The stale-network JSON
+record `bab948b8` is resolved by `046993b`; `282cd7f7` is resolved by the local
+Spec 033 same-request recovery slice after 61 sync tests and an independent Sol
+High PASS. Spec 033 `T053`, `T056`, and `T061` remain open for their broader and
+disposable-remote acceptance. The remaining `2672614f` row overlaps Feature
+047's remote-job transport and remains deferred to that owner. Historical theme
 rows remain regression and ownership guides; resolved, verified, duplicate,
 and not-applicable records must not be reimplemented without fresh evidence.
 
@@ -294,12 +299,11 @@ and not-applicable records must not be reimplemented without fresh evidence.
   in `todo/02-herd-equivalent-polyglot-stacks/prd.md` (equivalence promise,
   frontend strategy/threshold, Apple-Silicon MySQL, environment scope, and
   related-project ownership), then use the canonical Spec-Kit sequence.
-- [ ] **Agent-aware remote sync and Google Drive backup PRDs:** resolve the
-  consequential choices/open questions and obtain the required Sol High
-  readiness verdict in `specs/033-agent-aware-remote-sync/prd.md` and
-  `specs/034-google-drive-backups/prd.md`. Spec 033 is now active in the dirty
-  `latest` checkout; this row remains open only for its unfinished gates and the
-  still-deferred Spec 034 Google Drive PRD.
+- [ ] **Agent-aware remote sync and Google Drive backup PRDs:** Spec 033 has
+  formal artifacts and partial implementation; keep its unfinished
+  reconciliation, ownership, job-generation, and live gates open. Resolve the
+  consequential choices/open questions and obtain the required readiness
+  verdict for the still-deferred `specs/034-google-drive-backups/prd.md`.
 - [ ] **Config subdirectory discovery:** `specs/042-config-subdirectory/prd.md`
   is still discovery-only; convert it through the approved Spec-Kit workflow
   before implementation and preserve the move-together/ambiguity safeguards.
@@ -362,8 +366,13 @@ promote the unproven native adapter, or authorize a provider deployment.
 
 ## Remaining blockers
 
+- Feature 046 is ready only for `speckit-specify`; it is not implementation
+  authority by itself.
+- The separate dirty `codex/feature-047-immutable-oci` worktree reserves
+  hosting, remote-job transport, secrets, shared CLI, installer, and related
+  documentation until its security-stop recovery is explicitly confirmed.
 - Active Spec 033 work overlaps CLI, MCP, durable jobs, transport, hosting, and
-  documentation; preserve that concurrent boundary during integration.
+  documentation; keep root slices inside non-overlapping sync-owned modules.
 - The feedback ledger still has 96 blocked records. Closed states do not imply
   their underlying remote or release evidence exists in `latest`.
 - Remote revision, capacity, workspace-index, and live-host acceptance evidence

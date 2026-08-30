@@ -36,9 +36,25 @@ class RelationshipCoordinator:
     @contextmanager
     def serialize(self, relationship_id: str) -> Iterator[None]:
         """Take the relationship lock after any workspace operation lock."""
+        with self._serialize_file(relationship_id, purpose="operation"):
+            yield
+
+    @contextmanager
+    def serialize_reconciliation(self, relationship_id: str) -> Iterator[None]:
+        """Serialize uncertain-acknowledgment probes for one relationship."""
+        with self._serialize_file(relationship_id, purpose="reconciliation"):
+            yield
+
+    @contextmanager
+    def _serialize_file(self, relationship_id: str, *, purpose: str) -> Iterator[None]:
         validate_identifier(relationship_id, "relationship id")
         digest = hashlib.sha256(relationship_id.encode("utf-8")).hexdigest()[:24]
-        path = Path(self.repository.lock_path).parent / f".relationship-{digest}.lock"
+        filename = (
+            f".relationship-{digest}.lock"
+            if purpose == "operation"
+            else f".relationship-{digest}-{purpose}.lock"
+        )
+        path = Path(self.repository.lock_path).parent / filename
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:

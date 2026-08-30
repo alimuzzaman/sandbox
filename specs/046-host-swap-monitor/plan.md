@@ -141,6 +141,13 @@ tests/
 ├── test_host_memory_interfaces.py
 ├── test_resource_interfaces.py
 ├── test_resource_remote.py
+├── test_remote_service_help.py
+├── test_storage_monitor_policy.py
+├── test_storage_monitor_schedule.py
+├── test_storage_monitor_runner.py
+├── test_mcp_resource_tier.py
+├── test_resource_service.py
+├── test_workspace_contracts.py
 └── test_remote.py
 ```
 

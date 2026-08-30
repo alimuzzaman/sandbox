@@ -509,6 +509,9 @@ and evidence actually present in this branch.
   authority refusal, reusable/index/legacy compatibility, residual process-group and
   owned-cgroup refusal, FD-bound second-replacement safety, v5 request replay,
   bind-source mount observation, bounded/inventoried artifact retirement, empty-quarantine
-  replacement, accept-during-delete serialization, open-descriptor artifact swaps, and
-  failed-restore rollback. Local regressions
-  exist; live disposable-remote acceptance and measured reclamation remain pending.
+  replacement, post-recheck quarantine and archive replacement, accept-during-delete
+  serialization, open-descriptor artifact swaps, and failed-restore rollback. Local
+  regressions exist. Add an isolated cleanup broker or equivalent ownership boundary that
+  is inaccessible to the submitting UID and can perform identity-bound final directory and
+  archive removal; until then unsupported platforms must retain and report failure. Live
+  disposable-remote acceptance and measured reclamation remain pending.

@@ -130,13 +130,17 @@ cross-check evidence and can never substitute for a missing or conflicting ID.
 Mode/policy and job-supplied paths never create cleanup authority. A fresh
 process-group/owned-cgroup/container/mountpoint/bind-source/binding/lease/job observation
 must prove zero live references. The owned filesystem identity then moves to a private
-owner-only root and deletion remains bound to its open descriptor through completion.
+owner-only root and content deletion remains bound to its open descriptor. Final entry
+removal requires an identity-conditional kernel operation or a private broker ownership
+boundary. Until that exists, macOS/Linux retain the empty quarantine and verified archive
+and record cleanup as failed/indeterminate; they never report deletion or retirement.
 Validation/materialization, durable acceptance, retry, artifact retirement, and terminal
 deletion serialize on one stable project-identity/workspace-label controller lock.
 Terminal job/result rows and one bounded materialization artifact remain retained;
 retry publishes fresh authority without creating another archive generation. Archive
-digest, size, extraction, and retirement operate on one identity-checked open descriptor;
-an entry replacement fails closed and restore staging is rolled back.
+digest, size, and extraction operate on one identity-checked open descriptor. Retirement
+fails closed when identity-bound final removal is unavailable; an entry replacement
+preserves foreign bytes and restore staging is rolled back.
 
 ### `process_identities`
 

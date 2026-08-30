@@ -1181,16 +1181,26 @@ class WorkspaceRepository:
     def revive_destroyed(self, workspace_id: str, *,
                          metadata: Mapping[str, Any]) -> WorkspaceRecord:
         """Publish a freshly materialized generation for one destroyed identity."""
+        return self.revive_disposable(
+            workspace_id, metadata=metadata, allowed_lifecycles=("destroyed",))
+
+    def revive_disposable(self, workspace_id: str, *,
+                          metadata: Mapping[str, Any],
+                          allowed_lifecycles: tuple[str, ...] =
+                          ("destroyed", "indeterminate")) -> WorkspaceRecord:
+        """Publish a verified retry for one terminal disposable identity."""
         now = _timestamp(self.clock)
         with _WRITE_LOCK:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 current = self._row_for(connection, workspace_id)
-                if current is None or current["lifecycle"] != "destroyed":
+                if (current is None or
+                        current["lifecycle"] not in allowed_lifecycles):
                     raise WorkspaceIndexError(
                         "workspace_recovery_required",
-                        "only a destroyed workspace can be rematerialized")
+                        "workspace cannot be rematerialized from this lifecycle")
+                previous_lifecycle = current["lifecycle"]
                 connection.execute(
                     "UPDATE workspaces SET lifecycle='ready',status='ready',"
                     "metadata_json=?,updated_at=? WHERE workspace_id=?",
@@ -1201,7 +1211,8 @@ class WorkspaceRepository:
                     "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) "
                     "VALUES(?,?,?,?)",
                     ("workspace_rematerialized", workspace_id,
-                     _json({"status": "ready"}), now),
+                     _json({"status": "ready",
+                            "previous_lifecycle": previous_lifecycle}), now),
                 )
                 connection.execute("COMMIT")
             except Exception:

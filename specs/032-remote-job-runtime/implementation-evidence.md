@@ -1265,12 +1265,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   or retirement. Named regressions now cover the empty-quarantine replacement,
   concurrent acceptance during deletion, restore-time archive replacement,
   failed-restore rollback, and retirement-time archive replacement.
-- The corrected candidate serializes CI workspace validation, acceptance, and
-  terminal cleanup with one stable project/label operation lock. Quarantine
-  removal revalidates the owned entry against its continuously open descriptor.
-  Restore and retirement hash, size-check, extract, move, revalidate, and unlink
-  through one open no-follow archive descriptor; failed restore removes its
-  staging checkout without publishing it.
+- The subsequently rejected candidate serialized CI workspace validation,
+  acceptance, and terminal cleanup with one stable project/label operation lock,
+  but its final quarantine/archive pathname removals remained unsafe. The shared
+  transition and open-descriptor restore/rollback portions remain valid; the
+  final-removal claim does not.
 - After merging `origin/latest` at
   `065b91b81901d41b2af6042c346c059402d9635a`, including Spec 037, the
   adversarial/transport/architecture suite passed 135 tests with one Linux-only
@@ -1278,3 +1277,20 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   155 hosting tests, and 69 Spec 037 ingress tests passed. Compile and diff
   checks also passed. These remain local unit/static gates only; T171/T172 and
   live disposable-remote reclamation evidence remain open.
+- Review of `9b69a5ba` reproduced swaps after the last entry recheck but before
+  `rmdir`/`unlink`. Standard macOS/Linux removal remains pathname-based and cannot
+  condition the mutation on the still-open target descriptor. The earlier final-removal
+  wording was therefore an overclaim.
+- The safe partial candidate removes checkout contents only through the verified open
+  quarantine descriptor, then retains the empty quarantine and records cleanup
+  failed/indeterminate. Archive retirement verifies the exact open descriptor but retains
+  it and does not mark it retired. Explicit retry can rematerialize from that retained
+  archive; ordinary acceptance remains blocked while the workspace is indeterminate.
+  Post-recheck replacement regressions assert that neither pathname removal is invoked.
+- Automatic terminal reap remains incomplete. T171/T172 now explicitly require a private
+  cleanup broker or equivalent ownership boundary inaccessible to the submitting UID and
+  capable of identity-bound final removal. No live or remote cleanup proof is claimed.
+- With both post-recheck regressions included, the local adversarial/transport/
+  architecture suite passed 137 tests with one Linux-only skip. All 181 job tests,
+  133 workspace tests, 155 hosting tests, and 69 Spec 037 ingress tests passed.
+  These are local gates for fail-closed retention, not automatic reap acceptance.

@@ -310,56 +310,11 @@ def _verified_artifact(artifact: Path, expected_digest: str,
 
 def _unlink_verified_artifact(artifact: Path, expected_digest: str,
                               expected_size: int) -> None:
-    """Move and unlink only the exact verified archive directory entry."""
-    retirement_root = artifact.parent / ".retiring"
-    retirement_root.mkdir(mode=0o700, exist_ok=True)
-    retirement_identity = os.stat(retirement_root, follow_symlinks=False)
-    if (not stat.S_ISDIR(retirement_identity.st_mode) or
-            retirement_identity.st_uid != os.getuid() or
-            stat.S_IMODE(retirement_identity.st_mode) & 0o077):
+    """Verify the exact archive, then fail closed without a safe unlink API."""
+    with _verified_artifact(artifact, expected_digest, expected_size):
         raise WorkspaceIndexError(
-            "workspace_path_unsafe", "artifact retirement root is not owner-only")
-    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                       getattr(os, "O_NOFOLLOW", 0))
-    with _verified_artifact(
-            artifact, expected_digest, expected_size) as (_handle, identity):
-        parent_fd = os.open(artifact.parent, directory_flags)
-        retirement_fd = os.open(retirement_root, directory_flags)
-        retirement_name = uuid.uuid4().hex + ".tar.gz"
-        moved_fd = None
-        try:
-            os.rename(
-                artifact.name, retirement_name,
-                src_dir_fd=parent_fd, dst_dir_fd=retirement_fd)
-            moved_fd = os.open(
-                retirement_name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=retirement_fd)
-            moved_identity = _artifact_identity(os.fstat(moved_fd))
-            if moved_identity != identity:
-                try:
-                    os.stat(artifact.name, dir_fd=parent_fd,
-                            follow_symlinks=False)
-                except FileNotFoundError:
-                    os.rename(
-                        retirement_name, artifact.name,
-                        src_dir_fd=retirement_fd, dst_dir_fd=parent_fd)
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "retained CI materialization artifact entry changed")
-            entry_identity = _artifact_identity(os.stat(
-                retirement_name, dir_fd=retirement_fd,
-                follow_symlinks=False))
-            if entry_identity != identity:
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "retained CI materialization retirement entry changed")
-            os.unlink(retirement_name, dir_fd=retirement_fd)
-        finally:
-            if moved_fd is not None:
-                os.close(moved_fd)
-            os.close(retirement_fd)
-            os.close(parent_fd)
+            "workspace_identity_bound_removal_unavailable",
+            "platform cannot retire an archive by open descriptor identity")
 
 
 def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
@@ -1144,8 +1099,13 @@ class WorkspaceService:
             # cleanup authority.
             if existing.source != "ci-materialization":
                 return existing
-            if existing.lifecycle != "destroyed":
+            if existing.lifecycle not in {"destroyed", "indeterminate"}:
                 return existing
+            if (existing.lifecycle == "indeterminate" and
+                    expected_previous_authority_digest is None):
+                raise WorkspaceIndexError(
+                    "workspace_recovery_required",
+                    "fail-closed CI cleanup requires an explicit retry")
             previous_authority = existing.metadata.get("ci_cleanup_authority")
             if (not isinstance(previous_authority, dict) or
                     expected_previous_authority_digest is None or
@@ -1176,7 +1136,7 @@ class WorkspaceService:
                 "project_identity": submission.project_identity,
                 "workspace_id": existing.workspace_id,
             })
-            return repo.revive_destroyed(existing.workspace_id, metadata={
+            return repo.revive_disposable(existing.workspace_id, metadata={
                 "checkout_locator": checkout,
                 "checkout_locator_digest": "sha256:" + hashlib.sha256(
                     checkout.encode()).hexdigest(),
@@ -1302,7 +1262,7 @@ class WorkspaceService:
             return True
 
     def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
-        """Release one exact job-owned disposable checkout after terminal proof."""
+        """Attempt fail-closed disposal of one exact terminal CI checkout."""
         terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
         if job.get("lifecycle") not in terminal:
             raise WorkspaceIndexError(
@@ -1526,21 +1486,14 @@ class WorkspaceService:
                                 "workspace_ownership_drift",
                                 "quarantined checkout identity changed")
                         _remove_tree_fd(owned_fd)
-                        entry = os.stat(
-                            "owned", dir_fd=operation_fd,
-                            follow_symlinks=False)
-                        opened = os.fstat(owned_fd)
-                        if (_artifact_identity(entry) !=
-                                _artifact_identity(opened)):
-                            raise WorkspaceIndexError(
-                                "workspace_ownership_drift",
-                                "emptied quarantine entry identity changed")
-                        os.rmdir("owned", dir_fd=operation_fd)
+                        raise WorkspaceIndexError(
+                            "workspace_identity_bound_removal_unavailable",
+                            "platform cannot remove an emptied quarantine by "
+                            "open descriptor identity")
                     finally:
                         if owned_fd is not None:
                             os.close(owned_fd)
                         os.close(operation_fd)
-                        os.rmdir(operation_name, dir_fd=cleanup_fd)
                         os.close(cleanup_fd)
                         os.close(parent_fd)
                 metadata_path.unlink()

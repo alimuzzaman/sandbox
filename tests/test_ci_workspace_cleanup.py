@@ -80,7 +80,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         record = self.workspace_repository.get(row["workspace_id"])
         return Path(record.metadata["ci_cleanup_authority"]["artifact_locator"])
 
-    def test_prelaunch_failure_retains_terminal_row_then_releases_exact_disposable_workspace(self):
+    def test_prelaunch_failure_retains_row_and_fails_closed_after_emptying_checkout(self):
         checkout = self._checkout("launch-failure")
         service = self._service(
             lambda _descriptor: (_ for _ in ()).throw(OSError("launch failed")))
@@ -92,11 +92,11 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         row = self.job_repository.list(limit=1)[0]
         self.assertEqual(row["lifecycle"], "failed")
         self.assertEqual(row["termination_reason"], "supervisor_launch_failed")
-        self.assertEqual(row["cleanup_state"], "completed")
+        self.assertEqual(row["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
         self.assertEqual(
             self.workspace_repository.get(row["workspace_id"]).lifecycle,
-            "destroyed",
+            "indeterminate",
         )
 
     def test_supervisor_success_and_failure_use_the_same_terminal_cleanup_seam(self):
@@ -122,7 +122,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
 
                 row = self.job_repository.get(accepted["job_id"])
                 self.assertEqual(row["lifecycle"], lifecycle)
-                self.assertEqual(row["cleanup_state"], "completed")
+                self.assertEqual(row["cleanup_state"], "failed")
                 self.assertFalse(checkout.exists())
 
     def test_persistent_or_retained_workspace_is_never_deleted(self):
@@ -215,7 +215,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "ready",
         )
 
-    def test_replay_is_idempotent_after_disposable_workspace_release(self):
+    def test_replay_is_idempotent_after_fail_closed_disposable_cleanup(self):
         checkout = self._checkout("replay")
         service = self._service(
             lambda _descriptor: (_ for _ in ()).throw(OSError("launch failed")))
@@ -230,7 +230,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(replay["job_id"], first["job_id"])
         self.assertEqual(
             self.job_repository.get(first["job_id"])["cleanup_state"],
-            "completed",
+            "failed",
         )
 
     def test_terminal_cleanup_clears_exact_active_job_projection(self):
@@ -252,7 +252,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         after = self.workspace_repository.ownership_projection()["records"]
         projected = next(item for item in after if item["workspace_id"] == workspace_id)
         self.assertEqual(projected["active_references"]["jobs"], 0)
-        self.assertEqual(projected["lifecycle"], "destroyed")
+        self.assertEqual(projected["lifecycle"], "indeterminate")
 
     def test_reconciled_terminal_job_refuses_cleanup_while_recorded_child_is_live(self):
         checkout = self._checkout("live-child")
@@ -487,6 +487,42 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertTrue(replacements[0].is_dir())
         self.assertTrue(moved.is_dir())
 
+    def test_quarantine_post_recheck_replacement_is_never_deleted(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("quarantine-post-recheck")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="quarantine-post-recheck-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        moved = self.deploy_root / "reviewer-post-recheck-owned"
+        real_rmdir = workspace_module.os.rmdir
+        attacked = False
+
+        def replace_at_remove(path, *, dir_fd=None):
+            nonlocal attacked
+            if path == "owned" and dir_fd is not None and not attacked:
+                attacked = True
+                candidate = self._fd_path(dir_fd) / path
+                candidate.rename(moved)
+                candidate.mkdir()
+            return real_rmdir(path, dir_fd=dir_fd)
+
+        with patch(
+                "sandbox.application.workspace_service.os.rmdir",
+                side_effect=replace_at_remove):
+            row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "failed")
+        self.assertFalse(attacked)
+        replacements = tuple(self.deploy_root.glob(
+            ".sandbox-ci-cleanup/*/owned"))
+        self.assertEqual(len(replacements), 1)
+        self.assertTrue(replacements[0].is_dir())
+        self.assertFalse(moved.exists())
+
     def test_concurrent_accept_during_delete_cannot_lose_checkout(self):
         from sandbox.application import workspace_service as workspace_module
 
@@ -542,7 +578,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(len(self.job_repository.list(limit=10)), 1)
         self.assertFalse(checkout.exists())
 
-    def test_retry_rematerializes_fresh_disposable_checkout_after_auto_release(self):
+    def test_retry_rematerializes_after_fail_closed_disposable_cleanup(self):
         checkout = self._checkout("retry-after-release")
         service = self._service(lambda _descriptor: None)
         accepted = service.submit(self._submission(
@@ -550,7 +586,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"], "completed")
+        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
 
         retry = service.retry(
@@ -574,7 +610,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
         self.assertEqual(service.get(accepted["job_id"])["cleanup_state"],
-                         "completed")
+                         "failed")
         artifact = self._materialization_artifact(accepted)
         verified = artifact.with_name("reviewer-verified-restore.tar.gz")
         replacement = b"unrelated replacement"
@@ -647,7 +683,8 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         with patch(
                 "sandbox.application.workspace_service._file_sha256",
                 side_effect=swap_after_hash):
-            with self.assertRaisesRegex(Exception, "artifact"):
+            with self.assertRaisesRegex(
+                    Exception, "open descriptor identity"):
                 service.cleanup(accepted["job_id"])
 
         self.assertTrue(verified.is_file())
@@ -656,7 +693,47 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         record = self.workspace_repository.get(row["workspace_id"])
         self.assertFalse(record.metadata.get("ci_materialization_retired", False))
 
-    def test_materialization_archive_is_bounded_reserved_in_inventory_and_retired(self):
+    def test_retirement_post_recheck_replacement_is_never_deleted(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("retirement-post-recheck")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="retirement-post-recheck-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        verified = self.deploy_root / "reviewer-post-recheck-artifact.tar.gz"
+        replacement = b"unrelated post-recheck replacement"
+        real_unlink = workspace_module.os.unlink
+        attacked = False
+
+        def replace_at_unlink(path, *, dir_fd=None):
+            nonlocal attacked
+            if dir_fd is not None and not attacked:
+                attacked = True
+                candidate = self._fd_path(dir_fd) / path
+                candidate.rename(verified)
+                candidate.write_bytes(replacement)
+            return real_unlink(path, dir_fd=dir_fd)
+
+        with patch(
+                "sandbox.application.workspace_service.os.unlink",
+                side_effect=replace_at_unlink):
+            with self.assertRaises(Exception):
+                service.cleanup(accepted["job_id"])
+
+        self.assertFalse(attacked)
+        self.assertFalse(verified.exists())
+        artifact = self._materialization_artifact(accepted)
+        self.assertTrue(artifact.is_file())
+        self.assertNotEqual(artifact.read_bytes(), replacement)
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        self.assertFalse(record.metadata.get("ci_materialization_retired", False))
+
+    def test_materialization_archive_is_bounded_inventoried_and_retained_without_safe_removal(self):
         checkout = self._checkout("archive-lifecycle")
         service = self._service(lambda _descriptor: None)
         with patch(
@@ -681,13 +758,12 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         owned = next(item for item in projection
                      if item["workspace_id"] == accepted_row["workspace_id"])
         self.assertEqual(owned["retained_materializations"]["count"], 1)
-        swept = service.retention_sweep(retention_days=0)
-        self.assertEqual(len(swept["cleaned"]), 1)
-        self.assertIn(
-            "workspace_materialization", swept["cleaned"][0]["removed"])
-        self.assertEqual(tuple(
+        with self.assertRaisesRegex(
+                Exception, "cannot retire an archive by open descriptor identity"):
+            service.retention_sweep(retention_days=0)
+        self.assertEqual(len(tuple(
             self.workspace_repository.index_path.parent.glob(
-                "ci-materializations/*.tar.gz")), ())
+                "ci-materializations/*.tar.gz"))), 1)
 
     def test_materialization_archive_refuses_when_disk_reserve_cannot_be_kept(self):
         checkout = self._checkout("archive-reserve")
@@ -699,18 +775,19 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 service.submit(self._submission(
                     checkout, request_id="archive-reserve-request"))
 
-    def test_unpublished_materialization_archive_is_retired_on_index_failure(self):
+    def test_unpublished_materialization_archive_is_retained_when_safe_removal_is_unavailable(self):
         checkout = self._checkout("archive-index-failure")
         service = self._service(lambda _descriptor: None)
         with patch.object(
                 self.workspaces, "_register",
                 side_effect=RuntimeError("fixture index failure")):
-            with self.assertRaisesRegex(RuntimeError, "fixture index failure"):
+            with self.assertRaisesRegex(
+                    Exception, "cannot retire an archive by open descriptor identity"):
                 service.submit(self._submission(
                     checkout, request_id="archive-index-failure-request"))
-        self.assertEqual(tuple(
+        self.assertEqual(len(tuple(
             self.workspace_repository.index_path.parent.glob(
-                "ci-materializations/*.tar.gz")), ())
+                "ci-materializations/*.tar.gz"))), 1)
 
     def test_mountinfo_detects_checkout_used_as_a_bind_source_elsewhere(self):
         from sandbox.application.workspace_service import _mountinfo_reference_count

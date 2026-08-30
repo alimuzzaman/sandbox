@@ -274,6 +274,10 @@ workspace cleanup, reset, destroy, or network release as part of indexing.
   lease, or active job before an atomic move into a private owner-only cleanup root.
   Deletion MUST stay bound to the opened and revalidated directory identity through
   completion, never a reusable pathname.
+  A platform without an identity-conditional final removal operation MUST retain the
+  emptied quarantine and verified archive, record cleanup failure/indeterminate truth,
+  and MUST NOT report the workspace released or the archive retired. An isolated cleanup
+  broker or equivalent private ownership boundary is required to complete automatic reap.
   Workspace validation/materialization and durable job acceptance MUST share the same
   controller lock as terminal cleanup through its final active-job check and deletion.
   Persistent, reusable, retained, shared, foreign, ambiguous, or actively

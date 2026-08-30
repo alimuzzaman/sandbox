@@ -148,19 +148,22 @@ CI materialization receipt whose immutable digest was stored with acceptance. A 
 check must prove no live recorded child/supervisor, residual child process group,
 owned child cgroup, container mount, host mountpoint or bind source, resource binding,
 lease, or other active job. The exact filesystem identity is moved into a private
-owner-only cleanup root and deleted through its continuously open directory descriptor;
-the final directory entry is revalidated against that descriptor, so pathname
-replacements are never deletion targets. Workspace validation/materialization and
+owner-only cleanup root and emptied through its continuously open directory descriptor.
+On macOS/Linux the controller has no identity-conditional final unlink/rmdir API, so it
+retains the empty quarantine, marks cleanup failed/indeterminate, and retains the verified
+archive rather than exposing a check-then-path removal race. A private cleanup broker or
+equivalent ownership boundary inaccessible to the submitting UID is still required for
+automatic final reap. Workspace validation/materialization and
 durable job acceptance hold the same controller lock as terminal deletion, so a new
 accept cannot commit after the final active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB
 for both apparent input and compressed output, 100,000 entries, and a 1 GiB post-write
 free-space reserve; it does not accumulate a new archive per
 attempt. The ownership projection reports its retained byte count, and explicit/age or
-pressure cleanup retires the exact digest-verified archive. Restore hashes, sizes, and
-extracts one open archive identity; retirement hashes and
-moves that same open identity before unlinking it. A path replacement fails closed and
-a failed restore removes staging without publishing a checkout.
+pressure cleanup requests retirement of the exact digest-verified archive. Restore hashes,
+sizes, and extracts one open archive identity. Where identity-bound removal is unavailable,
+retirement fails closed without unlinking or marking the archive retired. A path
+replacement fails closed and a failed restore removes staging without publishing a checkout.
 Generic jobs, reusable/index/legacy
 workspaces, `retain`, failed `on-success`, missing authority, unknown observations,
 ownership drift, and unsafe paths all prevent deletion. Cleanup failure is separate

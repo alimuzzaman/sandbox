@@ -8,6 +8,7 @@ import os
 import io
 import json
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -24,7 +25,7 @@ SB = ROOT / "sb"
 def run_sb(*args, cwd="/tmp"):
     return subprocess.run(
         [str(SB), *args], cwd=cwd, capture_output=True, text=True,
-        env={**os.environ, "SANDBOX_INSTANCE": ""}, timeout=90)
+        env=synthetic_environment({"SANDBOX_INSTANCE": ""}), timeout=90)
 
 
 class TestResolutionGate(unittest.TestCase):
@@ -1423,7 +1424,7 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint.parent.mkdir(parents=True)
             hint.write_text(str(selected) + "\n")
 
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["HOME"] = str(home)
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)
@@ -1459,7 +1460,7 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint = home / ".config" / "sandbox" / "home"
             hint.parent.mkdir(parents=True)
             hint.write_text("relative-state\n")
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["HOME"] = str(home)
             env.pop("SANDBOX_HOME", None)
             env.pop("SANDBOX_RUNTIME", None)

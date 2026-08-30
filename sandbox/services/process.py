@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import signal
 import threading
@@ -9,6 +9,7 @@ from typing import Mapping, Protocol, Sequence
 import os
 import subprocess
 
+from .environment import ExplicitEnvironment
 from .redaction import redact_text
 
 
@@ -92,8 +93,8 @@ def _decode_bounded_output(raw: bytes, limit: int) -> str:
 class ProcessResult:
     argv: tuple[str, ...]
     returncode: int
-    stdout: str
-    stderr: str
+    stdout: str = field(repr=False)
+    stderr: str = field(repr=False)
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     termination_reason: str | None = None
@@ -106,7 +107,11 @@ class ProcessRunner(Protocol):
 
 
 class BoundedProcessRunner:
-    """Argument-list-only subprocess runner with bounded, redacted output."""
+    """Argument-list-only subprocess runner with bounded, redacted output.
+
+    ``env=None`` leaves native OS inheritance to ``Popen`` without reading the
+    parent environment. Any explicit mapping is the complete child environment.
+    """
 
     _TERMINATION_GRACE = 0.2
     _READER_START_GRACE = 0.1
@@ -239,7 +244,7 @@ class BoundedProcessRunner:
                     termination_reason="cancelled",
                 )
         process = subprocess.Popen(
-            command, cwd=cwd, env={**os.environ, **dict(env or {})},
+            command, cwd=cwd, env=None if env is None else ExplicitEnvironment(env),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             start_new_session=os.name == "posix", bufsize=0,
         )

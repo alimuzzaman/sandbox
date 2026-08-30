@@ -13,6 +13,8 @@ import re
 import stat
 from typing import Mapping, Protocol, Sequence
 
+from sandbox.services.environment import compatible_subprocess_environment
+
 from .errors import RecoveryError
 
 _SQL_STATEMENT = re.compile(
@@ -69,7 +71,10 @@ class DatabaseCapture:
         target.parent.mkdir(parents=True, exist_ok=True)
         command, warnings = self.command(engine, database, target,
                                          nontransactional=nontransactional, ddl_risk=ddl_risk)
-        result = self.runner.run(command, env=env, timeout=timeout)
+        child_environment = (
+            None if env is None else compatible_subprocess_environment(env)
+        )
+        result = self.runner.run(command, env=child_environment, timeout=timeout)
         if result.returncode != 0:
             raise RecoveryError("database dump command failed", "database_dump_failed")
         if not target.exists() or target.stat().st_size == 0:

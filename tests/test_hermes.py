@@ -12,6 +12,7 @@ import io
 import os
 import shlex
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
@@ -561,7 +562,7 @@ class TestSchedulerReliability(unittest.TestCase):
 
             def execute_snapshot(_, command, **__):
                 run = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False,
-                                     env={**os.environ, "HOME": str(home)})
+                                     env=synthetic_environment({"HOME": str(home)}))
                 return _completed(run.returncode, run.stdout, run.stderr)
 
             checked.side_effect = execute_snapshot
@@ -584,7 +585,7 @@ class TestSchedulerReliability(unittest.TestCase):
 
             def execute_snapshot(_, command, **__):
                 run = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False,
-                                     env={**os.environ, "HOME": str(home)})
+                                     env=synthetic_environment({"HOME": str(home)}))
                 return _completed(run.returncode, run.stdout, run.stderr)
 
             checked.side_effect = execute_snapshot
@@ -602,7 +603,7 @@ class TestSchedulerReliability(unittest.TestCase):
 
             def execute_snapshot(_, command, **__):
                 run = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False,
-                                     env={**os.environ, "HOME": str(home)})
+                                     env=synthetic_environment({"HOME": str(home)}))
                 return _completed(run.returncode, run.stdout, run.stderr)
 
             checked.side_effect = execute_snapshot

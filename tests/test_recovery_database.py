@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.recovery.database import DatabaseCapture
 from sandbox.recovery.errors import RecoveryError
@@ -19,6 +20,21 @@ class DumpRunner:
 
 
 class TestDatabaseCapture(unittest.TestCase):
+    def test_explicit_database_environment_is_completed_without_unrelated_parent_keys(self):
+        runner = DumpRunner()
+        parent = {"PATH": "/synthetic/bin", "UNRELATED_SYNTHETIC": "absent"}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("sandbox.services.environment.os.environ", parent):
+            DatabaseCapture(runner).capture(
+                "mariadb", "app", Path(directory) / "app.sql",
+                env={"DATABASE_SYNTHETIC": "present"},
+            )
+
+        child_environment = runner.calls[0][1]["env"]
+        self.assertEqual(child_environment["PATH"], "/synthetic/bin")
+        self.assertEqual(child_environment["DATABASE_SYNTHETIC"], "present")
+        self.assertNotIn("UNRELATED_SYNTHETIC", child_environment)
+
     def test_postgresql_uses_native_consistent_dump_without_credentials(self):
         runner = DumpRunner(b"PGDMP\x00custom dump")
         with tempfile.TemporaryDirectory() as directory:

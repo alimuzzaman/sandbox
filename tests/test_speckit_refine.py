@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from tests.subprocess_support import synthetic_environment
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,7 +114,7 @@ class SpeckitRefinePathTests(unittest.TestCase):
     def test_feature_creation_script_supports_prd_without_creating_spec(self):
         with tempfile.TemporaryDirectory() as directory:
             project, scripts = self._feature_project(directory, include_prd=True)
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["SPECIFY_INIT_DIR"] = str(project)
             result = subprocess.run(
                 [
@@ -139,7 +140,7 @@ class SpeckitRefinePathTests(unittest.TestCase):
     def test_default_feature_creation_still_returns_spec_file(self):
         with tempfile.TemporaryDirectory() as directory:
             project, scripts = self._feature_project(directory)
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["SPECIFY_INIT_DIR"] = str(project)
             result = subprocess.run(
                 [
@@ -172,7 +173,7 @@ class SpeckitRefinePathTests(unittest.TestCase):
             (project / ".specify/feature.json").write_text(
                 json.dumps({"feature_directory": "specs/001-example"})
             )
-            env = os.environ.copy()
+            env = synthetic_environment()
             env["SPECIFY_INIT_DIR"] = str(project)
             result = subprocess.run(
                 [str(scripts / "check-prerequisites.sh"), "--json", "--paths-only"],

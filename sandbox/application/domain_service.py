@@ -898,6 +898,13 @@ class DomainService:
         refusal_reason = None
         for binding in bindings:
             recovery = self.repository.snapshot()["recovery"].get(binding.binding_id) or {}
+            if (binding.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and recovery.get("reason_code") == "authority_cleanup_failed"):
+                incomplete = True
+                refusal_reason = (
+                    refusal_reason or "resolved_cleanup_atomicity_unproven"
+                )
+                continue
             if recovery.get("reason_code") == "authority_cleanup_failed":
                 try:
                     removed = self.authority is not None and self.authority.remove(

@@ -65,6 +65,12 @@ class QualifiedAdapter:
         return None
 
 
+class FailingApplyAdapter(QualifiedAdapter):
+    def apply(self, plan):
+        self.calls.append(("apply",))
+        return {"ok": False, "mutated": False, "error": "apply failed"}
+
+
 class Endpoints:
     def __init__(self):
         self.calls = 0
@@ -337,6 +343,32 @@ class TestResolverProductionQualification(unittest.TestCase):
             "ensure_helper", "qualification_preflight", "release_owner",
         ])
         self.assertEqual(len(qualified.repository.snapshot()["bindings"]), 1)
+
+    def test_authority_cleanup_recovery_refuses_resolved_non_atomic_mutation(self):
+        qualified, adapter, _endpoints, authority = self._service(
+            adapter=FailingApplyAdapter(),
+        )
+        authority.remove = lambda binding_id: (
+            authority.calls.append(("remove", binding_id)) or False
+        )
+        failed = qualified.apply("/tmp/project", interactive=True)
+        self.assertEqual(failed.reason["code"], "authority_cleanup_failed")
+        before = qualified.repository.snapshot()
+        adapter.calls.clear()
+        authority.calls.clear()
+        authority.remove = lambda binding_id: (
+            authority.calls.append(("remove", binding_id)) or True
+        )
+
+        cleaned = qualified.cleanup("/tmp/project", interactive=True)
+
+        self.assertEqual(cleaned.state, "cleanup_incomplete")
+        self.assertEqual(cleaned.reason["code"],
+                         "resolved_cleanup_atomicity_unproven")
+        self.assertFalse(cleaned.mutated)
+        self.assertEqual(authority.calls, [])
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(qualified.repository.snapshot(), before)
 
     def test_unselected_resolver_remains_default_and_never_auto_adopts(self):
         unselected, adapter, endpoints, authority = self._service(strategy=None)

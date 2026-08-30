@@ -29,10 +29,12 @@ CLI never re-execs a foreign process to bootstrap it.
 
 Tests must not copy, unpack, enumerate, print, or pass through the parent
 `os.environ`. Use `tests.subprocess_support.synthetic_environment` for explicit
-synthetic overrides. New or changed captured child processes must go through
-`run_test_process`, which always supplies that explicit environment, a finite
-timeout, an argument list, and `shell=False`. Fixed uncaptured setup commands
-may remain direct when they do not inspect or serialize their environment.
+synthetic overrides, including for every new or changed captured child process.
+Prefer `run_test_process` as the default: it always supplies that explicit
+environment, a finite timeout, an argument list, and `shell=False`. A direct
+captured call is allowed only with `synthetic_environment`; fixed uncaptured
+setup commands may remain direct when they do not inspect or serialize their
+environment.
 
 `sb test` is a different command. Its `auto` plugin mode resolves to `unit` or
 `integration`; `integration` provisions and runs the external WordPress/PHPUnit

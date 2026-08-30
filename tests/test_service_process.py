@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import signal
@@ -42,6 +43,8 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertNotIn(sentinel, repr(child_environment))
         self.assertNotIn(sentinel, str(child_environment))
         self.assertNotIn(sentinel, repr(popen.call_args))
+        with self.assertRaises(TypeError):
+            json.dumps(child_environment)
 
     def test_process_result_repr_excludes_captured_streams(self):
         from sandbox.services.process import ProcessResult

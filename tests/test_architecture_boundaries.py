@@ -56,6 +56,35 @@ subprocess.run(("fixture",), env=parent)
         self.assertTrue(all(value.startswith("fixture.py:") for value in rendered))
         self.assertTrue(all(value.count(":") == 2 for value in rendered))
 
+    def test_environment_boundary_handles_import_aliases_and_nested_enumeration(self):
+        from sandbox.testing_boundaries import inspect_test_environment_boundaries
+
+        source = """\
+import os as operating
+from os import environ
+from os import environ as imported_parent
+alias = operating.environ
+assigned = alias
+print(assigned.items())
+list(environ.keys())
+target = {}
+target.update(imported_parent.values())
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adversarial.py"
+            path.write_text(source)
+            violations = inspect_test_environment_boundaries(Path(directory))
+
+        observed = {(item.line, item.rule) for item in violations}
+        self.assertTrue({
+            (6, "parent-env-iteration"),
+            (7, "parent-env-iteration"),
+            (7, "parent-env-materialize"),
+            (9, "parent-env-iteration"),
+            (9, "parent-env-update"),
+        }.issubset(observed))
+        self.assertTrue(all(str(item).count(":") == 2 for item in violations))
+
     def test_native_proof_opt_in_cannot_enter_payload_or_persisted_models(self):
         opt_in = "SANDBOX_NATIVE_PROOF_CANDIDATE"
         launcher = (ROOT / "sandbox/isolation/launcher.py").read_text()

@@ -27,8 +27,22 @@ _COMPATIBILITY_KEYS = (
 )
 
 
-class ExplicitEnvironment(dict[str, str]):
-    """A Popen-compatible environment that never renders keys or values."""
+class ExplicitEnvironment(Mapping[str, str]):
+    """A private Popen mapping that never renders or JSON-serializes values."""
+
+    __slots__ = ("_values",)
+
+    def __init__(self, values: Mapping[str, str] | None = None) -> None:
+        self._values = dict(values or {})
+
+    def __getitem__(self, key: str) -> str:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
     def __repr__(self) -> str:
         return f"<explicit child environment: {len(self)} variables>"
@@ -51,11 +65,11 @@ def compatible_subprocess_environment(
         )
     ):
         raise ValueError("overrides must contain NUL-free string keys and values")
-    environment = ExplicitEnvironment()
+    environment: dict[str, str] = {}
     for key in _COMPATIBILITY_KEYS:
         value = os.environ.get(key)
         if value is not None:
             environment[key] = value
     if overrides is not None:
         environment.update(overrides)
-    return environment
+    return ExplicitEnvironment(environment)

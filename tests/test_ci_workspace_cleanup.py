@@ -394,6 +394,10 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        metadata_path = Path(record.path)
+        artifact = self._materialization_artifact(accepted)
         moved = self.deploy_root / "reviewer-moved-owned"
         real_rename = os.rename
         attacked = False
@@ -415,6 +419,11 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertEqual((checkout / "foreign.txt").read_text(), "must survive")
         self.assertTrue((moved / "retained-evidence.txt").is_file())
+        self.assertTrue(metadata_path.is_file())
+        self.assertTrue(artifact.is_file())
+        self.assertEqual(
+            self.workspace_repository.get(row["workspace_id"]).lifecycle,
+            "indeterminate")
 
     def test_quarantine_replacement_after_validation_is_never_deleted(self):
         from sandbox.application import workspace_service as workspace_module
@@ -486,6 +495,52 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(len(replacements), 1)
         self.assertTrue(replacements[0].is_dir())
         self.assertTrue(moved.is_dir())
+
+    def test_checkout_disappears_after_validation_before_quarantine_fails_closed(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("checkout-disappears-before-quarantine")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="checkout-disappears-before-quarantine-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        metadata_path = Path(record.path)
+        artifact = self._materialization_artifact(accepted)
+        moved = self.deploy_root / "reviewer-disappeared-checkout"
+        real_rename = workspace_module.os.rename
+        attacked = False
+
+        def disappear_at_quarantine(source, destination, *,
+                                    src_dir_fd=None, dst_dir_fd=None):
+            nonlocal attacked
+            if (source == checkout.name and destination == "owned" and
+                    src_dir_fd is not None and not attacked):
+                attacked = True
+                candidate = self._fd_path(src_dir_fd) / source
+                real_rename(candidate, moved)
+            return real_rename(
+                source, destination,
+                src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        with patch(
+                "sandbox.application.workspace_service.os.rename",
+                side_effect=disappear_at_quarantine):
+            observed = service.get(accepted["job_id"])
+
+        self.assertTrue(attacked)
+        self.assertEqual(observed["cleanup_state"], "failed")
+        self.assertEqual(observed["lifecycle"], "succeeded")
+        self.assertFalse(checkout.exists())
+        self.assertEqual((moved / "retained-evidence.txt").read_text(), "fixture")
+        self.assertTrue(metadata_path.is_file())
+        self.assertTrue(artifact.is_file())
+        self.assertEqual(
+            self.workspace_repository.get(row["workspace_id"]).lifecycle,
+            "indeterminate")
 
     def test_quarantine_post_recheck_replacement_is_never_deleted(self):
         from sandbox.application import workspace_service as workspace_module

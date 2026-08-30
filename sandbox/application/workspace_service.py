@@ -1454,48 +1454,60 @@ class WorkspaceService:
                     "workspace_path_unsafe", "private cleanup root is not owner-only")
             repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
             try:
-                if checkout_path.exists():
-                    if not checkout_path.is_dir():
+                directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                   getattr(os, "O_NOFOLLOW", 0))
+                parent_fd = os.open(checkout_path.parent, directory_flags)
+                cleanup_fd = os.open(cleanup_root, directory_flags)
+                operation_name = uuid.uuid4().hex
+                os.mkdir(operation_name, mode=0o700, dir_fd=cleanup_fd)
+                operation_fd = os.open(operation_name, directory_flags,
+                                       dir_fd=cleanup_fd)
+                expected_fd = None
+                owned_fd = None
+                try:
+                    expected_fd = os.open(
+                        checkout_path.name, directory_flags, dir_fd=parent_fd)
+                    expected_entry = os.fstat(expected_fd)
+                    if (_artifact_identity(expected_entry) != expected_identity or
+                            not stat.S_ISDIR(expected_entry.st_mode)):
                         raise WorkspaceIndexError(
                             "workspace_ownership_drift",
-                            "terminal workspace is not a directory")
-                    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                                       getattr(os, "O_NOFOLLOW", 0))
-                    parent_fd = os.open(checkout_path.parent, directory_flags)
-                    cleanup_fd = os.open(cleanup_root, directory_flags)
-                    operation_name = uuid.uuid4().hex
-                    os.mkdir(operation_name, mode=0o700, dir_fd=cleanup_fd)
-                    operation_fd = os.open(operation_name, directory_flags,
-                                           dir_fd=cleanup_fd)
-                    owned_fd = None
+                            "terminal checkout entry changed before quarantine")
                     try:
                         os.rename(
                             checkout_path.name, "owned",
                             src_dir_fd=parent_fd, dst_dir_fd=operation_fd,
                         )
-                        owned_fd = os.open("owned", directory_flags,
-                                           dir_fd=operation_fd)
-                        observed = os.fstat(owned_fd)
-                        if {"device": int(observed.st_dev),
-                            "inode": int(observed.st_ino)} != expected_identity:
-                            os.rename(
-                                "owned", checkout_path.name,
-                                src_dir_fd=operation_fd, dst_dir_fd=parent_fd,
-                            )
-                            raise WorkspaceIndexError(
-                                "workspace_ownership_drift",
-                                "quarantined checkout identity changed")
-                        _remove_tree_fd(owned_fd)
+                    except FileNotFoundError as exc:
                         raise WorkspaceIndexError(
-                            "workspace_identity_bound_removal_unavailable",
-                            "platform cannot remove an emptied quarantine by "
-                            "open descriptor identity")
-                    finally:
-                        if owned_fd is not None:
-                            os.close(owned_fd)
-                        os.close(operation_fd)
-                        os.close(cleanup_fd)
-                        os.close(parent_fd)
+                            "workspace_ownership_drift",
+                            "terminal checkout disappeared before quarantine",
+                        ) from exc
+                    owned_fd = os.open("owned", directory_flags,
+                                       dir_fd=operation_fd)
+                    observed = os.fstat(owned_fd)
+                    if (_artifact_identity(observed) !=
+                            _artifact_identity(expected_entry)):
+                        os.rename(
+                            "owned", checkout_path.name,
+                            src_dir_fd=operation_fd, dst_dir_fd=parent_fd,
+                        )
+                        raise WorkspaceIndexError(
+                            "workspace_ownership_drift",
+                            "quarantined checkout identity changed")
+                    _remove_tree_fd(owned_fd)
+                    raise WorkspaceIndexError(
+                        "workspace_identity_bound_removal_unavailable",
+                        "platform cannot remove an emptied quarantine by "
+                        "open descriptor identity")
+                finally:
+                    if owned_fd is not None:
+                        os.close(owned_fd)
+                    if expected_fd is not None:
+                        os.close(expected_fd)
+                    os.close(operation_fd)
+                    os.close(cleanup_fd)
+                    os.close(parent_fd)
                 metadata_path.unlink()
                 metadata_path.parent.rmdir()
             except Exception:

@@ -1294,3 +1294,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   architecture suite passed 137 tests with one Linux-only skip. All 181 job tests,
   133 workspace tests, 155 hosting tests, and 69 Spec 037 ingress tests passed.
   These are local gates for fail-closed retention, not automatic reap acceptance.
+- A final pre-quarantine race regression moves the exact validated checkout away before
+  the descriptor-relative rename. Cleanup now keeps an open parent-relative descriptor
+  for the expected checkout across that rename, reports failed/indeterminate when the
+  entry disappears or is replaced, and preserves workspace metadata plus the retained
+  materialization archive. It does not report cleanup completed.
+- The final local gates passed: 137 adversarial/transport/architecture/bounded-process
+  tests with one Linux-only skip, 181 job tests, 133 workspace tests, 155 hosting tests,
+  and the current 182-test Spec 037 ingress suite. Focused compile and diff checks also
+  passed. T171/T172 remain open; no remote, broker, or measured-reclamation proof ran.

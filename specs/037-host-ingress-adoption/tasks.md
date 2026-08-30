@@ -272,7 +272,8 @@ path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
       (documentation reconciliation)
 - [ ] T078 Define and implement a non-forgeable production qualification path for a
       live-proven incumbent adapter, then verify normal `./sb domains use system-caddy`
-      setup can adopt only within its evidenced constraints (FR-010, FR-032; missing)
+      setup can adopt only within its evidenced constraints (FR-010, FR-032; source-owned
+      qualification and local refusal tests complete; normal live Linux CLI proof missing)
 - [ ] T079 Prove the default Docker/Caddy provider on a Linux host with free `:80` and
       `:443`, including HTTP(S), repeatability, and no per-port-only result (SC-011;
       missing host proof)

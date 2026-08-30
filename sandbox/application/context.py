@@ -298,7 +298,9 @@ def ingress_service(cfg, **overrides):
     observer = overrides.pop(
         "listener_observer", ListenerObserver(platform=platform, process=process),
     )
-    detector = overrides.pop("detector", IngressDetector(listener_observer=observer))
+    detector = overrides.pop(
+        "detector", IngressDetector(listener_observer=observer, platform=platform),
+    )
     implementations = {}
     if platform == "linux":
         implementations["system-caddy"] = CaddyAdapter(
@@ -307,10 +309,7 @@ def ingress_service(cfg, **overrides):
             ),
             process=process, network_root=network_root,
         )
-    registry = overrides.pop("registry", built_in_ingress_registry(
-        implementations,
-        proof_attestation=overrides.pop("proof_attestation", None),
-    ))
+    registry = overrides.pop("registry", built_in_ingress_registry(implementations))
     repository = overrides.pop(
         "repository", IngressRepository(network_root / "ingress-state.json"),
     )
@@ -369,7 +368,7 @@ def ingress_service(cfg, **overrides):
         consent_decider=overrides.pop("consent_decider", interactive_consent),
         sandbox_owner=overrides.pop("sandbox_owner", sandbox_owns),
         caddy_health=overrides.pop("caddy_health", caddy_health),
-        clock=overrides.pop("clock", None), **overrides,
+        clock=overrides.pop("clock", None), platform=platform, **overrides,
     )
 
 

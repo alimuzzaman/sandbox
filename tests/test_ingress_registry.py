@@ -16,29 +16,22 @@ class TestIngressRegistry(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             registry.register(IngressAdapterSpec(declaration, object(), 10))
 
-    def test_system_caddy_requires_invocation_scoped_live_evidence(self):
-        from sandbox.ingress.manifest import (
-            BUILTIN_INGRESS, IngressProofAttestation, built_in_ingress_registry,
-        )
+    def test_system_caddy_has_checked_in_exact_http_evidence(self):
+        from sandbox.ingress.manifest import BUILTIN_INGRESS, built_in_ingress_registry
         registry = built_in_ingress_registry({"system-caddy": object()})
-        self.assertFalse(registry.get("system-caddy").adoptable)
-        promoted = built_in_ingress_registry(
-            {"system-caddy": object()},
-            proof_attestation=IngressProofAttestation(
-                "system-caddy", "ubuntu-live-http-exact",
-            ),
-        )
-        self.assertTrue(promoted.get("system-caddy").adoptable)
-        self.assertIsNone(registry.get("system-caddy").declaration.evidence_id)
-        self.assertIsNone(next(item for item in BUILTIN_INGRESS
-                               if item.adapter_id == "system-caddy").evidence_id)
+        self.assertTrue(registry.get("system-caddy").adoptable)
+        self.assertEqual(registry.get("system-caddy").declaration.evidence_id,
+                         "037-t044-ubuntu-2404")
+        self.assertEqual(next(item for item in BUILTIN_INGRESS
+                              if item.adapter_id == "system-caddy").evidence_id,
+                         "037-t044-ubuntu-2404")
         self.assertEqual(registry.get("system-caddy").declaration.capabilities,
                          frozenset({"http"}))
         for adapter_id in ("sandbox-caddy", "herd-valet", "system-nginx",
                            "system-apache", "traefik"):
             self.assertFalse(registry.get(adapter_id).adoptable)
 
-    def test_untyped_proof_material_cannot_promote_an_adapter(self):
+    def test_runtime_proof_material_is_not_an_input(self):
         from sandbox.ingress.manifest import built_in_ingress_registry
 
         for value in (
@@ -46,10 +39,10 @@ class TestIngressRegistry(unittest.TestCase):
             "ubuntu-live-http-exact",
             object(),
         ):
-            registry = built_in_ingress_registry(
-                {"system-caddy": object()}, proof_attestation=value,
-            )
-            self.assertFalse(registry.get("system-caddy").adoptable)
+            with self.assertRaises(TypeError):
+                built_in_ingress_registry(
+                    {"system-caddy": object()}, proof_attestation=value,
+                )
 
     def test_platform_and_capability_filter_precedes_side_effects(self):
         from sandbox.ingress.manifest import built_in_ingress_registry

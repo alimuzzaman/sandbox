@@ -10,16 +10,22 @@ backend `127.0.0.1:8188`. 2026-08-02.
 
 **Harness**: `python3 tests/live_ingress_acceptance.py --project-dir ~/git/templately
 --label tmp-logo --baseline-url http://localhost/ --consent --evidence-id
-037-t044-ubuntu-2404`. Both typed attestations are constructed inside the harness for that
-single invocation; `--consent` records operator approval, given by the repository owner for
-this run.
+037-t044-ubuntu-2404`. At capture time, the harness constructed typed ingress and resolver
+attestations for that single invocation. Production ingress qualification is now fixed in
+source to this evidence ID; the harness argument remains only resolver proof input.
+`--consent` records operator approval, given by the repository owner for this run.
 
-## Promotion is proof-gated
+## Historical harness promotion evidence
 
 ```text
 advertised without attestation:  system-caddy adoptable = False
 advertised with attestation:     system-caddy adoptable = True
 ```
+
+The current registry no longer accepts an ingress attestation. It advertises only the
+source-owned Linux exact-HTTP qualification and selection additionally requires live Caddy
+process identity, proven socket ownership, and successful fixed-helper preflight. Normal
+live CLI adoption using that production path is not yet captured; T078 remains open.
 
 ## Detection identifies the incumbent
 

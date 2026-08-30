@@ -14,25 +14,20 @@ class TestIngressCaddy(unittest.TestCase):
         self.assertIn("Caddyfile does not import", helper)
         self.assertIn("caddy validate --config /etc/caddy/Caddyfile", helper)
 
-    def test_current_build_composes_only_proof_scoped_exact_http_system_caddy(self):
+    def test_current_build_composes_source_qualified_exact_http_system_caddy(self):
         from pathlib import Path
         from unittest import mock
         import sandbox_core as sc
         from sandbox.application.context import ingress_service
-        from sandbox.ingress.manifest import IngressProofAttestation
         with mock.patch.object(sc, "sandbox_base", return_value=Path("/tmp/ingress-context")):
             service = ingress_service({}, platform="linux")
         caddy = service.registry.get("system-caddy")
         self.assertEqual(type(caddy.adapter).__name__, "CaddyAdapter")
-        self.assertFalse(caddy.adoptable)
+        self.assertTrue(caddy.adoptable)
+        self.assertEqual(caddy.declaration.evidence_id, "037-t044-ubuntu-2404")
         with mock.patch.object(sc, "sandbox_base", return_value=Path("/tmp/ingress-context")):
-            proof = ingress_service(
-                {}, platform="linux",
-                proof_attestation=IngressProofAttestation(
-                    "system-caddy", "ubuntu-live-http-exact",
-                ),
-            )
-        self.assertTrue(proof.registry.get("system-caddy").adoptable)
+            with self.assertRaises(TypeError):
+                ingress_service({}, platform="linux", proof_attestation=object())
         self.assertEqual(caddy.declaration.capabilities, frozenset({"http"}))
         for adapter_id in ("sandbox-caddy", "herd-valet", "system-nginx",
                            "system-apache", "traefik"):

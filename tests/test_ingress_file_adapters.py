@@ -73,6 +73,23 @@ class TestIngressFileAdapters(unittest.TestCase):
                              ["validate-current", "prepare", "activate", "rollback"])
             self.assertNotIn("candidate", plan)
 
+    def test_read_only_preflight_carries_exact_listener_authority(self):
+        from sandbox.ingress.adapters.caddy import CaddyAdapter
+        with tempfile.TemporaryDirectory() as tmp:
+            process = Process(); adapter = self.adapter(CaddyAdapter, tmp, process)
+            authority = {
+                "pid": 123, "start": "456", "executable_digest": "e" * 64,
+                "socket_ids": ("789", "790"), "listen_address": "::",
+                "listen_port": 80,
+            }
+
+            self.assertTrue(adapter.ready(authority))
+
+            self.assertEqual(process.calls[-1][0][3:], (
+                "preflight", str(Path(tmp).resolve()), "system-caddy", "123", "456",
+                "e" * 64, "789,790", "::", "80",
+            ))
+
     def test_prepare_binds_candidate_to_owner_hostname_backend_and_digest(self):
         from sandbox.ingress.adapters.caddy import CaddyAdapter
         with tempfile.TemporaryDirectory() as tmp:

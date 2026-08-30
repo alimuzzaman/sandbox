@@ -23,16 +23,22 @@ confirmed listener conflict is reported as a listener conflict, never as a Docke
 ## Support tiers and proof
 
 Only an adapter with a documented control surface and an accepted live lifecycle proof can
-be advertised as adoptable. Until then, implemented adapters remain unproven and make no
-route change. Nginx Proxy Manager remains credential-pending; DDEV, Local, XAMPP, Laragon,
-and WAMP are detection-only or outside-platform. Their classification comes only from public
+be advertised as adoptable. The checked-in production qualification currently names only
+Linux system Caddy, exact HTTP, and evidence `037-t044-ubuntu-2404`; runtime strings,
+configuration, environment variables, CLI/MCP values, and harness objects cannot add to or
+widen it. Nginx Proxy Manager remains credential-pending; DDEV, Local, XAMPP, Laragon, and
+WAMP are detection-only or outside-platform. Their classification comes only from public
 listener/process evidence and cannot grant route mutation authority.
 
-The current code enables only the Linux system-Caddy exact-HTTP adapter for the remaining
-live conformance run. Its unit proof does not claim live completion of 037. HTTPS, wildcard
-routes, Sandbox Caddy, Herd/Valet, nginx, Apache, and Traefik remain unadvertised. Selection
-also requires the installed helper's read-only preflight to validate the complete active
-Caddy config, so code presence alone cannot trigger DNS or route mutation.
+The current code enables only the Linux system-Caddy exact-HTTP adapter. Selection still
+requires a live observed Caddy process with proven listener ownership and the installed
+helper's read-only preflight to validate the complete active Caddy config and bind the
+observed PID, start time, executable digest, socket inode set, and listen endpoint to the
+active `caddy.service` MainPID. Changed, second, or unidentified owners, foreign listeners,
+non-system executable paths, Darwin, HTTPS, wildcard hostnames, and missing helper/import
+control fail closed before DNS or route mutation. Local tests do not complete 037:
+normal live Linux CLI adoption remains to be captured. Sandbox Caddy, Herd/Valet, nginx,
+Apache, and Traefik remain unadvertised for incumbent adoption.
 
 ## Explicit scoped helper installation
 

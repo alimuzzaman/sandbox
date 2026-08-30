@@ -293,8 +293,12 @@ If the remote child exits nonzero, Sandbox still parses its single bounded JSON
 stdout document first. The typed child code/message and exit code remain the
 failure; bounded redacted warning stderr is secondary `transport.stderr` only.
 Malformed, multiple, or oversized JSON is rejected with a typed transport
-failure, and raw tracebacks are not forwarded. This is locally regression
-tested; it does not prove any installed remote revision or live failure path.
+failure; `NaN` and infinite constants are invalid. The SSH client concurrently
+drains each stream into its own cap. A local timeout or either stream crossing
+the cap terminates the client and reports completion as unknown rather than
+parsing retained partial output. Raw tracebacks are not forwarded. This is
+locally regression tested; it does not prove any installed remote revision or
+live failure path.
 
 When `login_url` contains a `sandbox_autologin` query parameter, the JSON also
 includes the derived boolean `login_url_redacted`. It is `true` whenever the

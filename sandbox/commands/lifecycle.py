@@ -130,8 +130,12 @@ def _remote_ensure_document(stdout: object, *, redact: bool = True) -> tuple[dic
         return None, "remote_empty_output"
     if len(stdout.encode("utf-8")) > _REMOTE_ENSURE_JSON_MAX_BYTES:
         return None, "remote_output_too_large"
+
+    def reject_non_finite(_value: str):
+        raise ValueError("non-finite JSON constant")
+
     try:
-        value = json.loads(stdout)
+        value = json.loads(stdout, parse_constant=reject_non_finite)
     except (TypeError, ValueError):
         return None, "remote_invalid_output"
     if not isinstance(value, Mapping):
@@ -165,7 +169,15 @@ def _remote_ensure_stderr(stderr: object) -> str:
 
 def _remote_ensure_failure(result) -> dict:
     """Preserve a typed child failure and add transport evidence second."""
-    payload, parse_code = _remote_ensure_document(getattr(result, "stdout", ""))
+    termination_reason = getattr(result, "termination_reason", None)
+    if termination_reason == "output_overflow" \
+            or bool(getattr(result, "stdout_truncated", False)) \
+            or bool(getattr(result, "stderr_truncated", False)):
+        payload, parse_code = None, "remote_output_too_large"
+    elif termination_reason == "timeout":
+        payload, parse_code = None, "remote_timeout"
+    else:
+        payload, parse_code = _remote_ensure_document(getattr(result, "stdout", ""))
     if payload is not None:
         error = payload.get("error")
         code = error.get("code") if isinstance(error, Mapping) else None
@@ -181,8 +193,10 @@ def _remote_ensure_failure(result) -> dict:
         messages = {
             "remote_empty_output": "remote ensure returned no JSON output",
             "remote_output_too_large": (
-                f"remote ensure JSON output exceeded {_REMOTE_ENSURE_JSON_MAX_BYTES} bytes"
+                "remote ensure output exceeded the per-stream "
+                f"{_REMOTE_ENSURE_JSON_MAX_BYTES}-byte limit; completion is unknown"
             ),
+            "remote_timeout": "remote ensure timed out; completion is unknown",
             "remote_invalid_output": "remote ensure returned invalid JSON output",
         }
         payload = {
@@ -953,7 +967,14 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         # the VPS side too; asking here alone would only reveal a placeholder.
         command.append("--reveal-login")
     shlex_join = __import__("shlex").join
-    result = _remote.ssh_run(remote, shlex_join(command), timeout=900 if action == "ensure" else 25)
+    if action == "ensure":
+        result = _remote.ssh_run_bounded(
+            remote, shlex_join(command), timeout=900,
+            max_output=_REMOTE_ENSURE_JSON_MAX_BYTES,
+            terminate_on_output_limit=True,
+        )
+    else:
+        result = _remote.ssh_run(remote, shlex_join(command), timeout=25)
     if reveal_login and result.returncode != 0 \
             and "--reveal-login" in (result.stderr or "") \
             and "unrecognized arguments" in (result.stderr or ""):
@@ -965,7 +986,11 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
              "ensuring without it (run `./sb remote provision` to restage)")
         command.remove("--reveal-login")
         reveal_login = False
-        result = _remote.ssh_run(remote, shlex_join(command), timeout=900)
+        result = _remote.ssh_run_bounded(
+            remote, shlex_join(command), timeout=900,
+            max_output=_REMOTE_ENSURE_JSON_MAX_BYTES,
+            terminate_on_output_limit=True,
+        )
     payload = None
     if action == "status":
         try:

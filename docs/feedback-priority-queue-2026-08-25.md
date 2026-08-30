@@ -26,8 +26,9 @@ not close remote, live, or human-authority gates.
 ## Current local remediation evidence
 
 - Feedback `a3f3f976128ca1542b0adbfe7536cdca` remains machine-locally `blocked`.
-  Branch `codex/remote-ensure-structured-failure` adds a bounded stdout-first
-  remote-ensure failure parser and focused regressions. No live remote replay,
+  Branch `codex/remote-ensure-structured-failure` adds separately capped SSH
+  drains, a strict stdout-first remote-ensure parser, and focused regressions.
+  Overflow and timeout remain unknown completion. No live remote replay,
   installed-revision proof, deployment, or feedback-status mutation is claimed.
 
 ## Current remaining blockers

@@ -248,7 +248,8 @@ and not-applicable records must not be reimplemented without fresh evidence.
 
 - [ ] **Remote ensure structured failures:** local branch
   `codex/remote-ensure-structured-failure` parses one bounded JSON failure from
-  stdout before attaching safe stderr evidence for feedback `a3f3f976`. Keep
+  separately capped concurrent SSH streams before attaching safe stderr
+  evidence for feedback `a3f3f976`; overflow and timeout remain unknown. Keep
   the feedback blocked until the branch is integrated and the installed remote
   revision reproduces and passes the live failure path; no live proof exists.
 

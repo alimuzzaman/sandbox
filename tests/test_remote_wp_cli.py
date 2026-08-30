@@ -57,11 +57,14 @@ class TestRemoteWpCliTransport(unittest.TestCase):
 
     @patch("sandbox.core._remote._remote_control_request")
     def test_refuses_missing_ownership_evidence_before_control_dispatch(self, request):
-        with self.assertRaisesRegex(RuntimeError, "ownership evidence"):
+        with self.assertRaisesRegex(
+            _remote.RemoteWpRefusalError, "ownership evidence",
+        ) as raised:
             _remote.remote_wp_cli(
                 {"control_url": "https://control.example.test", "bearer_token": "token"},
                 project_slug="project", label="default", argv=["core", "version"], timeout=5,
             )
+        self.assertEqual(raised.exception.code, "remote_service_ownership_unavailable")
         request.assert_not_called()
 
     @patch("sandbox.core._remote._remote_control_request")
@@ -95,11 +98,14 @@ class TestRemoteWpCliTransport(unittest.TestCase):
     @patch("sandbox.core._remote._remote_mcp_runtime_revision", return_value="a" * 24)
     def test_transport_timeout_is_unknown_and_never_retried(self, _revision, request):
         remote = {"mcp_service": {"ownership_marker": "b" * 24}}
-        with self.assertRaisesRegex(RuntimeError, "completion is unknown"):
+        with self.assertRaisesRegex(
+            _remote.RemoteWpCompletionUnknown, "completion is unknown",
+        ) as raised:
             _remote.remote_wp_cli(
                 remote, project_slug="project", label="default",
                 argv=["option", "update", "flag", "1"], timeout=5,
             )
+        self.assertEqual(raised.exception.code, "remote_wp_transport_unknown")
         request.assert_called_once()
 
     @patch("sandbox.core._remote._remote_control_request")
@@ -133,6 +139,47 @@ class TestRemoteWpCliTransport(unittest.TestCase):
         request.assert_called_once()
         ssh_run.assert_not_called()
 
+    @patch("sandbox.core._remote._remote_control_request")
+    @patch("sandbox.core._remote._remote_mcp_runtime_revision", return_value="a" * 24)
+    def test_rejects_every_malformed_status_exit_mapping(self, _revision, request):
+        remote = {"mcp_service": {"ownership_marker": "b" * 24}}
+        for status, exit_code in (
+            ("complete", 7), ("failed", 0), ("unknown", 0), ("failed", 124),
+            ("unknown", 125),
+        ):
+            with self.subTest(status=status, exit_code=exit_code):
+                request.return_value = {
+                    "ok": True, "wp_cli_schema": 1, "transport": "control",
+                    "status": status, "ownership": "proven",
+                    "runtime_revision": "a" * 24, "instance": "project-default",
+                    "stdout": "partial out\n", "stderr": "partial err\n",
+                    "exit_code": exit_code,
+                }
+                with self.assertRaisesRegex(
+                    _remote.RemoteWpCompletionUnknown, "completion",
+                ) as raised:
+                    _remote.remote_wp_cli(
+                        remote, project_slug="project", label="default",
+                        argv=["core", "version"], timeout=5,
+                    )
+                self.assertEqual(raised.exception.code, "remote_wp_completion_invalid")
+
+    @patch("sandbox.core._remote._remote_control_request")
+    @patch("sandbox.core._remote._remote_mcp_runtime_revision", return_value="a" * 24)
+    def test_accepts_typed_output_overflow_only_as_nonzero_unknown(self, _revision, request):
+        request.return_value = {
+            "ok": True, "wp_cli_schema": 1, "transport": "control",
+            "status": "unknown", "ownership": "proven",
+            "runtime_revision": "a" * 24, "instance": "project-default",
+            "stdout": "bounded partial\n", "stderr": "completion unknown\n",
+            "exit_code": 125, "error": {"code": "wp_cli_output_overflow"},
+        }
+        result = _remote.remote_wp_cli(
+            {"mcp_service": {"ownership_marker": "b" * 24}},
+            project_slug="project", label="default", argv=["post", "list"], timeout=5,
+        )
+        self.assertEqual((result["status"], result["exit_code"]), ("unknown", 125))
+
 
 class TestRemoteWpCliCommand(unittest.TestCase):
     def _args(self, **overrides):
@@ -157,7 +204,8 @@ class TestRemoteWpCliCommand(unittest.TestCase):
         }
         get_remote.return_value = {"provisioned": True}
         remote_wp_cli.return_value = {
-            "ok": True, "stdout": "raw output\n", "stderr": "raw warning\n", "exit_code": 0,
+            "ok": True, "status": "complete", "stdout": "raw output\n",
+            "stderr": "raw warning\n", "exit_code": 0,
         }
         out, err = StringIO(), StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -232,6 +280,26 @@ class TestRemoteWpCliCommand(unittest.TestCase):
             command.cmd_wp({}, args)
         wpcli.assert_called_once()
         remote_wp_cli.assert_not_called()
+
+    @patch("sandbox.commands.wp._remote.remote_wp_cli")
+    @patch("sandbox.commands.wp._remote.get_remote")
+    @patch("sandbox.commands.wp.preflight_project_capability", return_value=None)
+    @patch("sandbox.commands.wp._core")
+    def test_unknown_remote_result_can_never_exit_zero(
+        self, core, _preflight, get_remote, remote_wp_cli,
+    ):
+        core.return_value.load_project_config.return_value = {
+            "root": "/project", "kind": "wordpress", "slug": "project",
+        }
+        get_remote.return_value = {"provisioned": True}
+        remote_wp_cli.return_value = {
+            "ok": True, "status": "unknown", "stdout": "partial\n",
+            "stderr": "completion unknown\n", "exit_code": 0,
+        }
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()), \
+                self.assertRaises(SystemExit) as raised:
+            command.cmd_wp({}, self._args())
+        self.assertNotEqual(raised.exception.code, 0)
 
 
 if __name__ == "__main__":

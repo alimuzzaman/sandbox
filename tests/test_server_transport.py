@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -116,22 +117,27 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported resource action"):
             server._resource_contract({"action": "shell", "command": "id"})
 
-    @patch("server.subprocess.run")
+    @patch("server._run_remote_wp_process")
     @patch.dict(os.environ, {
         "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
         "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
         "SANDBOX_HOME": "/srv/sandbox",
     }, clear=False)
     def test_wp_contract_selects_existing_instance_without_workspace_or_shell(self, run):
-        run.return_value = subprocess.CompletedProcess(
-            [], 0, "raw stdout\n", "raw stderr\n",
-        )
+        run.return_value = {
+            "status": "complete", "exit_code": 0, "error_code": None,
+            "stdout": "raw stdout\n", "stderr": "raw stderr\n",
+            "stdout_truncated": False, "stderr_truncated": False,
+        }
         registry = types.SimpleNamespace(
             load_project_config=lambda path, label=None: {
                 "root": path, "kind": "wordpress", "slug": "project",
             },
         )
-        with patch("server._core", return_value=registry), \
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch("server._capture_deploy_identity", return_value=()), \
+                patch("server._revalidate_deploy_identity"), \
+                patch("server._core", return_value=registry), \
                 patch("sandbox.core.resolve_registered_instance", return_value={
                     "root": "/srv/sandbox/deploy-src/project",
                     "label": "default", "instance": "project-default",
@@ -157,7 +163,7 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         self.assertFalse(any("workspace" in value for value in argv))
         self.assertNotIn("shell", run.call_args.kwargs)
 
-    @patch("server.subprocess.run")
+    @patch("server._run_remote_wp_process")
     def test_wp_contract_rejects_revision_ownership_and_generic_before_dispatch(self, run):
         base = {
             "schema_version": 1, "action": "wp_cli", "project_slug": "project",
@@ -165,13 +171,15 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
             "expected_runtime_revision": "a" * 24,
             "expected_ownership_marker": "b" * 24,
         }
-        with patch.dict(os.environ, {
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch.dict(os.environ, {
             "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "c" * 24,
             "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
         }, clear=False):
             mismatch = server._remote_wp_contract(base)
         self.assertEqual(mismatch["error"]["code"], "runtime_revision_mismatch")
-        with patch.dict(os.environ, {
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch.dict(os.environ, {
             "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
             "SANDBOX_REMOTE_MCP_MARKER": "c" * 24,
         }, clear=False):
@@ -179,7 +187,7 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         self.assertEqual(mismatch["error"]["code"], "remote_service_ownership_unknown")
         run.assert_not_called()
 
-    @patch("server.subprocess.run")
+    @patch("server._run_remote_wp_process")
     @patch.dict(os.environ, {
         "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
         "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
@@ -197,7 +205,9 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         registry = types.SimpleNamespace(load_project_config=lambda path, label=None: {
             "root": path, "kind": "compose", "slug": "project",
         })
-        with patch("server._core", return_value=registry):
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch("server._capture_deploy_identity", return_value=()), \
+                patch("server._core", return_value=registry):
             generic = server._remote_wp_contract(base)
         self.assertEqual(generic["error"]["code"], "unsupported_project_kind")
         self.assertNotIn("secret", json.dumps(unsafe))
@@ -216,20 +226,25 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
             server._remote_wp_contract({**base, "argv": ["core", "version"],
                                         "allow_missing": "yes"})
 
-    @patch("server.subprocess.run")
+    @patch("server._run_remote_wp_process")
     @patch.dict(os.environ, {
         "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
         "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
         "SANDBOX_HOME": "/srv/sandbox",
     }, clear=False)
     def test_wp_contract_timeout_preserves_partial_streams_and_unknown_state(self, run):
-        run.side_effect = subprocess.TimeoutExpired(
-            ["sb", "wp"], 12, output=b"partial out\n", stderr=b"partial err\n",
-        )
+        run.return_value = {
+            "status": "unknown", "exit_code": 124, "error_code": "wp_cli_timeout",
+            "stdout": "partial out\n", "stderr": "partial err\nprocess timed out\n",
+            "stdout_truncated": False, "stderr_truncated": False,
+        }
         registry = types.SimpleNamespace(load_project_config=lambda path, label=None: {
             "root": path, "kind": "wordpress", "slug": "project",
         })
-        with patch("server._core", return_value=registry), \
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch("server._capture_deploy_identity", return_value=()), \
+                patch("server._revalidate_deploy_identity"), \
+                patch("server._core", return_value=registry), \
                 patch("sandbox.core.resolve_registered_instance", return_value={
                     "root": "/srv/sandbox/deploy-src/project",
                     "label": "default", "instance": "project-default",
@@ -246,6 +261,171 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         self.assertIn("partial err\n", result["stderr"])
         self.assertFalse(result["retried"])
         run.assert_called_once()
+
+    def test_bounded_wp_process_stops_on_noisy_output_and_keeps_both_streams_bounded(self):
+        script = (
+            "import os\n"
+            "for _ in range(4096):\n"
+            " os.write(1, b'o' * 4096)\n"
+            " os.write(2, b'e' * 4096)\n"
+        )
+        result = server._run_remote_wp_process(
+            [sys.executable, "-c", script], cwd=str(ROOT), timeout=10,
+            max_stream_bytes=4096,
+        )
+        self.assertEqual(result["status"], "unknown")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertEqual(result["error_code"], "wp_cli_output_overflow")
+        self.assertLessEqual(len(result["stdout"].encode()), 4096)
+        self.assertLessEqual(len(result["stderr"].encode()), 4096)
+        self.assertTrue(result["stdout"])
+        self.assertTrue(result["stderr"])
+        self.assertTrue(result["stdout_truncated"] or result["stderr_truncated"])
+
+        failed = server._run_remote_wp_process(
+            [sys.executable, "-c", "raise SystemExit(7)"],
+            cwd=str(ROOT), timeout=10, max_stream_bytes=4096,
+        )
+        self.assertEqual((failed["status"], failed["exit_code"]), ("failed", 7))
+        ordinary_125 = server._run_remote_wp_process(
+            [sys.executable, "-c", "raise SystemExit(125)"],
+            cwd=str(ROOT), timeout=10, max_stream_bytes=4096,
+        )
+        self.assertEqual(
+            (ordinary_125["status"], ordinary_125["error_code"]),
+            ("failed", None),
+        )
+
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+    }, clear=False)
+    def test_wp_contract_refuses_live_runtime_digest_drift_before_dispatch(self):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        with patch("server._live_runtime_revision", return_value="c" * 24), \
+                patch("server._run_remote_wp_process") as run:
+            result = server._remote_wp_contract(base)
+        self.assertEqual(result["error"]["code"], "runtime_revision_mismatch")
+        run.assert_not_called()
+
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+    }, clear=False)
+    def test_wp_contract_requires_request_unit_and_live_revision_to_all_match(self):
+        base = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch.dict(os.environ, {"SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "c" * 24}), \
+                patch("server._run_remote_wp_process") as run:
+            result = server._remote_wp_contract(base)
+        self.assertEqual(result["error"]["code"], "runtime_revision_mismatch")
+        run.assert_not_called()
+
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+        "SANDBOX_HOME": "/srv/sandbox",
+    }, clear=False)
+    def test_wp_contract_rechecks_live_digest_immediately_before_launch(self):
+        registry = types.SimpleNamespace(load_project_config=lambda path, label=None: {
+            "root": path, "kind": "wordpress", "slug": "project",
+        })
+        payload = {
+            "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+            "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+            "expected_runtime_revision": "a" * 24,
+            "expected_ownership_marker": "b" * 24,
+        }
+        with patch("server._live_runtime_revision", side_effect=["a" * 24, "c" * 24]), \
+                patch("server._capture_deploy_identity", return_value=()), \
+                patch("server._core", return_value=registry), \
+                patch("sandbox.core.resolve_registered_instance", return_value={
+                    "root": "/srv/sandbox/deploy-src/project",
+                    "label": "default", "instance": "project-default",
+                }), \
+                patch("server._run_remote_wp_process") as run:
+            result = server._remote_wp_contract(payload)
+        self.assertEqual(result["error"]["code"], "runtime_revision_mismatch")
+        run.assert_not_called()
+
+    def test_deploy_identity_refuses_symlink_leaf_and_detects_leaf_replacement(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve() / "home"
+            deploy_root = home / "deploy-src"
+            deploy_root.mkdir(parents=True)
+            real = deploy_root / "real"
+            real.mkdir()
+            linked = deploy_root / "project"
+            linked.symlink_to(real, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                server._capture_deploy_identity(home, "project")
+
+            linked.unlink()
+            linked.mkdir()
+            identity = server._capture_deploy_identity(home, "project")
+            original = deploy_root / "project-old"
+            linked.rename(original)
+            linked.mkdir()
+            with self.assertRaisesRegex(ValueError, "changed"):
+                server._revalidate_deploy_identity(identity)
+
+            trusted = Path(raw).resolve() / "trusted"
+            trusted.mkdir()
+            symlink_home = Path(raw).resolve() / "linked-home"
+            symlink_home.symlink_to(trusted, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                server._capture_deploy_identity(symlink_home, "project")
+
+            linked.rmdir()
+            original.rename(linked)
+            identity = server._capture_deploy_identity(home, "project")
+            old_deploy = home / "deploy-src-old"
+            deploy_root.rename(old_deploy)
+            (home / "deploy-src" / "project").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "changed"):
+                server._revalidate_deploy_identity(identity)
+
+    @patch.dict(os.environ, {
+        "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,
+        "SANDBOX_REMOTE_MCP_MARKER": "b" * 24,
+    }, clear=False)
+    def test_wp_contract_refuses_symlink_deploy_leaf_before_project_load(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve() / "home"
+            deploy_root = home / "deploy-src"
+            deploy_root.mkdir(parents=True)
+            real = deploy_root / "real"
+            real.mkdir()
+            (deploy_root / "project").symlink_to(real, target_is_directory=True)
+            payload = {
+                "schema_version": 1, "action": "wp_cli", "project_slug": "project",
+                "label": "default", "argv": ["core", "version"], "timeout_seconds": 7,
+                "expected_runtime_revision": "a" * 24,
+                "expected_ownership_marker": "b" * 24,
+            }
+            with patch.dict(os.environ, {"SANDBOX_HOME": str(home)}), \
+                    patch("server._live_runtime_revision", return_value="a" * 24), \
+                    patch("server._core") as core, \
+                    patch("server._run_remote_wp_process") as run:
+                result = server._remote_wp_contract(payload)
+        self.assertEqual(result["error"]["code"], "remote_deploy_path_unsafe")
+        core.assert_not_called()
+        run.assert_not_called()
+
+    def test_server_and_client_use_the_same_live_runtime_digest_algorithm(self):
+        from sandbox.core import _remote
+
+        self.assertEqual(server._live_runtime_revision(), _remote._remote_mcp_runtime_revision())
 
     def test_inventory_route_accepts_fast_and_explicit_deep_modes(self):
         with patch("uvicorn.run") as run:

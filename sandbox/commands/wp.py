@@ -318,6 +318,18 @@ def _cmd_remote_wp(cfg, args, pt: list[str], *, allow_missing: bool) -> None:
     exit_code = result.get("exit_code", 0)
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
         exit_code = 1
+    status = result.get("status")
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    overflow = error.get("code") == "wp_cli_output_overflow"
+    valid_mapping = (
+        (status == "complete" and exit_code == 0)
+        or (status == "failed" and exit_code not in {0, 124} and not overflow)
+        or (status == "unknown" and (
+            exit_code == 124 or (exit_code == 125 and overflow)
+        ))
+    )
+    if not valid_mapping:
+        die("remote WP-CLI completion evidence is invalid; completion is unknown", code=1)
     if exit_code:
         raise SystemExit(max(1, min(exit_code, 255)))
 

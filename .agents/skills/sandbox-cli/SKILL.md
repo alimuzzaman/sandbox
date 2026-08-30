@@ -396,6 +396,11 @@ existing deployed WordPress instance through authenticated control HTTP. It
 requires exact installed-runtime revision and service-ownership evidence,
 runs the co-located `sb wp --local` boundary, and never creates a workspace,
 uses generic `sb exec`, falls back to SSH, or retries an unknown result.
+The controller also recomputes the digest of its live staged source, rejects a
+symlinked or replaced deploy path, and bounds both output streams while the
+command runs. Bounded termination on timeout or output overflow is limited to
+the owned process group and returns a nonzero unknown result; inspect state
+before any manual retry.
 
 Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
 through 3600 with `--timeout` before the `--` delimiter to change that bound:

@@ -249,6 +249,12 @@ evidence, then invokes only the co-located `sb wp --local` boundary. It does
 not stage source, create a job workspace, route through generic `sb exec`, fall
 back to SSH, or retry an unknown result. Generic Compose projects are refused
 before dispatch.
+The controller also requires the request revision, service-unit receipt, and
+digest of its live staged source to match, then revalidates the stable identity
+of a non-symlink deploy path immediately before launch. Stdout and stderr are
+drained concurrently into fixed-size edge buffers. Bounded termination on
+timeout or output overflow is limited to the owned process group and returns a
+nonzero unknown result.
 
 `wp post list` does not support a `--search` query argument: WP-CLI forwards
 that unknown spelling to `WP_Query`, which can silently return an unfiltered

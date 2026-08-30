@@ -5,6 +5,7 @@ import json
 import math
 import os
 import shlex
+import stat
 import subprocess
 import shutil
 import sqlite3
@@ -136,6 +137,77 @@ def _remote_wp_error(code: str, message: str, *, status: str = "blocked") -> dic
     }
 
 
+def _live_runtime_revision() -> str:
+    """Recompute the digest from the source this controller will execute."""
+    from sandbox.services.runtime_revision import runtime_revision
+
+    return runtime_revision(Path(SANDBOX_ROOT))
+
+
+def _lexical_absolute(path: str | os.PathLike) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _capture_deploy_identity(home: Path, slug: str) -> tuple[tuple[Path, int, int], ...]:
+    """Attest the configured home, deploy root, and leaf without following links."""
+    home = _lexical_absolute(home)
+    project_root = home / "deploy-src" / slug
+    current = Path(project_root.anchor)
+    paths = [current]
+    for part in project_root.parts[1:]:
+        current = current / part
+        paths.append(current)
+    identities = []
+    for path in paths:
+        try:
+            details = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"remote deploy path is unavailable: {path.name}") from exc
+        if stat.S_ISLNK(details.st_mode):
+            raise ValueError(f"remote deploy path contains a symlink: {path.name}")
+        if not stat.S_ISDIR(details.st_mode):
+            raise ValueError(f"remote deploy path is not a directory: {path.name}")
+        identities.append((path, details.st_dev, details.st_ino))
+    return tuple(identities)
+
+
+def _revalidate_deploy_identity(identity: tuple[tuple[Path, int, int], ...]) -> None:
+    """Refuse ancestor or leaf replacement immediately before process launch."""
+    for path, expected_device, expected_inode in identity:
+        try:
+            details = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"remote deploy path changed before launch: {path.name}") from exc
+        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode)
+                or details.st_dev != expected_device or details.st_ino != expected_inode):
+            raise ValueError(f"remote deploy path changed before launch: {path.name}")
+
+
+def _run_remote_wp_process(command: list[str], *, cwd: str, timeout: int,
+                           max_stream_bytes: int = _REMOTE_WP_MAX_STREAM_BYTES) -> dict:
+    """Run explicit argv with concurrent bounded drains and fail-closed overflow."""
+    from sandbox.services.process import BoundedProcessRunner
+
+    result = BoundedProcessRunner(
+        max_output=max_stream_bytes,
+        terminate_on_output_limit=True,
+    ).run(command, cwd=cwd, timeout=timeout)
+    overflow = result.termination_reason == "output_overflow"
+    unknown = result.returncode == 124 or overflow
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.returncode,
+        "status": "unknown" if unknown else "complete" if result.returncode == 0 else "failed",
+        "error_code": (
+            "wp_cli_timeout" if result.returncode == 124 else
+            "wp_cli_output_overflow" if overflow else None
+        ),
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+    }
+
+
 def _remote_wp_contract(payload: dict) -> dict:
     """Execute only bounded ``sb wp --local`` for an existing deployment."""
     from sandbox.core import resolve_registered_instance
@@ -166,22 +238,32 @@ def _remote_wp_contract(payload: dict) -> dict:
         raise ValueError("remote WP-CLI allow_missing must be boolean")
     installed_revision = os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "")
     installed_marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
+    try:
+        live_revision = _live_runtime_revision()
+    except OSError:
+        live_revision = ""
     if (not isinstance(expected_revision, str)
             or not _re.fullmatch(r"[0-9a-f]{24}", expected_revision)
-            or not hmac.compare_digest(installed_revision, expected_revision)):
+            or not _re.fullmatch(r"[0-9a-f]{24}", installed_revision)
+            or not _re.fullmatch(r"[0-9a-f]{24}", live_revision)
+            or not hmac.compare_digest(installed_revision, expected_revision)
+            or not hmac.compare_digest(live_revision, expected_revision)):
         return _remote_wp_error("runtime_revision_mismatch",
-            "the installed remote runtime does not match the calling Sandbox build")
+            "the request, service receipt, and live remote runtime do not match")
     if (not isinstance(expected_marker, str)
             or not _re.fullmatch(r"[0-9a-f]{24}", expected_marker)
             or not hmac.compare_digest(installed_marker, expected_marker)):
         return _remote_wp_error("remote_service_ownership_unknown",
             "the authenticated service does not match the registered ownership marker")
 
-    home = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")).expanduser().resolve()
-    deploy_root = (home / "deploy-src").resolve()
-    project_root = (deploy_root / slug).resolve()
-    if project_root.parent != deploy_root:
-        raise ValueError("remote WP-CLI project identity escapes the deployment root")
+    home = _lexical_absolute(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+    try:
+        deploy_identity = _capture_deploy_identity(home, slug)
+    except ValueError:
+        return _remote_wp_error("remote_deploy_path_unsafe",
+                                "the exact deployed project path is unavailable or unsafe")
+    deploy_root = home / "deploy-src"
+    project_root = deploy_root / slug
     try:
         project = _core().load_project_config(str(project_root), label=label)
     except Exception:
@@ -200,7 +282,8 @@ def _remote_wp_contract(payload: dict) -> dict:
     selected_root = selected.get("root") or project.get("root")
     if (not isinstance(instance, str)
             or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", instance)
-            or Path(selected_root).expanduser().resolve() != project_root
+            or not isinstance(selected_root, (str, os.PathLike))
+            or _lexical_absolute(selected_root) != project_root
             or selected.get("label", "default") != label):
         return _remote_wp_error("remote_instance_unavailable",
                                 "the registered instance does not own the exact deployment")
@@ -211,30 +294,29 @@ def _remote_wp_contract(payload: dict) -> dict:
         command.append("--allow-missing")
     command.extend(["--", *argv])
     try:
-        completed = subprocess.run(command, cwd=str(project_root), capture_output=True,
-                                   text=True, timeout=timeout + 5, check=False)
-        stdout, stderr = completed.stdout or "", completed.stderr or ""
-        exit_code = completed.returncode if isinstance(completed.returncode, int) else 1
-        status = "unknown" if exit_code == 124 else "complete" if exit_code == 0 else "failed"
-    except subprocess.TimeoutExpired as exc:
-        def partial(value):
-            if value is None:
-                return ""
-            return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
-        stdout, stderr, exit_code, status = partial(exc.stdout), partial(exc.stderr), 124, "unknown"
-        stderr += "remote WP-CLI controller timed out; completion is unknown and was not retried\n"
-    if (len(stdout.encode("utf-8", errors="replace")) > _REMOTE_WP_MAX_STREAM_BYTES
-            or len(stderr.encode("utf-8", errors="replace")) > _REMOTE_WP_MAX_STREAM_BYTES):
-        return _remote_wp_error(
-            "output_too_large",
-            "remote WP-CLI output exceeded the bounded control response",
-            status="unknown",
-        )
+        if not hmac.compare_digest(_live_runtime_revision(), expected_revision):
+            return _remote_wp_error("runtime_revision_mismatch",
+                                    "the live remote runtime changed before dispatch")
+        _revalidate_deploy_identity(deploy_identity)
+    except (OSError, ValueError):
+        return _remote_wp_error("remote_deploy_path_changed",
+                                "the deployed project path changed before dispatch")
+    process_result = _run_remote_wp_process(
+        command, cwd=str(project_root), timeout=timeout + 5,
+    )
+    stdout = process_result["stdout"]
+    stderr = process_result["stderr"]
+    exit_code = process_result["exit_code"]
+    status = process_result["status"]
     return {
         "ok": True, "wp_cli_schema": 1, "transport": "control", "status": status,
-        "ownership": "proven", "runtime_revision": installed_revision,
+        "ownership": "proven", "runtime_revision": live_revision,
         "instance": instance, "stdout": stdout, "stderr": stderr,
         "exit_code": exit_code, "retried": False, "workspace_created": False,
+        "stdout_truncated": process_result["stdout_truncated"],
+        "stderr_truncated": process_result["stderr_truncated"],
+        "error": ({"code": process_result["error_code"]}
+                  if process_result["error_code"] else None),
     }
 
 

@@ -12,7 +12,7 @@ from sandbox.registry import CommandSpec, register_specs
 def configure_parser(parser) -> None:
     parser.add_argument("action", choices=(
         "create", "list", "status", "migrate", "reset", "destroy",
-        "release", "ttl", "reap",
+        "release", "ttl", "reap", "publish-sync",
     ))
     parser.add_argument("name", nargs="?", default=None,
                         help="workspace name for release and ttl")
@@ -26,6 +26,13 @@ def configure_parser(parser) -> None:
     parser.add_argument("--plan-id")
     parser.add_argument("--expected-legacy-namespace", help="scope a migration plan to one exact legacy namespace")
     parser.add_argument("--deployment-receipt", help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--generation-id", help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--manifest-digest", help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--archive-manifest-digest", help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--file-count", type=int, help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--byte-count", type=int, help=__import__("argparse").SUPPRESS)
+    parser.add_argument("--expected-index-generation", type=int,
+                        help=__import__("argparse").SUPPRESS)
     parser.add_argument("--inventory-digest")
     parser.add_argument("--index-generation", type=int)
     parser.add_argument("--limit", type=int, default=50)
@@ -114,24 +121,39 @@ def cmd_workspace(_cfg, args) -> None:
         from sandbox.core import die
         die(f"workspace {args.action} requires --confirm")
     service = durable_job_dependencies()["workspace_service"]
-    request = TargetRequest(
-        args.project_dir, local=args.local, remote=args.remote,
-        workspace=args.workspace,
-        project_identity=getattr(args, "project_identity", None),
-        workspace_id=getattr(args, "workspace_id", None),
-        migration_plan_id=getattr(args, "plan_id", None),
-        confirm=args.confirm,
-        expected_legacy_namespace=getattr(args, "expected_legacy_namespace", None),
-        checkout_locator=getattr(args, "checkout_locator", None),
-        deployment_receipt=getattr(args, "deployment_receipt", None),
-        inventory_digest=getattr(args, "inventory_digest", None),
-        index_generation=getattr(args, "index_generation", None),
-        limit=getattr(args, "limit", 50), active_only=getattr(args, "active_only", False),
-        measure_sizes=getattr(args, "measure_sizes", False),
-        mode=getattr(args, "mode", "persistent"),
-    )
     try:
-        method = ("migration_apply" if args.action == "migrate" and args.plan_id
+        if args.action == "publish-sync":
+            from sandbox.application.workspace_service import SyncPublishRequest
+            request = SyncPublishRequest(
+                workspace_id=args.workspace_id,
+                project_identity=args.project_identity,
+                generation_id=args.generation_id,
+                manifest_digest=args.manifest_digest,
+                archive_manifest_digest=args.archive_manifest_digest,
+                file_count=args.file_count,
+                byte_count=args.byte_count,
+                expected_index_generation=args.expected_index_generation,
+            )
+        else:
+            request = TargetRequest(
+                args.project_dir, local=args.local, remote=args.remote,
+                workspace=args.workspace,
+                project_identity=getattr(args, "project_identity", None),
+                workspace_id=getattr(args, "workspace_id", None),
+                migration_plan_id=getattr(args, "plan_id", None),
+                confirm=args.confirm,
+                expected_legacy_namespace=getattr(args, "expected_legacy_namespace", None),
+                checkout_locator=getattr(args, "checkout_locator", None),
+                deployment_receipt=getattr(args, "deployment_receipt", None),
+                inventory_digest=getattr(args, "inventory_digest", None),
+                index_generation=getattr(args, "index_generation", None),
+                limit=getattr(args, "limit", 50),
+                active_only=getattr(args, "active_only", False),
+                measure_sizes=getattr(args, "measure_sizes", False),
+                mode=getattr(args, "mode", "persistent"),
+            )
+        method = ("publish_sync" if args.action == "publish-sync"
+                  else "migration_apply" if args.action == "migrate" and args.plan_id
                   else "migration_plan" if args.action == "migrate"
                   else args.action)
         result = getattr(service, method)(request)

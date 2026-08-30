@@ -300,6 +300,41 @@ class RemoteWorkspaceTransport:
             args += ["--project-identity", self._project_identity(project_identity)]
         return self._control(remote_name, args)
 
+    def publish_sync(
+        self,
+        remote_name: str,
+        workspace_id: str,
+        project_identity: str,
+        generation_id: str,
+        manifest_digest: str,
+        archive_manifest_digest: str,
+        file_count: int,
+        byte_count: int,
+        expected_index_generation: int,
+    ) -> dict[str, Any]:
+        """Ask the controller to re-authorize and publish staged bytes under lock."""
+        for value, label in (
+            (file_count, "file_count"),
+            (byte_count, "byte_count"),
+            (expected_index_generation, "expected_index_generation"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RemoteWorkspaceError(
+                    "workspace_request_invalid", f"{label} must be non-negative")
+        args = [
+            "workspace", "publish-sync",
+            "--workspace-id", self._workspace_id(workspace_id),
+            "--project-identity", self._project_identity(project_identity),
+            "--generation-id", _safe_id(generation_id, "generation_id"),
+            "--manifest-digest", _safe_id(manifest_digest, "manifest_digest"),
+            "--archive-manifest-digest", _safe_id(
+                archive_manifest_digest, "archive_manifest_digest"),
+            "--file-count", str(file_count),
+            "--byte-count", str(byte_count),
+            "--expected-index-generation", str(expected_index_generation),
+        ]
+        return self._control(remote_name, args)
+
     def migration_plan(
         self,
         remote_name: str,

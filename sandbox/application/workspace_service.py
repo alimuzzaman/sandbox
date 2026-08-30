@@ -14,9 +14,9 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from sandbox.workspaces import WorkspaceIndexError, WorkspaceRepository
 
@@ -29,6 +29,7 @@ class WorkspaceServiceProtocol(Protocol):
     def migration_apply(self, request): ...
     def reset(self, request): ...
     def destroy(self, request): ...
+    def publish_sync(self, request): ...
 
 
 _INCOMPLETE = {"unresolved", "conflict", "incomplete", "invalid", "indeterminate"}
@@ -43,6 +44,44 @@ _REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
 _REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
 _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
 _LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
+_SYNC_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_SYNC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+
+
+@dataclass(frozen=True)
+class SyncPublishRequest:
+    """Opaque, path-free request for one controller-owned sync publication."""
+
+    workspace_id: str
+    project_identity: str
+    generation_id: str
+    manifest_digest: str
+    archive_manifest_digest: str
+    file_count: int
+    byte_count: int
+    expected_index_generation: int
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.workspace_id, "workspace id"),
+            (self.project_identity, "project identity"),
+            (self.generation_id, "generation id"),
+        ):
+            if not isinstance(value, str) or _SYNC_ID.fullmatch(value) is None:
+                raise ValueError(f"{label} is invalid")
+        for value, label in (
+            (self.manifest_digest, "manifest digest"),
+            (self.archive_manifest_digest, "archive manifest digest"),
+        ):
+            if not isinstance(value, str) or _SYNC_DIGEST.fullmatch(value) is None:
+                raise ValueError(f"{label} is invalid")
+        for value, label in (
+            (self.file_count, "file count"),
+            (self.byte_count, "byte count"),
+            (self.expected_index_generation, "expected index generation"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{label} must be a non-negative integer")
 
 
 def _iso(epoch: float) -> str:
@@ -181,6 +220,165 @@ def _public_record(record, repository: WorkspaceRepository, *,
         "source_binding": source_binding,
         "error": None if complete else "workspace_index_incomplete",
     }
+
+
+def _assert_sync_ready(record, repository: WorkspaceRepository,
+                       project_identity: str, expected_generation: int) -> None:
+    """Re-attest the canonical workspace proof while its operation lock is held."""
+    if record.project_identity != project_identity:
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "workspace ownership changed before synchronization publication",
+        )
+    if record.lifecycle in {"destroyed", "tombstoned"}:
+        raise WorkspaceIndexError("workspace_not_found", "workspace was destroyed")
+    evidence = _public_record(record, repository)
+    index = evidence.get("index")
+    checkout = evidence.get("checkout")
+    locator_digests = evidence.get("locator_digests")
+    deployment = evidence.get("deployment_proof")
+    binding = evidence.get("source_binding")
+    ready = (
+        evidence.get("lifecycle") == "ready"
+        and evidence.get("state") == "ready"
+        and evidence.get("status") == "ready"
+        and evidence.get("error") is None
+        and isinstance(index, Mapping)
+        and index.get("complete") is True
+        and index.get("generation") == expected_generation
+        and isinstance(checkout, Mapping)
+        and checkout.get("present") is True
+        and isinstance(checkout.get("identity"), str)
+        and isinstance(locator_digests, Mapping)
+        and locator_digests.get("checkout") == checkout.get("identity")
+        and isinstance(locator_digests.get("source_checkout"), str)
+        and isinstance(deployment, Mapping)
+        and deployment.get("checkout_locator_digest") == checkout.get("identity")
+        and isinstance(deployment.get("source_identity"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", deployment["source_identity"])
+        and isinstance(deployment.get("source_commit"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", deployment["source_commit"])
+        and isinstance(binding, Mapping)
+        and binding.get("checkout_present") is True
+        and binding.get("source_present") is True
+        and binding.get("healthy") is True
+    )
+    if not ready:
+        code = (
+            "workspace_ownership_drift"
+            if isinstance(index, Mapping)
+            and index.get("generation") != expected_generation
+            else "workspace_recovery_required"
+        )
+        raise WorkspaceIndexError(
+            code,
+            "workspace ownership or live source binding changed before synchronization publication",
+        )
+
+
+def _publish_sync_generation(root: Path, request: SyncPublishRequest) -> None:
+    """Verify and atomically publish one already-uploaded staged generation."""
+    project_hash = hashlib.sha256(request.project_identity.encode()).hexdigest()[:32]
+    base = root / "sync" / project_hash / request.workspace_id
+    staging = base / "staging" / request.generation_id
+    published = base / "generations" / request.generation_id
+    current = base / "current"
+    manifest_path = staging / ".sandbox-sync-manifest.json"
+
+    for directory in (root, root / "sync", root / "sync" / project_hash, base,
+                      base / "staging", staging, base / "generations"):
+        try:
+            details = directory.lstat()
+        except OSError as exc:
+            raise WorkspaceIndexError(
+                "sync_staging_unavailable", "staged generation is unavailable") from exc
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise WorkspaceIndexError(
+                "sync_staging_unsafe", "staged generation path is unsafe")
+    try:
+        manifest_details = manifest_path.lstat()
+        if (stat.S_ISLNK(manifest_details.st_mode)
+                or not stat.S_ISREG(manifest_details.st_mode)):
+            raise OSError("manifest is not a regular file")
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "staged generation manifest is invalid") from exc
+    expected_keys = {
+        "schema_version", "generation_id", "manifest_digest",
+        "archive_manifest_digest", "file_count", "byte_count", "entries",
+    }
+    entries = document.get("entries") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected_keys
+        or document.get("schema_version") != 1
+        or document.get("generation_id") != request.generation_id
+        or document.get("manifest_digest") != request.manifest_digest
+        or document.get("archive_manifest_digest") != request.archive_manifest_digest
+        or document.get("file_count") != request.file_count
+        or document.get("byte_count") != request.byte_count
+        or not isinstance(entries, list)
+        or len(entries) != request.file_count
+    ):
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "staged generation manifest binding is invalid")
+    canonical = json.dumps(
+        entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()
+    if hashlib.sha256(canonical).hexdigest() != request.archive_manifest_digest:
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "staged generation manifest digest is invalid")
+    seen: set[str] = set()
+    total = 0
+    for item in entries:
+        if not isinstance(item, dict) or set(item) != {
+            "path", "size", "sha256", "executable",
+        }:
+            raise WorkspaceIndexError("sync_manifest_invalid", "manifest entry is invalid")
+        path = item["path"]
+        parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+        if (not isinstance(path, str) or not path or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts) or path in seen):
+            raise WorkspaceIndexError("sync_manifest_invalid", "manifest path is invalid")
+        target = staging / path
+        try:
+            target.resolve(strict=True).relative_to(staging.resolve(strict=True))
+            details = target.lstat()
+            content = target.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "manifest member is unavailable") from exc
+        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode)
+                or isinstance(item["size"], bool) or item["size"] != len(content)
+                or not isinstance(item["sha256"], str)
+                or hashlib.sha256(content).hexdigest() != item["sha256"]
+                or not isinstance(item["executable"], bool)
+                or bool(details.st_mode & stat.S_IXUSR) != item["executable"]):
+            raise WorkspaceIndexError("sync_manifest_invalid", "manifest member mismatch")
+        seen.add(path)
+        total += len(content)
+    actual = {
+        member.relative_to(staging).as_posix()
+        for member in staging.rglob("*")
+        if member.name != ".sandbox-sync-manifest.json" and member.is_file()
+    }
+    if actual != seen or total != request.byte_count:
+        raise WorkspaceIndexError("sync_manifest_invalid", "generation inventory mismatch")
+    if published.exists() or published.is_symlink():
+        raise WorkspaceIndexError("sync_generation_exists", "generation is already published")
+    if os.path.lexists(current) and not current.is_symlink():
+        raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
+    published.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.replace(staging, published)
+    temporary = current.with_name(".current-" + request.generation_id)
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+    os.symlink(str(published), str(temporary), target_is_directory=True)
+    os.replace(temporary, current)
+    os.chmod(published, 0o700)
 
 
 def _is_remote_target(target) -> bool:
@@ -841,6 +1039,36 @@ class WorkspaceService:
                     "workspace": _public_record(record, self._repo()),
                     "recovery_command": _LOCAL_WORKSPACE_RECOVERY}
         return {"ok": True, **_public_record(record, self._repo())}
+
+    def publish_sync(self, request: SyncPublishRequest) -> dict[str, Any]:
+        """Authorize and publish staged sync bytes under one workspace lock."""
+        if not isinstance(request, SyncPublishRequest):
+            raise TypeError("sync publication request is invalid")
+        if self.storage is None or not isinstance(getattr(self.storage, "root", None), Path):
+            raise WorkspaceIndexError(
+                "sync_publication_unsupported",
+                "synchronization publication storage is unavailable",
+            )
+        repo = self._repo()
+        with repo.operation_lock(request.workspace_id):
+            current = repo.get(request.workspace_id)
+            if current is None or current.lifecycle in {"destroyed", "tombstoned"}:
+                raise WorkspaceIndexError("workspace_not_found", "workspace is unavailable")
+            _assert_sync_ready(
+                current, repo, request.project_identity,
+                request.expected_index_generation,
+            )
+            _publish_sync_generation(self.storage.root, request)
+            return {
+                "ok": True,
+                "status": "accepted",
+                "accepted_generation": request.generation_id,
+                "manifest_digest": request.manifest_digest,
+                "file_count": request.file_count,
+                "byte_count": request.byte_count,
+                "workspace_id": request.workspace_id,
+                "project_identity": request.project_identity,
+            }
 
     def migration_plan(self, request):
         target = self._target(request)

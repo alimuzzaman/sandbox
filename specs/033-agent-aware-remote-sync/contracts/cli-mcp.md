@@ -68,6 +68,14 @@ Credential findings use `credential_detected` and MUST be returned before any
 remote source mutation. A transport failure with uncertain acknowledgment uses
 `status=unknown` and the same request ID for reconciliation.
 
+Staged bytes are never published by a free-standing remote shell program. The
+transport calls the controller's path-free internal `workspace publish-sync`
+operation with opaque workspace/generation identities, manifest bindings, and
+the preflight index generation. The controller acquires the workspace operation
+lock, re-reads ownership, readiness, and live source binding, then holds that
+lock through atomic generation publication. Destroy, migration, adoption, or
+ownership drift after preflight therefore refuses publication.
+
 ## Job launch boundary
 
 Remote job submission MUST include the accepted generation ID in its durable

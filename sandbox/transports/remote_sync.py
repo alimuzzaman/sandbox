@@ -37,82 +37,6 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
-_PUBLISH_PROGRAM = r'''import hashlib, json, os, pathlib, stat, sys
-staging = pathlib.Path(sys.argv[1]).resolve()
-published = pathlib.Path(sys.argv[2]).resolve()
-current = pathlib.Path(sys.argv[3])
-generation, digest, archive_digest = sys.argv[4], sys.argv[5], sys.argv[6]
-expected_count, expected_bytes = int(sys.argv[7]), int(sys.argv[8])
-manifest_path = staging / ".sandbox-sync-manifest.json"
-
-def fail(message):
-    raise RuntimeError(message)
-
-document = json.loads(manifest_path.read_text(encoding="utf-8"))
-if set(document) != {"schema_version", "generation_id", "manifest_digest", "archive_manifest_digest", "file_count", "byte_count", "entries"}:
-    fail("manifest schema invalid")
-entries = document["entries"]
-if (document["schema_version"] != 1 or document["generation_id"] != generation
-        or document["manifest_digest"] != digest
-        or document["archive_manifest_digest"] != archive_digest
-        or document["file_count"] != expected_count
-        or document["byte_count"] != expected_bytes
-        or not isinstance(entries, list) or len(entries) != expected_count):
-    fail("manifest binding invalid")
-canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-if hashlib.sha256(canonical).hexdigest() != archive_digest:
-    fail("manifest digest invalid")
-seen, total = set(), 0
-for item in entries:
-    if not isinstance(item, dict) or set(item) != {"path", "size", "sha256", "executable"}:
-        fail("manifest entry invalid")
-    path = item["path"]
-    if (not isinstance(path, str) or not path or path.startswith("/")
-            or any(part in ("", ".", "..") for part in pathlib.PurePosixPath(path).parts)
-            or path in seen):
-        fail("manifest path invalid")
-    target = staging / path
-    try:
-        target.resolve(strict=True).relative_to(staging)
-    except (OSError, ValueError):
-        fail("manifest path escapes generation")
-    details = target.lstat()
-    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
-        fail("generation member invalid")
-    content = target.read_bytes()
-    if (isinstance(item["size"], bool) or item["size"] != len(content)
-            or not isinstance(item["sha256"], str)
-            or hashlib.sha256(content).hexdigest() != item["sha256"]
-            or not isinstance(item["executable"], bool)
-            or bool(details.st_mode & stat.S_IXUSR) != item["executable"]):
-        fail("generation member mismatch")
-    seen.add(path)
-    total += len(content)
-actual = {
-    member.relative_to(staging).as_posix()
-    for member in staging.rglob("*")
-    if member.name != ".sandbox-sync-manifest.json" and member.is_file()
-}
-if actual != seen or total != expected_bytes:
-    fail("generation inventory mismatch")
-if published.exists() or published.is_symlink():
-    fail("generation already published")
-published.parent.mkdir(parents=True, exist_ok=True)
-os.replace(staging, published)
-temporary = current.with_name(".current-" + generation)
-try:
-    temporary.unlink()
-except FileNotFoundError:
-    pass
-os.symlink(str(published), str(temporary), target_is_directory=True)
-if os.path.lexists(current) and not current.is_symlink():
-    temporary.unlink()
-    fail("current generation pointer is unsafe")
-os.replace(temporary, current)
-os.chmod(published, 0o700)
-'''
-
-
 def _safe_id(value: str, label: str) -> str:
     if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
         raise RemoteSyncTransportError(f"{label} is invalid", "ownership_conflict", retryable=False)
@@ -179,6 +103,7 @@ class RemoteSyncTransport:
 
     def __init__(self, *, remote_lookup: Callable, ssh_run: Callable, ssh_process: Callable,
                  resolve_home: Callable, workspace_preflight: Callable,
+                 workspace_publish: Callable | None = None,
                  clock: Callable | None = None) -> None:
         if not callable(workspace_preflight):
             raise TypeError("workspace_preflight is required")
@@ -187,6 +112,7 @@ class RemoteSyncTransport:
         self.ssh_process = ssh_process
         self.resolve_home = resolve_home
         self.workspace_preflight = workspace_preflight
+        self.workspace_publish = workspace_publish
         self.clock = clock
 
     def _verify_workspace_owner(
@@ -279,7 +205,7 @@ class RemoteSyncTransport:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict) or remote.get("provisioned") is not True:
             raise RemoteSyncTransportError("remote is not provisioned", "remote_unavailable", retryable=True)
-        self._verify_workspace_owner(relationship)
+        evidence = self._verify_workspace_owner(relationship)
         try:
             home = self.resolve_home(remote)
             if not isinstance(home, str) or not home.startswith("/"):
@@ -289,8 +215,6 @@ class RemoteSyncTransport:
             generation_id = _safe_id(generation.generation_id, "generation id")
             base = f"{home}/runtime/sync/{project_hash}/{workspace}"
             staging = f"{base}/staging/{generation_id}"
-            published = f"{base}/generations/{generation_id}"
-            current = f"{base}/current"
             archive, archive_digest = _archive(
                 Path(project_root).expanduser().resolve(), manifest,
                 project_relative_manifest=True,
@@ -306,17 +230,36 @@ class RemoteSyncTransport:
             uploaded = self.ssh_process(remote, extract, input_data=archive, timeout=120)
             if uploaded.returncode != 0:
                 raise RemoteSyncTransportError("remote generation upload failed")
-            publish = (
-                f"python3 -c {shlex.quote(_PUBLISH_PROGRAM)} "
-                f"{shlex.quote(staging)} {shlex.quote(published)} "
-                f"{shlex.quote(current)} {shlex.quote(generation_id)} "
-                f"{shlex.quote(manifest.manifest_digest)} "
-                f"{shlex.quote(archive_digest)} "
-                f"{manifest.file_count} {manifest.byte_count}"
-            )
-            published_result = self.ssh_run(remote, publish, timeout=30)
-            if published_result.returncode != 0:
-                raise RemoteSyncTransportError("remote generation publication failed")
+            if not callable(self.workspace_publish):
+                raise RemoteSyncTransportError(
+                    "controller-owned synchronization publication is unavailable",
+                    "remote_unavailable", retryable=True,
+                )
+            try:
+                publication = self.workspace_publish(
+                    relationship, generation, manifest, archive_digest, evidence,
+                )
+            except RemoteSyncTransportError:
+                raise
+            except Exception as exc:
+                remote_code = getattr(exc, "code", "") or str(exc)
+                conflict = isinstance(remote_code, str) and any(
+                    marker in remote_code
+                    for marker in (
+                        "ownership", "identity", "conflict", "not_found",
+                        "destroyed", "generation", "recovery_required",
+                    )
+                )
+                raise RemoteSyncTransportError(
+                    "remote workspace changed before synchronization publication",
+                    "ownership_conflict" if conflict else "remote_unavailable",
+                    retryable=not conflict,
+                ) from None
+            if not isinstance(publication, Mapping) or publication.get("ok") is not True:
+                raise RemoteSyncTransportError(
+                    "remote generation publication failed",
+                    "remote_unavailable", retryable=True,
+                )
             return {
                 "accepted_generation": generation.generation_id,
                 "manifest_digest": manifest.manifest_digest,
@@ -632,6 +575,18 @@ def default_remote_sync_transport() -> RemoteSyncTransport:
             relationship.workspace_id,
             project_identity=relationship.project_identity,
         ),
+        workspace_publish=lambda relationship, generation, manifest, archive_digest, evidence:
+            workspace_transport.publish_sync(
+                relationship.remote_name,
+                relationship.workspace_id,
+                relationship.project_identity,
+                generation.generation_id,
+                manifest.manifest_digest,
+                archive_digest,
+                manifest.file_count,
+                manifest.byte_count,
+                evidence["index"]["generation"],
+            ),
     )
 
 

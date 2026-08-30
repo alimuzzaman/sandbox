@@ -89,6 +89,20 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
         self.assertIn("--confirm", command)
         self.assertNotIn("--project-dir", command)
 
+    def test_sync_publication_is_path_free_and_bound_to_preflight_generation(self):
+        self.transport.publish_sync(
+            "remote-a", "ws-123", "project-identity", "gen-123",
+            "a" * 64, "b" * 64, 2, 12, 7,
+        )
+        command = self._command()
+        self.assertIn("workspace publish-sync", command)
+        self.assertIn("--workspace-id ws-123", command)
+        self.assertIn("--project-identity project-identity", command)
+        self.assertIn("--generation-id gen-123", command)
+        self.assertIn("--expected-index-generation 7", command)
+        self.assertNotIn("--project-dir", command)
+        self.assertNotIn("--path", command)
+
     def test_reset_and_destroy_require_confirmation_and_workspace_id(self):
         for method in (self.transport.reset, self.transport.destroy):
             with self.subTest(method=method.__name__):

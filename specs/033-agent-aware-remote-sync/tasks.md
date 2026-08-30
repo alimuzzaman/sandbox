@@ -61,7 +61,7 @@ is unavailable.
 ### Implementation for User Story 1
 
 - [X] T019 [US1] Implement staged generation packaging and shell-safe transfer in `sandbox/transports/remote_sync.py`, using the existing bounded remote runner and never writing directly into the active workspace.
-- [X] T020 [US1] Implement remote manifest validation, atomic generation publication, and typed acceptance/unknown envelopes in `sandbox/transports/remote_sync.py`.
+- [X] T020 [US1] Implement staged remote manifest validation, controller-locked atomic generation publication in `sandbox/application/workspace_service.py`, and typed acceptance/unknown envelopes in `sandbox/transports/remote_sync.py`.
 - [X] T021 [US1] Implement `SyncService.once()` and `SyncService.status()` orchestration in `sandbox/sync/service.py`, including relationship preflight and journal transitions.
 - [X] T022 [US1] Implement the application boundary in `sandbox/application/sync_service.py` so CLI and MCP share target, ownership, and redaction semantics.
 - [X] T023 [US1] Register `sync once` and `sync status` in `sandbox/commands/sync.py` and `sandbox/commands/manifest.py` with explicit project/remote/workspace selectors.

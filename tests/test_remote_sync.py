@@ -107,16 +107,52 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 ssh_run=ssh_run, ssh_process=ssh_process,
                 resolve_home=lambda _remote: "/srv/sandbox",
                 workspace_preflight=self.ready_workspace,
+                workspace_publish=lambda *_args: {"ok": True},
             )
             result = transport.transfer(root, manifest, relationship, generation)
             self.assertEqual(result["status"], "accepted")
             self.assertEqual(len(uploads), 1)
             self.assertIn("tar -xzf -", uploads[0][0])
             self.assertGreater(len(uploads[0][1]), 0)
-            self.assertIn("python3 -c", commands[-1])
-            self.assertIn("manifest digest invalid", commands[-1])
-            self.assertIn("os.replace(staging, published)", commands[-1])
-            self.assertIn("os.symlink", commands[-1])
+            self.assertEqual(len(commands), 1)
+
+    def test_transfer_publication_rechecks_workspace_after_staging_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Sync Test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "sync@example.test"], cwd=root, check=True)
+            (root / "source.txt").write_text("safe\n")
+            subprocess.run(["git", "add", "source.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+            manifest = capture_manifest(root)
+            relationship = SynchronizationRelationship(
+                "rel_fixture", "project:fixture", "remote", "workspace",
+            )
+            generation = SourceGeneration(
+                "gen_fixture", "rel_fixture", 1, manifest.manifest_digest,
+                manifest.file_count, manifest.byte_count, "pending", "request",
+            )
+            events = []
+
+            def publish(_relationship, _generation, _manifest, _archive_digest, evidence):
+                events.append(("publish", evidence["index"]["generation"]))
+                raise RuntimeError("workspace_ownership_drift")
+
+            transport = RemoteSyncTransport(
+                remote_lookup=lambda name: {"provisioned": True, "name": name},
+                ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
+                    returncode=0, stdout="", stderr=""),
+                ssh_process=lambda *_args, **_kwargs: events.append(("upload", 4)) or SimpleNamespace(
+                    returncode=0, stdout="", stderr=""),
+                resolve_home=lambda _remote: "/srv/sandbox",
+                workspace_preflight=self.ready_workspace,
+                workspace_publish=publish,
+            )
+            with self.assertRaises(RemoteSyncTransportError) as caught:
+                transport.transfer(root, manifest, relationship, generation)
+            self.assertEqual(caught.exception.code, "ownership_conflict")
+            self.assertEqual(events, [("upload", 4), ("publish", 4)])
 
     def test_unprovisioned_remote_fails_before_runner(self):
         calls = []

@@ -1,14 +1,20 @@
 import tempfile
 import unittest
+from dataclasses import replace
+from contextlib import contextmanager
+import hashlib
+import json
 from pathlib import Path
+from unittest import mock
 
-from sandbox.application.workspace_service import WorkspaceService
+from sandbox.application.workspace_service import SyncPublishRequest, WorkspaceService
 from sandbox.jobs.models import TargetRequest
 from sandbox.jobs.storage import JobStorage
 from sandbox.jobs.scheduler import JobScheduler
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.workspaces import WorkspaceRepository
+from sandbox.workspaces.models import JobEvidence
 
 
 class _Target:
@@ -26,6 +32,125 @@ class _RemoteTarget:
 
 
 class WorkspaceRuntimeTests(unittest.TestCase):
+    def _sync_fixture(self, temp):
+        storage = JobStorage(temp, free_disk_reserve=0)
+        checkout = Path(temp) / "checkout"
+        source = Path(temp) / "source"
+        checkout.mkdir()
+        source.mkdir()
+        repository = WorkspaceRepository(
+            Path(temp) / "workspaces" / "index.sqlite3",
+            storage.root / "workspaces",
+        )
+        record = repository.register(
+            "project:test", "unit", workspace_id="ws_sync",
+            metadata={
+                "checkout_locator": str(checkout),
+                "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    str(checkout).encode()).hexdigest(),
+                "source_checkout_locator": str(source),
+                "source_checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    str(source).encode()).hexdigest(),
+                "source_identity": "sha256:" + "1" * 64,
+                "source_commit": "a" * 40,
+            },
+        )
+        generation = repository.schema_generation()
+        base = storage.root / "sync" / hashlib.sha256(
+            b"project:test").hexdigest()[:32] / record.workspace_id
+        (base / "generations").mkdir(parents=True)
+        staging = base / "staging" / "gen_sync"
+        staging.mkdir(parents=True)
+        content = b"safe\n"
+        (staging / "source.txt").write_bytes(content)
+        entries = [{
+            "path": "source.txt", "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(), "executable": False,
+        }]
+        archive_digest = hashlib.sha256(json.dumps(
+            entries, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode()).hexdigest()
+        manifest_digest = "2" * 64
+        (staging / ".sandbox-sync-manifest.json").write_text(json.dumps({
+            "schema_version": 1,
+            "generation_id": "gen_sync",
+            "manifest_digest": manifest_digest,
+            "archive_manifest_digest": archive_digest,
+            "file_count": 1,
+            "byte_count": len(content),
+            "entries": entries,
+        }, sort_keys=True, separators=(",", ":")))
+        service = WorkspaceService(
+            _Target(), storage, repository=repository,
+        )
+        request = SyncPublishRequest(
+            workspace_id=record.workspace_id,
+            project_identity="project:test",
+            generation_id="gen_sync",
+            manifest_digest=manifest_digest,
+            archive_manifest_digest=archive_digest,
+            file_count=1,
+            byte_count=len(content),
+            expected_index_generation=generation,
+        )
+        return service, repository, request, base
+
+    def test_sync_publication_holds_workspace_operation_lock_through_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, repository, request, base = self._sync_fixture(temp)
+            original = repository.operation_lock
+            events = []
+
+            @contextmanager
+            def recording(operation="workspace-migration", **kwargs):
+                events.append(("enter", operation))
+                with original(operation, **kwargs):
+                    yield
+                    self.assertTrue((base / "current").is_symlink())
+                events.append(("exit", operation))
+
+            with mock.patch.object(repository, "operation_lock", side_effect=recording):
+                result = service.publish_sync(request)
+            self.assertTrue(result["ok"])
+            self.assertEqual(events, [("enter", "ws_sync"), ("exit", "ws_sync")])
+
+    def test_sync_publication_refuses_destroy_between_preflight_and_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, repository, request, base = self._sync_fixture(temp)
+            repository.tombstone(request.workspace_id, reason="race")
+            with self.assertRaises(Exception) as refused:
+                service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "workspace_not_found")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_refuses_migration_or_adoption_after_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, repository, request, base = self._sync_fixture(temp)
+            metadata = (
+                repository.legacy_root / "local:race" / "adopted" / "workspace.json"
+            )
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text('{"label":"adopted"}\n')
+            plan = repository.migration_plan(evidence=[
+                JobEvidence("project:adopted", "local:race", "adopted"),
+            ])
+            repository.migration_apply(plan, confirm=True)
+            with self.assertRaises(Exception) as refused:
+                service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "workspace_ownership_drift")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_refuses_ownership_change_after_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, repository, request, base = self._sync_fixture(temp)
+            current = repository.get(request.workspace_id)
+            changed = replace(current, project_identity="project:other")
+            with mock.patch.object(repository, "get", return_value=changed):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "workspace_ownership_drift")
+            self.assertFalse((base / "current").exists())
+
     def test_create_rejects_namespace_traversal_and_symlink_without_residue(self):
         with tempfile.TemporaryDirectory() as temp:
             storage = JobStorage(temp, free_disk_reserve=0)

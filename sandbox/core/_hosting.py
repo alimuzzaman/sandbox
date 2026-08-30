@@ -509,9 +509,9 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     declared_services = [str(compose["service"]), *init_services, *background_services]
     if len(declared_services) != len(set(declared_services)):
         raise HostingError("compose service names must not be duplicated across service lists")
-    # An environment whose image build is too slow for the deploy timeout can
-    # opt out of rebuilding. Compose still builds a service whose image is
-    # missing, so this skips the rebuild, never the first build.
+    # A no-build environment must use only explicit images that already exist
+    # on the host. Apply preflights every declared service and carries Compose's
+    # hard --no-build flag; missing image evidence fails closed.
     build = compose.get("build", True)
     if not isinstance(build, bool):
         raise HostingError("compose.build must be true or false")

@@ -1597,7 +1597,7 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
         f"set -eu; mkdir -p {shlex.quote(str(__import__('posixpath').dirname(target)))}; "
         f"cat > {shlex.quote(target)}; chmod 0644 {shlex.quote(target)}"
     )
-    service = shlex.quote(validated["compose"]["service"])
+    service = shlex.quote(config.get("service") or validated["compose"]["service"])
     _remote_checked(entry, (
         f"printf %s {shlex.quote(payload)} | base64 -d | {prefix} exec -T {service} "
         f"sh -c {shlex.quote(install)}"

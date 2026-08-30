@@ -711,11 +711,39 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(_manifest()) as directory:
             manifest = Path(directory) / "sandbox.hosting.yml"
             manifest.write_text(manifest.read_text().replace(
-                "    cloudflare:\n", "    autologin:\n      user: admin\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n      ttl_seconds: 600\n    cloudflare:\n"
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      service: wordpress\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n      ttl_seconds: 600\n    cloudflare:\n"
             ))
             validated = hosting.validate_manifest(directory)
         self.assertEqual(validated["autologin"]["user"], "admin")
+        self.assertEqual(validated["autologin"]["service"], "wordpress")
         self.assertEqual(validated["autologin"]["ttl_seconds"], 600)
+
+    def test_rejects_unsafe_autologin_service(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      service: ../wordpress\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n    cloudflare:\n"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "autologin.service"):
+                hosting.validate_manifest(directory)
+
+    def test_host_autologin_installs_plugin_in_declared_service(self):
+        validated = {
+            "project": "example-site", "environment": "production",
+            "compose": {"service": "gateway", "files": ["compose.yml"]},
+            "routes": [{"hostname": "example.test", "primary": True}],
+            "autologin": {
+                "user": "admin", "service": "wordpress", "ttl_seconds": 600,
+                "container_path": "/var/www/html/wp-content/mu-plugins/99-autologin.php",
+            },
+        }
+        state = {"hosts": {"remote/example-site/production": {}}}
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_compose_prefix", return_value="docker compose"), \
+             patch.object(hosting_cmd, "_remote_checked") as checked, \
+             patch.object(hosting, "save_host_state"):
+            hosting_cmd._issue_host_autologin(validated, {}, "remote", state, 600)
+        self.assertIn("exec -T wordpress", checked.call_args_list[0].args[1])
 
     def test_rejects_unsafe_autologin_container_path(self):
         with self._write(_manifest()) as directory:

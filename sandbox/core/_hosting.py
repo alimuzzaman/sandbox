@@ -323,7 +323,11 @@ def _autologin(env: dict) -> dict | None:
     ttl = raw.get("ttl_seconds", 900)
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise HostingError("autologin.ttl_seconds must be an integer from 60 to 3600")
-    return {"user": user, "container_path": path, "ttl_seconds": ttl}
+    service = str(raw.get("service") or "").strip()
+    if service and not _SERVICE_RE.fullmatch(service):
+        raise HostingError("autologin.service contains unsupported characters")
+    return {"user": user, "container_path": path, "ttl_seconds": ttl,
+            "service": service or None}
 
 
 def _basic_auth(env: dict) -> dict | None:

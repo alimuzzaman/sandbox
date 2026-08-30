@@ -2,8 +2,9 @@
 
 Live evidence exists for the default provider and for every read-only surface, on macOS.
 The Ubuntu system-Caddy lifecycle is also captured through the single-invocation conformance
-harness. No incumbent adapter is normally adoptable in production yet: the harness-only
-proof attestation does not change ordinary CLI support, so end-user adoption remains open.
+harness. Source now qualifies only Linux system Caddy exact HTTP against that fixed evidence;
+no runtime proof input can promote or widen it. Normal live Linux `./sb domains use
+system-caddy` adoption has not yet been recaptured, so T078 remains open.
 
 | Evidence | State | Covers | Still required |
 |---|---|---|---|
@@ -15,6 +16,11 @@ proof attestation does not change ordinary CLI support, so end-user adoption rem
 | `quickstart-run.md` | live (macOS + Ubuntu) | T068: read-only baseline, clean-URL serve, repeat-safety; lifecycle in `system-caddy.md` | the live transaction-failure matrix |
 | `cleanup.md` | live (Ubuntu + macOS) | T052: normal, repeated, drift, incumbent-unavailable cleanup with foreign routes healthy | incumbent replaced by another product |
 | `system-caddy.md` | live (Ubuntu 24.04) | T044: add/request/update/remove through a real incumbent, incumbent routes preserved | HTTPS/wildcard; the live transaction-failure matrix |
+
+The locally tested T078 portion fixes the production registry qualification to
+`037-t044-ubuntu-2404` and requires Linux, exact HTTP, observed Caddy identity, proven
+listener ownership, and helper/import readiness. It refuses foreign collisions and owner
+drift before mutation. This is source validation, not new live CLI evidence.
 
 ## What each open item needs
 

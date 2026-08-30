@@ -13,7 +13,9 @@ from contextlib import contextmanager
 
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
-from sandbox.resources.context import node_store_service, reclaim_service, resource_service
+from sandbox.resources.context import (
+    host_memory_status, node_store_service, reclaim_service, resource_service,
+)
 from sandbox.resources.models import resource_cancellation_signal, redact
 from sandbox.resources.monitor import record_path, resolve_policy
 
@@ -324,7 +326,8 @@ def _run_monitor(args) -> dict:
 def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
     parser.add_argument(
-        "action", choices=("status", "plan", "cleanup", "monitor", "schedule")
+        "action", choices=("status", "plan", "cleanup", "monitor", "schedule",
+                           "swap-status")
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
@@ -1055,6 +1058,64 @@ def _tier_action(args) -> bool:
     return bool(getattr(args, "tier", None)) and args.action in {"plan", "cleanup"}
 
 
+def _host_memory_cli(args):
+    """Run the completed remote-only host-memory status action."""
+    action = args.action
+    remote = getattr(args, "remote", None)
+    target = {"kind": "remote", "name": remote} if remote else None
+    if not remote:
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "remote_required",
+                      "message": "--remote is required for host-memory operations",
+                      "retryable": False},
+        }
+    if (getattr(args,"plan_id",None) or bool(getattr(args,"confirm",False))
+            or any(getattr(args, name, None) for name in
+                      ("scope", "tier", "node_store_family", "detach", "request_id"))):
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": "invalid_mode", "message": "option is not valid for this host-memory action", "retryable": False}}
+    budget = 15 if args.budget is None else args.budget
+    try:
+        return host_memory_status(remote,budget_seconds=budget)
+    except Exception as exc:
+        code = getattr(exc, "code", None) or str(exc)
+        if code not in {"unknown_remote", "remote_runtime_revision_mismatch",
+                        "remote_service_ownership_unknown"}:
+            code = "unknown_remote"
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
+
+
+def _emit_host_memory(payload, json_output):
+    if json_output:
+        print(json.dumps(payload, sort_keys=True)); return
+    target = (payload.get("target") or {}).get("name", "unknown")
+    print(f"resources {payload.get('action')}: {payload.get('status')} ({target})")
+    error = payload.get("error") or {}
+    if error: print(f"  {error.get('code')}: {error.get('message')}")
+    data = payload.get("data") or {}
+    memory = data.get("memory") or {}
+    if memory: print(f"  memory available: {_human_bytes(memory.get('available_bytes'))} / {_human_bytes(memory.get('total_bytes'))}")
+    if "ownership" in data: print(f"  ownership: {data.get('ownership', 'unknown')}")
+    swap_areas = data.get("swap_areas") or []
+    if "swap_areas" in data:
+        swap_total = sum(item.get("total_bytes", 0) for item in swap_areas
+                         if isinstance(item.get("total_bytes"), int))
+        swap_used = sum(item.get("used_bytes", 0) for item in swap_areas
+                        if isinstance(item.get("used_bytes"), int))
+        print(f"  swap used: {_human_bytes(swap_used)} / {_human_bytes(swap_total)}")
+    monitor = data.get("monitor") or {}
+    if monitor: print(f"  monitor: {monitor.get('freshness', 'unknown')}")
+    eligibility = data.get("container_eligibility") or {}
+    if eligibility: print(f"  container swap: {eligibility.get('state', 'unknown')}")
+    counts = data.get("counts") or {}
+    if counts: print(f"  samples: {counts.get('returned', 0)}; malformed: {counts.get('malformed', 0)}")
+
+
 def _run_tier(args) -> dict:
     from sandbox.resources.context import reclaim_service
 
@@ -1097,6 +1158,27 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if action == "swap-status":
+        payload = _host_memory_cli(args)
+        _emit_host_memory(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
+    host_only = next((flag for flag, value in (
+        ("--operation", getattr(args, "operation", None)),
+        ("--size-gib", getattr(args, "size_gib", None)),
+        ("--since", getattr(args, "since", None)),
+        ("--until", getattr(args, "until", None)),
+        ("--limit", getattr(args, "limit", None)),
+    ) if value is not None), None)
+    if host_only:
+        from sandbox.resources.service import ResourceError, result
+        payload = result(False, action, status="refused", error=ResourceError(
+            f"{host_only} is valid only for host-memory resource actions",
+            "invalid_mode",
+        ))
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
     if action == "status" and bool(getattr(args, "worker", False)):
         from sandbox.resources.detached import run_worker
         worker_status = run_worker(args)

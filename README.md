@@ -931,6 +931,13 @@ and can usually diagnose itself.
   for deferred product work.
 
 Re-run `./sb setup` after a global config change — it's idempotent.
+
+The current Feature 046 MVP exposes only read-only `resources swap-status --remote NAME`.
+It uses the authenticated `host_memory_status` action and never falls back to SSH. Planning,
+apply, disable, and history commands remain unimplemented and unavailable.
+See [resource monitoring](docs/resource-monitoring.md#remote-host-swap-and-memory-history).
+Local or synthetic tests do not prove live Linux mutation, reboot persistence, or release
+readiness.
 ## Hermes Agent
 
 Remote Hermes control is documented in [docs/hermes-agent.md](docs/hermes-agent.md).

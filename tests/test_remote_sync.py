@@ -69,11 +69,12 @@ class RemoteSyncTransportTests(unittest.TestCase):
             ssh_process=lambda *_args, **_kwargs: self.fail("must not upload"),
             resolve_home=lambda _remote: "/srv/sandbox",
             workspace_preflight=self.ready_workspace,
+            workspace_reconcile=lambda *_args: {"ok": True, "status": "accepted"},
         )
         result = transport.reconcile(relationship, generation)
         self.assertEqual(result["accepted_generation"], "gen_fixture")
         self.assertEqual(result["request_id"], "request_fixture")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [])
     def test_transfer_stages_archive_and_publishes_only_after_upload(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -92,29 +93,29 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 manifest.file_count, manifest.byte_count, "pending", "request",
             )
             commands = []
-            uploads = []
+            publications = []
 
             def ssh_run(_remote, command, timeout=30):
                 commands.append(command)
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            def ssh_process(_remote, command, input_data=None, timeout=120):
-                uploads.append((command, input_data))
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            def publish(*args):
+                publications.append(args)
+                return {"ok": True}
 
             transport = RemoteSyncTransport(
                 remote_lookup=lambda name: {"provisioned": True, "name": name},
-                ssh_run=ssh_run, ssh_process=ssh_process,
+                ssh_run=ssh_run,
+                ssh_process=lambda *_args, **_kwargs: self.fail("raw upload is forbidden"),
                 resolve_home=lambda _remote: "/srv/sandbox",
                 workspace_preflight=self.ready_workspace,
-                workspace_publish=lambda *_args: {"ok": True},
+                workspace_publish=publish,
             )
             result = transport.transfer(root, manifest, relationship, generation)
             self.assertEqual(result["status"], "accepted")
-            self.assertEqual(len(uploads), 1)
-            self.assertIn("tar -xzf -", uploads[0][0])
-            self.assertGreater(len(uploads[0][1]), 0)
-            self.assertEqual(len(commands), 1)
+            self.assertEqual(len(publications), 1)
+            self.assertGreater(len(publications[0][-1]), 0)
+            self.assertEqual(commands, [])
 
     def test_transfer_publication_rechecks_workspace_after_staging_upload(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -135,7 +136,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
             )
             events = []
 
-            def publish(_relationship, _generation, _manifest, _archive_digest, evidence):
+            def publish(_relationship, _generation, _manifest, _archive_digest, evidence, _archive):
                 events.append(("publish", evidence["index"]["generation"]))
                 raise RuntimeError("workspace_ownership_drift")
 
@@ -143,8 +144,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 remote_lookup=lambda name: {"provisioned": True, "name": name},
                 ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
                     returncode=0, stdout="", stderr=""),
-                ssh_process=lambda *_args, **_kwargs: events.append(("upload", 4)) or SimpleNamespace(
-                    returncode=0, stdout="", stderr=""),
+                ssh_process=lambda *_args, **_kwargs: self.fail("raw upload is forbidden"),
                 resolve_home=lambda _remote: "/srv/sandbox",
                 workspace_preflight=self.ready_workspace,
                 workspace_publish=publish,
@@ -152,7 +152,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
             with self.assertRaises(RemoteSyncTransportError) as caught:
                 transport.transfer(root, manifest, relationship, generation)
             self.assertEqual(caught.exception.code, "ownership_conflict")
-            self.assertEqual(events, [("upload", 4), ("publish", 4)])
+            self.assertEqual(events, [("publish", 4)])
 
     def test_unprovisioned_remote_fails_before_runner(self):
         calls = []

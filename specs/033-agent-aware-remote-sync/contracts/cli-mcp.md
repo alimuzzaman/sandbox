@@ -68,21 +68,25 @@ Credential findings use `credential_detected` and MUST be returned before any
 remote source mutation. A transport failure with uncertain acknowledgment uses
 `status=unknown` and the same request ID for reconciliation.
 
-Staged bytes are never published by a free-standing remote shell program. The
-transport calls the controller's path-free internal `workspace publish-sync`
-operation with opaque workspace/generation identities, manifest bindings, and
-the preflight index generation. The controller acquires the workspace operation
-lock, re-reads ownership, readiness, and live source binding, then holds that
-lock through atomic generation publication. Destroy, migration, adoption, or
-ownership drift after preflight therefore refuses publication.
+Staged bytes are never prepared, extracted, or published by free-standing
+remote shell path operations. The transport sends the bounded archive on stdin
+to the controller's path-free internal `workspace publish-sync` operation with
+opaque workspace/generation identities, manifest bindings, and the preflight
+index generation. The controller acquires the workspace operation lock,
+re-reads ownership, readiness, and live source binding, then holds that lock
+through extraction and atomic generation publication. Destroy, migration,
+adoption, or ownership drift after preflight therefore refuses publication.
 
 The controller validates the exact directory inventory through no-follow
-directory handles, including broken links and non-file entries, and revalidates
-file identities and digests after generation rename and across the `current`
-pointer commit. A failed pointer commit rolls the exact generation back to
-staging when possible; if rollback is interrupted, replay recognizes and
-revalidates that exact published generation before completing. Filesystem
-failures use bounded typed errors and never include protected controller paths.
+directory handles, including every directory identity, broken links, and
+non-file entries. It repeats the full snapshot and revalidates identities and
+digests across generation rename and the conditional `current` pointer commit.
+A failed pointer commit leaves a complete fingerprint receipt beside the exact
+published generation, so replay can revalidate and complete without restaging.
+Lost-ack reconciliation uses that receipt under the workspace lock and repeats
+the full exact-tree validation; `current` plus manifest metadata alone is never
+acceptance proof. Filesystem failures use bounded typed errors and never include
+protected controller paths.
 
 ## Job launch boundary
 

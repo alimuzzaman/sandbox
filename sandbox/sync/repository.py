@@ -68,7 +68,7 @@ class SyncRepository:
         return {
             "schema_version": SCHEMA_VERSION,
             "relationships": {}, "generations": {}, "requests": {},
-            "participants": {}, "divergences": {}, "metrics": {},
+            "participants": {}, "divergences": {}, "metrics": {}, "conflicts": {},
         }
 
     def _prepare(self) -> None:
@@ -95,13 +95,29 @@ class SyncRepository:
         # These additive collections were introduced after the original v1
         # journal. Keep old owner-only journals readable without advertising a
         # new schema before a migration is necessary.
-        for key in ("participants", "divergences", "metrics"):
+        for key in ("participants", "divergences", "metrics", "conflicts"):
             collection = value.setdefault(key, {})
             if not isinstance(collection, dict):
                 raise SyncJournalCorruption("synchronization journal schema is invalid")
         try:
+            for key, item in value["conflicts"].items():
+                validate_identifier(key, "relationship id")
+                if not isinstance(item, dict) or set(item) != {
+                    "code", "request_id", "generation_id",
+                } or item.get("code") != "ownership_conflict":
+                    raise ValueError("conflict record invalid")
+                validate_identifier(item.get("request_id"), "conflict request id")
+                validate_identifier(item.get("generation_id"), "conflict generation id")
             for key, item in value["relationships"].items():
-                if SynchronizationRelationship.from_dict(item).relationship_id != key:
+                hydrated = dict(item)
+                conflict = value["conflicts"].get(key)
+                hydrated.update({
+                    "conflict_code": conflict.get("code") if conflict else None,
+                    "conflict_request_id": conflict.get("request_id") if conflict else None,
+                    "conflict_generation_id": conflict.get("generation_id") if conflict else None,
+                })
+                value["relationships"][key] = hydrated
+                if SynchronizationRelationship.from_dict(hydrated).relationship_id != key:
                     raise ValueError("relationship key mismatch")
             for key, item in value["generations"].items():
                 if SourceGeneration.from_dict(item).generation_id != key:
@@ -138,13 +154,29 @@ class SyncRepository:
         return value
 
     def _write_unlocked(self, value: dict[str, Any]) -> None:
+        serialized = dict(value)
+        serialized["relationships"] = {}
+        serialized["conflicts"] = dict(value.get("conflicts") or {})
+        for key, item in value["relationships"].items():
+            relationship = dict(item)
+            code = relationship.pop("conflict_code", None)
+            request_id = relationship.pop("conflict_request_id", None)
+            generation_id = relationship.pop("conflict_generation_id", None)
+            serialized["relationships"][key] = relationship
+            if code is None:
+                serialized["conflicts"].pop(key, None)
+            else:
+                serialized["conflicts"][key] = {
+                    "code": code, "request_id": request_id,
+                    "generation_id": generation_id,
+                }
         descriptor, temporary = tempfile.mkstemp(
             prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent,
         )
         temporary_path = Path(temporary)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+                json.dump(serialized, stream, sort_keys=True, separators=(",", ":"))
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())

@@ -12,7 +12,7 @@ from sandbox.registry import CommandSpec, register_specs
 def configure_parser(parser) -> None:
     parser.add_argument("action", choices=(
         "create", "list", "status", "migrate", "reset", "destroy",
-        "release", "ttl", "reap", "publish-sync",
+        "release", "ttl", "reap", "publish-sync", "reconcile-sync",
     ))
     parser.add_argument("name", nargs="?", default=None,
                         help="workspace name for release and ttl")
@@ -122,17 +122,28 @@ def cmd_workspace(_cfg, args) -> None:
         die(f"workspace {args.action} requires --confirm")
     service = durable_job_dependencies()["workspace_service"]
     try:
-        if args.action == "publish-sync":
-            from sandbox.application.workspace_service import SyncPublishRequest
-            request = SyncPublishRequest(
+        if args.action in {"publish-sync", "reconcile-sync"}:
+            from sandbox.application.workspace_service import (
+                SyncPublishRequest, SyncReconcileRequest,
+            )
+            common = dict(
                 workspace_id=args.workspace_id,
                 project_identity=args.project_identity,
                 generation_id=args.generation_id,
                 manifest_digest=args.manifest_digest,
-                archive_manifest_digest=args.archive_manifest_digest,
                 file_count=args.file_count,
                 byte_count=args.byte_count,
                 expected_index_generation=args.expected_index_generation,
+            )
+            request = (
+                SyncPublishRequest(
+                    **common,
+                    archive_manifest_digest=args.archive_manifest_digest,
+                    archive_bytes=__import__("sys").stdin.buffer.read(
+                        min(max(args.byte_count or 0, 0), 512 * 1024 * 1024)
+                        + 16 * 1024 * 1024 + 1),
+                ) if args.action == "publish-sync"
+                else SyncReconcileRequest(**common)
             )
         else:
             request = TargetRequest(
@@ -153,6 +164,7 @@ def cmd_workspace(_cfg, args) -> None:
                 mode=getattr(args, "mode", "persistent"),
             )
         method = ("publish_sync" if args.action == "publish-sync"
+                  else "reconcile_sync" if args.action == "reconcile-sync"
                   else "migration_apply" if args.action == "migrate" and args.plan_id
                   else "migration_plan" if args.action == "migrate"
                   else args.action)

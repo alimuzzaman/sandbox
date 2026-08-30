@@ -64,6 +64,27 @@ class SyncStateTests(unittest.TestCase):
         self.assertIsNone(loaded.conflict_request_id)
         self.assertIsNone(loaded.conflict_generation_id)
 
+    def test_conflict_persistence_keeps_schema_v1_relationship_rollback_readable(self):
+        self.repo.put_relationship(relationship())
+        generation, _ = self.reserve()
+        self.repo.transition_generation(generation.generation_id, "transferring")
+        self.repo.transition_generation(
+            generation.generation_id, "refused", refusal_code="ownership_conflict")
+        document = json.loads(self.path.read_text())
+        old_relationship_fields = {
+            "relationship_id", "project_identity", "remote_name", "workspace_id",
+            "mode", "lifecycle", "owner_generation", "accepted_generation_id",
+            "pending_generation_id", "updated_at",
+        }
+        self.assertEqual(set(document["relationships"]["rel_fixture"]),
+                         old_relationship_fields)
+        self.assertEqual(document["conflicts"]["rel_fixture"], {
+            "code": "ownership_conflict", "request_id": "request-1",
+            "generation_id": generation.generation_id,
+        })
+        loaded = SyncRepository(self.path).get_relationship("rel_fixture")
+        self.assertEqual(loaded.conflict_code, "ownership_conflict")
+
     def test_default_journal_is_scoped_below_sandbox_home_runtime_sync(self):
         with patch.dict(os.environ, {"SANDBOX_HOME": self.temporary.name}):
             repo = SyncRepository()

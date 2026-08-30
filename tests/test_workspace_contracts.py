@@ -6,6 +6,7 @@ import sys
 import unittest
 from argparse import ArgumentParser
 from io import StringIO
+import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -173,6 +174,7 @@ class WorkspaceContractTests(unittest.TestCase):
 
         with patch("sandbox.commands.workspaces.durable_job_dependencies",
                    return_value={"workspace_service": PublishService()}), \
+                patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b"archive"))), \
                 patch("sys.stdout", StringIO()):
             cmd_workspace(None, args)
         self.assertEqual(requests[0].workspace_id, "ws-sync")

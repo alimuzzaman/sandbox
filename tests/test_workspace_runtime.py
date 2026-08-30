@@ -3,12 +3,17 @@ import unittest
 from dataclasses import replace
 from contextlib import contextmanager
 import hashlib
+import io
 import json
+import shutil
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from sandbox.application.workspace_service import SyncPublishRequest, WorkspaceService
+from sandbox.application.workspace_service import (
+    SyncPublishRequest, SyncReconcileRequest, WorkspaceService,
+)
 from sandbox.jobs.models import TargetRequest
 from sandbox.jobs.storage import JobStorage
 from sandbox.jobs.scheduler import JobScheduler
@@ -81,6 +86,15 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             "byte_count": len(content),
             "entries": entries,
         }, sort_keys=True, separators=(",", ":")))
+        archive_output = io.BytesIO()
+        with tarfile.open(fileobj=archive_output, mode="w:gz") as archive:
+            archive.add(staging / "source.txt", arcname="source.txt", recursive=False)
+            archive.add(
+                staging / ".sandbox-sync-manifest.json",
+                arcname=".sandbox-sync-manifest.json", recursive=False,
+            )
+        archive_bytes = archive_output.getvalue()
+        shutil.rmtree(staging)
         service = WorkspaceService(
             _Target(), storage, repository=repository,
         )
@@ -93,6 +107,7 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             file_count=1,
             byte_count=len(content),
             expected_index_generation=generation,
+            archive_bytes=archive_bytes,
         )
         return service, repository, request, base
 
@@ -155,26 +170,44 @@ class WorkspaceRuntimeTests(unittest.TestCase):
     def test_sync_publication_rejects_unlisted_broken_symlink(self):
         with tempfile.TemporaryDirectory() as temp:
             service, _repository, request, base = self._sync_fixture(temp)
-            (base / "staging" / request.generation_id / "broken").symlink_to(
-                "missing-target")
+            malicious = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(request.archive_bytes), mode="r:gz") as source, \
+                    tarfile.open(fileobj=malicious, mode="w:gz") as target:
+                for member in source.getmembers():
+                    target.addfile(member, source.extractfile(member))
+                link = tarfile.TarInfo("broken")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "missing-target"
+                target.addfile(link)
+            request = replace(request, archive_bytes=malicious.getvalue())
             with self.assertRaises(Exception) as refused:
                 service.publish_sync(request)
-            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertEqual(refused.exception.code, "sync_archive_invalid")
             self.assertFalse((base / "current").exists())
 
     def test_sync_publication_revalidates_bytes_after_generation_rename(self):
         with tempfile.TemporaryDirectory() as temp:
             service, _repository, request, base = self._sync_fixture(temp)
-            staging = base / "staging" / request.generation_id
-            published = base / "generations" / request.generation_id
-            original_replace = __import__("os").replace
+            from sandbox.application import workspace_service as workspace_module
+            original_snapshot = workspace_module._snapshot_sync_fd
+            calls = 0
 
-            def mutate_then_replace(source, destination):
-                if Path(source) == staging and Path(destination) == published:
-                    (staging / "source.txt").write_text("changed after validation\n")
-                return original_replace(source, destination)
+            def mutate_after_snapshot(root_fd, publish_request):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    descriptor = __import__("os").open(
+                        "source.txt", __import__("os").O_WRONLY | __import__("os").O_TRUNC,
+                        dir_fd=root_fd,
+                    )
+                    try:
+                        __import__("os").write(descriptor, b"changed after snapshot\n")
+                    finally:
+                        __import__("os").close(descriptor)
+                return original_snapshot(root_fd, publish_request)
 
-            with mock.patch("os.replace", side_effect=mutate_then_replace):
+            with mock.patch.object(
+                    workspace_module, "_snapshot_sync_fd", side_effect=mutate_after_snapshot):
                 with self.assertRaises(Exception) as refused:
                     service.publish_sync(request)
             self.assertEqual(refused.exception.code, "sync_manifest_invalid")
@@ -184,22 +217,22 @@ class WorkspaceRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             service, _repository, request, base = self._sync_fixture(temp)
             current = base / "current"
-            original_replace = __import__("os").replace
+            original_link = __import__("os").link
             failed = False
 
-            def fail_current_once(source, destination):
+            def fail_current_once(source, destination, **kwargs):
                 nonlocal failed
-                if Path(destination) == current and not failed:
+                if destination == "current" and not failed:
                     failed = True
-                    raise OSError(f"cannot replace protected path {destination}")
-                return original_replace(source, destination)
+                    raise OSError(f"cannot replace protected path {current}")
+                return original_link(source, destination, **kwargs)
 
-            with mock.patch("os.replace", side_effect=fail_current_once):
+            with mock.patch("os.link", side_effect=fail_current_once):
                 with self.assertRaises(Exception) as refused:
                     service.publish_sync(request)
             self.assertEqual(refused.exception.code, "sync_publication_failed")
             self.assertNotIn(str(base), str(refused.exception))
-            self.assertTrue((base / "staging" / request.generation_id).is_dir())
+            self.assertTrue((base / "generations" / request.generation_id).is_dir())
 
             result = service.publish_sync(request)
             self.assertTrue(result["ok"])
@@ -215,35 +248,20 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(refused.exception.code, "sync_publication_failed")
             self.assertNotIn(protected, str(refused.exception))
 
-    def test_sync_publication_recovers_exact_orphan_when_rollback_fails(self):
+    def test_sync_publication_recovers_exact_published_orphan(self):
         with tempfile.TemporaryDirectory() as temp:
             service, _repository, request, base = self._sync_fixture(temp)
             current = base / "current"
-            staging = base / "staging" / request.generation_id
             published = base / "generations" / request.generation_id
-            original_replace = __import__("os").replace
-            failed_current = False
-            failed_rollback = False
-
-            def fail_commit_and_rollback(source, destination):
-                nonlocal failed_current, failed_rollback
-                if Path(destination) == current and not failed_current:
-                    failed_current = True
-                    raise OSError("current commit failed")
-                if (Path(source) == published and Path(destination) == staging
-                        and not failed_rollback):
-                    failed_rollback = True
-                    raise OSError("rollback failed")
-                return original_replace(source, destination)
-
-            with mock.patch("os.replace", side_effect=fail_commit_and_rollback):
+            original_link = __import__("os").link
+            with mock.patch("os.link", side_effect=OSError("current commit failed")):
                 with self.assertRaises(Exception) as refused:
                     service.publish_sync(request)
             self.assertEqual(refused.exception.code, "sync_publication_failed")
             self.assertTrue(published.is_dir())
-            self.assertFalse(staging.exists())
 
-            result = service.publish_sync(request)
+            with mock.patch("os.link", side_effect=original_link):
+                result = service.publish_sync(request)
             self.assertTrue(result["ok"])
             self.assertTrue(current.is_symlink())
 
@@ -266,15 +284,114 @@ class WorkspaceRuntimeTests(unittest.TestCase):
                 confirm=False, json=True,
             )
             output = StringIO()
+            stdin = io.TextIOWrapper(io.BytesIO(request.archive_bytes))
             with mock.patch(
                 "sandbox.commands.workspaces.durable_job_dependencies",
                 return_value={"workspace_service": service},
             ), mock.patch("os.scandir", side_effect=OSError(protected)), \
-                    mock.patch("sys.stdout", output), self.assertRaises(SystemExit):
+                    mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", output), \
+                    self.assertRaises(SystemExit):
                 cmd_workspace(None, args)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["error"]["code"], "sync_publication_failed")
             self.assertNotIn(protected, output.getvalue())
+
+    def test_sync_publication_refuses_generations_parent_symlink_swap(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            original_extract = workspace_module._extract_sync_archive
+            outside = Path(temp) / "outside-generations"
+            outside.mkdir()
+
+            def swap_parent(staging_fd, publish_request):
+                result = original_extract(staging_fd, publish_request)
+                (base / "generations").rename(base / "bound-generations")
+                (base / "generations").symlink_to(outside, target_is_directory=True)
+                return result
+
+            with mock.patch.object(
+                    workspace_module, "_extract_sync_archive", side_effect=swap_parent):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_namespace_changed")
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_publication_never_overwrites_foreign_current_race(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            original_link = __import__("os").link
+            injected = False
+
+            def create_foreign_current(source, destination, **kwargs):
+                nonlocal injected
+                if destination == "current" and not injected:
+                    injected = True
+                    __import__("os").symlink(
+                        "generations/foreign", "current",
+                        dir_fd=kwargs["dst_dir_fd"],
+                    )
+                return original_link(source, destination, **kwargs)
+
+            with mock.patch("os.link", side_effect=create_foreign_current):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_pointer_conflict")
+            self.assertEqual(__import__("os").readlink(base / "current"),
+                             "generations/foreign")
+
+    def test_sync_snapshot_rejects_addition_after_complete_first_scan(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            service, _repository, request, base = self._sync_fixture(temp)
+            original_scan = workspace_module._scan_sync_tree
+            calls = 0
+
+            def add_after_scan(root_fd, publish_request):
+                nonlocal calls
+                result = original_scan(root_fd, publish_request)
+                calls += 1
+                if calls == 1:
+                    descriptor = __import__("os").open(
+                        "late-entry", __import__("os").O_WRONLY
+                        | __import__("os").O_CREAT | __import__("os").O_EXCL,
+                        0o600, dir_fd=root_fd,
+                    )
+                    __import__("os").close(descriptor)
+                return result
+
+            with mock.patch.object(
+                    workspace_module, "_scan_sync_tree", side_effect=add_after_scan):
+                with self.assertRaises(Exception) as refused:
+                    service.publish_sync(request)
+            self.assertEqual(refused.exception.code, "sync_manifest_invalid")
+            self.assertFalse((base / "current").exists())
+
+    def test_sync_reconciliation_requires_locked_complete_fingerprint_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service, repository, request, base = self._sync_fixture(temp)
+            service.publish_sync(request)
+            reconcile = SyncReconcileRequest(
+                workspace_id=request.workspace_id,
+                project_identity=request.project_identity,
+                generation_id=request.generation_id,
+                manifest_digest=request.manifest_digest,
+                file_count=request.file_count,
+                byte_count=request.byte_count,
+                expected_index_generation=repository.schema_generation(),
+            )
+            self.assertEqual(service.reconcile_sync(reconcile)["status"], "accepted")
+            receipt = base / "receipts" / f"{request.generation_id}.json"
+            receipt_bytes = receipt.read_bytes()
+            receipt.unlink()
+            self.assertEqual(service.reconcile_sync(reconcile)["status"], "unknown")
+            receipt.write_bytes(receipt_bytes)
+            (base / "generations" / request.generation_id / "source.txt").write_text(
+                "tampered\n")
+            self.assertEqual(service.reconcile_sync(reconcile)["status"], "unknown")
 
     def test_create_rejects_namespace_traversal_and_symlink_without_residue(self):
         with tempfile.TemporaryDirectory() as temp:

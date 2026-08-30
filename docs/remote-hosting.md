@@ -684,6 +684,7 @@ declaring its target MU-plugin path and login user in `sandbox.hosting.yml`:
 autologin:
   user: admin
   service: wordpress
+  request_path: /wp-login.php
   container_path: /var/www/html/wp-content/mu-plugins/99-sandbox-host-autologin.php
   ttl_seconds: 900
 ```
@@ -701,6 +702,7 @@ hash in the running container, never records the token in Git or host state, and
 new link replaces the previous unused link. Treat the returned URL like a password.
 `service` selects the Compose service that owns the WordPress filesystem; it defaults
 to `compose.service` for stacks where WordPress is also the public service.
+`request_path` selects the public route that reaches WordPress; it defaults to `/`.
 
 The default policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.

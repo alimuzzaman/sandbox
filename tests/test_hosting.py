@@ -711,11 +711,12 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(_manifest()) as directory:
             manifest = Path(directory) / "sandbox.hosting.yml"
             manifest.write_text(manifest.read_text().replace(
-                "    cloudflare:\n", "    autologin:\n      user: admin\n      service: wordpress\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n      ttl_seconds: 600\n    cloudflare:\n"
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      service: wordpress\n      request_path: /wp-login.php\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n      ttl_seconds: 600\n    cloudflare:\n"
             ))
             validated = hosting.validate_manifest(directory)
         self.assertEqual(validated["autologin"]["user"], "admin")
         self.assertEqual(validated["autologin"]["service"], "wordpress")
+        self.assertEqual(validated["autologin"]["request_path"], "/wp-login.php")
         self.assertEqual(validated["autologin"]["ttl_seconds"], 600)
 
     def test_rejects_unsafe_autologin_service(self):
@@ -727,13 +728,22 @@ class TestHostingManifest(unittest.TestCase):
             with self.assertRaisesRegex(hosting.HostingError, "autologin.service"):
                 hosting.validate_manifest(directory)
 
+    def test_rejects_autologin_request_path_with_query(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      request_path: /wp-login.php?unsafe=1\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n    cloudflare:\n"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "autologin.request_path"):
+                hosting.validate_manifest(directory)
+
     def test_host_autologin_installs_plugin_in_declared_service(self):
         validated = {
             "project": "example-site", "environment": "production",
             "compose": {"service": "gateway", "files": ["compose.yml"]},
             "routes": [{"hostname": "example.test", "primary": True}],
             "autologin": {
-                "user": "admin", "service": "wordpress", "ttl_seconds": 600,
+                "user": "admin", "service": "wordpress", "request_path": "/wp-login.php", "ttl_seconds": 600,
                 "container_path": "/var/www/html/wp-content/mu-plugins/99-autologin.php",
             },
         }
@@ -744,6 +754,17 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting, "save_host_state"):
             hosting_cmd._issue_host_autologin(validated, {}, "remote", state, 600)
         self.assertIn("exec -T wordpress", checked.call_args_list[0].args[1])
+
+    def test_host_autologin_url_uses_declared_request_path(self):
+        validated = {
+            "routes": [{"hostname": "example.test", "primary": True}],
+            "autologin": {"request_path": "/wp-login.php"},
+        }
+        url = hosting.autologin_url(validated, "opaque-token", 1234567890)
+        self.assertEqual(
+            url,
+            "https://example.test/wp-login.php?sandbox_autologin=opaque-token&expires=1234567890",
+        )
 
     def test_rejects_unsafe_autologin_container_path(self):
         with self._write(_manifest()) as directory:

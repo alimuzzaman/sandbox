@@ -555,9 +555,10 @@ skips the explicit `init_services` build. This is a hard no-build contract: befo
 Compose start or initializer mutation, apply requires every declared primary,
 background, and init service to resolve to an explicit image that already exists on the
 remote Docker engine. A missing service, omitted `image`, missing local image, malformed
-Compose output, or timed-out preflight refuses the apply. Every subsequent Compose
-`up`/`run` command carries `--no-build`; there is no build or development fallback.
-New application code ships only after those explicit images are produced separately.
+Compose output, Compose model larger than the bounded 1 MiB preflight input, or timed-out
+preflight refuses the apply. Every subsequent Compose `up`/`run` command carries
+`--no-build`; there is no build or development fallback. New application code ships only
+after those explicit images are produced separately.
 Targeted/no-build Compose convergence is guarded by exact source identity, configuration
 digest, topology, and health proof, and never runs migration/setup initializers. Host apply uses
 an even narrower replay rule: an exact same-source `edge: pending` receipt resumes only

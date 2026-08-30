@@ -42,6 +42,7 @@ _HOST_OBSERVATION_MAX_CONFIGURED_SERVICES = 64
 _HOST_OBSERVATION_MAX_PHASES = 2 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
+_HOST_NO_BUILD_CONFIG_MAX_BYTES = 1_048_576
 _HOST_SOURCE_SNAPSHOT_MAX_FILES = 4096
 _HOST_SOURCE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 _SOURCE_STATE_IDENTITY_VERSION = 2
@@ -797,7 +798,7 @@ def _no_build_image_preflight_command(prefix: str, services: list[str]) -> str:
     config_command = f"{prefix} --profile '*' config --format json"
     program = "\n".join((
         "import json,os,selectors,signal,subprocess,sys,time",
-        "MAX_OUTPUT=65536;end=time.monotonic()+60",
+        f"MAX_OUTPUT={_HOST_NO_BUILD_CONFIG_MAX_BYTES};end=time.monotonic()+60",
         "def fail():",
         " print('no-build image preflight failed: every declared target/init service must resolve to an explicit existing image',file=sys.stderr)",
         " raise SystemExit(1)",

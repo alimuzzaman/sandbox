@@ -919,8 +919,10 @@ class TestHostingManifest(unittest.TestCase):
                 "('missing:latest' if mode == 'missing-local' else 'present:latest')\n"
                 " service={'build': {'context': '.'}}\n"
                 " if image is not None: service['image']=image\n"
+                " padding=70000 if mode == 'large-valid' else "
+                "(1048576 if mode == 'oversized' else 0)\n"
                 " print(json.dumps({'services': {name: dict(service) for name in "
-                "('web','worker','setup')}}))\n"
+                "('web','worker','setup')}, 'x-padding': 'x' * padding}))\n"
                 " raise SystemExit(0)\n"
                 "if args[:2] == ['image','inspect'] and args[-1] == 'present:latest':\n"
                 " print('sha256:present')\n"
@@ -929,7 +931,8 @@ class TestHostingManifest(unittest.TestCase):
             )
             docker.chmod(0o700)
             results = {}
-            for mode in ("no-explicit", "missing-local", "ready"):
+            for mode in (
+                    "no-explicit", "missing-local", "ready", "large-valid", "oversized"):
                 command = hosting_cmd._no_build_image_preflight_command(
                     f"docker compose -p {mode} -f compose.yml",
                     ["web", "worker", "setup"],
@@ -945,6 +948,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotEqual(results["missing-local"].returncode, 0)
         self.assertEqual(results["ready"].returncode, 0)
         self.assertEqual(json.loads(results["ready"].stdout), {"ok": True, "services": 3})
+        self.assertEqual(results["large-valid"].returncode, 0)
+        self.assertNotEqual(results["oversized"].returncode, 0)
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")

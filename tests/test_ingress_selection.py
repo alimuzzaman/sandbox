@@ -164,7 +164,7 @@ class TestWildcardIncumbentIsSelectable(unittest.TestCase):
         from sandbox.ingress.models import IngressObservation, ListenerEndpoint
 
         process = {"pid": 4242, "start": "77", "executable": "/usr/bin/caddy",
-                   "command": "caddy"}
+                   "executable_digest": "e" * 64, "command": "caddy"}
         return (IngressObservation(
             "system-caddy", "Caddy",
             (ListenerEndpoint(address, 80, socket_id="1", process=process,
@@ -177,7 +177,7 @@ class TestWildcardIncumbentIsSelectable(unittest.TestCase):
 
         class Adapter:
             @staticmethod
-            def ready():
+            def ready(_authority):
                 return True
 
         registry = built_in_ingress_registry({"system-caddy": Adapter()})
@@ -212,7 +212,7 @@ class TestSelectionCarriesIncumbentListenAddresses(unittest.TestCase):
 
         class Adapter:
             @staticmethod
-            def ready():
+            def ready(_authority):
                 return True
 
         observation = (IngressObservation(
@@ -220,6 +220,7 @@ class TestSelectionCarriesIncumbentListenAddresses(unittest.TestCase):
             (ListenerEndpoint("::", 80, socket_id="1", owner_confidence="proven",
                               process={"pid": 4242, "start": "77",
                                        "executable": "/usr/bin/caddy",
+                                       "executable_digest": "e" * 64,
                                        "command": "caddy"}),),
             "implemented_unproven", frozenset({"http"})),)
         selection = IngressService(

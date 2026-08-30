@@ -7,7 +7,10 @@ Validated properties:
 
 - a foreign overlapping listener prevents Sandbox Caddy selection;
 - accepted addresses are concrete and served on every required protocol;
-- an unavailable installed-helper preflight prevents selection;
+- the installed helper binds the observed PID, start time, executable digest, socket inode
+  set, and listen endpoint to the active `caddy.service` MainPID before selection;
+- an unavailable or mismatched installed-helper preflight prevents selection and all DNS
+  mutation;
 - system Caddy advertises exact HTTP only; HTTPS and wildcard remain unavailable;
 - foreign-route baseline requirements cannot pass with zero samples;
 - privileged candidate preparation binds the root-owned staged copy to the approved digest,
@@ -16,8 +19,9 @@ Validated properties:
   passwordless fixed-verb grant.
 - the production registry qualifies only Linux system Caddy exact HTTP, bound to
   `037-t044-ubuntu-2404`, with no runtime proof input;
-- changed or unidentified process owners, unproven sockets, foreign collisions, Darwin,
-  HTTPS, wildcard hostname capability, and missing/failed helper readiness fail closed.
+- changed, second, or unidentified process owners, unproven sockets, foreign collisions,
+  `/tmp` or `/home` Caddy binaries, Darwin, HTTPS, wildcard hostname capability, and
+  missing/failed helper readiness fail closed.
 
 Focused command:
 

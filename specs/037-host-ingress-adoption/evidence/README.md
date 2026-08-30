@@ -19,8 +19,10 @@ system-caddy` adoption has not yet been recaptured, so T078 remains open.
 
 The locally tested T078 portion fixes the production registry qualification to
 `037-t044-ubuntu-2404` and requires Linux, exact HTTP, observed Caddy identity, proven
-listener ownership, and helper/import readiness. It refuses foreign collisions and owner
-drift before mutation. This is source validation, not new live CLI evidence.
+listener ownership, and helper/import readiness. The read-only preflight binds the selected
+PID/start/executable digest/socket set/listen endpoint to active `caddy.service`; it refuses
+foreign or second-process collisions and owner drift before DNS mutation. This is source
+validation, not new live CLI evidence.
 
 ## What each open item needs
 

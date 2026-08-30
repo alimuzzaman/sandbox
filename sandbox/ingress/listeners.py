@@ -43,10 +43,13 @@ def parse_helper_listeners(text: str) -> dict:
     found = {}
     for line in text.splitlines():
         columns = line.split()
-        if len(columns) not in (5, 6):
+        if len(columns) not in (5, 6, 7):
             continue
         address, port, pid, command, executable = columns[:5]
         start = columns[5] if len(columns) == 6 else "-"
+        if len(columns) == 7:
+            start = columns[5]
+        executable_digest = columns[6] if len(columns) == 7 else "-"
         if not port.isdigit():
             continue
         address = address.strip("[]")
@@ -60,6 +63,8 @@ def parse_helper_listeners(text: str) -> dict:
                     "command": None if command == "-" else command,
                     "executable": None if executable == "-" else executable,
                     "start": None if start == "-" else start,
+                    "executable_digest": (None if executable_digest == "-"
+                                          else executable_digest),
                 }
             continue
         try:
@@ -71,6 +76,8 @@ def parse_helper_listeners(text: str) -> dict:
             "command": None if command == "-" else command,
             "executable": None if executable == "-" else executable,
             "start": None if start == "-" else start,
+            "executable_digest": (None if executable_digest == "-"
+                                  else executable_digest),
         }
     return found
 

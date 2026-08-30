@@ -21,23 +21,26 @@ class Adapter:
         self._ready = ready
         self.ready_calls = 0
 
-    def ready(self):
+    def ready(self, authority=None):
         self.ready_calls += 1
+        self.authority = authority
         return self._ready
 
 
 def caddy_observation(*, address="::", confidence="proven", command="caddy",
-                      pid=4242, start="77", executable=None):
+                      pid=4242, start="77", executable=None,
+                      executable_digest="e" * 64, socket_id="424280"):
     from sandbox.ingress.models import IngressObservation, ListenerEndpoint
 
     return IngressObservation(
         "system-caddy", "Caddy",
         (ListenerEndpoint(
-            address, 80, socket_id="socket-80",
+            address, 80, socket_id=socket_id,
             process={
                 "pid": pid,
                 "start": start,
                 "executable": executable or f"/usr/bin/{command}",
+                "executable_digest": executable_digest,
                 "command": command,
             },
             service={"unit": "caddy.service"},
@@ -112,6 +115,14 @@ class TestProductionIngressQualification(unittest.TestCase):
         self.assertEqual(observed.required_protocols, frozenset({"http"}))
         self.assertEqual(detector.calls, 1)
         self.assertEqual(adapter.ready_calls, 1)
+        self.assertEqual(adapter.authority, {
+            "pid": 4242,
+            "start": "77",
+            "executable_digest": "e" * 64,
+            "socket_ids": ("424280",),
+            "listen_address": "::",
+            "listen_port": 80,
+        })
 
     def test_unqualified_platform_protocol_and_capability_are_refused(self):
         cases = (
@@ -132,6 +143,10 @@ class TestProductionIngressQualification(unittest.TestCase):
             caddy_observation(pid="not-a-pid"),
             caddy_observation(start="not-a-start"),
             caddy_observation(executable="caddy"),
+            caddy_observation(executable="/tmp/caddy"),
+            caddy_observation(executable="/home/operator/bin/caddy"),
+            caddy_observation(executable_digest="not-a-digest"),
+            caddy_observation(socket_id="not-an-inode"),
         ):
             with self.subTest(process=observation.endpoints[0].process):
                 observed, _detector, _adapter = selection(
@@ -140,6 +155,62 @@ class TestProductionIngressQualification(unittest.TestCase):
                 self.assertIsNone(observed.adapter_id)
                 self.assertEqual(observed.reason_code,
                                  "ingress_control_unavailable")
+
+    def test_two_caddy_processes_cannot_share_one_qualified_selection(self):
+        first = caddy_observation(address="0.0.0.0", pid=4242, start="77",
+                                  socket_id="424280")
+        second_endpoint = caddy_observation(
+            address="::", pid=5252, start="88", socket_id="525280",
+        ).endpoints[0]
+        from sandbox.ingress.models import IngressObservation
+        conflicting = IngressObservation(
+            first.adapter_id, first.product,
+            first.endpoints + (second_endpoint,), first.support_tier,
+            first.capabilities, first.product_identity,
+        )
+
+        observed, _detector, adapter = selection(observations=(conflicting,))
+
+        self.assertIsNone(observed.adapter_id)
+        self.assertEqual(observed.reason_code, "ingress_control_unavailable")
+        self.assertEqual(adapter.ready_calls, 0)
+
+    def test_service_listener_mismatch_fails_before_dns_mutation(self):
+        from sandbox.application.clean_url_service import CleanUrlService
+
+        events = []
+
+        class MismatchedAdapter(Adapter):
+            def ready(self, authority=None):
+                self.ready_calls += 1
+                self.authority = authority
+                return False
+
+        class Domains:
+            def ingress_policy(self, *_args, **_kwargs):
+                return {"pin": "system-caddy", "pin_source": "project"}
+
+            def apply(self, *_args, **_kwargs):
+                events.append("dns-mutation")
+                raise AssertionError("DNS must not run before exact listener qualification")
+
+        ingress_selection, detector, adapter = selection(adapter=MismatchedAdapter())
+        self.assertIsNone(ingress_selection.adapter_id)
+        from sandbox.application.ingress_service import IngressService
+        from sandbox.ingress.manifest import built_in_ingress_registry
+        ingress = IngressService(
+            detector=detector,
+            registry=built_in_ingress_registry({"system-caddy": adapter}),
+            platform="linux",
+        )
+        result = CleanUrlService(ingress=ingress, domains=Domains()).apply(
+            "/tmp/project", backend={"address": "127.0.0.1", "port": 8123},
+            fallback_url="http://localhost:8123",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"]["code"], "ingress_control_unavailable")
+        self.assertEqual(events, [])
 
     def test_missing_helper_import_readiness_is_refused(self):
         observed, _detector, adapter = selection(adapter=Adapter(ready=False))
@@ -150,7 +221,7 @@ class TestProductionIngressQualification(unittest.TestCase):
 
     def test_helper_observation_failure_is_fail_closed(self):
         class FailedAdapter(Adapter):
-            def ready(self):
+            def ready(self, authority=None):
                 self.ready_calls += 1
                 raise RuntimeError("synthetic helper failure")
 

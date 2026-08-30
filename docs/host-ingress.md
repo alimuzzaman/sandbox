@@ -32,9 +32,11 @@ listener/process evidence and cannot grant route mutation authority.
 
 The current code enables only the Linux system-Caddy exact-HTTP adapter. Selection still
 requires a live observed Caddy process with proven listener ownership and the installed
-helper's read-only preflight to validate the complete active Caddy config. Changed or
-unidentified owners, foreign listeners, Darwin, HTTPS, wildcard hostnames, and missing
-helper/import control fail closed before route mutation. Local tests do not complete 037:
+helper's read-only preflight to validate the complete active Caddy config and bind the
+observed PID, start time, executable digest, socket inode set, and listen endpoint to the
+active `caddy.service` MainPID. Changed, second, or unidentified owners, foreign listeners,
+non-system executable paths, Darwin, HTTPS, wildcard hostnames, and missing helper/import
+control fail closed before DNS or route mutation. Local tests do not complete 037:
 normal live Linux CLI adoption remains to be captured. Sandbox Caddy, Herd/Valet, nginx,
 Apache, and Traefik remain unadvertised for incumbent adoption.
 

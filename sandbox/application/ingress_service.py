@@ -263,8 +263,17 @@ class IngressService:
                 foreign_endpoint_owner = True
                 continue
             if candidate.adapter_id == "system-caddy":
+                authority = SYSTEM_CADDY_QUALIFICATION.authority(
+                    observation=observation,
+                    platform=self.platform,
+                    protocols=protocols,
+                    capabilities=capabilities,
+                )
+                if authority is None:
+                    control_unavailable = True
+                    continue
                 try:
-                    ready = (candidate.adapter.ready()
+                    ready = (candidate.adapter.ready(authority)
                              if hasattr(candidate.adapter, "ready") else False)
                 except Exception:
                     ready = False
@@ -437,7 +446,13 @@ class IngressService:
                 executable_path = Path(executable)
                 if not pid.isdigit() or not start.isdigit() or not executable_path.is_absolute():
                     raise ValueError("selected Caddy process identity is incomplete")
-                executable_digest = hashlib.sha256(executable_path.read_bytes()).hexdigest()
+                executable_digest = str(
+                    (relevant[0].process or {}).get("executable_digest") or ""
+                )
+                if (len(executable_digest) != 64
+                        or any(char not in "0123456789abcdef"
+                               for char in executable_digest)):
+                    raise ValueError("selected Caddy executable digest is incomplete")
                 authority = {
                     "pid": int(pid), "start": start,
                     "executable_digest": executable_digest,

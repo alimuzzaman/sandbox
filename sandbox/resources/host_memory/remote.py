@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import numbers
 from typing import Callable, Mapping
 
 from .models import HEX24, HEX64, bounded, parse_utc
@@ -27,7 +29,8 @@ def validate_request(payload):
     if not isinstance(payload.get("remote_name"), str) or not payload["remote_name"]:
         raise RemoteProtocolError("remote_required", "registered remote is required")
     budget = payload.get("budget_seconds")
-    if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 300:
+    if (isinstance(budget, bool) or not isinstance(budget, numbers.Real)
+            or not math.isfinite(float(budget)) or not 0 < float(budget) <= 300):
         raise RemoteProtocolError("response_invalid", "budget must be from 1 through 300 seconds")
     if action == "host_memory_history":
         limit=payload.get("limit",288)

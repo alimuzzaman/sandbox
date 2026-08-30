@@ -20,6 +20,7 @@ class HostMemoryRepository:
 
     def _atomic(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
         encoded = json.dumps(bounded(payload), sort_keys=True, separators=(",", ":")).encode()
         fd, tmp = tempfile.mkstemp(prefix=".host-memory-", dir=str(path.parent))
         try:
@@ -115,7 +116,8 @@ class HostMemoryRepository:
             path.unlink()
 
     def history_window(self, since=None, until=None, limit=288):
-        if isinstance(limit, bool) or not 1 <= int(limit) <= 1000: raise RepositoryError("invalid_limit")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise RepositoryError("invalid_limit")
         samples=[]; malformed=0
         for path in sorted(self.root.glob("history*.jsonl"))[:9]:
             try:
@@ -127,9 +129,9 @@ class HostMemoryRepository:
                     if (since and at < since) or (until and at > until): continue
                     samples.append(bounded(row, 16 * 1024))
             except OSError: malformed += 1
-        samples = sorted(samples, key=lambda x: x.get("sampled_at", ""), reverse=True)[:int(limit)]
+        samples = sorted(samples, key=lambda x: x.get("sampled_at", ""), reverse=True)[:limit]
         return bounded({"requested_range":{"since":since,"until":until},
             "observed_range":{"since":samples[-1]["sampled_at"],"until":samples[0]["sampled_at"]} if samples else None,
             "samples":samples,"counts":{"returned":len(samples),"malformed":malformed},
             "freshness":"unknown" if not samples else "observed","complete":malformed==0,
-            "truncated":len(samples)>=int(limit)})
+            "truncated":len(samples)>=limit})

@@ -15,6 +15,8 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         self.assertEqual((self.repo.plans/f"{plan['plan_id']}.json").stat().st_mode & 0o777,0o600)
     def test_corrupt_plan_fails_closed(self):
         with self.assertRaises(RepositoryError): self.repo.load_plan("a"*64)
+        for limit in (True, "1", 1.5):
+            with self.assertRaises(RepositoryError): self.repo.history_window(limit=limit)
     def test_history_is_bounded_and_malformed_is_visible(self):
         self.repo.append_sample(sample()); self.repo.append_sample(sample("2026-08-30T11:55:00Z"))
         with (Path(self.tmp.name)/"history.2.jsonl").open("w") as stream: stream.write("not-json\n")

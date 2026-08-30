@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AggregateMemorySample, OwnershipReceipt, bounded, canonical_digest
-from .policy import PolicyRefusal, freshness, plan_current, sustained_swap_use
+from .policy import PolicyRefusal, plan_current
 
 STATE=Path("/var/lib/sandbox/host-memory")
 SWAP=STATE/"sandbox.swap"
@@ -77,24 +77,40 @@ class HostProvider:
                     "memory_limit_bytes": None, "memory_used_bytes": None,
                     "swap_limit_bytes": None, "swap_used_bytes": None}
         try:
-            if any(line.startswith("0::") for line in cgroup.splitlines()):
-                memory_limit = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.max"))
-                memory_used = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.current"))
-                swap_limit = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.swap.max"))
-                swap_used = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.swap.current"))
+            v2_line = next((line for line in cgroup.splitlines() if line.startswith("0::")), None)
+            if v2_line is not None:
+                relative = v2_line[3:].strip().strip("/")
+                if relative and (".." in relative.split("/") or "\x00" in relative):
+                    raise ValueError("invalid cgroup locator")
+                prefix = "/sys/fs/cgroup" + ("/" + relative if relative else "")
+                def v2(name):
+                    value = self._optional_text(prefix + "/" + name)
+                    if value is None and prefix != "/sys/fs/cgroup":
+                        value = self._optional_text("/sys/fs/cgroup/" + name)
+                    return self._bounded_integer(value)
+                memory_limit = v2("memory.max")
+                memory_used = v2("memory.current")
+                swap_limit = v2("memory.swap.max")
+                swap_used = v2("memory.swap.current")
                 state = "limited" if memory_limit is not None or swap_limit is not None else "eligible"
                 return {"state": state, "version": "v2", "memory_limit_bytes": memory_limit,
                         "memory_used_bytes": memory_used, "swap_limit_bytes": swap_limit,
                         "swap_used_bytes": swap_used}
-            if any(":memory:" in line for line in cgroup.splitlines()):
-                memory_limit = self._bounded_integer(self._optional_text(
-                    "/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-                memory_used = self._bounded_integer(self._optional_text(
-                    "/sys/fs/cgroup/memory/memory.usage_in_bytes"))
-                memsw_limit = self._bounded_integer(self._optional_text(
-                    "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes"))
-                memsw_used = self._bounded_integer(self._optional_text(
-                    "/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes"))
+            v1_line = next((line for line in cgroup.splitlines() if ":memory:" in line), None)
+            if v1_line is not None:
+                relative = v1_line.split(":", 2)[2].strip().strip("/")
+                if relative and (".." in relative.split("/") or "\x00" in relative):
+                    raise ValueError("invalid cgroup locator")
+                prefix = "/sys/fs/cgroup/memory" + ("/" + relative if relative else "")
+                def v1(name):
+                    value = self._optional_text(prefix + "/" + name)
+                    if value is None and prefix != "/sys/fs/cgroup/memory":
+                        value = self._optional_text("/sys/fs/cgroup/memory/" + name)
+                    return self._bounded_integer(value)
+                memory_limit = v1("memory.limit_in_bytes")
+                memory_used = v1("memory.usage_in_bytes")
+                memsw_limit = v1("memory.memsw.limit_in_bytes")
+                memsw_used = v1("memory.memsw.usage_in_bytes")
                 swap_limit = (max(0, memsw_limit - memory_limit)
                               if memsw_limit is not None and memory_limit is not None else None)
                 swap_used = (max(0, memsw_used - memory_used)

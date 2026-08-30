@@ -52,3 +52,8 @@ class HostMemoryRemoteTest(unittest.TestCase):
         payload = validate_request({"action":"host_memory_status", "remote_name":"r",
                                     "budget_seconds":15})
         self.assertEqual(set(payload), {"action", "remote_name", "budget_seconds"})
+
+    def test_fractional_finite_budget_is_supported(self):
+        payload = validate_request({"action":"host_memory_status", "remote_name":"r",
+                                    "budget_seconds":1.5})
+        self.assertEqual(payload["budget_seconds"], 1.5)

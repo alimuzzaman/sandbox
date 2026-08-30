@@ -24,6 +24,13 @@ safety or release readiness.
   it does not prove a deployed service, a live Linux host, reboot persistence, or mutation.
 - The exact T027 module set, including the full adjacent resource-interface module, ran 62
   tests and passed in 0.283 seconds.
+- After fetching `origin/latest`, the normal merge reported `Already up to date`. The final
+  foundational command ran 29 tests and passed in 0.014 seconds; the exact T027 module set
+  then ran 63 tests and passed in 0.248 seconds. The focused controller transport class ran
+  two tests and passed in 0.025 seconds. Python compilation and `git diff --check` passed.
+- `tests.test_server_transport` could not run under system Python because `httpx` is absent,
+  and `mcp/wp-server/.venv/bin/python` does not exist in this worktree. This is an explicit
+  local dependency gap, not a passing server-transport result.
 
 - The requested `.cli-venv/bin/python` runtime was absent (`no such file or directory`).
 - `python3 -m unittest -v tests.test_host_memory_models tests.test_host_memory_policy

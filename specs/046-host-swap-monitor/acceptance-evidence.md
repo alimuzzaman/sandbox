@@ -48,6 +48,18 @@ safety or release readiness.
   tests for the newly merged bounded remote-ensure transport passed in 1.114 seconds, proving
   the Feature 046 merge did not overwrite that reviewed behavior. Compilation and diff checks
   remained clean.
+- Final history-reader review RED was captured with two focused repository tests: one failed
+  because four ordinary retained samples falsely marked status retention truncated, and one
+  errored because the repository lacked an identity-bound ancestor-root reader. After the
+  correction, status derives its last three warning samples independently from retention
+  completeness, while fixed history opens walk every trusted ancestor by directory FD and
+  verify the final `O_NOFOLLOW` FD identity, type, owner, mode, link count, size, deadline,
+  and read bound. Deterministic symlink and oversized replacement races now refuse.
+- With current `origin/latest` still at `a0845e0f9438788820199ee4229f4484a93466f9`,
+  the exact T027 set ran 70 tests and passed in 0.259 seconds; the broader Feature 046,
+  transport, interface, and help gate ran 98 tests and passed in 1.091 seconds; and the 50
+  bounded remote-ensure adjacent tests passed in 1.118 seconds. Compilation and diff checks
+  passed. No remote or live host was accessed.
 - Independent-review correction RED was captured before the production fixes with
   `python3 -m unittest -v tests.test_host_memory_remote tests.test_host_memory_service
   tests.test_host_memory_provider tests.test_host_memory_repository

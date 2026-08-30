@@ -153,7 +153,8 @@ def _host_memory_contract(payload: dict) -> dict:
     identity_seed = platform.node().encode("utf-8", "replace")
     target_identity = hashlib.sha256(identity_seed).hexdigest()[:24]
     provider = HostProvider(target_identity=target_identity)
-    repository = HostMemoryRepository(STATE,history_path=HISTORY,history_owner_uid=0)
+    repository = HostMemoryRepository(STATE,history_path=HISTORY,history_owner_uid=0,
+                                      history_ancestor_root=Path("/"))
     deadline=time.monotonic()+float(request["budget_seconds"])
     try:
         result = provider.observe(deadline=deadline)

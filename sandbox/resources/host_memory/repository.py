@@ -21,10 +21,17 @@ class RepositoryError(RuntimeError): pass
 
 class HostMemoryRepository:
     def __init__(self, root: Path, *, history_path: Path | None = None,
-                 history_owner_uid: int | None = None, monotonic=None):
+                 history_owner_uid: int | None = None,
+                 history_ancestor_root: Path | None = None, monotonic=None):
         self.root = Path(root); self.plans = self.root / "plans"
-        self.history_path=Path(history_path) if history_path is not None else self.root/"history.jsonl"
+        selected=Path(history_path) if history_path is not None else self.root/"history.jsonl"
+        self.history_path=Path(os.path.abspath(selected))
         self.history_owner_uid=os.getuid() if history_owner_uid is None else history_owner_uid
+        boundary=(Path(history_ancestor_root) if history_ancestor_root is not None
+                  else self.history_path.parent)
+        self.history_ancestor_root=Path(os.path.abspath(boundary))
+        try: self.history_path.relative_to(self.history_ancestor_root)
+        except ValueError: raise RepositoryError("history_unavailable") from None
         self.monotonic=monotonic or time.monotonic
 
     def _history_paths(self):
@@ -39,16 +46,105 @@ class HostMemoryRepository:
     def _check_deadline(self,deadline):
         if self.monotonic()>=deadline: raise RepositoryError("history_unavailable")
 
-    def _attested_history_stat(self,path,deadline):
-        self._check_deadline(deadline)
-        try: info=path.lstat()
-        except FileNotFoundError: return None
-        except OSError: raise RepositoryError("history_unavailable") from None
-        self._check_deadline(deadline)
-        if (not statmod.S_ISREG(info.st_mode) or statmod.S_IMODE(info.st_mode)!=0o600
-                or info.st_uid!=self.history_owner_uid or info.st_nlink!=1):
+    @staticmethod
+    def _same_identity(before,after):
+        return (before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)
+
+    def _validate_directory(self,info):
+        if (not statmod.S_ISDIR(info.st_mode) or info.st_uid!=self.history_owner_uid
+                or statmod.S_IMODE(info.st_mode)&0o022 or info.st_nlink<1):
             raise RepositoryError("history_unavailable")
-        return info
+
+    def _open_attested_history(self,path,deadline,maximum_bytes):
+        """Open one fixed history file without following replacement links."""
+        self._check_deadline(deadline)
+        try: relative=Path(path).relative_to(self.history_ancestor_root)
+        except ValueError: raise RepositoryError("history_unavailable") from None
+        if not relative.parts: raise RepositoryError("history_unavailable")
+        directory_flags=(os.O_RDONLY|getattr(os,"O_CLOEXEC",0)
+                         |getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
+        file_flags=os.O_RDONLY|getattr(os,"O_CLOEXEC",0)|getattr(os,"O_NOFOLLOW",0)
+        directory_fd=None; file_fd=None
+        try:
+            before=os.lstat(self.history_ancestor_root)
+            directory_fd=os.open(self.history_ancestor_root,directory_flags)
+            after=os.fstat(directory_fd)
+            if not self._same_identity(before,after): raise RepositoryError("history_unavailable")
+            self._validate_directory(after)
+            for component in relative.parts[:-1]:
+                self._check_deadline(deadline)
+                before=os.stat(component,dir_fd=directory_fd,follow_symlinks=False)
+                next_fd=os.open(component,directory_flags,dir_fd=directory_fd)
+                after=os.fstat(next_fd)
+                if not self._same_identity(before,after):
+                    os.close(next_fd); raise RepositoryError("history_unavailable")
+                self._validate_directory(after)
+                os.close(directory_fd); directory_fd=next_fd
+            self._check_deadline(deadline)
+            try:
+                before=os.stat(relative.parts[-1],dir_fd=directory_fd,follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            if (not statmod.S_ISREG(before.st_mode) or statmod.S_IMODE(before.st_mode)!=0o600
+                    or before.st_uid!=self.history_owner_uid or before.st_nlink!=1
+                    or before.st_size>maximum_bytes):
+                raise RepositoryError("history_unavailable")
+            file_fd=os.open(relative.parts[-1],file_flags,dir_fd=directory_fd)
+            after=os.fstat(file_fd)
+            if (not self._same_identity(before,after) or not statmod.S_ISREG(after.st_mode)
+                    or statmod.S_IMODE(after.st_mode)!=0o600
+                    or after.st_uid!=self.history_owner_uid or after.st_nlink!=1
+                    or after.st_size>maximum_bytes):
+                raise RepositoryError("history_unavailable")
+            result_fd=file_fd; file_fd=None
+            return result_fd,after
+        except FileNotFoundError:
+            return None
+        except RepositoryError:
+            raise
+        except OSError:
+            raise RepositoryError("history_unavailable") from None
+        finally:
+            if file_fd is not None: os.close(file_fd)
+            if directory_fd is not None: os.close(directory_fd)
+
+    def _read_attested_history(self,path,deadline,maximum_bytes):
+        opened=self._open_attested_history(path,deadline,maximum_bytes)
+        if opened is None: return None
+        file_fd,initial=opened; chunks=[]; total=0
+        try:
+            try:
+                while True:
+                    self._check_deadline(deadline)
+                    chunk=os.read(file_fd,min(64*1024,maximum_bytes-total+1))
+                    self._check_deadline(deadline)
+                    if not chunk: break
+                    total+=len(chunk)
+                    if total>maximum_bytes: raise RepositoryError("history_unavailable")
+                    chunks.append(chunk)
+                final=os.fstat(file_fd)
+            except OSError: raise RepositoryError("history_unavailable") from None
+            if not self._same_identity(initial,final) or final.st_size!=total:
+                raise RepositoryError("history_unavailable")
+            try: text=b"".join(chunks).decode("utf-8")
+            except UnicodeDecodeError: raise RepositoryError("history_unavailable") from None
+            return text,final
+        finally: os.close(file_fd)
+
+    def _history_snapshot(self,deadline):
+        samples=[]; malformed=0; total_bytes=0; files=[]
+        for path in self._history_paths():
+            remaining=32*1024*1024-total_bytes
+            read=self._read_attested_history(path,deadline,remaining)
+            if read is None: continue
+            text,info=read; total_bytes+=info.st_size; files.append((path,info.st_size))
+            for line in text.splitlines():
+                self._check_deadline(deadline)
+                try: row=AggregateMemorySample.from_dict(json.loads(line)).to_dict()
+                except (TypeError,ValueError): malformed+=1; continue
+                samples.append(bounded(row,16*1024))
+        return {"samples":sorted(samples,key=lambda x:x.get("sampled_at",""),reverse=True),
+                "malformed":malformed,"files":files,"total_bytes":total_bytes}
 
     def _atomic(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -153,25 +249,10 @@ class HostMemoryRepository:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise RepositoryError("invalid_limit")
         deadline=self._deadline(budget_seconds) if deadline is None else deadline
-        samples=[]; malformed=0; total_bytes=0
-        for path in self._history_paths():
-            try:
-                info=self._attested_history_stat(path,deadline)
-                if info is None: continue
-                total_bytes+=info.st_size
-                if total_bytes>32*1024*1024: raise RepositoryError("history_unavailable")
-                text=path.read_text(encoding="utf-8")
-                self._check_deadline(deadline)
-                for line in text.splitlines():
-                    self._check_deadline(deadline)
-                    try:
-                        row=AggregateMemorySample.from_dict(json.loads(line)).to_dict()
-                    except (TypeError, ValueError): malformed += 1; continue
-                    at=row.get("sampled_at", "")
-                    if (since and at < since) or (until and at > until): continue
-                    samples.append(bounded(row, 16 * 1024))
-            except OSError: malformed += 1
-        samples=sorted(samples,key=lambda x:x.get("sampled_at",""),reverse=True)
+        snapshot=self._history_snapshot(deadline)
+        malformed=snapshot["malformed"]
+        samples=[row for row in snapshot["samples"] if not
+                 ((since and row["sampled_at"]<since) or (until and row["sampled_at"]>until))]
         truncated=len(samples)>limit
         samples=samples[:limit]
         try: return bounded({"requested_range":{"since":since,"until":until},
@@ -186,26 +267,24 @@ class HostMemoryRepository:
                                 budget_seconds=5,deadline=None):
         """Derive bounded monitor health from the retained aggregate history."""
         deadline=self._deadline(budget_seconds) if deadline is None else deadline
-        window=self.history_window(limit=3,deadline=deadline)
-        samples=window["samples"]
+        snapshot=self._history_snapshot(deadline)
+        samples=snapshot["samples"][:3]
         latest=samples[0] if samples else None
         latest_at=latest.get("sampled_at") if latest else None
-        paths=[]; total_bytes=0
-        for path in self._history_paths():
-            info=self._attested_history_stat(path,deadline)
-            if info is not None: paths.append(path); total_bytes+=info.st_size
+        paths=[path for path,_size in snapshot["files"]]
+        total_bytes=snapshot["total_bytes"]
         current=self.history_path
         history_files=[path for path in paths if path!=current]
-        retention={"current_files":1 if current.exists() else 0,
+        retention={"current_files":1 if current in paths else 0,
                    "history_files":len(history_files),"total_bytes":total_bytes,
                    "compliant":(len(history_files)<=8 and total_bytes<=32*1024*1024
-                                and window["counts"]["malformed"]==0),
-                   "truncated":bool(window["truncated"])}
+                                and snapshot["malformed"]==0),
+                   "truncated":False}
         if latest_at is None:
             return {"latest_sample_at":None,"age_seconds":None,"freshness":"missing",
                     "next_sample_at":None,"sustained_swap_use":None,
                     "pressure_state":"unknown","retention":retention,
-                    "history_complete":bool(window["complete"])}
+                    "history_complete":snapshot["malformed"]==0}
         latest_time=parse_utc(latest_at)
         age=(now-latest_time).total_seconds()
         pressure=latest.get("pressure")
@@ -223,4 +302,4 @@ class HostMemoryRepository:
                 "next_sample_at":utc_text(latest_time+timedelta(seconds=interval_seconds)),
                 "sustained_swap_use":sustained_swap_use(list(reversed(samples))),
                 "pressure_state":pressure_state,"retention":retention,
-                "history_complete":bool(window["complete"])}
+                "history_complete":snapshot["malformed"]==0}

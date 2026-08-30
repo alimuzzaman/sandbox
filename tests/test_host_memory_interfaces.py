@@ -33,6 +33,7 @@ class HostMemoryInterfacesTest(unittest.TestCase):
         contract=source.split("def _host_memory_contract",1)[1].split("def _remote_wp_error",1)[0]
         self.assertIn("status_monitor_evidence",contract)
         self.assertIn("history_path=HISTORY",contract)
+        self.assertIn('history_ancestor_root=Path("/")',contract)
         self.assertIn("provider.observe(deadline=deadline)",contract)
         self.assertIn("status_monitor_evidence(now=provider.now(),deadline=deadline)",contract)
         self.assertNotIn("provider.apply",contract)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import tempfile, unittest
 from pathlib import Path
+import os
+from unittest import mock
 from sandbox.resources.host_memory.policy import build_plan
 from sandbox.resources.host_memory.repository import HostMemoryRepository, RepositoryError
 from tests.host_memory_fixtures import NOW, eligible_state, ownership_receipt, sample
@@ -53,7 +55,7 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         self.assertLessEqual(sum(path.stat().st_size for path in files), 700)
 
     def test_status_monitor_evidence_uses_real_history(self):
-        for minute in (45, 50, 55):
+        for minute in (40, 45, 50, 55):
             self.repo.append_sample(sample(
                 f"2026-08-30T11:{minute}:00Z", 512 * 1024 ** 2,
             ))
@@ -64,6 +66,7 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         self.assertTrue(monitor["sustained_swap_use"])
         self.assertEqual(monitor["retention"]["current_files"], 1)
         self.assertFalse(monitor["retention"]["truncated"])
+        self.assertTrue(monitor["history_complete"])
 
     def test_fixed_history_path_is_bounded_attested_and_budgeted(self):
         history=Path(self.tmp.name)/"var/log/sandbox/host-memory.jsonl"
@@ -78,3 +81,35 @@ class HostMemoryRepositoryTest(unittest.TestCase):
             repo.history_window(limit=3)
         with self.assertRaises(RepositoryError):
             repo.history_window(limit=3,budget_seconds=0)
+
+    def test_history_open_rejects_replacement_with_symlink_or_oversized_file(self):
+        history=Path(self.tmp.name)/"safe/history.jsonl"
+        repo=HostMemoryRepository(Path(self.tmp.name)/"state",history_path=history,
+                                  history_ancestor_root=Path(self.tmp.name))
+        repo.append_sample(sample())
+        history.parent.chmod(0o777)
+        with self.assertRaises(RepositoryError): repo.history_window(limit=3)
+        history.parent.chmod(0o700)
+        replacement=Path(self.tmp.name)/"replacement.jsonl"
+        replacement.write_text("{}\n"); replacement.chmod(0o600)
+        original_open=os.open
+
+        def race(replacement_kind):
+            replaced=False
+            def open_with_replacement(path,flags,*args,**kwargs):
+                nonlocal replaced
+                if not replaced and path==history.name and not flags & getattr(os,"O_DIRECTORY",0):
+                    replaced=True
+                    history.unlink()
+                    if replacement_kind=="symlink": history.symlink_to(replacement)
+                    else:
+                        history.write_bytes(b"x"*(32*1024*1024+1)); history.chmod(0o600)
+                return original_open(path,flags,*args,**kwargs)
+            with mock.patch("sandbox.resources.host_memory.repository.os.open",
+                            side_effect=open_with_replacement):
+                with self.assertRaises(RepositoryError): repo.history_window(limit=3)
+
+        race("symlink")
+        if history.is_symlink(): history.unlink()
+        repo.append_sample(sample())
+        race("oversized")

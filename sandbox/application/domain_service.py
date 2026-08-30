@@ -914,6 +914,23 @@ class DomainService:
                 continue
             spec = self.adapters.get(binding.adapter_id)
             adapter = spec.adapter if spec is not None else None
+            if (binding.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and adapter is not None):
+                helper = adapter.ensure_helper(interactive=interactive)
+                expected_identity = dict(binding.desired).get("service_identity")
+                current_identity = (
+                    SYSTEMD_RESOLVED_QUALIFICATION.preflight(
+                        observation=observation, adapter=adapter,
+                    ) if helper.get("ok") else None
+                )
+                if current_identity is None or current_identity != expected_identity:
+                    self.repository.put_recovery(CleanupRecovery(
+                        binding.binding_id, binding.adapter_id,
+                        binding.last_applied_digest or canonical_digest(binding.desired),
+                        None, "resolver_owner_changed", None, "unavailable",
+                    ))
+                    incomplete = True
+                    continue
             observed = (
                 self.binding_observer(binding, adapter)
                 if self.binding_observer is not None and adapter is not None else None

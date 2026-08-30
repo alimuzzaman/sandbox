@@ -256,8 +256,8 @@ proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
       live-proven resolver adapter, then verify normal `./sb domains use systemd-resolved`
       setup can adopt only within its evidenced constraints (FR-027, FR-031; source-owned
       exact/Linux qualification and identity-bound pre-mutation helper gate complete
-      locally but remains implemented_unproven/non-adoptable; normal live Linux CLI proof
-      still missing)
+      locally for apply and cleanup, including owner-change no-mutation regressions, but
+      remains implemented_unproven/non-adoptable; normal live Linux CLI proof still missing)
 - [ ] T068 Resolve the managed-Linux default-path gap: implement and prove a
       Sandbox-owned default resolution path for supported systemd-resolved/NetworkManager
       hosts, or obtain an approved scope change before narrowing FR-029 and SC-011

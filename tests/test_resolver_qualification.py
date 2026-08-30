@@ -81,6 +81,10 @@ class Authority:
         self.calls.append(("ensure", bindings, endpoint))
         return {"ok": True}
 
+    def remove(self, binding_id):
+        self.calls.append(("remove", binding_id))
+        return True
+
 
 def observation(*, owner="systemd-resolved:host", manager="resolved",
                 mode="stub"):
@@ -289,6 +293,25 @@ class TestResolverProductionQualification(unittest.TestCase):
         self.assertEqual([call[0] for call in adapter.calls[:3]], [
             "ensure_helper", "qualification_preflight", "ensure_authorized",
         ])
+
+    def test_owner_change_between_apply_and_cleanup_mutates_no_external_state(self):
+        qualified, adapter, _endpoints, authority = self._service()
+        applied = qualified.apply("/tmp/project", interactive=True)
+        self.assertTrue(applied.ok)
+        adapter.calls.clear()
+        authority.calls.clear()
+        adapter.preflight = {**adapter.preflight, "pid": 999, "start_ticks": 999999}
+        qualified.binding_observer = lambda binding, _adapter: dict(binding.last_applied)
+
+        cleaned = qualified.cleanup("/tmp/project", interactive=True)
+
+        self.assertEqual(cleaned.state, "cleanup_incomplete")
+        self.assertEqual(authority.calls, [])
+        self.assertEqual(adapter.calls, [
+            ("ensure_helper", True),
+            ("qualification_preflight", "systemd-resolved:host"),
+        ])
+        self.assertEqual(len(qualified.repository.snapshot()["bindings"]), 1)
 
     def test_unselected_resolver_remains_default_and_never_auto_adopts(self):
         unselected, adapter, endpoints, authority = self._service(strategy=None)

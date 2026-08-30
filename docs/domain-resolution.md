@@ -59,6 +59,13 @@ treated as ready: after consent it is upgraded from the checked-in helper, and a
 legacy resolved authorization receipt may be replaced only during the interactive
 authorization step with the new identity-bound receipt.
 
+Cleanup is bound to the same service identity. DomainService compares the live helper
+preflight with the binding's stored PID, start ticks, UID, and control group before release.
+The helper repeats that comparison immediately before every shared-receipt branch,
+missing-fragment receipt removal, final fragment removal, and reload. An owner or service
+identity change retains recovery state and performs no receipt, fragment, or reload
+mutation.
+
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
 authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.
 Use `domains reconsider --resolver ID` to clear remembered consent after reviewing a

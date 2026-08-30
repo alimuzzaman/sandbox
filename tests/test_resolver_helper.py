@@ -76,6 +76,17 @@ class TestResolverHelper(unittest.TestCase):
         self.assertIn("pid=%s start=%s service_uid=%s control=%s", text)
         self.assertIn("legacy_payload", text)
 
+    def test_resolved_remove_rechecks_identity_before_every_removal_branch(self):
+        text = HELPER.read_text()
+        remove = text.split("    resolved-remove)", 1)[1].split(
+            "    macos-apply)", 1,
+        )[0]
+        self.assertGreaterEqual(remove.count("require_resolved_identity"), 5)
+        self.assertLess(remove.index("require_resolved_identity"),
+                        remove.index('rm -f -- "$applied" "$receipt"'))
+        self.assertLess(remove.rindex("require_resolved_identity"),
+                        remove.index("systemctl reload-or-restart"))
+
     def test_apply_and_remove_require_exact_root_authorization_receipts(self):
         text = HELPER.read_text()
         resolved_apply = text.split("    resolved-apply)", 1)[1].split(

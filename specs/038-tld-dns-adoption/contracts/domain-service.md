@@ -58,6 +58,9 @@ one of the accepted addresses.
 `cleanup(owner, interactive) -> CleanupResult`
 
 - Removes only unchanged owned binding state.
+- For systemd-resolved, requires the current helper PID/start/UID/control identity to
+  equal the binding's applied identity at the service boundary and again inside the helper
+  before every receipt, fragment, or reload mutation.
 - Removes a shared zone only after its final owner is gone.
 - Reverts routed-resolver state before stopping the final authority binding.
 - Returns incomplete recovery for drift/unavailability; safe to repeat.

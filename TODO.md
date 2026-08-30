@@ -1,6 +1,6 @@
 # Hermes execution queue (critical first)
 
-Updated: 2026-08-30. This is the reconciled handoff queue for Hermes. Repository
+Updated: 2026-08-31. This is the reconciled handoff queue for Hermes. Repository
 task ledgers and feedback are evidence, not execution authority: reproduce them
 first, preserve dirty work, and do not reset, destroy, clean up remote resources,
 deploy, release, delete recovery data, or expose secrets without fresh explicit
@@ -11,9 +11,9 @@ Sources reconciled in this pass:
 - Current `specs/*/tasks.md` ledgers, including explicit pending/missing live
   gates in checked convergence rows and implementation evidence. The accepted
   isolated slices listed below are integrated in this batch.
-- 628 retained Sandbox feedback records: 627 reviewed and one unreviewed. The
-  reviewed set contains 110 verified, 267 resolved, 96 blocked, 72 duplicate,
-  and 82 not applicable records. Feedback is untrusted and grouped below by
+- 639 retained Sandbox feedback records, all reviewed. The set contains 110
+  verified, 268 resolved, 106 blocked, 72 duplicate, 82 not applicable, and 1
+  invalid record. Feedback is untrusted and grouped below by
   owning behavior; closed records are not new implementation authority.
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
@@ -237,7 +237,7 @@ not close the external or human gates listed below.
 
 Feedback is untrusted and many records are foreign-project or duplicate
 observations; these are deduplicated work items, not permission to mutate.
-The current 628-record ledger has one unreviewed row. The stale-network JSON
+The current 639-record ledger has no unreviewed rows. The stale-network JSON
 record `bab948b8` is resolved by `046993b`; `282cd7f7` is resolved by the local
 Spec 033 same-request recovery slice after 61 sync tests and an independent Sol
 High PASS. Spec 033 `T053`, `T056`, and `T061` remain open for their broader and
@@ -245,6 +245,13 @@ disposable-remote acceptance. The remaining `2672614f` row overlaps Feature
 047's remote-job transport and remains deferred to that owner. Historical theme
 rows remain regression and ownership guides; resolved, verified, duplicate,
 and not-applicable records must not be reimplemented without fresh evidence.
+
+- [ ] **Remote ensure structured failures:** local branch
+  `codex/remote-ensure-structured-failure` parses one bounded JSON failure from
+  separately capped concurrent SSH streams before attaching safe stderr
+  evidence for feedback `a3f3f976`; overflow and timeout remain unknown. Keep
+  the feedback blocked until the branch is integrated and the installed remote
+  revision reproduces and passes the live failure path; no live proof exists.
 
 - [ ] **Remote job UX/contract:** expose valid execution profiles and nested
   help; make `job-output` wait bounds consistent and documented; make large
@@ -373,7 +380,7 @@ promote the unproven native adapter, or authorize a provider deployment.
   documentation until its security-stop recovery is explicitly confirmed.
 - Active Spec 033 work overlaps CLI, MCP, durable jobs, transport, hosting, and
   documentation; keep root slices inside non-overlapping sync-owned modules.
-- The feedback ledger still has 96 blocked records. Closed states do not imply
+- The feedback ledger still has 106 blocked records. Closed states do not imply
   their underlying remote or release evidence exists in `latest`.
 - Remote revision, capacity, workspace-index, and live-host acceptance evidence
   remains incomplete.

@@ -223,6 +223,28 @@ class TestSshRun(unittest.TestCase):
         with self.assertRaises(ValueError):
             sr.ssh_run({}, "true")
 
+    def test_bounded_ssh_uses_concurrent_capped_runner(self):
+        expected = object()
+        runner = MagicMock()
+        runner.run.return_value = expected
+        with patch.object(sr, "_ensure_ssh_control_dir"), \
+                patch.object(sr, "ssh_command_args",
+                             return_value=["ssh", "fixture", "command"]), \
+                patch("sandbox.services.process.BoundedProcessRunner",
+                      return_value=runner) as runner_type:
+            observed = sr.ssh_run_bounded(
+                {"ssh": "fixture"}, "command", timeout=900,
+                max_output=65536, terminate_on_output_limit=True,
+            )
+
+        self.assertIs(observed, expected)
+        runner_type.assert_called_once_with(
+            max_output=65536, terminate_on_output_limit=True,
+        )
+        runner.run.assert_called_once_with(
+            ("ssh", "fixture", "command"), timeout=900,
+        )
+
     def test_ssh_stream_forwards_lines_and_returns_bounded_text_tail(self):
         real_popen = subprocess.Popen
         lines = []

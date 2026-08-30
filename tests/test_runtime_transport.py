@@ -312,7 +312,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
-                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+                mock.patch.object(remote, "ssh_run_bounded",
+                                  return_value=result) as ssh_run:
             ensured = commands._remote_lifecycle({}, args, "ensure")
         self.assertIn("--reveal-login", ssh_run.call_args.args[1])
         self.assertEqual(ensured["login_url"], login_url)
@@ -348,7 +349,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
-                mock.patch.object(remote, "ssh_run",
+                mock.patch.object(remote, "ssh_run_bounded",
                                   side_effect=[rejected, accepted]) as ssh_run, \
                 contextlib.redirect_stdout(io.StringIO()):
             ensured = commands._remote_lifecycle({}, args, "ensure")
@@ -687,6 +688,33 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(raised.exception.code, expected)
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         return json.loads(output.getvalue())
+
+    def _run_remote_ensure_result(self, result):
+        import sandbox.commands.lifecycle as commands
+        from sandbox.core import _remote as remote
+
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"},
+            remote_name="fixture-remote", project_root="/tmp/project",
+            workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        args = types.SimpleNamespace(
+            remote="fixture-remote", local=False,
+            project_dir="/tmp/project", workspace="default",
+        )
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(commands, "_remote_ensure_reachability",
+                                  return_value=None), \
+                mock.patch.object(remote, "deploy_exact_working_tree",
+                                  return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "prepare_remote_workspace",
+                                  return_value="/srv/project-workspace"), \
+                mock.patch.object(remote, "remote_sb_path",
+                                  return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run_bounded", return_value=result):
+            return commands._remote_lifecycle({}, args, "ensure")
 
     def test_status_json_sanitizer_removes_sensitive_keys_and_redacts_assignment(self):
         from sandbox.commands.lifecycle import _public_status_json
@@ -1079,7 +1107,8 @@ class TestStatusJsonRedaction(unittest.TestCase):
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
-                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+                mock.patch.object(remote, "ssh_run_bounded",
+                                  return_value=result) as ssh_run:
             ensured = commands._remote_lifecycle({}, args, "ensure")
         command = ssh_run.call_args.args[1]
         self.assertIn("--json", command)
@@ -1112,11 +1141,146 @@ class TestStatusJsonRedaction(unittest.TestCase):
                 mock.patch.object(remote, "prepare_remote_workspace",
                                   return_value="/srv/project-workspace"), \
                 mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
-                mock.patch.object(remote, "ssh_run", return_value=result):
+                mock.patch.object(remote, "ssh_run_bounded", return_value=result):
             ensured = commands._remote_lifecycle({}, args, "ensure")
         self.assertFalse(ensured["ok"])
         self.assertEqual(ensured["error"]["code"], "remote_empty_output")
         self.assertEqual(ensured["target"]["remote"], "fixture-remote")
+
+    def test_remote_ensure_nonzero_prefers_structured_stdout_to_warning_stderr(self):
+        result = types.SimpleNamespace(
+            returncode=23,
+            stdout=json.dumps({
+                "ok": False,
+                "error": {
+                    "code": "wordpress_download_failed",
+                    "message": "WordPress archive could not be installed",
+                },
+            }),
+            stderr="Warning: Failed to find WordPress version. Please cleanup files manually.\n",
+        )
+
+        observed = self._run_remote_ensure_result(result)
+
+        self.assertFalse(observed["ok"])
+        self.assertEqual(observed["error"], {
+            "code": "wordpress_download_failed",
+            "message": "WordPress archive could not be installed",
+        })
+        self.assertEqual(observed["exit_code"], 23)
+        self.assertEqual(
+            observed["transport"]["stderr"],
+            "Warning: Failed to find WordPress version. Please cleanup files manually.",
+        )
+
+    def test_remote_ensure_nonzero_invalid_stdout_returns_typed_redacted_fallback(self):
+        secret = "github_pat_" + "a" * 30
+        result = types.SimpleNamespace(
+            returncode=17,
+            stdout="not-json\n",
+            stderr=f"controller failed token={secret}\n",
+        )
+
+        observed = self._run_remote_ensure_result(result)
+        serialized = json.dumps(observed)
+
+        self.assertFalse(observed["ok"])
+        self.assertEqual(observed["error"]["code"], "remote_invalid_output")
+        self.assertEqual(observed["exit_code"], 17)
+        self.assertIn("[REDACTED]", observed["transport"]["stderr"])
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("not-json", serialized)
+
+    def test_remote_ensure_rejects_non_finite_json_constants(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                observed = self._run_remote_ensure_result(types.SimpleNamespace(
+                    returncode=7,
+                    stdout=(
+                        '{"ok":false,"error":{"code":"inner_failure",'
+                        '"message":"safe"},"value":' + constant + '}'
+                    ),
+                    stderr="",
+                ))
+                self.assertEqual(observed["error"]["code"],
+                                 "remote_invalid_output")
+                self.assertEqual(observed["exit_code"], 7)
+
+    def test_remote_ensure_classifies_capture_overflow_before_partial_json(self):
+        result = types.SimpleNamespace(
+            returncode=125,
+            stdout=json.dumps({
+                "ok": False,
+                "error": {"code": "inner_failure", "message": "partial"},
+            }),
+            stderr="process output limit exceeded; completion is unknown",
+            stdout_truncated=True,
+            stderr_truncated=False,
+            termination_reason="output_overflow",
+        )
+
+        observed = self._run_remote_ensure_result(result)
+
+        self.assertEqual(observed["error"]["code"], "remote_output_too_large")
+        self.assertIn("completion is unknown", observed["error"]["message"])
+        self.assertEqual(observed["exit_code"], 125)
+        self.assertNotIn("inner_failure", json.dumps(observed))
+
+    def test_remote_ensure_classifies_capture_timeout_as_unknown_completion(self):
+        result = types.SimpleNamespace(
+            returncode=124,
+            stdout="",
+            stderr="process timed out",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            termination_reason="timeout",
+        )
+
+        observed = self._run_remote_ensure_result(result)
+
+        self.assertEqual(observed["error"]["code"], "remote_timeout")
+        self.assertIn("completion is unknown", observed["error"]["message"])
+        self.assertEqual(observed["exit_code"], 124)
+
+    def test_remote_ensure_rejects_multiple_and_oversized_json_documents(self):
+        failure = json.dumps({
+            "ok": False,
+            "error": {"code": "inner_failure", "message": "safe detail"},
+        })
+        cases = (
+            (failure + "\n" + failure + "\n", "remote_invalid_output"),
+            (" " * (64 * 1024) + failure, "remote_output_too_large"),
+        )
+        for stdout, code in cases:
+            with self.subTest(code=code):
+                observed = self._run_remote_ensure_result(types.SimpleNamespace(
+                    returncode=9, stdout=stdout, stderr="",
+                ))
+                self.assertFalse(observed["ok"])
+                self.assertEqual(observed["error"]["code"], code)
+                self.assertEqual(observed["exit_code"], 9)
+
+    def test_remote_ensure_never_forwards_raw_traceback(self):
+        secret = "sk-proj-" + "b" * 24
+        result = types.SimpleNamespace(
+            returncode=4,
+            stdout="",
+            stderr=(
+                "Traceback (most recent call last):\n"
+                "  File \"/srv/private/controller.py\", line 1, in <module>\n"
+                f"RuntimeError: authorization=Bearer {secret}\n"
+            ),
+        )
+
+        observed = self._run_remote_ensure_result(result)
+        serialized = json.dumps(observed)
+
+        self.assertEqual(observed["error"]["code"], "remote_empty_output")
+        self.assertEqual(observed["transport"]["stderr"],
+                         "remote stderr omitted (traceback)")
+        self.assertNotIn("Traceback", serialized)
+        self.assertNotIn("controller.py", serialized)
+        self.assertNotIn(secret, serialized)
 
 if __name__ == "__main__":
     unittest.main()

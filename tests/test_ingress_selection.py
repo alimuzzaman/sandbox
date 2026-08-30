@@ -122,28 +122,33 @@ class TestIngressSelection(unittest.TestCase):
         )
         selection = IngressService(
             detector=Detector((observation,)), registry=registry(declaration),
+            platform="linux",
         ).select(required_protocols=("http",))
         self.assertIsNone(selection.adapter_id)
         self.assertEqual(selection.reason_code, "ingress_control_unavailable")
 
-    def test_system_caddy_public_or_wildcard_listener_is_never_adopted(self):
+    def test_system_caddy_routable_listener_is_never_adopted(self):
         from sandbox.application.ingress_service import IngressService
         from sandbox.ingress.models import IngressObservation, ListenerEndpoint, SupportDeclaration
         declaration = SupportDeclaration(
             "system-caddy", ("caddy",), ("linux",), "adoptable",
             frozenset({"http"}), "proof",
         )
-        for address in ("0.0.0.0", "10.0.0.4"):
-            observation = IngressObservation(
-                "system-caddy", "Caddy",
-                (ListenerEndpoint(address, 80, owner_confidence="proven"),),
-                "adoptable", frozenset({"http"}),
-            )
-            selection = IngressService(
-                detector=Detector((observation,)), registry=registry(declaration),
-            ).select(required_protocols=("http",))
-            self.assertIsNone(selection.adapter_id)
-            self.assertEqual(selection.reason_code, "ingress_control_unavailable")
+        observation = IngressObservation(
+            "system-caddy", "Caddy",
+            (ListenerEndpoint(
+                "10.0.0.4", 80, socket_id="1", owner_confidence="proven",
+                process={"pid": 4242, "start": "77", "command": "caddy",
+                         "executable": "/usr/bin/caddy"},
+            ),),
+            "adoptable", frozenset({"http"}),
+        )
+        selection = IngressService(
+            detector=Detector((observation,)), registry=registry(declaration),
+            platform="linux",
+        ).select(required_protocols=("http",))
+        self.assertIsNone(selection.adapter_id)
+        self.assertEqual(selection.reason_code, "ingress_control_unavailable")
 
 
 if __name__ == "__main__": unittest.main()
@@ -159,7 +164,7 @@ class TestWildcardIncumbentIsSelectable(unittest.TestCase):
         from sandbox.ingress.models import IngressObservation, ListenerEndpoint
 
         process = {"pid": 4242, "start": "77", "executable": "/usr/bin/caddy",
-                   "command": "caddy"}
+                   "executable_digest": "e" * 64, "command": "caddy"}
         return (IngressObservation(
             "system-caddy", "Caddy",
             (ListenerEndpoint(address, 80, socket_id="1", process=process,
@@ -168,21 +173,17 @@ class TestWildcardIncumbentIsSelectable(unittest.TestCase):
 
     def _select(self, address):
         from sandbox.application.ingress_service import IngressService
-        from sandbox.ingress.manifest import (
-            IngressProofAttestation, built_in_ingress_registry,
-        )
+        from sandbox.ingress.manifest import built_in_ingress_registry
 
         class Adapter:
             @staticmethod
-            def ready():
+            def ready(_authority):
                 return True
 
-        registry = built_in_ingress_registry(
-            {"system-caddy": Adapter()},
-            proof_attestation=IngressProofAttestation("system-caddy", "evidence-1"),
-        )
+        registry = built_in_ingress_registry({"system-caddy": Adapter()})
         return IngressService(
             detector=Detector(self._observation(address)), registry=registry,
+            platform="linux",
         ).select(required_protocols=("http",))
 
     def test_wildcard_listener_is_selected(self):
@@ -206,28 +207,26 @@ class TestSelectionCarriesIncumbentListenAddresses(unittest.TestCase):
 
     def test_wildcard_socket_is_reported_as_the_listen_address(self):
         from sandbox.application.ingress_service import IngressService
-        from sandbox.ingress.manifest import (
-            IngressProofAttestation, built_in_ingress_registry,
-        )
+        from sandbox.ingress.manifest import built_in_ingress_registry
         from sandbox.ingress.models import IngressObservation, ListenerEndpoint
 
         class Adapter:
             @staticmethod
-            def ready():
+            def ready(_authority):
                 return True
 
         observation = (IngressObservation(
             "system-caddy", "Caddy",
             (ListenerEndpoint("::", 80, socket_id="1", owner_confidence="proven",
                               process={"pid": 4242, "start": "77",
-                                       "executable": "/usr/bin/caddy"}),),
+                                       "executable": "/usr/bin/caddy",
+                                       "executable_digest": "e" * 64,
+                                       "command": "caddy"}),),
             "implemented_unproven", frozenset({"http"})),)
         selection = IngressService(
             detector=Detector(observation),
-            registry=built_in_ingress_registry(
-                {"system-caddy": Adapter()},
-                proof_attestation=IngressProofAttestation("system-caddy", "evidence-1"),
-            ),
+            registry=built_in_ingress_registry({"system-caddy": Adapter()}),
+            platform="linux",
         ).select(required_protocols=("http",))
 
         self.assertEqual(selection.listen_addresses, ("::",))

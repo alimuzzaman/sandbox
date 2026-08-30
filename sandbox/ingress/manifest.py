@@ -3,25 +3,9 @@
 from __future__ import annotations
 
 from .models import SupportDeclaration
+from .qualification import SYSTEM_CADDY_QUALIFICATION
 from .registry import IngressAdapterRegistry, IngressAdapterSpec
 from .adapters.detect_only import DetectOnlyAdapter
-
-
-class IngressProofAttestation:
-    """Invocation-only live-proof capability; never deserialize from config/CLI."""
-
-    __slots__ = ("_adapter_id", "_evidence_id")
-
-    def __init__(self, adapter_id: str, evidence_id: str) -> None:
-        if adapter_id != "system-caddy":
-            raise ValueError("proof attestation adapter is invalid")
-        if not isinstance(evidence_id, str) or not evidence_id.strip():
-            raise ValueError("proof attestation evidence is invalid")
-        self._adapter_id = adapter_id
-        self._evidence_id = evidence_id.strip()
-
-    def evidence_for(self, adapter_id: str) -> str | None:
-        return self._evidence_id if adapter_id == self._adapter_id else None
 
 
 def _decl(adapter_id, products, platforms, tier, capabilities, evidence=None):
@@ -38,8 +22,11 @@ BUILTIN_INGRESS = (
           "implemented_unproven", ("http", "wildcard")),
     _decl("system-apache", ("apache", "httpd"), ("linux", "darwin"),
           "implemented_unproven", ("http", "wildcard")),
-    _decl("system-caddy", ("caddy",), ("linux", "darwin"),
-          "implemented_unproven", ("http",)),
+    _decl("system-caddy",
+          SYSTEM_CADDY_QUALIFICATION.products,
+          SYSTEM_CADDY_QUALIFICATION.platforms, "adoptable",
+          SYSTEM_CADDY_QUALIFICATION.capabilities,
+          SYSTEM_CADDY_QUALIFICATION.evidence_id),
     _decl("traefik", ("traefik",), ("linux", "darwin"),
           "implemented_unproven", ("http", "wildcard")),
     _decl("nginx-proxy-manager", ("nginx-proxy-manager",), ("linux", "darwin"),
@@ -55,15 +42,8 @@ BUILTIN_INGRESS = (
 )
 
 
-def built_in_ingress_registry(
-    adapters=None, *, proof_attestation: IngressProofAttestation | None = None,
-):
+def built_in_ingress_registry(adapters=None):
     implementations = dict(adapters or {})
-    attestation = (
-        proof_attestation
-        if isinstance(proof_attestation, IngressProofAttestation)
-        else None
-    )
     for declaration in BUILTIN_INGRESS:
         if declaration.support_tier != "detect_only":
             continue
@@ -76,11 +56,7 @@ def built_in_ingress_registry(
             ),
         )
     registry = IngressAdapterRegistry()
-    for order, base in enumerate(BUILTIN_INGRESS, 10):
-        evidence_id = attestation.evidence_for(base.adapter_id) if attestation else None
-        declaration = (_decl(base.adapter_id, base.products, base.platforms,
-                             "adoptable", base.capabilities, evidence_id)
-                       if evidence_id else base)
+    for order, declaration in enumerate(BUILTIN_INGRESS, 10):
         registry.register(IngressAdapterSpec(
             declaration, implementations.get(declaration.adapter_id), order,
         ))

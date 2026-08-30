@@ -9,7 +9,7 @@ usage() {
     echo "usage: ingress-helper install ROOT USER" >&2
     echo "       ingress-helper authorize ROOT system-caddy ROUTE OWNER HOST BACKEND BACKEND_PORT LISTEN LISTEN_PORT SHA256 PID START EXE_SHA256 SOCKET_IDS OBSERVATION_SHA256" >&2
     echo "       ingress-helper authorization-status ROOT system-caddy ROUTE OWNER HOST BACKEND BACKEND_PORT LISTEN LISTEN_PORT SHA256 PID START EXE_SHA256 SOCKET_IDS OBSERVATION_SHA256" >&2
-    echo "       ingress-helper preflight ROOT system-caddy" >&2
+    echo "       ingress-helper preflight ROOT system-caddy PID START EXE_SHA256 SOCKET_IDS LISTEN LISTEN_PORT" >&2
     echo "       ingress-helper validate-current ROOT system-caddy" >&2
     echo "       ingress-helper prepare ROOT system-caddy ROUTE OWNER HOST BACKEND BACKEND_PORT LISTEN LISTEN_PORT SHA256 PID START EXE_SHA256 SOCKET_IDS OBSERVATION_SHA256" >&2
     echo "       ingress-helper activate ROOT system-caddy ROUTE" >&2
@@ -148,6 +148,10 @@ verify_caddy_authority() {
     observed_start=$(sed -n '1p' "/proc/$pid/stat" | awk '{print $22}')
     [ "$start" = "$observed_start" ] || fail "selected Caddy process was replaced"
     executable=$(readlink -f "/proc/$pid/exe") || fail "Caddy executable identity is unavailable"
+    case "$executable" in
+        /usr/bin/caddy|/usr/sbin/caddy|/usr/local/bin/caddy|/usr/local/sbin/caddy) ;;
+        *) fail "Caddy executable is outside system binary roots" ;;
+    esac
     [ -f "$executable" ] && [ ! -L "$executable" ] || fail "Caddy executable is not a regular file"
     [ "$(file_uid "$executable")" -eq 0 ] || fail "Caddy executable is not root-owned"
     mode=$(file_mode "$executable"); [ $((0$mode & 022)) -eq 0 ] \
@@ -425,7 +429,11 @@ case "$verb" in
     authorization-status)
         [ "$#" -eq 15 ] || usage; require_root; require_plan_receipt "$@" ;;
     preflight)
-        [ "$#" -eq 2 ] || usage; require_root; authorized_root "$1" >/dev/null; valid_adapter "$2"; validate_current >/dev/null ;;
+        [ "$#" -eq 8 ] || usage; require_root; authorized_root "$1" >/dev/null; valid_adapter "$2"
+        pid=$3; start=$4; executable_digest=$5; socket_ids=$6; listen=$7; listen_port=$8
+        validate_current >/dev/null
+        verify_caddy_authority "$pid" "$start" "$executable_digest" \
+            "$socket_ids" "$listen" "$listen_port" ;;
     validate-current)
         [ "$#" -eq 2 ] || usage; require_root; authorized_root "$1" >/dev/null; valid_adapter "$2"; validate_current ;;
     prepare)
@@ -487,7 +495,7 @@ case "$verb" in
             case "$port" in ''|*[!0-9]*) continue ;; esac
             pid=${users#*pid=}; pid=${pid%%,*}
             case "$pid" in ''|*[!0-9]*) pid="" ;; esac
-            command=""; executable=""; start=""
+            command=""; executable=""; start=""; executable_digest=""
             if [ -n "$pid" ] && [ -r "/proc/$pid/comm" ]; then
                 command=$(tr -d "\n" < "/proc/$pid/comm")
                 executable=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
@@ -495,8 +503,11 @@ case "$verb" in
                 # of the process identity an adapter must pin, so a pid reused
                 # by another process cannot pass as the same owner.
                 start=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
+                if [ -n "$executable" ] && [ -f "$executable" ]; then
+                    executable_digest=$(sha256sum "$executable" 2>/dev/null | cut -d' ' -f1 || true)
+                fi
             fi
-            printf '%s %s %s %s %s %s\n' "$address" "$port" "${pid:--}" "${command:--}" "${executable:--}" "${start:--}"
+            printf '%s %s %s %s %s %s %s\n' "$address" "$port" "${pid:--}" "${command:--}" "${executable:--}" "${start:--}" "${executable_digest:--}"
         done ;;
     observe)
         [ "$#" -eq 3 ] || usage; require_root; require_applied_receipt "$@"

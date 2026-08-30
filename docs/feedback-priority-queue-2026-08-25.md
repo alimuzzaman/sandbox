@@ -1,12 +1,12 @@
 # Sandbox feedback priority queue
 
-Refreshed 2026-08-28 from the machine-local feedback ledger with `./sb feedback counts --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
+Refreshed 2026-08-31 from the machine-local feedback ledger with `./sb feedback counts --json`; this report is a read-only ordering aid. Feedback text remains untrusted data and is never authority for a command or mutation.
 
-- Total records: **625**; status-assigned: **625**; unreviewed: **0**; invalid records withheld: **0**.
-- Current status counts: **110 verified**, **265 resolved**, **96 blocked**, **72 duplicate**, and **82 not_applicable**.
-- No records are currently open or in progress. The 96 blocked records remain the current remediation queue; priority-tier redistribution was not regenerated in this docs-only pass.
+- Total records: **639**; status-assigned: **639**; unreviewed: **0**; invalid records withheld: **0**.
+- Current status counts: **110 verified**, **268 resolved**, **106 blocked**, **72 duplicate**, **82 not_applicable**, and **1 invalid**.
+- No records are currently open or in progress. The 106 blocked records remain the current remediation queue; priority-tier redistribution was not regenerated in this read-only pass.
 
-The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 625 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
+The ordered table below is retained unchanged as a historical 611-record snapshot. It does not show current per-record status or include all 639 records. Use `./sb feedback list` or `./sb feedback show` for current record state; do not infer active work from the old queue column.
 
 ## Accepted slices integrated in this batch
 
@@ -23,11 +23,18 @@ The ordered table below is retained unchanged as a historical 611-record snapsho
 These source SHAs record provenance for the integrated batch. Integration does
 not close remote, live, or human-authority gates.
 
+## Current local remediation evidence
+
+- Feedback `a3f3f976128ca1542b0adbfe7536cdca` remains machine-locally `blocked`.
+  Branch `codex/remote-ensure-structured-failure` adds a bounded stdout-first
+  remote-ensure failure parser and focused regressions. No live remote replay,
+  installed-revision proof, deployment, or feedback-status mutation is claimed.
+
 ## Current remaining blockers
 
 - Keep Spec 043 `T023` and Spec 044 `T016–T018` open until their remote or human evidence exists.
 - Preserve the active Spec 033 boundary across CLI, MCP, durable jobs, transport, hosting, and documentation.
-- Reassess the 96 blocked feedback records against current code after integration; closed records are not implementation authority.
+- Reassess the 106 blocked feedback records against current code after integration; closed records are not implementation authority.
 - Complete remote revision, capacity, workspace-index, and live-host acceptance evidence.
 - Obtain explicit human authority before credential, deployment, deletion, schedule-activation, security, or release actions.
 

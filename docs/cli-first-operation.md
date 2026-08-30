@@ -289,6 +289,13 @@ Remote `ensure` fails closed when SSH exits successfully but returns no JSON
 document. It emits `error.code=remote_empty_output`; inspect remote state before
 retrying.
 
+If the remote child exits nonzero, Sandbox still parses its single bounded JSON
+stdout document first. The typed child code/message and exit code remain the
+failure; bounded redacted warning stderr is secondary `transport.stderr` only.
+Malformed, multiple, or oversized JSON is rejected with a typed transport
+failure, and raw tracebacks are not forwarded. This is locally regression
+tested; it does not prove any installed remote revision or live failure path.
+
 When `login_url` contains a `sandbox_autologin` query parameter, the JSON also
 includes the derived boolean `login_url_redacted`. It is `true` whenever the
 placeholder remains, the URL is unusable or non-loopback for a local reveal,

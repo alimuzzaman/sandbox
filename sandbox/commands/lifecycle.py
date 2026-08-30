@@ -45,6 +45,9 @@ from sandbox.runtimes.base import OperationError, OperationRequest
 
 
 WORDPRESS_LATEST_DOWNLOAD_URL = "https://wordpress.org/latest.tar.gz"
+_REMOTE_ENSURE_JSON_MAX_BYTES = 64 * 1024
+_REMOTE_ENSURE_STDERR_INPUT_MAX_BYTES = 64 * 1024
+_REMOTE_ENSURE_STDERR_MAX_BYTES = 2 * 1024
 
 
 def _target_is_remote(target) -> bool:
@@ -117,6 +120,86 @@ def _remote_instance_unavailable(
         },
         "target": dict(target),
     }
+
+
+def _remote_ensure_document(stdout: object, *, redact: bool = True) -> tuple[dict | None, str]:
+    """Parse one bounded ensure JSON object without accepting stream noise."""
+    from sandbox.services.redaction import redact_structure
+
+    if not isinstance(stdout, str) or not stdout.strip():
+        return None, "remote_empty_output"
+    if len(stdout.encode("utf-8")) > _REMOTE_ENSURE_JSON_MAX_BYTES:
+        return None, "remote_output_too_large"
+    try:
+        value = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None, "remote_invalid_output"
+    if not isinstance(value, Mapping):
+        return None, "remote_invalid_output"
+    if not redact:
+        return dict(value), ""
+    public = redact_structure(value)
+    if not isinstance(public, Mapping):
+        return None, "remote_invalid_output"
+    return dict(public), ""
+
+
+def _remote_ensure_stderr(stderr: object) -> str:
+    """Return secondary, bounded stderr evidence without forwarding tracebacks."""
+    from sandbox.services.redaction import redact_text
+
+    if not isinstance(stderr, str) or not stderr.strip():
+        return ""
+    if "traceback (most recent call last):" in stderr.lower():
+        return "remote stderr omitted (traceback)"
+    if len(stderr.encode("utf-8")) > _REMOTE_ENSURE_STDERR_INPUT_MAX_BYTES:
+        return "remote stderr omitted (oversized)"
+    safe = " ".join(redact_text(stderr).split())
+    encoded = safe.encode("utf-8")
+    if len(encoded) > _REMOTE_ENSURE_STDERR_MAX_BYTES:
+        safe = encoded[-_REMOTE_ENSURE_STDERR_MAX_BYTES:].decode(
+            "utf-8", errors="replace"
+        )
+    return safe
+
+
+def _remote_ensure_failure(result) -> dict:
+    """Preserve a typed child failure and add transport evidence second."""
+    payload, parse_code = _remote_ensure_document(getattr(result, "stdout", ""))
+    if payload is not None:
+        error = payload.get("error")
+        code = error.get("code") if isinstance(error, Mapping) else None
+        message = error.get("message") if isinstance(error, Mapping) else None
+        if payload.get("ok") is not False \
+                or not isinstance(code, str) \
+                or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) \
+                or not isinstance(message, str) \
+                or not message.strip():
+            payload = None
+            parse_code = "remote_invalid_output"
+    if payload is None:
+        messages = {
+            "remote_empty_output": "remote ensure returned no JSON output",
+            "remote_output_too_large": (
+                f"remote ensure JSON output exceeded {_REMOTE_ENSURE_JSON_MAX_BYTES} bytes"
+            ),
+            "remote_invalid_output": "remote ensure returned invalid JSON output",
+        }
+        payload = {
+            "ok": False,
+            "error": {
+                "code": parse_code or "remote_invalid_output",
+                "message": messages.get(
+                    parse_code, "remote ensure returned invalid JSON output"
+                ),
+            },
+        }
+    payload["ok"] = False
+    payload["exit_code"] = int(getattr(result, "returncode", 1) or 1)
+    diagnostic = _remote_ensure_stderr(getattr(result, "stderr", ""))
+    if diagnostic:
+        payload["transport"] = {"stderr": diagnostic}
+    return payload
 
 
 def _compose_up(
@@ -901,23 +984,40 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
             payload = dict(payload)
             payload["ok"] = False
             payload["exit_code"] = result.returncode
+    elif action == "ensure" and result.returncode != 0:
+        payload = _remote_ensure_failure(result)
     elif result.returncode != 0:
         die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
     elif action != "logs":
-        payload = _remote._last_json(result.stdout or "")
+        if action == "ensure":
+            payload, parse_code = _remote_ensure_document(result.stdout or "")
+        else:
+            payload, parse_code = _remote._last_json(result.stdout or ""), ""
         if payload is None:
+            messages = {
+                "remote_output_too_large": (
+                    f"remote {action} JSON output exceeded "
+                    f"{_REMOTE_ENSURE_JSON_MAX_BYTES} bytes"
+                ),
+                "remote_invalid_output": f"remote {action} returned invalid JSON output",
+            }
             payload = {
                 "ok": False,
                 "error": {
-                    "code": "remote_empty_output",
-                    "message": f"remote {action} returned no JSON output",
+                    "code": parse_code or "remote_empty_output",
+                    "message": messages.get(
+                        parse_code, f"remote {action} returned no JSON output"
+                    ),
                 },
             }
         if reveal_login and isinstance(payload, dict):
             # Lift ONE field out of the unredacted remote document: the
             # autologin URL the operator explicitly asked for. Everything else
             # stays as the redacted parse produced it.
-            raw = _remote._last_json(result.stdout or "", redact=False) or {}
+            raw, _parse_code = _remote_ensure_document(
+                result.stdout or "", redact=False
+            )
+            raw = raw or {}
             revealed = raw.get("login_url")
             if isinstance(revealed, str) and "sandbox_autologin=" in revealed:
                 payload["login_url"] = revealed

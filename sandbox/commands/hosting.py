@@ -792,6 +792,66 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
                                progress=progress, log_path=log_path)
 
 
+def _no_build_image_preflight_command(prefix: str, services: list[str]) -> str:
+    """Render one bounded, read-only check for explicit local service images."""
+    config_command = f"{prefix} --profile '*' config --format json"
+    program = "\n".join((
+        "import json,os,selectors,signal,subprocess,sys,time",
+        "MAX_OUTPUT=65536;end=time.monotonic()+60",
+        "def fail():",
+        " print('no-build image preflight failed: every declared target/init service must resolve to an explicit existing image',file=sys.stderr)",
+        " raise SystemExit(1)",
+        "command=sys.argv[1];declared=sys.argv[2:]",
+        "if not declared:fail()",
+        "q=subprocess.Popen(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)",
+        "selector=selectors.DefaultSelector();selector.register(q.stdout,selectors.EVENT_READ)",
+        "raw=bytearray();invalid=False",
+        "while True:",
+        " remaining=end-time.monotonic()",
+        " if remaining<=0:invalid=True;break",
+        " ready=selector.select(remaining)",
+        " if not ready:invalid=True;break",
+        " chunk=os.read(q.stdout.fileno(),65536)",
+        " if not chunk:break",
+        " raw.extend(chunk)",
+        " if len(raw)>MAX_OUTPUT:invalid=True;break",
+        "selector.close()",
+        "if invalid:",
+        " try:os.killpg(q.pid,signal.SIGKILL)",
+        " except ProcessLookupError:pass",
+        "q.wait()",
+        "if invalid or q.returncode:fail()",
+        "try:document=json.loads(bytes(raw).decode('utf-8'))",
+        "except Exception:fail()",
+        "configured=document.get('services') if isinstance(document,dict) else None",
+        "if not isinstance(configured,dict):fail()",
+        "images=[]",
+        "for name in declared:",
+        " service=configured.get(name)",
+        " image=service.get('image') if isinstance(service,dict) else None",
+        " if not isinstance(image,str) or not image.strip():fail()",
+        " images.append(image.strip())",
+        "for image in images:",
+        " remaining=end-time.monotonic()",
+        " if remaining<=0:fail()",
+        " try:result=subprocess.run(['docker','image','inspect','--format','{{.Id}}',image],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=min(10,remaining),check=False)",
+        " except (OSError,subprocess.SubprocessError):fail()",
+        " if result.returncode or not (result.stdout or '').strip():fail()",
+        "print(json.dumps({'ok':True,'services':len(declared)},separators=(',',':')))",
+    ))
+    return shlex.join(["python3", "-c", program, config_command, *services])
+
+
+def _preflight_no_build_images(entry: dict, prefix: str, services: list[str],
+                               *, progress=None) -> None:
+    """Refuse a no-build apply unless each declared image already exists."""
+    _remote_checked(
+        entry, _no_build_image_preflight_command(prefix, services), timeout=65,
+    )
+    if progress is not None:
+        progress("No-build image preflight passed")
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
@@ -831,12 +891,18 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         *(shlex.quote(service) for service in validated["compose"].get("background_services", [])),
     ]
     service_args = " ".join(runtime_services)
-    # `compose.build: false` deploys config, secrets and routing onto whatever
-    # image the remote already has. Compose still builds a service with no
-    # image at all, so a first deploy works either way.
     build = validated["compose"].get("build", True)
     build_timeout = validated["compose"].get("build_timeout_seconds", 900)
-    build_flag = " --build" if build else ""
+    if not build:
+        declared_services = [
+            validated["compose"]["service"],
+            *validated["compose"].get("background_services", []),
+            *validated["compose"].get("init_services", []),
+        ]
+        _preflight_no_build_images(
+            entry, prefix, declared_services, progress=progress,
+        )
+    build_flag = " --build" if force_recreate and build else " --no-build"
     if progress is not None:
         progress(
             f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} started "
@@ -848,10 +914,10 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     # data must be declared as named volumes (for WordPress: database/uploads).
     converge_flags = (
         f"{build_flag} --force-recreate --renew-anon-volumes"
-        if force_recreate else ""
+        if force_recreate else " --no-build" if not build else ""
     )
     command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
-    if force_recreate:
+    if force_recreate and build:
         _build_checked(
             entry, prefix, command, service_args, timeout=build_timeout,
             progress=progress, log_path=apply_log,
@@ -879,11 +945,14 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             if progress is not None:
                 progress(f"Init service {init_service} build completed")
         _remote_checked(
-            entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}",
+            entry,
+            f"{prefix} --profile jobs run --rm"
+            f"{' --no-build' if not build else ''} {shlex.quote(init_service)}",
             timeout=900, progress=progress, log_path=apply_log,
         )
     _remote_checked(
-        entry, f"{prefix} up -d {service_args}", timeout=300,
+        entry, f"{prefix} up -d{' --no-build' if not build else ''} {service_args}",
+        timeout=300,
         progress=progress, log_path=apply_log,
     )
 

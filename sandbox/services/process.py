@@ -325,7 +325,11 @@ class BoundedProcessRunner:
                 except subprocess.TimeoutExpired:
                     continue
 
-        if not timed_out and not cancelled:
+        # Output overflow is already a terminal condition. Waiting for reader
+        # EOF here can consume the caller's entire deadline while the live
+        # child keeps its pipes open; terminate first, then use the short
+        # bounded drain below for retained evidence.
+        if not timed_out and not cancelled and not output_overflow:
             timed_out = not self._join_readers(readers, self._remaining(deadline))
 
         if self.terminate_on_output_limit and output_limit_reached.is_set():

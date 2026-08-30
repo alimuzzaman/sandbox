@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Mapping
 
-from .models import HEX24, HEX64, bounded
+from .models import HEX24, HEX64, bounded, parse_utc
 
 ACTIONS = frozenset({"host_memory_status", "host_memory_history", "host_memory_apply"})
 
@@ -26,9 +26,20 @@ def validate_request(payload):
     if set(payload)-allowed: raise RemoteProtocolError("response_invalid", "unknown host-memory request field")
     if not isinstance(payload.get("remote_name"), str) or not payload["remote_name"]:
         raise RemoteProtocolError("remote_required", "registered remote is required")
+    budget = payload.get("budget_seconds")
+    if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 300:
+        raise RemoteProtocolError("response_invalid", "budget must be from 1 through 300 seconds")
     if action == "host_memory_history":
         limit=payload.get("limit",288)
         if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=1000: raise RemoteProtocolError("invalid_limit","history limit must be 1 through 1000")
+        since, until = payload.get("since"), payload.get("until")
+        try:
+            start = parse_utc(since) if since is not None else None
+            end = parse_utc(until) if until is not None else None
+        except (TypeError, ValueError):
+            raise RemoteProtocolError("invalid_range", "history range must use UTC timestamps") from None
+        if start is not None and end is not None and start > end:
+            raise RemoteProtocolError("invalid_range", "history range start exceeds end")
     if action == "host_memory_apply":
         if payload.get("confirmed") is not True: raise RemoteProtocolError("confirmation_required","exact plan confirmation is required")
         plan=payload.get("plan"); op=payload.get("operation_id")
@@ -42,7 +53,8 @@ def validate_request(payload):
 
 
 def validate_response(response, *, marker, revision):
-    if not isinstance(response,dict) or response.get("resource_schema")!=1:
+    envelope_fields={"resource_schema","host_memory_schema","transport","service","result"}
+    if not isinstance(response,dict) or set(response)!=envelope_fields or response.get("resource_schema")!=1:
         raise RemoteProtocolError("remote_swap_protocol_mismatch","resource protocol is unavailable")
     if response.get("host_memory_schema")!=1 or response.get("transport")!="control":
         raise RemoteProtocolError("remote_swap_protocol_mismatch","host-memory protocol is unavailable")
@@ -51,7 +63,10 @@ def validate_response(response, *, marker, revision):
     if service.get("runtime_revision")!=revision: raise RemoteProtocolError("remote_runtime_revision_mismatch","runtime revision does not match")
     result=response.get("result")
     if not isinstance(result,dict): raise RemoteProtocolError("response_invalid","remote response is invalid")
-    return bounded(result)
+    try:
+        return bounded(result)
+    except (TypeError, ValueError):
+        raise RemoteProtocolError("response_invalid", "remote evidence is invalid or oversized") from None
 
 
 class HostMemoryRemote:

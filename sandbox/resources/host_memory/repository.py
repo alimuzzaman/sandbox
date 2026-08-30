@@ -8,7 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from .models import HEX64, bounded
+from .models import AggregateMemorySample, HEX64, OwnershipReceipt, bounded
 
 
 class RepositoryError(RuntimeError): pass
@@ -49,20 +49,70 @@ class HostMemoryRepository:
             raise RepositoryError("plan_not_found")
         return bounded(data)
 
-    def save_operation(self, operation): self._atomic(self.root / "operation.json", operation)
+    def save_operation(self, operation):
+        if not isinstance(operation, dict) or operation.get("schema_version") != 1:
+            raise RepositoryError("invalid operation evidence")
+        operation_id = operation.get("operation_id")
+        if not isinstance(operation_id, str) or not HEX64.fullmatch(operation_id):
+            raise RepositoryError("invalid operation identity")
+        current = self.load_operation()
+        if current is not None and current.get("operation_id") != operation_id:
+            raise RepositoryError("operation identity conflict")
+        self._atomic(self.root / "operation.json", operation)
     def load_operation(self):
         try: data = json.loads((self.root / "operation.json").read_text())
         except FileNotFoundError: return None
         except (OSError, ValueError): raise RepositoryError("operation evidence is corrupt") from None
         return bounded(data)
 
+    def save_receipt(self, receipt):
+        model = OwnershipReceipt.from_dict(receipt)
+        current = self.load_receipt()
+        if current is not None and current["target_identity"] != model.target_identity:
+            raise RepositoryError("ownership identity conflict")
+        self._atomic(self.root / "receipt.json", model.to_dict())
+
+    def load_receipt(self):
+        try:
+            data = json.loads((self.root / "receipt.json").read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            raise RepositoryError("ownership evidence is corrupt") from None
+        try:
+            return OwnershipReceipt.from_dict(data).to_dict()
+        except (TypeError, ValueError):
+            raise RepositoryError("ownership evidence is corrupt") from None
+
     def append_sample(self, sample, *, maximum_bytes=32 * 1024 * 1024):
-        history = self.root / "history.jsonl"; history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        line = json.dumps(bounded(sample, 16 * 1024), sort_keys=True, separators=(",", ":")) + "\n"
-        if history.exists() and history.stat().st_size + len(line.encode()) > maximum_bytes:
-            rotated = self.root / "history.1.jsonl"
-            os.replace(history, rotated)
-        with history.open("a", encoding="utf-8") as stream: stream.write(line)
+        history = self.root / "history.jsonl"
+        history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        line = json.dumps(AggregateMemorySample.from_dict(sample).to_dict(),
+                          sort_keys=True, separators=(",", ":")) + "\n"
+        encoded_size = len(line.encode())
+        if encoded_size > maximum_bytes:
+            raise RepositoryError("sample exceeds history bound")
+        if history.exists() and history.stat().st_size + encoded_size > maximum_bytes:
+            for index in range(8, 0, -1):
+                source = self.root / ("history.%d.jsonl" % index)
+                if index == 8:
+                    try: source.unlink()
+                    except FileNotFoundError: pass
+                elif source.exists():
+                    os.replace(source, self.root / ("history.%d.jsonl" % (index + 1)))
+            os.replace(history, self.root / "history.1.jsonl")
+        with history.open("a", encoding="utf-8") as stream:
+            stream.write(line); stream.flush(); os.fsync(stream.fileno())
+        files = sorted(self.root.glob("history*.jsonl"),
+                       key=lambda path: (path.name == "history.jsonl", path.name))
+        total = sum(path.stat().st_size for path in files)
+        for path in files:
+            if total <= maximum_bytes:
+                break
+            if path == history:
+                continue
+            total -= path.stat().st_size
+            path.unlink()
 
     def history_window(self, since=None, until=None, limit=288):
         if isinstance(limit, bool) or not 1 <= int(limit) <= 1000: raise RepositoryError("invalid_limit")
@@ -70,8 +120,9 @@ class HostMemoryRepository:
         for path in sorted(self.root.glob("history*.jsonl"))[:9]:
             try:
                 for line in path.read_text().splitlines():
-                    try: row=json.loads(line)
-                    except ValueError: malformed += 1; continue
+                    try:
+                        row=AggregateMemorySample.from_dict(json.loads(line)).to_dict()
+                    except (TypeError, ValueError): malformed += 1; continue
                     at=row.get("sampled_at", "")
                     if (since and at < since) or (until and at > until): continue
                     samples.append(bounded(row, 16 * 1024))

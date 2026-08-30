@@ -39,3 +39,31 @@ class HostMemoryPolicyTest(unittest.TestCase):
     def test_unmanaged_and_operation_blocks_refuse(self):
         for state in (eligible_state(swap_areas=[{"ownership":"unmanaged"}]), eligible_state(operation_block={"reason":"active"})):
             with self.assertRaises(PolicyRefusal): build_plan("enable",{},state,now=NOW)
+
+    def test_enable_accepts_exact_capacity_boundaries(self):
+        state = eligible_state(
+            memory={"total_bytes": 16 * GIB, "available_bytes": 12 * GIB},
+            filesystem={"total_bytes": 80 * GIB, "free_bytes": 20 * GIB},
+        )
+        rows = enable_calculations(state, 8)
+        self.assertTrue(all(row["passed"] for row in rows))
+        self.assertEqual(rows[-1]["observed_bytes"], rows[-1]["threshold_bytes"])
+
+    def test_negative_unknown_and_boolean_capacity_fail_closed(self):
+        bad_states = (
+            eligible_state(memory={"total_bytes": -1, "available_bytes": 0}),
+            eligible_state(filesystem={"total_bytes": 100 * GIB, "free_bytes": True}),
+            eligible_state(evidence_state="unknown"),
+        )
+        for state in bad_states:
+            with self.subTest(state=state):
+                with self.assertRaises(PolicyRefusal):
+                    build_plan("enable", service_evidence(), state, now=NOW)
+
+    def test_warning_ignores_partial_breaks_and_clock_regression(self):
+        rows = [sample("2026-08-30T11:40:00Z", 512 * 1024 ** 2),
+                sample("2026-08-30T11:45:00Z", 512 * 1024 ** 2, "partial"),
+                sample("2026-08-30T11:50:00Z", 512 * 1024 ** 2),
+                sample("2026-08-30T11:55:00Z", 512 * 1024 ** 2)]
+        self.assertFalse(sustained_swap_use(rows))
+        self.assertEqual(freshness("2026-08-30T12:00:01Z", NOW), "unknown")

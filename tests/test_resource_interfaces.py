@@ -1019,6 +1019,37 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
             _host_memory_cli(self._args(["swap-history","--remote","fixture","--limit","0"]))
         self.assertEqual((service.size,service.limit),(0,0))
 
+    def test_status_text_and_json_share_the_same_bounded_envelope(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        payload={"schema_version":1,"ok":True,"action":"swap-status","status":"complete",
+                 "target":{"kind":"remote","name":"fixture"},
+                 "data":{"memory":{"total_bytes":16*1024**3,"available_bytes":12*1024**3},
+                         "swap_areas":[],"ownership":"absent",
+                         "monitor":{"freshness":"missing"},
+                         "container_eligibility":{"state":"unknown"}},"error":None}
+        class Service:
+            def status(self,budget_seconds): return payload
+        with patch.object(resources,"host_memory_service",return_value=Service()):
+            human=StringIO()
+            with redirect_stdout(human): resources.cmd_resources({},self._args(["swap-status","--remote","fixture"]))
+            structured=StringIO()
+            with redirect_stdout(structured): resources.cmd_resources({},self._args(["swap-status","--remote","fixture","--json"]))
+        self.assertIn("ownership: absent", human.getvalue())
+        self.assertIn("monitor: missing", human.getvalue())
+        self.assertEqual(json.loads(structured.getvalue()),payload)
+
+    def test_status_refusal_uses_exit_one_and_safe_json(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        output=StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            resources.cmd_resources({},self._args(["swap-status","--json"]))
+        self.assertEqual(raised.exception.code,1)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"],"remote_required")
+
 
 if __name__ == "__main__":
     unittest.main()

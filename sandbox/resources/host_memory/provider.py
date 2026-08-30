@@ -13,8 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AggregateMemorySample, canonical_digest
-from .policy import PolicyRefusal, plan_current
+from .models import AggregateMemorySample, OwnershipReceipt, bounded, canonical_digest
+from .policy import PolicyRefusal, freshness, plan_current, sustained_swap_use
 
 STATE=Path("/var/lib/sandbox/host-memory")
 SWAP=STATE/"sandbox.swap"
@@ -53,29 +53,147 @@ class HostProvider:
             if len(parts)>=2 and parts[1].isdigit(): rows[parts[0]]=int(parts[1])*1024
         return rows
 
+    def _optional_text(self, path):
+        try:
+            return self.read_text(path)
+        except (OSError, KeyError):
+            return None
+
+    @staticmethod
+    def _bounded_integer(text):
+        if text is None:
+            return None
+        value = str(text).strip()
+        if value == "max":
+            return None
+        if not value.isdigit():
+            raise ValueError("invalid aggregate integer")
+        return int(value)
+
+    def _container_limits(self):
+        cgroup = self._optional_text("/proc/self/cgroup")
+        if cgroup is None:
+            return {"state": "unknown", "version": "unknown",
+                    "memory_limit_bytes": None, "memory_used_bytes": None,
+                    "swap_limit_bytes": None, "swap_used_bytes": None}
+        try:
+            if any(line.startswith("0::") for line in cgroup.splitlines()):
+                memory_limit = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.max"))
+                memory_used = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.current"))
+                swap_limit = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.swap.max"))
+                swap_used = self._bounded_integer(self._optional_text("/sys/fs/cgroup/memory.swap.current"))
+                state = "limited" if memory_limit is not None or swap_limit is not None else "eligible"
+                return {"state": state, "version": "v2", "memory_limit_bytes": memory_limit,
+                        "memory_used_bytes": memory_used, "swap_limit_bytes": swap_limit,
+                        "swap_used_bytes": swap_used}
+            if any(":memory:" in line for line in cgroup.splitlines()):
+                memory_limit = self._bounded_integer(self._optional_text(
+                    "/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+                memory_used = self._bounded_integer(self._optional_text(
+                    "/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+                memsw_limit = self._bounded_integer(self._optional_text(
+                    "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes"))
+                memsw_used = self._bounded_integer(self._optional_text(
+                    "/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes"))
+                swap_limit = (max(0, memsw_limit - memory_limit)
+                              if memsw_limit is not None and memory_limit is not None else None)
+                swap_used = (max(0, memsw_used - memory_used)
+                             if memsw_used is not None and memory_used is not None else None)
+                return {"state": "limited" if memory_limit is not None else "unknown",
+                        "version": "v1", "memory_limit_bytes": memory_limit,
+                        "memory_used_bytes": memory_used, "swap_limit_bytes": swap_limit,
+                        "swap_used_bytes": swap_used}
+        except (TypeError, ValueError):
+            pass
+        return {"state": "unknown", "version": "unknown",
+                "memory_limit_bytes": None, "memory_used_bytes": None,
+                "swap_limit_bytes": None, "swap_used_bytes": None}
+
+    def _unit_state(self, unit):
+        try:
+            result = self.run(("systemctl", "is-active", unit), timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        value = str(getattr(result, "stdout", "")).strip()
+        if value == "active" and getattr(result, "returncode", 1) == 0:
+            return "active"
+        if value in {"inactive", "failed", "unknown"}:
+            return "inactive" if value in {"inactive", "failed"} else "unknown"
+        return "missing" if getattr(result, "returncode", 1) in {3, 4} else "unknown"
+
     def observe(self):
-        if platform.system()!="Linux": return {"observed_at":self.now().isoformat(),"memory":{},"filesystem":{},"swap_areas":[],"monitor":{},"ownership":"unknown","evidence_state":"unsupported","container_eligibility":{"state":"unsupported"},"reboot_verification":"unverified","operation_block":None}
-        try: memory=self._kv(self.read_text("/proc/meminfo")); swaps=self.read_text("/proc/swaps").splitlines()[1:]; disk=shutil.disk_usage(STATE.parent)
-        except (OSError,ValueError): return {"observed_at":self.now().isoformat(),"memory":{},"filesystem":{},"swap_areas":[],"monitor":{},"ownership":"unknown","evidence_state":"partial","container_eligibility":{"state":"unknown"},"reboot_verification":"unverified","operation_block":None}
-        receipt=None
-        try: receipt=json.loads(self.read_text(RECEIPT))
-        except (OSError,ValueError): pass
-        areas=[]
-        for index,line in enumerate(swaps):
-            parts=line.split()
-            if len(parts)<5: continue
-            total=int(parts[2])*1024; used=int(parts[3])*1024
-            owned=bool(receipt and receipt.get("swap_area_id")==canonical_digest({"index":index,"total":total})[:24])
-            areas.append({"area_id":canonical_digest({"index":index,"total":total})[:24],"type":"file" if parts[1]=="file" else "partition","total_bytes":total,"used_bytes":used,"active":True,"persistent":"unknown","priority":int(parts[4]),"ownership":"owned" if owned else "unmanaged"})
-        unmanaged=any(x["ownership"]!="owned" for x in areas)
-        return {"observed_at":self.now().isoformat().replace("+00:00","Z"),
-            "memory":{"total_bytes":memory.get("MemTotal"),"available_bytes":memory.get("MemAvailable")},
-            "filesystem":{"total_bytes":disk.total,"free_bytes":disk.free},"swap_areas":areas,
-            "swappiness":{"effective":None,"owned":bool(receipt),"drifted":False},
-            "monitor":{"service_state":"unknown","timer_state":"unknown","freshness":"unknown","interval_seconds":300},
-            "container_eligibility":{"state":"unknown"},"reboot_verification":"unverified",
-            "operation_block":None,"ownership":"owned" if receipt else "absent",
-            "evidence_state":"unmanaged" if unmanaged else "known"}
+        observed_at = self.now().isoformat().replace("+00:00", "Z")
+        empty = {"observed_at": observed_at, "memory": {"total_bytes": None,
+            "available_bytes": None}, "filesystem": {"total_bytes": None, "free_bytes": None},
+            "swap_areas": [], "swappiness": {"effective": None, "owned": False,
+            "drifted": False}, "monitor": {"service_state": "unknown",
+            "timer_state": "unknown", "freshness": "unknown", "interval_seconds": None,
+            "latest_sample_at": None, "next_sample_at": None, "sustained_swap_use": None,
+            "pressure_state": "unknown"}, "ownership": "unknown",
+            "container_eligibility": {"state": "unsupported"},
+            "reboot_verification": "unverified", "operation_block": None}
+        if platform.system() != "Linux":
+            return bounded({**empty, "evidence_state": "unsupported"}, 256 * 1024)
+        complete = True
+        try:
+            memory = self._kv(self.read_text("/proc/meminfo"))
+            swap_lines = self.read_text("/proc/swaps").splitlines()
+            disk = shutil.disk_usage(STATE.parent)
+        except (OSError, KeyError, TypeError, ValueError):
+            return bounded({**empty, "container_eligibility": {"state": "unknown"},
+                            "evidence_state": "partial"}, 256 * 1024)
+        memory_total = memory.get("MemTotal"); memory_available = memory.get("MemAvailable")
+        if not isinstance(memory_total, int) or not isinstance(memory_available, int):
+            complete = False
+        receipt = None; receipt_malformed = False
+        receipt_text = self._optional_text(RECEIPT)
+        if receipt_text is not None:
+            try: receipt = OwnershipReceipt.from_dict(json.loads(receipt_text)).to_dict()
+            except (TypeError, ValueError): receipt_malformed = True
+        swappiness = None
+        try: swappiness = self._bounded_integer(self._optional_text("/proc/sys/vm/swappiness"))
+        except ValueError: complete = False
+        if swappiness is None: complete = False
+        areas = []; malformed_swap = False
+        for line in swap_lines[1:] if swap_lines else ():
+            parts = line.split()
+            try:
+                if len(parts) != 5 or parts[1] not in {"file", "partition"}: raise ValueError
+                total = int(parts[2]) * 1024; used = int(parts[3]) * 1024; priority = int(parts[4])
+                if total < 0 or used < 0 or used > total: raise ValueError
+            except ValueError:
+                malformed_swap = True; continue
+            area_id = canonical_digest({"type": parts[1], "total_bytes": total,
+                                        "priority": priority})[:24]
+            owned = bool(receipt and receipt.get("swap_area_id") == area_id)
+            areas.append({"area_id": area_id, "type": parts[1], "total_bytes": total,
+                          "used_bytes": used, "active": True,
+                          "persistent": bool(owned and receipt["lifecycle_state"] == "enabled"),
+                          "priority": priority, "ownership": "owned" if owned else "unmanaged"})
+        unmanaged = any(area["ownership"] != "owned" for area in areas)
+        if malformed_swap or receipt_malformed: complete = False
+        monitor_owned = bool(receipt and receipt["lifecycle_state"] == "enabled")
+        service_state = self._unit_state("sandbox-host-memory-monitor.service") if monitor_owned else "missing"
+        timer_state = self._unit_state("sandbox-host-memory-monitor.timer") if monitor_owned else "missing"
+        target_identity = receipt.get("target_identity") if receipt else None
+        result = {"observed_at": observed_at,
+            "memory": {"total_bytes": memory_total, "available_bytes": memory_available},
+            "filesystem": {"total_bytes": disk.total, "free_bytes": disk.free},
+            "swap_areas": areas,
+            "swappiness": {"effective": swappiness, "owned": monitor_owned,
+                            "drifted": bool(monitor_owned and swappiness != 15)},
+            "monitor": {"service_state": service_state, "timer_state": timer_state,
+                        "freshness": "unknown", "interval_seconds": 300 if monitor_owned else None,
+                        "latest_sample_at": None, "next_sample_at": None,
+                        "sustained_swap_use": None, "pressure_state": "unknown"},
+            "container_eligibility": self._container_limits(),
+            "reboot_verification": (receipt or {}).get("reboot_verification", "unverified"),
+            "operation_block": None,
+            "ownership": "unknown" if receipt_malformed else "owned" if receipt else "absent",
+            "evidence_state": ("unmanaged" if unmanaged else "partial" if not complete
+                               else "drifted" if monitor_owned and swappiness != 15 else "known")}
+        if target_identity: result["target_identity"] = target_identity
+        return bounded(result, 256 * 1024)
 
     def sample(self):
         state=self.observe(); memory=state.get("memory") or {}; areas=state.get("swap_areas") or []

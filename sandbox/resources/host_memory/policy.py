@@ -18,8 +18,8 @@ class PolicyRefusal(ValueError):
 
 
 def _integer(value, code="invalid_size"):
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise PolicyRefusal(code, "value must be an integer")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PolicyRefusal(code, "value must be a non-negative integer")
     return value
 
 
@@ -89,6 +89,7 @@ def build_plan(operation, target, state, *, size_gib=4, now=None):
         "effective_policy": policy.to_dict() if policy else None,
         "calculations": calculations, "intended_changes": list(ACTIVE_ARTIFACTS),
         "rollback_scope": list(ACTIVE_ARTIFACTS), "requires_confirmation": True,
+        "state": "planned",
     }
     payload["plan_id"] = canonical_digest(payload)
     return payload
@@ -107,5 +108,9 @@ def freshness(sampled_at, now, seconds=660):
 
 
 def sustained_swap_use(samples, threshold=512 * 1024 * 1024):
-    valid = [s for s in samples if s.get("status") == "valid"][-3:]
-    return len(valid) == 3 and all((s.get("swap") or {}).get("used_bytes", -1) >= threshold for s in valid)
+    recent = list(samples)[-3:]
+    return len(recent) == 3 and all(
+        sample.get("status") == "valid"
+        and (sample.get("swap") or {}).get("used_bytes", -1) >= threshold
+        for sample in recent
+    )

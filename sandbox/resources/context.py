@@ -118,3 +118,13 @@ def host_memory_service(remote: str | None = None):
         Path(RUNTIME_DIR) / "resources" / "host-memory",
     )
     return HostMemoryService(adapter, repository)
+
+
+def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
+    """Return Feature 046's immutable read-only governance projection only."""
+    service = host_memory_service(remote)
+    result = service.status(budget_seconds)
+    if not result.get("ok"):
+        error = result.get("error") or {}
+        raise ValueError(error.get("code", "response_invalid"))
+    return service.projection(result["data"])

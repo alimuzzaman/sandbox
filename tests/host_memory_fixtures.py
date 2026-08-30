@@ -3,12 +3,42 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 GIB = 1024 ** 3
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
 MARKER = "a" * 24
 REVISION = "b" * 24
 TARGET = "host-fixture"
+PROC_MEMINFO = """\
+MemTotal:       16777216 kB
+MemFree:         2097152 kB
+MemAvailable:   12582912 kB
+Buffers:         1048576 kB
+Cached:          9437184 kB
+SwapCached:            0 kB
+SwapTotal:       4194304 kB
+SwapFree:        3670016 kB
+"""
+PROC_SWAPS_EMPTY = "Filename\tType\tSize\tUsed\tPriority\n"
+PROC_SWAPS_OWNED = (
+    "Filename\tType\tSize\tUsed\tPriority\n"
+    "/var/lib/sandbox/host-memory/sandbox.swap file 4194304 524288 -2\n"
+)
+CGROUP_V2 = {
+    "/proc/self/cgroup": "0::/fixture.scope\n",
+    "/sys/fs/cgroup/memory.max": str(12 * GIB),
+    "/sys/fs/cgroup/memory.current": str(6 * GIB),
+    "/sys/fs/cgroup/memory.swap.max": str(2 * GIB),
+    "/sys/fs/cgroup/memory.swap.current": str(256 * 1024 ** 2),
+}
+CGROUP_V1 = {
+    "/proc/self/cgroup": "5:memory:/fixture.scope\n",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes": str(12 * GIB),
+    "/sys/fs/cgroup/memory/memory.usage_in_bytes": str(6 * GIB),
+    "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes": str(14 * GIB),
+    "/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes": str(7 * GIB),
+}
 
 
 def eligible_state(**overrides):
@@ -36,6 +66,34 @@ def service_evidence():
         "ownership_marker": MARKER, "runtime_revision": REVISION,
         "resource_schema": 1, "host_memory_schema": 1, "transport": "control",
     }
+
+
+def ownership_receipt(*, lifecycle_state="enabled"):
+    return {
+        "schema_version": 1,
+        "target_identity": TARGET,
+        "created_by_operation": "c" * 64,
+        "last_verified_operation": "d" * 64,
+        "policy": {
+            "size_gib": 4, "swappiness": 15,
+            "sample_interval_seconds": 300, "freshness_seconds": 660,
+            "warning_swap_used_bytes": 512 * 1024 ** 2,
+            "warning_consecutive_samples": 3, "history_files": 9,
+            "history_bytes": 32 * 1024 ** 2, "sample_timeout_seconds": 5,
+        },
+        "artifacts": {"swap_file": {"kind": "regular", "mode": 0o600,
+                                     "digest": "e" * 64, "state": "active"}},
+        "swap_area_id": "f" * 24,
+        "prior_swappiness": {"effective": 60, "persistent": False},
+        "verified_at": "2026-08-30T12:00:00Z",
+        "reboot_verification": {"state": "unverified", "observed_at": None},
+        "lifecycle_state": lifecycle_state,
+    }
+
+
+def command_result(*, returncode=0, output="active"):
+    """A narrow fake runner result; it deliberately has no environment field."""
+    return SimpleNamespace(returncode=returncode, stdout=output, stderr="")
 
 
 def sample(at="2026-08-30T12:00:00Z", used=0, status="valid"):

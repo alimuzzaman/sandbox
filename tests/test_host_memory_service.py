@@ -4,6 +4,8 @@ from pathlib import Path
 from sandbox.resources.host_memory.repository import HostMemoryRepository
 from sandbox.resources.host_memory.service import HostMemoryService
 from tests.host_memory_fixtures import MARKER, NOW, REVISION, eligible_state
+from tests.host_memory_fixtures import sample
+from tests.host_memory_assertions import assert_privacy_bounded
 
 class FakeRemote:
     name="r"; marker=MARKER; revision=REVISION; record={"identity":"host"}
@@ -26,3 +28,29 @@ class HostMemoryServiceTest(unittest.TestCase):
     def test_planning_never_sends_remote_plan_action(self):
         self.service.plan("enable"); self.assertEqual([c[0] for c in self.remote.calls],["host_memory_status"])
     def test_history_is_bounded_action(self): self.assertEqual(self.service.history(limit=1000)["action"],"swap-history")
+
+    def test_status_composes_freshness_warning_and_projection(self):
+        state = eligible_state(
+            monitor={"service_state":"active", "timer_state":"active",
+                     "latest_sample_at":"2026-08-30T11:55:00Z", "interval_seconds":300,
+                     "freshness":"unknown", "sustained_swap_use":None,
+                     "pressure_state":"normal"}
+        )
+        self.remote.call = lambda action, **fields: ({**state, "target_identity":"host",
+            "recent_samples":[sample("2026-08-30T11:45:00Z",512*1024**2),
+                              sample("2026-08-30T11:50:00Z",512*1024**2),
+                              sample("2026-08-30T11:55:00Z",512*1024**2)]})
+        result = self.service.status()
+        self.assertEqual(result["data"]["monitor"]["freshness"], "fresh")
+        self.assertTrue(result["data"]["monitor"]["sustained_swap_use"])
+        projection = self.service.projection(result["data"])
+        self.assertTrue(projection.sustained_swap_use)
+        assert_privacy_bounded(self, projection.to_dict(), maximum=64*1024)
+
+    def test_unknown_status_is_partial_and_non_authorizing(self):
+        self.remote.call = lambda action, **fields: {**eligible_state(evidence_state="unknown"),
+                                                      "target_identity":"host"}
+        result = self.service.status()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(self.service.plan("enable")["status"], "refused")

@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from .models import HostMemoryStatusProjection, canonical_digest
-from .policy import PolicyRefusal, build_plan
+from .models import bounded
+from .policy import PolicyRefusal, build_plan, freshness, sustained_swap_use
 from .repository import RepositoryError
 
 
@@ -30,6 +31,19 @@ class HostMemoryService:
     def status(self,budget_seconds=15):
         try: data=self.remote.call("host_memory_status",budget_seconds=budget_seconds)
         except Exception as exc: return failure("swap-status",exc,self.target,"failed")
+        data = dict(data)
+        monitor = dict(data.get("monitor") or {})
+        latest = monitor.get("latest_sample_at")
+        if latest:
+            try: monitor["freshness"] = freshness(latest, self.now())
+            except (TypeError, ValueError): monitor["freshness"] = "malformed"
+        recent = data.pop("recent_samples", None)
+        if isinstance(recent, list):
+            monitor["sustained_swap_use"] = sustained_swap_use(recent)
+        data["monitor"] = monitor
+        try: data = bounded(data, 256 * 1024)
+        except (TypeError, ValueError) as exc:
+            return failure("swap-status", exc, self.target, "failed")
         return envelope("swap-status","complete" if data.get("evidence_state")=="known" else "partial",target=self.target,data=data,error=None if data.get("evidence_state")=="known" else {"code":"evidence_partial","message":"host evidence is incomplete","retryable":True})
 
     def projection(self,status):

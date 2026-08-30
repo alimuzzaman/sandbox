@@ -11,7 +11,7 @@
 
 **Purpose**: Add narrow synthetic fixtures and an evidence ledger without implementing host behavior.
 
-- [ ] T001 [P] Add deterministic, secret-free host-memory fixtures with fixed `/proc`, cgroup, swap, ownership, and command-result values in `tests/host_memory_fixtures.py`
+- [X] T001 [P] Add deterministic, secret-free host-memory fixtures with fixed `/proc`, cgroup, swap, ownership, and command-result values in `tests/host_memory_fixtures.py`
 - [X] T002 [P] Add a Feature 046 acceptance ledger with separate local, synthetic-provider, human-review, live-Linux, and reboot sections in `specs/046-host-swap-monitor/acceptance-evidence.md`
 - [X] T003 [P] Add shared assertions that reject raw command output, environment dumps, host paths, process arguments, and unbounded samples in `tests/host_memory_assertions.py`
 
@@ -23,21 +23,21 @@
 
 ### Foundational RED tests
 
-- [ ] T004 [P] Add failing serialization and validation tests for status, plan, operation, sample, history, warning, and read-only projection models in `tests/test_host_memory_models.py`
-- [ ] T005 [P] Add failing boundary tests for the default 4 GiB target, valid 1 GiB and 8 GiB overrides, byte-unit arithmetic, minimum headroom, severity thresholds, and explicit unknown states in `tests/test_host_memory_policy.py`
-- [ ] T006 [P] Add failing repository tests for atomic writes, schema versions, bounded retention, operation identity, ownership metadata, and corrupt-state fail-closed behavior in `tests/test_host_memory_repository.py`
-- [ ] T007 [P] Add failing remote-result tests for typed envelopes, bounded evidence, strict underscore action allowlists, and no raw stdout or stderr projection in `tests/test_host_memory_remote.py`
-- [ ] T008 Run the foundational tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, and `tests/test_host_memory_remote.py`; confirm they fail for missing behavior and record the RED result in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T004 [P] Add failing serialization and validation tests for status, plan, operation, sample, history, warning, and read-only projection models in `tests/test_host_memory_models.py`
+- [X] T005 [P] Add failing boundary tests for the default 4 GiB target, valid 1 GiB and 8 GiB overrides, byte-unit arithmetic, minimum headroom, severity thresholds, and explicit unknown states in `tests/test_host_memory_policy.py`
+- [X] T006 [P] Add failing repository tests for atomic writes, schema versions, bounded retention, operation identity, ownership metadata, and corrupt-state fail-closed behavior in `tests/test_host_memory_repository.py`
+- [X] T007 [P] Add failing remote-result tests for typed envelopes, bounded evidence, strict underscore action allowlists, and no raw stdout or stderr projection in `tests/test_host_memory_remote.py`
+- [X] T008 Run the foundational tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, and `tests/test_host_memory_remote.py`; confirm they fail for missing behavior and record the RED result in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 ### Foundational GREEN implementation
 
-- [ ] T009 Implement versioned immutable domain models, enums, validation, and bounded serialization in `sandbox/resources/host_memory/models.py` and export only public types from `sandbox/resources/host_memory/__init__.py`
+- [X] T009 Implement versioned immutable domain models, enums, validation, and bounded serialization in `sandbox/resources/host_memory/models.py` and export only public types from `sandbox/resources/host_memory/__init__.py`
 - [X] T010 Implement pure byte-based planning, size-override bounds, thresholds, headroom, ownership, and fail-closed decision rules in `sandbox/resources/host_memory/policy.py`
-- [ ] T011 Implement atomic versioned state, sample, ownership, and operation-journal persistence behind a repository API in `sandbox/resources/host_memory/repository.py`
-- [ ] T012 Implement the typed remote action/result adapter with evidence limits and the explicit `host_memory_status`, `host_memory_history`, and `host_memory_apply` allowlist in `sandbox/resources/host_memory/remote.py`
+- [X] T011 Implement atomic versioned state, sample, ownership, and operation-journal persistence behind a repository API in `sandbox/resources/host_memory/repository.py`
+- [X] T012 Implement the typed remote action/result adapter with evidence limits and the explicit `host_memory_status`, `host_memory_history`, and `host_memory_apply` allowlist in `sandbox/resources/host_memory/remote.py`
 - [X] T013 Implement the base application-service response envelope, dependency interfaces, and read-only status projection contract in `sandbox/resources/host_memory/service.py`
 - [X] T014 Wire the private host-memory service factory and dependency adapters without a governance mutation export in `sandbox/resources/context.py`
-- [ ] T015 Run `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, and `tests/test_host_memory_remote.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T015 Run `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, and `tests/test_host_memory_remote.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Typed foundations are usable. No host mutation is reachable.
 
@@ -51,21 +51,21 @@
 
 ### Tests for User Story 1 - RED first
 
-- [ ] T016 [P] [US1] Add failing provider observation tests for `/proc`, cgroup v1/v2, active swap, service state, ownership, effective limits, unsupported Linux evidence, and read-only execution in `tests/test_host_memory_provider.py`
-- [ ] T017 [P] [US1] Add failing service tests for status composition, warning derivation, freshness, unknown evidence, and bounded serialization in `tests/test_host_memory_service.py`
-- [ ] T018 [P] [US1] Add failing fixed-action control-contract tests for `host_memory_status` authorization, capability checks, evidence bounds, and zero mutation in `tests/test_host_memory_remote.py`
-- [ ] T019 [P] [US1] Add failing CLI contract tests for `resources swap-status`, `--json`, stable exit classes, and aggregate-only output in `tests/test_resource_interfaces.py`
-- [ ] T020 [P] [US1] Add failing architecture tests proving Feature 047 consumers receive only `HostMemoryStatusProjection` and cannot import planner, provider, repository, or apply methods in `tests/test_host_memory_interfaces.py`
-- [ ] T021 [US1] Run `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_interfaces.py`, and `tests/test_host_memory_interfaces.py`; confirm the User Story 1 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T016 [P] [US1] Add failing provider observation tests for `/proc`, cgroup v1/v2, active swap, service state, ownership, effective limits, unsupported Linux evidence, and read-only execution in `tests/test_host_memory_provider.py`
+- [X] T017 [P] [US1] Add failing service tests for status composition, warning derivation, freshness, unknown evidence, and bounded serialization in `tests/test_host_memory_service.py`
+- [X] T018 [P] [US1] Add failing fixed-action control-contract tests for `host_memory_status` authorization, capability checks, evidence bounds, and zero mutation in `tests/test_host_memory_remote.py`
+- [X] T019 [P] [US1] Add failing CLI contract tests for `resources swap-status`, `--json`, stable exit classes, and aggregate-only output in `tests/test_resource_interfaces.py`
+- [X] T020 [P] [US1] Add failing architecture tests proving Feature 047 consumers receive only `HostMemoryStatusProjection` and cannot import planner, provider, repository, or apply methods in `tests/test_host_memory_interfaces.py`
+- [X] T021 [US1] Run `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_interfaces.py`, and `tests/test_host_memory_interfaces.py`; confirm the User Story 1 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 ### Implementation for User Story 1 - GREEN after T021
 
-- [ ] T022 [US1] Implement bounded read-only Linux observation, cgroup normalization, swap enumeration, ownership classification, and explicit unknown results in `sandbox/resources/host_memory/provider.py`
-- [ ] T023 [US1] Compose provider observations, stored samples, policy warnings, freshness, and the only immutable governance projection in `sandbox/resources/host_memory/service.py` and expose that projection without mutation methods from `sandbox/resources/context.py`
+- [X] T022 [US1] Implement bounded read-only Linux observation, cgroup normalization, swap enumeration, ownership classification, and explicit unknown results in `sandbox/resources/host_memory/provider.py`
+- [X] T023 [US1] Compose provider observations, stored samples, policy warnings, freshness, and the only immutable governance projection in `sandbox/resources/host_memory/service.py` and expose that projection without mutation methods from `sandbox/resources/context.py`
 - [X] T024 [US1] Register the authorized fixed `host_memory_status` control action without shell or arbitrary-command input in `mcp/wp-server/server.py`
 - [X] T025 [US1] Add the controller-side typed status request and response mapping with no SSH fallback in `sandbox/core/_remote.py`
-- [ ] T026 [US1] Add `resources swap-status` text and JSON presentation with stable error classes in `sandbox/commands/resources.py`
-- [ ] T027 [US1] Run the User Story 1 tests in `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_interfaces.py`, and `tests/test_host_memory_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T026 [US1] Add `resources swap-status` text and JSON presentation with stable error classes in `sandbox/commands/resources.py`
+- [X] T027 [US1] Run the User Story 1 tests in `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_interfaces.py`, and `tests/test_host_memory_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: The read-only status path is independently usable and is the MVP. Feature 047 may consume its projection but owns no Feature 046 mutation.
 

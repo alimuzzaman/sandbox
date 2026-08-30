@@ -1138,6 +1138,18 @@ def _emit_host_memory(payload, json_output):
     if data.get("plan_id"): print(f"  plan: {data['plan_id']} expires: {data.get('expires_at')}")
     memory = data.get("memory") or {}
     if memory: print(f"  memory available: {_human_bytes(memory.get('available_bytes'))} / {_human_bytes(memory.get('total_bytes'))}")
+    if "ownership" in data: print(f"  ownership: {data.get('ownership', 'unknown')}")
+    swap_areas = data.get("swap_areas") or []
+    if "swap_areas" in data:
+        swap_total = sum(item.get("total_bytes", 0) for item in swap_areas
+                         if isinstance(item.get("total_bytes"), int))
+        swap_used = sum(item.get("used_bytes", 0) for item in swap_areas
+                        if isinstance(item.get("used_bytes"), int))
+        print(f"  swap used: {_human_bytes(swap_used)} / {_human_bytes(swap_total)}")
+    monitor = data.get("monitor") or {}
+    if monitor: print(f"  monitor: {monitor.get('freshness', 'unknown')}")
+    eligibility = data.get("container_eligibility") or {}
+    if eligibility: print(f"  container swap: {eligibility.get('state', 'unknown')}")
     counts = data.get("counts") or {}
     if counts: print(f"  samples: {counts.get('returned', 0)}; malformed: {counts.get('malformed', 0)}")
 

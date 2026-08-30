@@ -5,6 +5,26 @@ safety or release readiness.
 
 ## Local RED/GREEN evidence
 
+- Foundational RED was captured against the pre-existing scaffold with
+  `python3 -m unittest -v tests.test_host_memory_models tests.test_host_memory_policy
+  tests.test_host_memory_repository tests.test_host_memory_remote`: 22 tests ran with five
+  failures and two errors. Missing behavior was specific to strict model types, receipt
+  persistence, immutable operation identity, total history retention, consecutive warning
+  semantics, request range/budget validation, and response-envelope bounds.
+- After the bounded foundational implementation, the same four-module command ran 27 tests
+  and passed in 0.015 seconds.
+- User Story 1 RED was captured against the pre-existing provider/service scaffold with
+  `python3 -m unittest -v tests.test_host_memory_provider tests.test_host_memory_service
+  tests.test_host_memory_remote tests.test_resource_interfaces.TestHostMemoryResourceInterfaces
+  tests.test_host_memory_interfaces`: 26 tests ran with one failure and four errors. Missing
+  behavior was specific to cgroup v1/v2 normalization, receipt/monitor observation, malformed
+  evidence handling, and service freshness/warning composition.
+- After the bounded read-only implementation, the combined foundational and User Story 1
+  command ran 52 tests and passed in 0.104 seconds. This is local synthetic evidence only;
+  it does not prove a deployed service, a live Linux host, reboot persistence, or mutation.
+- The exact T027 module set, including the full adjacent resource-interface module, ran 62
+  tests and passed in 0.283 seconds.
+
 - The requested `.cli-venv/bin/python` runtime was absent (`no such file or directory`).
 - `python3 -m unittest -v tests.test_host_memory_models tests.test_host_memory_policy
   tests.test_host_memory_repository tests.test_host_memory_remote
@@ -26,9 +46,10 @@ safety or release readiness.
 - The seven-suite adjacent gate ran 352 tests in 8.900 seconds and ended with 42 environment
   errors because the worktree has no CLI venv and system Python lacks PyYAML. This is not a
   pass and no failing assertion was attributed to Feature 046.
-- Test files were not executed against the unimplemented baseline before production code was
-  added. Therefore the required per-phase RED tasks remain unchecked even though missing-
-  behavior assertions now exist and the focused current-source suite is green.
+- The original scaffold tests were not executed against a wholly unimplemented baseline.
+  The later strict foundational and User Story 1 tests were executed against that scaffold
+  before their corresponding bounded implementation changes, producing the RED results
+  above. No RED claim is made for later user stories.
 
 ## Fixed authenticated synthetic-provider evidence
 

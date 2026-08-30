@@ -7,9 +7,11 @@ overflowing chunk itself is smaller than the tail window — the tail must be
 the TRUE last bytes of the full stream, never a duplicated prefix fragment.
 """
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from sandbox.resources.models import ResourceCancellationSignal
@@ -50,21 +52,25 @@ class TestBoundedEdgeCapture(unittest.TestCase):
         popen.assert_not_called()
 
     def test_later_cancellation_probe_failure_terminates_owned_child(self):
-        class FailingProbe:
-            def __init__(self):
-                self.calls = 0
+        with tempfile.TemporaryDirectory() as raw:
+            ready = Path(raw) / "ready"
 
-            def terminal_status(self):
-                self.calls += 1
-                if self.calls > 2:
-                    raise RuntimeError("untrusted detail")
-                return None
+            class FailingProbe:
+                def terminal_status(self):
+                    if ready.exists():
+                        raise RuntimeError("untrusted detail")
+                    return None
 
-        started = time.monotonic()
-        result = BoundedProcessRunner(max_output=1024).run((
-            sys.executable, "-c",
-            "import time; print('retained', flush=True); time.sleep(30)",
-        ), timeout=10, cancellation=FailingProbe())
+            script = (
+                "import pathlib,time; "
+                "print('retained', flush=True); "
+                f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+                "time.sleep(30)"
+            )
+            started = time.monotonic()
+            result = BoundedProcessRunner(max_output=1024).run((
+                sys.executable, "-c", script,
+            ), timeout=10, cancellation=FailingProbe())
         self.assertEqual(result.returncode, 130)
         self.assertIn("retained", result.stdout)
         self.assertIn("cancellation probe failed", result.stderr)
@@ -72,36 +78,57 @@ class TestBoundedEdgeCapture(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0)
 
     def test_cancellation_terminates_and_reaps_owned_child_with_partial_output(self):
-        signal = ResourceCancellationSignal()
-        timer = threading.Timer(0.1, signal.cancel)
-        timer.start()
-        started = time.monotonic()
-        try:
-            result = BoundedProcessRunner(max_output=1024).run((
-                sys.executable, "-c",
-                "import sys,time; print('completed', flush=True); time.sleep(30)",
-            ), timeout=10, cancellation=signal)
-        finally:
-            timer.cancel()
+        with tempfile.TemporaryDirectory() as raw:
+            ready = Path(raw) / "ready"
+            signal = ResourceCancellationSignal()
+
+            def cancel_when_ready():
+                deadline = time.monotonic() + 2
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                signal.cancel()
+
+            watcher = threading.Thread(target=cancel_when_ready)
+            watcher.start()
+            script = (
+                "import pathlib,time; "
+                "print('completed', flush=True); "
+                f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+                "time.sleep(30)"
+            )
+            started = time.monotonic()
+            try:
+                result = BoundedProcessRunner(max_output=1024).run((
+                    sys.executable, "-c", script,
+                ), timeout=10, cancellation=signal)
+            finally:
+                watcher.join(timeout=2)
         self.assertEqual(result.returncode, 130)
         self.assertIn("completed", result.stdout)
         self.assertLess(time.monotonic() - started, 2.0)
 
-    def test_post_spawn_cancellation_keeps_delayed_startup_output_within_deadline(self):
-        signal = ResourceCancellationSignal()
-        timer = threading.Timer(0.01, signal.cancel)
-        timer.start()
-        started = time.monotonic()
-        try:
-            result = BoundedProcessRunner(max_output=1024).run((
-                sys.executable, "-c",
-                "import time; time.sleep(0.1); print('late-retained', flush=True); time.sleep(30)",
-            ), timeout=1, cancellation=signal)
-        finally:
-            timer.cancel()
+    def test_post_spawn_cancellation_does_not_allow_future_output(self):
+        with tempfile.TemporaryDirectory() as raw:
+            mutation = Path(raw) / "ran-after-cancel"
+            signal = ResourceCancellationSignal()
+            timer = threading.Timer(0.01, signal.cancel)
+            timer.start()
+            script = (
+                "import pathlib,time; time.sleep(0.3); "
+                f"pathlib.Path({str(mutation)!r}).write_text('mutated'); "
+                "print('ran-after-cancel', flush=True); time.sleep(30)"
+            )
+            started = time.monotonic()
+            try:
+                result = BoundedProcessRunner(max_output=1024).run((
+                    sys.executable, "-c", script,
+                ), timeout=1, cancellation=signal)
+            finally:
+                timer.cancel()
+            self.assertFalse(mutation.exists())
         self.assertEqual(result.returncode, 130)
         self.assertEqual(result.termination_reason, "cancelled")
-        self.assertIn("late-retained", result.stdout)
+        self.assertNotIn("ran-after-cancel", result.stdout)
         self.assertLess(time.monotonic() - started, 1.0)
 
     def _feed(self, cap: _BoundedEdgeCapture, data: bytes, chunk: int) -> None:

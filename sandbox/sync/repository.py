@@ -525,6 +525,9 @@ class SyncRepository:
                         "active" if relationship.mode in {"live", "checkpoint"}
                         else "stopped"
                     ),
+                    conflict_code=None,
+                    conflict_request_id=None,
+                    conflict_generation_id=None,
                     updated_at=when or utc_now(),
                 )
             elif lifecycle in {"refused", "failed", "diverged"}:
@@ -539,6 +542,24 @@ class SyncRepository:
                             and refusal_code == "ownership_conflict"
                         )
                         else relationship.lifecycle
+                    ),
+                    conflict_code=(
+                        "ownership_conflict" if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_code
+                    ),
+                    conflict_request_id=(
+                        generation.request_id if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_request_id
+                    ),
+                    conflict_generation_id=(
+                        generation.generation_id if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_generation_id
                     ),
                     updated_at=utc_now(),
                 )

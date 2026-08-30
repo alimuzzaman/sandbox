@@ -447,6 +447,37 @@ class SyncServiceTests(unittest.TestCase):
             self.repository.get_relationship(relationship.relationship_id).lifecycle,
             "conflicted",
         )
+        stored = self.repository.get_relationship(relationship.relationship_id)
+        self.assertEqual(stored.conflict_code, "ownership_conflict")
+        self.assertEqual(stored.conflict_request_id, "request-remote-conflict")
+        self.assertEqual(stored.conflict_generation_id, generation.generation_id)
+
+        for index in range(257):
+            manifest_digest = f"{index + 1:064x}"
+            self.repository.reserve_generation(
+                relationship_id=relationship.relationship_id,
+                request_id=f"later-request-{index}",
+                request_digest=self.repository.canonical_request_digest({
+                    "request": index, "manifest": manifest_digest,
+                }),
+                manifest_digest=manifest_digest,
+                file_count=1, byte_count=1,
+            )
+        bounded = self.repository.list_generations(relationship.relationship_id)
+        self.assertEqual(len(bounded), 256)
+        self.assertNotIn(generation.generation_id, {
+            item.generation_id for item in bounded
+        })
+        for conflict in (
+            service.status(self.root, remote="remote", workspace_id="workspace"),
+            service.start(
+                self.root, remote="remote", workspace_id="workspace", mode="live",
+            ),
+            service.stop(self.root, remote="remote", workspace_id="workspace"),
+        ):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
 
         accepting["enabled"] = True
         accepted = service.once(

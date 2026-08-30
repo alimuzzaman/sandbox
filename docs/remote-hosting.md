@@ -49,7 +49,9 @@ workspace controller. A mismatch returns `ownership_conflict` before any source
 bytes are uploaded; CLI and MCP expose the same bounded code. Transfer also
 requires a complete ready workspace record whose checkout locator and exact-tree
 deployment receipt provide the canonical source binding; destroyed, incomplete,
-unhealthy, ambiguous, or unbound records remain unavailable.
+unhealthy, ambiguous, or unbound records remain unavailable. The controller
+also attests that both protected checkout directories still exist as real
+directories at status time; stored locator digests alone are not acceptance.
 
 Lost acknowledgments reconcile with the original request identity. Remote
 divergence is never adopted or overwritten automatically; `sync resolve

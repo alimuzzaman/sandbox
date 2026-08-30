@@ -110,28 +110,28 @@ class SyncService:
         self, relationship: SynchronizationRelationship,
         generation=None,
     ) -> dict | None:
-        candidates = (
-            (generation,)
-            if generation is not None
-            else reversed(self.repository.list_generations(
-                relationship.relationship_id
-            ))
+        if (
+            generation is not None
+            and generation.lifecycle == "refused"
+            and generation.refusal_code == "ownership_conflict"
+        ):
+            request_id = generation.request_id
+        elif relationship.lifecycle == "conflicted":
+            request_id = (
+                relationship.conflict_request_id
+                or relationship.relationship_id
+            )
+        else:
+            return None
+        return failure_envelope(
+            code="ownership_conflict", status="conflicted",
+            relationship_id=relationship.relationship_id,
+            remote_name=relationship.remote_name,
+            request_id=request_id,
+            accepted_generation=relationship.accepted_generation_id,
+            pending_generation=relationship.pending_generation_id,
+            retryable=False,
         )
-        for candidate in candidates:
-            if (
-                candidate.lifecycle == "refused"
-                and candidate.refusal_code == "ownership_conflict"
-            ):
-                return failure_envelope(
-                    code="ownership_conflict", status="conflicted",
-                    relationship_id=relationship.relationship_id,
-                    remote_name=relationship.remote_name,
-                    request_id=candidate.request_id,
-                    accepted_generation=relationship.accepted_generation_id,
-                    pending_generation=relationship.pending_generation_id,
-                    retryable=False,
-                )
-        return None
 
     def _reconcile_generation(self, relationship, generation, *, remote: str) -> dict:
         """Probe uncertain acceptance once and require exact generation evidence."""

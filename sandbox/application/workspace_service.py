@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -118,6 +119,29 @@ def _public_record(record, repository: WorkspaceRepository, *,
         )
         if isinstance(record.metadata.get(key), str)
     }
+    def live_directory(locator_key: str, digest: str | None) -> bool:
+        locator = record.metadata.get(locator_key)
+        if (
+            not isinstance(locator, str)
+            or not isinstance(digest, str)
+            or "sha256:" + hashlib.sha256(locator.encode()).hexdigest() != digest
+        ):
+            return False
+        try:
+            details = Path(locator).lstat()
+        except OSError:
+            return False
+        return stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+
+    checkout_present = live_directory("checkout_locator", checkout_digest)
+    source_present = live_directory(
+        "source_checkout_locator", source_checkout_digest,
+    )
+    source_binding = {
+        "checkout_present": checkout_present,
+        "source_present": source_present,
+        "healthy": checkout_present and source_present,
+    }
     migration = repository.migration_summary(record.workspace_id)
     legacy_digest = record.metadata.get("legacy_source_digest")
     if (migration["total"] == 0 and record.source == "legacy" and
@@ -154,6 +178,7 @@ def _public_record(record, repository: WorkspaceRepository, *,
         "index": {"generation": generation, "complete": complete},
         "migration": migration,
         "deployment_proof": deployment or None,
+        "source_binding": source_binding,
         "error": None if complete else "workspace_index_incomplete",
     }
 

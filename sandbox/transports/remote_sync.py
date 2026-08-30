@@ -228,6 +228,7 @@ class RemoteSyncTransport:
         checkout = evidence.get("checkout")
         locator_digests = evidence.get("locator_digests")
         deployment_proof = evidence.get("deployment_proof")
+        source_binding = evidence.get("source_binding")
         ready = (
             evidence.get("ok") is True
             and evidence.get("lifecycle") == "ready"
@@ -248,10 +249,15 @@ class RemoteSyncTransport:
             and isinstance(locator_digests.get("source_checkout"), str)
             and _SHA256.fullmatch(locator_digests["source_checkout"]) is not None
             and isinstance(deployment_proof, Mapping)
+            and deployment_proof.get("checkout_locator_digest") == checkout.get("identity")
             and isinstance(deployment_proof.get("source_identity"), str)
             and _SHA256.fullmatch(deployment_proof["source_identity"]) is not None
             and isinstance(deployment_proof.get("source_commit"), str)
             and _FULL_COMMIT.fullmatch(deployment_proof["source_commit"]) is not None
+            and isinstance(source_binding, Mapping)
+            and source_binding.get("checkout_present") is True
+            and source_binding.get("source_present") is True
+            and source_binding.get("healthy") is True
         )
         if not ready:
             raise RemoteSyncTransportError(

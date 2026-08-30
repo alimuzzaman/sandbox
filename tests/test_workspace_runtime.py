@@ -132,6 +132,31 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             )
             first = service.create(request)
             self.assertEqual(first["deployment_proof"]["source_commit"], "a" * 40)
+            self.assertEqual(first["source_binding"], {
+                "checkout_present": True,
+                "source_present": True,
+                "healthy": True,
+            })
+            identity = TargetRequest(
+                project_identity="project:test", workspace="unit",
+                workspace_id=first["workspace_id"],
+            )
+            checkout.rmdir()
+            stale_checkout = service.status(identity)["source_binding"]
+            self.assertEqual(stale_checkout, {
+                "checkout_present": False,
+                "source_present": True,
+                "healthy": False,
+            })
+            checkout.mkdir()
+            source_checkout.rmdir()
+            stale_source = service.status(identity)["source_binding"]
+            self.assertEqual(stale_source, {
+                "checkout_present": True,
+                "source_present": False,
+                "healthy": False,
+            })
+            source_checkout.mkdir()
             proof["source_identity"] = "sha256:" + "3" * 64
             proof["commit"] = "b" * 40
             second = service.create(request)

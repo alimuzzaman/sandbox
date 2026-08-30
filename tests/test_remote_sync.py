@@ -35,8 +35,14 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 "source_checkout": "sha256:" + "3" * 64,
             },
             "deployment_proof": {
+                "checkout_locator_digest": checkout,
                 "source_identity": "sha256:" + "4" * 64,
                 "source_commit": "a" * 40,
+            },
+            "source_binding": {
+                "checkout_present": True,
+                "source_present": True,
+                "healthy": True,
             },
             "error": None,
         }
@@ -178,6 +184,13 @@ class RemoteSyncTransportTests(unittest.TestCase):
                     "checkout": "sha256:" + "9" * 64,
                 },
             },
+            "mismatched_receipt_checkout_digest": {
+                **baseline,
+                "deployment_proof": {
+                    **baseline["deployment_proof"],
+                    "checkout_locator_digest": "sha256:" + "8" * 64,
+                },
+            },
             "missing_locator_map": {key: value for key, value in baseline.items()
                                     if key != "locator_digests"},
             "missing_source_commit": {
@@ -195,7 +208,30 @@ class RemoteSyncTransportTests(unittest.TestCase):
             },
             "missing_source_identity": {
                 **baseline,
-                "deployment_proof": {"source_commit": "a" * 40},
+                "deployment_proof": {
+                    "checkout_locator_digest": baseline["checkout"]["identity"],
+                    "source_commit": "a" * 40,
+                },
+            },
+            "stale_live_checkout": {
+                **baseline,
+                "source_binding": {
+                    "checkout_present": False,
+                    "source_present": True,
+                    "healthy": False,
+                },
+            },
+            "missing_live_source": {
+                **baseline,
+                "source_binding": {
+                    "checkout_present": True,
+                    "source_present": False,
+                    "healthy": False,
+                },
+            },
+            "missing_live_attestation": {
+                key: value for key, value in baseline.items()
+                if key != "source_binding"
             },
         }
         for label, evidence in cases.items():

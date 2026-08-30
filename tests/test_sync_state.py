@@ -54,6 +54,16 @@ class SyncStateTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.repo.lock_path.stat().st_mode & 0o777, 0o600)
 
+    def test_legacy_relationship_without_conflict_identity_loads_compatibly(self):
+        legacy = relationship().as_dict()
+        legacy.pop("conflict_code")
+        legacy.pop("conflict_request_id")
+        legacy.pop("conflict_generation_id")
+        loaded = SynchronizationRelationship.from_dict(legacy)
+        self.assertIsNone(loaded.conflict_code)
+        self.assertIsNone(loaded.conflict_request_id)
+        self.assertIsNone(loaded.conflict_generation_id)
+
     def test_default_journal_is_scoped_below_sandbox_home_runtime_sync(self):
         with patch.dict(os.environ, {"SANDBOX_HOME": self.temporary.name}):
             repo = SyncRepository()

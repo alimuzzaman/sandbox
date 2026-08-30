@@ -1,4 +1,7 @@
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 
 from sandbox.sync.models import (
     DivergenceRecord,
@@ -10,6 +13,7 @@ from sandbox.sync.models import (
     success_envelope,
     validate_sync_envelope,
 )
+from sandbox.sync.repository import SyncRepository
 
 
 class SyncTransportContractTests(unittest.TestCase):
@@ -103,6 +107,49 @@ class SyncTransportContractTests(unittest.TestCase):
         self.assertEqual(PinnedJob.from_dict(job.as_dict()), job)
         self.assertEqual(DivergenceRecord.from_dict(divergence.as_dict()), divergence)
         self.assertNotIn("path", repr((participant, job, divergence)).lower())
+
+    def test_concurrent_participants_coalesce_one_source_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = SyncRepository(Path(temporary) / "journal.json")
+            repository.put_relationship(self.relationship)
+            barrier = threading.Barrier(8)
+            results = []
+            errors = []
+
+            def participate(index):
+                try:
+                    barrier.wait()
+                    current = SyncRepository(repository.path)
+                    current.register_participant(Participant(
+                        f"participant_{index}", self.relationship.relationship_id,
+                        "2026-08-26T00:00:02Z",
+                    ))
+                    request_id = f"request_{index}"
+                    digest = current.canonical_request_digest({
+                        "request_id": request_id,
+                        "manifest_digest": "a" * 64,
+                    })
+                    results.append(current.reserve_generation(
+                        relationship_id=self.relationship.relationship_id,
+                        request_id=request_id, request_digest=digest,
+                        manifest_digest="a" * 64, file_count=2, byte_count=10,
+                    ))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=participate, args=(index,))
+                       for index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(repository.list_participants(
+                self.relationship.relationship_id)), 8)
+            self.assertEqual(len({item[0].generation_id for item in results}), 1)
+            self.assertEqual(len(repository.list_generations(
+                self.relationship.relationship_id)), 1)
 
 
 if __name__ == "__main__":

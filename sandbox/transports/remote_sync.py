@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import tarfile
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from sandbox.sync.capture import CaptureManifest
 from sandbox.sync.models import SourceGeneration, SynchronizationRelationship
@@ -176,12 +176,53 @@ class RemoteSyncTransport:
     """Transfer one immutable generation through the registered remote runner."""
 
     def __init__(self, *, remote_lookup: Callable, ssh_run: Callable, ssh_process: Callable,
-                 resolve_home: Callable, clock: Callable | None = None) -> None:
+                 resolve_home: Callable, workspace_preflight: Callable,
+                 clock: Callable | None = None) -> None:
+        if not callable(workspace_preflight):
+            raise TypeError("workspace_preflight is required")
         self.remote_lookup = remote_lookup
         self.ssh_run = ssh_run
         self.ssh_process = ssh_process
         self.resolve_home = resolve_home
+        self.workspace_preflight = workspace_preflight
         self.clock = clock
+
+    def _verify_workspace_owner(
+        self, relationship: SynchronizationRelationship,
+    ) -> Mapping[str, Any]:
+        """Recheck controller-owned workspace identity before source mutation."""
+        try:
+            evidence = self.workspace_preflight(relationship)
+        except RemoteSyncTransportError:
+            raise
+        except Exception as exc:
+            remote_code = getattr(exc, "code", "")
+            code = (
+                "ownership_conflict"
+                if isinstance(remote_code, str) and any(
+                    marker in remote_code
+                    for marker in ("ownership", "identity", "conflict")
+                )
+                else "remote_unavailable"
+            )
+            raise RemoteSyncTransportError(
+                "remote workspace ownership preflight failed", code,
+                retryable=code == "remote_unavailable",
+            ) from None
+        if not isinstance(evidence, Mapping):
+            raise RemoteSyncTransportError(
+                "remote workspace ownership preflight is invalid",
+                "remote_unavailable", retryable=True,
+            )
+        if (
+            evidence.get("workspace_id") != relationship.workspace_id
+            or evidence.get("project_identity") != relationship.project_identity
+        ):
+            raise RemoteSyncTransportError(
+                "remote workspace ownership does not match the synchronization relationship",
+                "ownership_conflict", retryable=False,
+            )
+        return evidence
 
     def transfer(
         self,
@@ -196,6 +237,7 @@ class RemoteSyncTransport:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict) or remote.get("provisioned") is not True:
             raise RemoteSyncTransportError("remote is not provisioned", "remote_unavailable", retryable=True)
+        self._verify_workspace_owner(relationship)
         try:
             home = self.resolve_home(remote)
             if not isinstance(home, str) or not home.startswith("/"):
@@ -261,6 +303,7 @@ class RemoteSyncTransport:
             raise RemoteSyncTransportError(
                 "remote is not provisioned", "remote_unavailable", retryable=True,
             )
+        self._verify_workspace_owner(relationship)
         try:
             home = self.resolve_home(remote)
             project_hash = hashlib.sha256(
@@ -530,11 +573,23 @@ shutil.rmtree(staging)
 
 def default_remote_sync_transport() -> RemoteSyncTransport:
     from sandbox.core import _remote
+    from sandbox.transports.remote_workspaces import RemoteWorkspaceTransport
+
+    workspace_transport = RemoteWorkspaceTransport(
+        remote_lookup=_remote.get_remote,
+        ssh_run=_remote.ssh_run,
+        remote_sb_path=_remote.remote_sb_path,
+    )
     return RemoteSyncTransport(
         remote_lookup=_remote.get_remote,
         ssh_run=_remote.ssh_run,
         ssh_process=_remote.ssh_process,
         resolve_home=_remote.resolve_sandbox_home,
+        workspace_preflight=lambda relationship: workspace_transport.status(
+            relationship.remote_name,
+            relationship.workspace_id,
+            project_identity=relationship.project_identity,
+        ),
     )
 
 

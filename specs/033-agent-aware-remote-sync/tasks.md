@@ -119,16 +119,16 @@ different project identity is rejected with no remote source mutation.
 
 ### Tests for User Story 3
 
-- [ ] T035 [P] [US3] Add resolved identity, symlink, relocation, fresh-clone, and ownership-conflict tests in `tests/test_sync_state.py`.
-- [ ] T036 [P] [US3] Add concurrent participant and duplicate-generation tests in `tests/test_sync_transport.py`.
-- [ ] T037 [P] [US3] Add redacted ownership-conflict parity tests in `tests/test_sync_cli.py` and `tests/test_sync_mcp.py`.
+- [X] T035 [P] [US3] Add resolved identity, symlink, relocation, fresh-clone, and ownership-conflict tests in `tests/test_sync_state.py`.
+- [X] T036 [P] [US3] Add concurrent participant and duplicate-generation tests in `tests/test_sync_transport.py`.
+- [X] T037 [P] [US3] Add redacted ownership-conflict parity tests in `tests/test_sync_cli.py` and `tests/test_sync_mcp.py`.
 
 ### Implementation for User Story 3
 
 - [X] T038 [US3] Implement authoritative relationship lookup by project identity, remote name, and durable workspace ID in `sandbox/sync/repository.py`.
 - [X] T039 [US3] Implement participant registration/heartbeat and relationship-level serialization in `sandbox/sync/coordinator.py`.
 - [X] T040 [US3] Integrate existing project/workspace identity resolution into `sandbox/application/sync_service.py` without reading registry JSON directly.
-- [ ] T041 [US3] Add conflict refusal before transfer and bounded redacted ownership status in `sandbox/transports/remote_sync.py`.
+- [X] T041 [US3] Add conflict refusal before transfer and bounded redacted ownership status in `sandbox/transports/remote_sync.py`.
 - [X] T042 [US3] Document shared-worktree participation and fresh-clone adoption boundaries in `docs/remote-hosting.md`.
 
 **Checkpoint**: User Story 3 is complete when concurrent local tests pass and

@@ -56,6 +56,26 @@ class SyncMcpTests(unittest.TestCase):
             "message": "synchronization status is unavailable",
         })
 
+    def test_ownership_conflict_matches_cli_code_without_private_detail(self):
+        from sandbox.sync.service import SyncServiceError
+        from tools import sync
+
+        class Conflicting:
+            def once(self, *_args, **_kwargs):
+                raise SyncServiceError(
+                    "workspace owned by /private/other token=synthetic",
+                    "ownership_conflict",
+                )
+
+        with patch.object(sync, "_service", Conflicting()):
+            result = sync.sync_once(
+                "/private/competing/project", "remote", "workspace", "request",
+            )
+        self.assertEqual(result["code"], "ownership_conflict")
+        self.assertEqual(result["message"], "synchronization operation failed")
+        self.assertNotIn("private", json.dumps(result).lower())
+        self.assertNotIn("synthetic", json.dumps(result).lower())
+
     def test_start_stop_and_resolve_use_the_same_service_operations(self):
         from tools import sync
 

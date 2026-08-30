@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from sandbox.config.facade import resolve_project_identity
 from sandbox.sync.models import DivergenceRecord, Participant, SynchronizationRelationship
 from sandbox.sync.repository import (
     RelationshipConflict,
@@ -184,6 +185,29 @@ class SyncStateTests(unittest.TestCase):
         owner = self.repo.find_workspace_owner("remote-fixture", "workspace_fixture")
         self.assertEqual(owner.project_identity, "project_fixture")
         self.assertIsNone(self.repo.find_workspace_owner("other", "workspace_fixture"))
+
+    def test_resolved_identity_coalesces_symlinks_and_separates_unadopted_roots(self):
+        project = Path(self.temporary.name) / "project"
+        project.mkdir()
+        symlink = Path(self.temporary.name) / "project-link"
+        symlink.symlink_to(project, target_is_directory=True)
+        relocated = Path(self.temporary.name) / "relocated"
+        relocated.mkdir()
+        fresh_clone = Path(self.temporary.name) / "fresh-clone"
+        fresh_clone.mkdir()
+
+        def load(root, label=None):
+            return {"root": root, "kind": "wordpress", "label": label or "default"}
+
+        canonical = resolve_project_identity(project, config_loader=load)
+        through_symlink = resolve_project_identity(symlink, config_loader=load)
+        moved_without_adoption = resolve_project_identity(relocated, config_loader=load)
+        independent_clone = resolve_project_identity(fresh_clone, config_loader=load)
+
+        self.assertEqual(through_symlink["identity"], canonical["identity"])
+        self.assertEqual(through_symlink["canonical_root"], canonical["canonical_root"])
+        self.assertNotEqual(moved_without_adoption["identity"], canonical["identity"])
+        self.assertNotEqual(independent_clone["identity"], canonical["identity"])
 
     def test_participant_heartbeat_is_bounded_and_replaces_same_session(self):
         self.repo.put_relationship(relationship())

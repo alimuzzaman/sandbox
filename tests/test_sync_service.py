@@ -376,6 +376,34 @@ class SyncServiceTests(unittest.TestCase):
                 request_id="request-conflict",
             )
 
+    def test_remote_workspace_owner_conflict_remains_bounded_and_non_retryable(self):
+        class ConflictingTransport:
+            def transfer(self, *_args):
+                error = RuntimeError("private remote ownership detail")
+                error.code = "ownership_conflict"
+                error.retryable = False
+                raise error
+
+        service = SyncService(
+            self.repository, lambda: ConflictingTransport(),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:fixture", "root": str(self.root),
+            },
+        )
+        result = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-remote-conflict",
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "ownership_conflict")
+        self.assertEqual(result["status"], "conflicted")
+        self.assertFalse(result["retryable"])
+        self.assertNotIn("private", repr(result).lower())
+        relationship = self.repository.list_relationships()[0]
+        self.assertEqual(
+            self.repository.metrics(relationship.relationship_id)["refused"], 1,
+        )
+
     def test_lost_acknowledgment_reconciles_with_original_request(self):
         class Reconciling:
             def transfer(inner, *_args):

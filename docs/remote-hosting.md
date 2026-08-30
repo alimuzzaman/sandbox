@@ -43,6 +43,10 @@ ordered relationship. Symlink locators may share that identity. A fresh clone
 or unresolved relocation is a different owner and is refused before source
 transfer until the existing lifecycle adoption flow explicitly preserves the
 durable identity. Ownership errors expose opaque IDs only, never checkout paths.
+Immediately before staging a disposable-workspace generation, the source
+transport rechecks the durable workspace ID and project identity through the
+workspace controller. A mismatch returns `ownership_conflict` before any source
+bytes are uploaded; CLI and MCP expose the same bounded code.
 
 Lost acknowledgments reconcile with the original request identity. Remote
 divergence is never adopted or overwritten automatically; `sync resolve

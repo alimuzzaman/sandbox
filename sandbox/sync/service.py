@@ -257,20 +257,44 @@ class SyncService:
             # Keep the pending generation visible for a safe replay. The public
             # envelope intentionally uses only the stable error code.
             code = getattr(exc, "code", "remote_unavailable")
-            if code not in {"remote_unavailable", "transport_unknown", "unstable_capture"}:
+            if code not in {
+                "ownership_conflict", "remote_unavailable", "transport_unknown",
+                "unstable_capture",
+            }:
                 code = "transport_unknown"
-            status = "unknown" if code == "transport_unknown" else "failed"
+            status = (
+                "conflicted" if code == "ownership_conflict"
+                else "unknown" if code == "transport_unknown"
+                else "failed"
+            )
+            if code == "ownership_conflict":
+                self.repository.transition_generation(
+                    generation.generation_id, "refused",
+                    refusal_code="ownership_conflict",
+                )
+                relationship = (
+                    self.repository.get_relationship(relationship.relationship_id)
+                    or relationship
+                )
             self.repository.record_metrics(
                 relationship.relationship_id,
-                outcome="unknown" if status == "unknown" else "failed",
+                outcome=(
+                    "refused" if code == "ownership_conflict"
+                    else "unknown" if status == "unknown"
+                    else "failed"
+                ),
                 file_count=generation.file_count, byte_count=generation.byte_count,
             )
             return failure_envelope(
                 code=code, status=status, relationship_id=relationship.relationship_id,
                 remote_name=remote, request_id=request_id,
                 accepted_generation=relationship.accepted_generation_id,
-                pending_generation=generation.generation_id,
-                retryable=(False if code == "transport_unknown" else
+                pending_generation=(
+                    relationship.pending_generation_id
+                    if code == "ownership_conflict"
+                    else generation.generation_id
+                ),
+                retryable=(False if code in {"ownership_conflict", "transport_unknown"} else
                            bool(getattr(exc, "retryable", True))),
             )
         accepted = self.repository.transition_generation(

@@ -48,6 +48,26 @@ class SyncCliTests(unittest.TestCase):
         self.assertEqual(once.participant_id, "participant")
         self.assertTrue(resolve.confirm)
 
+    def test_ownership_conflict_is_bounded_and_redacted(self):
+        from sandbox.commands import sync
+        from sandbox.sync.service import SyncServiceError
+
+        args = argparse.Namespace(
+            sync_action="once", project_dir="/private/competing/project",
+            remote="remote", workspace_id="workspace", request_id="request",
+            include=[], checkpoint=False, participant_id=None, json=True,
+        )
+        with patch.object(sync, "build_sync_service") as build:
+            build.return_value.once.side_effect = SyncServiceError(
+                "workspace owned by /private/other token=synthetic", "ownership_conflict",
+            )
+            with patch("builtins.print") as output, self.assertRaises(SystemExit):
+                sync.cmd_sync({}, args)
+        rendered = output.call_args.args[0]
+        self.assertIn('"code":"ownership_conflict"', rendered)
+        self.assertNotIn("/private", rendered)
+        self.assertNotIn("synthetic", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

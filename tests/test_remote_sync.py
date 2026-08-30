@@ -34,6 +34,10 @@ class RemoteSyncTransportTests(unittest.TestCase):
             ssh_run=ssh_run,
             ssh_process=lambda *_args, **_kwargs: self.fail("must not upload"),
             resolve_home=lambda _remote: "/srv/sandbox",
+            workspace_preflight=lambda relationship: {
+                "workspace_id": relationship.workspace_id,
+                "project_identity": relationship.project_identity,
+            },
         )
         result = transport.reconcile(relationship, generation)
         self.assertEqual(result["accepted_generation"], "gen_fixture")
@@ -71,6 +75,10 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 remote_lookup=lambda name: {"provisioned": True, "name": name},
                 ssh_run=ssh_run, ssh_process=ssh_process,
                 resolve_home=lambda _remote: "/srv/sandbox",
+                workspace_preflight=lambda relationship: {
+                    "workspace_id": relationship.workspace_id,
+                    "project_identity": relationship.project_identity,
+                },
             )
             result = transport.transfer(root, manifest, relationship, generation)
             self.assertEqual(result["status"], "accepted")
@@ -89,11 +97,43 @@ class RemoteSyncTransportTests(unittest.TestCase):
             ssh_run=lambda *_args, **_kwargs: calls.append("run"),
             ssh_process=lambda *_args, **_kwargs: calls.append("process"),
             resolve_home=lambda _remote: "/srv/sandbox",
+            workspace_preflight=lambda relationship: {
+                "workspace_id": relationship.workspace_id,
+                "project_identity": relationship.project_identity,
+            },
         )
         with self.assertRaisesRegex(Exception, "not provisioned"):
             transport.transfer(Path("/tmp"), SimpleNamespace(entries=(), git_root=Path("/tmp")),
                                SynchronizationRelationship("rel", "project", "remote", "workspace"),
                                SourceGeneration("gen", "rel", 1, "a" * 64, 0, 0, "pending", "request"))
+        self.assertEqual(calls, [])
+
+    def test_workspace_owner_conflict_refuses_before_remote_source_mutation(self):
+        calls = []
+        transport = RemoteSyncTransport(
+            remote_lookup=lambda name: {"provisioned": True, "name": name},
+            ssh_run=lambda *_args, **_kwargs: calls.append("run"),
+            ssh_process=lambda *_args, **_kwargs: calls.append("process"),
+            resolve_home=lambda _remote: "/srv/sandbox",
+            workspace_preflight=lambda _relationship: {
+                "workspace_id": "workspace",
+                "project_identity": "project:competing",
+            },
+        )
+        relationship = SynchronizationRelationship(
+            "rel_fixture", "project:fixture", "remote", "workspace",
+        )
+        generation = SourceGeneration(
+            "gen_fixture", "rel_fixture", 1, "a" * 64, 0, 0,
+            "pending", "request",
+        )
+        with self.assertRaisesRegex(Exception, "ownership") as caught:
+            transport.transfer(
+                Path("/tmp"), SimpleNamespace(entries=(), git_root=Path("/tmp")),
+                relationship, generation,
+            )
+        self.assertEqual(caught.exception.code, "ownership_conflict")
+        self.assertFalse(caught.exception.retryable)
         self.assertEqual(calls, [])
 
     def test_host_source_transfer_uses_project_relative_manifest_without_restart(self):

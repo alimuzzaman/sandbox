@@ -608,6 +608,10 @@ class JobSubmission:
                     "sync_relationship_id", "sync_generation_id", "source_access",
                     "parallel_safe"):
                 payload.pop(field)
+        # Schema-v6 CI materialization provenance is also additive. Omitting
+        # the unused nullable field preserves exact v5 request-id replay.
+        if self.materialization_source_root is None:
+            payload.pop("materialization_source_root")
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def canonical_digest(self) -> str:

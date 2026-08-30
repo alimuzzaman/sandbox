@@ -269,13 +269,17 @@ workspace cleanup, reset, destroy, or network release as part of indexing.
   controller-materialized CI workspace whose durable `workspace_id`, immutable
   materialization-authority digest, isolated/ephemeral mode, cleanup policy,
   project identity, checkout filesystem identity, and containment all agree.
-  A fresh observation MUST prove no live recorded process, container mount,
-  host mount, resource binding, lease, or active job before an atomic owned
-  quarantine/rename; the quarantined identity MUST be revalidated before delete.
+  A fresh observation MUST prove no live recorded process, residual owned process
+  group/cgroup, container mount, host mountpoint or bind-source use, resource binding,
+  lease, or active job before an atomic move into a private owner-only cleanup root.
+  Deletion MUST stay bound to the opened and revalidated directory identity through
+  completion, never a reusable pathname.
   Persistent, reusable, retained, shared, foreign, ambiguous, or actively
   referenced workspaces MUST NOT be deleted. Cleanup failure MUST be recorded
   separately without changing the terminal job lifecycle, exit code, or result.
-  Retry after release MUST rematerialize from the retained exact source receipt.
+  Retry after release MUST rematerialize from one bounded, reserve-checked retained
+  artifact without accumulating superseded generations. Inventory and retention MUST
+  report and retire that exact artifact.
 
 ### Acceptance evidence required before closing this amendment
 

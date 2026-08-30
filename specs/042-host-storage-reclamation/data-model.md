@@ -19,8 +19,10 @@
 
 An inactive projection is reporting evidence only. Automatic CI checkout release
 also requires the accepted controller materialization-authority digest, fresh zero
-process/container/mount/binding/lease/job observations, and quarantine identity
-revalidation. Names and path correlation never supply that authority.
+process-group/owned-cgroup/container/mountpoint/bind-source/binding/lease/job
+observations, and FD-bound deletion from a private owner-only cleanup root. Retained
+materialization bytes remain inventoried until exact artifact retirement. Names and
+path correlation never supply cleanup authority.
 | `protections` | list[str] | protection reasons already known host-side |
 
 ## ClassifiedEntry (decision, produced by `reclaim.py`)

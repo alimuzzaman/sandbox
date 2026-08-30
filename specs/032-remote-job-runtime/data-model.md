@@ -128,10 +128,11 @@ For terminal workspace cleanup, `workspace_id` plus the accepted
 `project_identity`, `workspace_label`, paths, age, and naming patterns are
 cross-check evidence and can never substitute for a missing or conflicting ID.
 Mode/policy and job-supplied paths never create cleanup authority. A fresh
-process/container/mount/binding/lease/job observation must prove zero live references,
-then the owned filesystem identity is atomically quarantined and revalidated before
-deletion. Terminal job/result rows and the source materialization receipt remain
-retained; retry publishes a fresh authority generation after rematerialization.
+process-group/owned-cgroup/container/mountpoint/bind-source/binding/lease/job observation
+must prove zero live references. The owned filesystem identity then moves to a private
+owner-only root and deletion remains bound to its open descriptor through completion.
+Terminal job/result rows and one bounded materialization artifact remain retained;
+retry publishes fresh authority without creating another archive generation.
 
 ### `process_identities`
 
@@ -146,6 +147,7 @@ One current supervisor and optional child identity per leaf job.
 | `supervisor_nonce_hash` | TEXT | launch nonce identity without exposing nonce |
 | `child_pid` | INTEGER nullable | >0 when running |
 | `child_pgid` | INTEGER nullable | owned process group |
+| `child_cgroup_path` | TEXT nullable | controller-observed dedicated child cgroup; when present it must be absent or empty before cleanup |
 | `child_start_identity` | TEXT nullable | PID-reuse guard |
 | `child_executable_identity` | TEXT nullable | safe executable basename/hash |
 | `recorded_at` | TEXT | UTC RFC3339 |

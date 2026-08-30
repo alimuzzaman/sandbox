@@ -305,6 +305,7 @@ class JobRepository:
             supervisor_nonce_hash TEXT NOT NULL,
             child_pid INTEGER,
             child_pgid INTEGER,
+            child_cgroup_path TEXT,
             child_start_identity TEXT,
             recorded_at TEXT NOT NULL,
             last_verified_at TEXT
@@ -439,6 +440,13 @@ class JobRepository:
                     connection.execute(
                         f"ALTER TABLE workspace_leases ADD COLUMN {name} {declaration}"
                     )
+            process_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(process_identities)")
+            }
+            if "child_cgroup_path" not in process_columns:
+                connection.execute(
+                    "ALTER TABLE process_identities ADD COLUMN child_cgroup_path TEXT")
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -661,22 +669,25 @@ class JobRepository:
                              supervisor_pid: int, supervisor_start_identity: str,
                              supervisor_nonce_hash: str, child_pid: int | None = None,
                              child_pgid: int | None = None,
+                             child_cgroup_path: str | None = None,
                              child_start_identity: str | None = None) -> None:
         now = _now()
         self.connection.execute(
             """INSERT INTO process_identities(job_id, host_boot_id, supervisor_pid,
                supervisor_start_identity, supervisor_nonce_hash, child_pid, child_pgid,
-               child_start_identity, recorded_at, last_verified_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)
+               child_cgroup_path, child_start_identity, recorded_at, last_verified_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET host_boot_id=excluded.host_boot_id,
                supervisor_pid=excluded.supervisor_pid,
                supervisor_start_identity=excluded.supervisor_start_identity,
                supervisor_nonce_hash=excluded.supervisor_nonce_hash,
                child_pid=excluded.child_pid, child_pgid=excluded.child_pgid,
+               child_cgroup_path=excluded.child_cgroup_path,
                child_start_identity=excluded.child_start_identity,
                last_verified_at=excluded.last_verified_at""",
             (job_id, host_boot_id, supervisor_pid, supervisor_start_identity,
-             supervisor_nonce_hash, child_pid, child_pgid, child_start_identity, now, now),
+             supervisor_nonce_hash, child_pid, child_pgid, child_cgroup_path,
+             child_start_identity, now, now),
         )
 
     def put_heartbeat(self, job_id: str, *, supervisor_at: str,

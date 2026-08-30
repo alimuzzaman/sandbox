@@ -1,7 +1,10 @@
 import tempfile
 import unittest
+import fcntl
 import os
+import signal
 import shutil
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -156,7 +159,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             accepted["job_id"], "succeeded", exit_code=0)
 
         with patch(
-                "sandbox.application.workspace_service.shutil.rmtree",
+                "sandbox.application.workspace_service._remove_tree_fd",
                 side_effect=OSError("fixture cleanup failed")):
             row = service.get(accepted["job_id"])
 
@@ -164,7 +167,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(row["exit_code"], 0)
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
-        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup-*"))
+        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup/*/owned"))
         self.assertEqual(len(quarantines), 1)
         self.assertTrue((quarantines[0] / "retained-evidence.txt").is_file())
         self.assertEqual(
@@ -267,6 +270,59 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertTrue(checkout.exists())
 
+    def test_background_process_group_blocks_cleanup_after_shell_leader_exits(self):
+        checkout = self._checkout("background-group")
+        descriptors = []
+        service = self._service(descriptors.append)
+        submission = self._submission(
+            checkout, request_id="background-group-request")
+        submission = JobSubmission(**{
+            **submission.__dict__,
+            "argv": ("/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 &"),
+        })
+        accepted = service.submit(submission)
+        pgid = None
+        try:
+            with patch(
+                    "sandbox.application.workspace_service._observe_cleanup_references",
+                    return_value={"containers": 0, "mounts": 0}):
+                run_descriptor(descriptors[0])
+            row = self.job_repository.get(accepted["job_id"])
+            pgid = self.job_repository.snapshot(
+                accepted["job_id"])["process"]["child_pgid"]
+            self.assertEqual(row["cleanup_state"], "failed")
+            self.assertTrue(checkout.exists())
+        finally:
+            if pgid:
+                try:
+                    os.killpg(int(pgid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_owned_child_cgroup_must_be_proven_empty_before_cleanup(self):
+        checkout = self._checkout("owned-cgroup")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="owned-cgroup-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.put_process_identity(
+            accepted["job_id"], host_boot_id="boot", supervisor_pid=101,
+            supervisor_start_identity="gone-supervisor",
+            supervisor_nonce_hash="nonce", child_pid=202, child_pgid=999999,
+            child_cgroup_path="/sandbox/job-fixture",
+            child_start_identity="gone-child",
+        )
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        with patch(
+                "sandbox.application.workspace_service.capture_process_identity",
+                return_value=None), patch(
+                "sandbox.application.workspace_service._owned_cgroup_empty",
+                return_value=False):
+            row = service.get(accepted["job_id"])
+        self.assertEqual(row["cleanup_state"], "failed")
+        self.assertTrue(checkout.exists())
+
     def test_cleanup_requires_positive_zero_container_mount_and_binding_proof(self):
         cases = (
             ("container", {"containers": 1, "mounts": 0}, ()),
@@ -347,6 +403,46 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual((checkout / "foreign.txt").read_text(), "must survive")
         self.assertTrue((moved / "retained-evidence.txt").is_file())
 
+    def test_quarantine_replacement_after_validation_is_never_deleted(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("quarantine-second-aba")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="quarantine-second-aba-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        moved = self.deploy_root / "reviewer-moved-quarantine"
+        real_remove = workspace_module._remove_tree_fd
+
+        def replace_quarantine(directory_fd):
+            fd_link = (f"/proc/self/fd/{directory_fd}"
+                       if sys.platform.startswith("linux")
+                       else f"/dev/fd/{directory_fd}")
+            if sys.platform.startswith("linux"):
+                candidate = Path(os.readlink(fd_link))
+            else:
+                encoded = fcntl.fcntl(
+                    directory_fd, fcntl.F_GETPATH, b"\0" * 1024)
+                candidate = Path(encoded.split(b"\0", 1)[0].decode())
+            candidate.rename(moved)
+            candidate.mkdir()
+            (candidate / "foreign.txt").write_text("must survive")
+            return real_remove(directory_fd)
+
+        with patch(
+                "sandbox.application.workspace_service._remove_tree_fd",
+                side_effect=replace_quarantine):
+            row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "failed")
+        foreign = tuple(self.deploy_root.glob(
+            ".sandbox-ci-cleanup/*/owned/foreign.txt"))
+        self.assertEqual(len(foreign), 1)
+        self.assertEqual(foreign[0].read_text(), "must survive")
+        self.assertFalse((moved / "retained-evidence.txt").exists())
+
     def test_retry_rematerializes_fresh_disposable_checkout_after_auto_release(self):
         checkout = self._checkout("retry-after-release")
         service = self._service(lambda _descriptor: None)
@@ -364,6 +460,86 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertTrue(checkout.is_dir())
         self.assertEqual((checkout / "retained-evidence.txt").read_text(), "fixture")
         self.assertNotEqual(retry["job_id"], accepted["job_id"])
+        self.assertEqual(len(tuple(
+            self.workspace_repository.index_path.parent.glob(
+                "ci-materializations/*.tar.gz"))), 1)
+
+    def test_materialization_archive_is_bounded_reserved_in_inventory_and_retired(self):
+        checkout = self._checkout("archive-lifecycle")
+        service = self._service(lambda _descriptor: None)
+        with patch(
+                "sandbox.application.workspace_service.MAX_CI_MATERIALIZATION_ARCHIVE_BYTES",
+                1, create=True):
+            with self.assertRaisesRegex(Exception, "materialization archive"):
+                service.submit(self._submission(
+                    checkout, request_id="archive-bounded-request"))
+        self.assertEqual(tuple(
+            self.workspace_repository.index_path.parent.glob(
+                "ci-materializations/*.tar.gz")), ())
+
+        checkout = self._checkout("archive-retention")
+        accepted = service.submit(self._submission(
+            checkout, request_id="archive-retention-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        accepted_row = self.job_repository.get(accepted["job_id"])
+        projection = self.workspace_repository.ownership_projection()["records"]
+        owned = next(item for item in projection
+                     if item["workspace_id"] == accepted_row["workspace_id"])
+        self.assertEqual(owned["retained_materializations"]["count"], 1)
+        swept = service.retention_sweep(retention_days=0)
+        self.assertEqual(len(swept["cleaned"]), 1)
+        self.assertIn(
+            "workspace_materialization", swept["cleaned"][0]["removed"])
+        self.assertEqual(tuple(
+            self.workspace_repository.index_path.parent.glob(
+                "ci-materializations/*.tar.gz")), ())
+
+    def test_materialization_archive_refuses_when_disk_reserve_cannot_be_kept(self):
+        checkout = self._checkout("archive-reserve")
+        service = self._service(lambda _descriptor: None)
+        usage = shutil._ntuple_diskusage(total=100, used=99, free=1)
+        with patch("sandbox.application.workspace_service.shutil.disk_usage",
+                   return_value=usage):
+            with self.assertRaisesRegex(Exception, "disk reserve"):
+                service.submit(self._submission(
+                    checkout, request_id="archive-reserve-request"))
+
+    def test_unpublished_materialization_archive_is_retired_on_index_failure(self):
+        checkout = self._checkout("archive-index-failure")
+        service = self._service(lambda _descriptor: None)
+        with patch.object(
+                self.workspaces, "_register",
+                side_effect=RuntimeError("fixture index failure")):
+            with self.assertRaisesRegex(RuntimeError, "fixture index failure"):
+                service.submit(self._submission(
+                    checkout, request_id="archive-index-failure-request"))
+        self.assertEqual(tuple(
+            self.workspace_repository.index_path.parent.glob(
+                "ci-materializations/*.tar.gz")), ())
+
+    def test_mountinfo_detects_checkout_used_as_a_bind_source_elsewhere(self):
+        from sandbox.application.workspace_service import _mountinfo_reference_count
+
+        checkout = Path("/deploy/workspace")
+        mountinfo = "\n".join((
+            "1 0 8:1 / / rw - ext4 /dev/sda1 rw",
+            "2 1 8:1 /deploy/workspace /srv/consumer rw - ext4 /dev/sda1 rw",
+            "3 1 0:42 / /deploy/workspace/nested rw - tmpfs tmpfs rw",
+            "4 1 8:1 /deploy /srv/all-deployments rw - ext4 /dev/sda1 rw",
+        ))
+        self.assertEqual(_mountinfo_reference_count(
+            mountinfo, checkout, device=(8, 1)), 3)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mountinfo proof")
+    def test_linux_mountinfo_probe_reads_current_namespace_without_unknown(self):
+        from sandbox.application.workspace_service import _observe_mount_references
+
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertIsInstance(
+                _observe_mount_references(Path(temporary)), int)
 
     def test_non_ci_mode_and_policy_cannot_self_authorize_checkout_deletion(self):
         checkout = self._checkout("non-ci")

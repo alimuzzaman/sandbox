@@ -838,6 +838,10 @@ class JobService:
         if artifacts:
             artifact_dir = directory / "artifacts"
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
+            if (self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "retire_terminal_materialization") and
+                    self.workspace_registry.retire_terminal_materialization(state)):
+                removed.append("workspace_materialization")
         if metrics:
             metric_file = directory / "metrics.jsonl"
             metric_dir = directory / "metrics"
@@ -853,6 +857,10 @@ class JobService:
         self.repository.mark_retained_metadata_unavailable(
             job_id, logs=logs, artifacts=artifacts, metrics=metrics)
         remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
+        if (self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "has_retained_materialization")):
+            remaining = (remaining or
+                         self.workspace_registry.has_retained_materialization(state))
         cleanup_state = "retained" if remaining else "completed"
         self.repository.set_cleanup_state(job_id, cleanup_state)
         return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
@@ -878,7 +886,14 @@ class JobService:
                 finished = datetime.fromisoformat(row["finished_at"].replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if (storage_pressure or finished <= cutoff) and row.get("cleanup_state") != "completed":
+            retained_materialization = (
+                self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "has_retained_materialization") and
+                self.workspace_registry.has_retained_materialization(row)
+            )
+            if ((storage_pressure or finished <= cutoff) and
+                    (row.get("cleanup_state") != "completed" or
+                     retained_materialization)):
                 cleaned.append(self.cleanup(row["job_id"]))
             if storage_pressure and not self.storage.is_under_pressure():
                 break

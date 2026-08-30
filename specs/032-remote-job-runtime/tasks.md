@@ -506,5 +506,7 @@ and evidence actually present in this branch.
   supervisor completion, persistent/retained/on-success retention, foreign/ambiguous
   ownership, cleanup failure truth, replay idempotency, and terminal active-reference
   projection, live-child refusal, pathname ABA, retry rematerialization, non-CI
-  authority refusal, and reusable/index/legacy compatibility. Local regressions
+  authority refusal, reusable/index/legacy compatibility, residual process-group and
+  owned-cgroup refusal, FD-bound second-replacement safety, v5 request replay,
+  bind-source mount observation, and bounded/inventoried artifact retirement. Local regressions
   exist; live disposable-remote acceptance and measured reclamation remain pending.

@@ -1520,6 +1520,13 @@ class WorkspaceRepository:
                 "aliases": list(item.aliases),
                 "bindings": binding_rows,
             })
+            authority = item.metadata.get("ci_cleanup_authority")
+            retained_materializations = {"count": 0, "bytes": 0}
+            if (isinstance(authority, dict) and
+                    not item.metadata.get("ci_materialization_retired", False)):
+                size = authority.get("artifact_size_bytes")
+                if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                    retained_materializations = {"count": 1, "bytes": size}
             return {
                 "workspace_id": item.workspace_id,
                 "owner_kind": "workspace",
@@ -1545,6 +1552,7 @@ class WorkspaceRepository:
                 "observed_at": item.updated_at,
                 "aliases": list(item.aliases),
                 "bindings": binding_rows,
+                "retained_materializations": retained_materializations,
             }
 
         projected = [project(item) for item in records]

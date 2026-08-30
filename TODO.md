@@ -38,8 +38,11 @@ not close the external or human gates listed below.
 
 - [ ] **Prove fail-closed disposable CI workspace terminal cleanup.**
   The local candidate binds controller materialization authority to the accepted
-  job, refuses live process/container/mount/binding references, quarantines and
-  revalidates the owned inode before deletion, and rematerializes retries.
+  job, refuses residual process-group/owned-cgroup, container, bind-source or
+  mountpoint, and binding references, then moves the exact inode into an
+  owner-only cleanup root and deletes through its open descriptor. Retry reuses
+  one bounded, reserve-checked retained materialization; inventory and job
+  retention report and retire that exact artifact.
   Reviewer reproductions and local focused/adjacent proof are recorded in Spec
   032, but live disposable-remote and measured reclamation gates remain open.
   Feedback/incident evidence: `52622c4577419a51f02d728f886b40f0`,

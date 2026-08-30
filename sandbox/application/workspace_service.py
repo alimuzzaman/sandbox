@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -45,6 +47,9 @@ _REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
 _REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
 _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
 _LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
+MAX_CI_MATERIALIZATION_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_CI_MATERIALIZATION_ENTRIES = 100_000
+MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES = 1024 * 1024 * 1024
 
 
 def _iso(epoch: float) -> str:
@@ -116,21 +121,114 @@ def _path_is_within(candidate: str, root: Path) -> bool:
         return False
 
 
+def _decode_mountinfo_path(value: str) -> str:
+    return (value.replace("\\040", " ").replace("\\011", "\t")
+            .replace("\\012", "\n").replace("\\134", "\\"))
+
+
+def _mountinfo_reference_count(text: str, checkout: Path, *,
+                               device: tuple[int, int] | None = None) -> int:
+    """Count mountpoints in checkout and same-device bind roots from it."""
+    checkout = checkout.resolve(strict=False)
+    if device is None:
+        observed = os.stat(checkout, follow_symlinks=False)
+        device = (os.major(observed.st_dev), os.minor(observed.st_dev))
+    rows: list[tuple[tuple[int, int], Path, Path]] = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        try:
+            major, minor = (int(part) for part in fields[2].split(":", 1))
+        except (TypeError, ValueError):
+            continue
+        rows.append(((major, minor),
+                     Path(_decode_mountinfo_path(fields[3])).resolve(strict=False),
+                     Path(_decode_mountinfo_path(fields[4])).resolve(strict=False)))
+    covering = [row for row in rows if row[0] == device and
+                (row[2] == checkout or _path_is_within(str(checkout), row[2]))]
+    if not covering:
+        return 0
+    base = max(covering, key=lambda row: len(row[2].parts))
+    relative = checkout.relative_to(base[2])
+    checkout_root = (base[1] / relative).resolve(strict=False)
+    count = 0
+    for row_device, root, mountpoint in rows:
+        if row_device == device and root == base[1] and mountpoint == base[2]:
+            continue
+        mounted_inside = (mountpoint == checkout or
+                          _path_is_within(str(mountpoint), checkout))
+        sourced_inside = (row_device == device and
+                           (root == checkout_root or
+                            _path_is_within(str(root), checkout_root) or
+                            _path_is_within(str(checkout_root), root)))
+        if mounted_inside or sourced_inside:
+            count += 1
+    return count
+
+
+def _observe_mount_references(checkout: Path) -> int | None:
+    mountinfo = Path("/proc/self/mountinfo")
+    if not mountinfo.is_file():
+        return 0 if not sys.platform.startswith("linux") else None
+    try:
+        return _mountinfo_reference_count(
+            mountinfo.read_text(errors="replace"), checkout)
+    except (OSError, ValueError):
+        return None
+
+
+def _process_group_empty(pgid: int) -> bool:
+    try:
+        os.killpg(int(pgid), 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _owned_cgroup_empty(cgroup_path: str) -> bool:
+    if (not isinstance(cgroup_path, str) or not cgroup_path.startswith("/") or
+            cgroup_path == "/" or ".." in Path(cgroup_path).parts):
+        return False
+    root = Path("/sys/fs/cgroup").resolve(strict=False)
+    target = (root / cgroup_path.lstrip("/")).resolve(strict=False)
+    try:
+        target.relative_to(root)
+        payload = (target / "cgroup.procs").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return not any(line.strip() for line in payload.splitlines())
+
+
+def _remove_tree_fd(directory_fd: int) -> None:
+    """Delete one already-open directory without following path replacements."""
+    for name in os.listdir(directory_fd):
+        observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            child_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev != observed.st_dev or
+                        opened.st_ino != observed.st_ino):
+                    raise WorkspaceIndexError(
+                        "workspace_ownership_drift",
+                        "cleanup child directory identity changed")
+                _remove_tree_fd(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
 def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
     """Return positive host/container mount absence or unknown on probe failure."""
-    mounts: int | None = None
-    mountinfo = Path("/proc/self/mountinfo")
-    if mountinfo.is_file():
-        try:
-            mounts = 0
-            for line in mountinfo.read_text(errors="replace").splitlines():
-                fields = line.split()
-                if len(fields) > 4:
-                    mountpoint = fields[4].replace("\\040", " ")
-                    if _path_is_within(mountpoint, checkout):
-                        mounts += 1
-        except OSError:
-            mounts = None
+    mounts = _observe_mount_references(checkout)
     containers: int | None = None
     try:
         from sandbox.services.environment import compatible_subprocess_environment
@@ -156,7 +254,8 @@ def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
                         containers = sum(
                             any(isinstance(mount, dict) and
                                 isinstance(mount.get("Source"), str) and
-                                _path_is_within(mount["Source"], checkout)
+                                (_path_is_within(mount["Source"], checkout) or
+                                 _path_is_within(str(checkout), Path(mount["Source"])))
                                 for mount in (row.get("Mounts") or ()))
                             for row in rows if isinstance(row, dict)
                         )
@@ -173,19 +272,82 @@ def _file_sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _archive_checkout(checkout: Path, artifact: Path) -> str:
+def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
+    measured, reason = _measure_tree(
+        checkout, entry_budget=MAX_CI_MATERIALIZATION_ENTRIES,
+        deadline=time.monotonic() + 30.0)
+    if measured is None or measured > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+        raise WorkspaceIndexError(
+            "workspace_materialization_too_large",
+            f"materialization archive exceeds its bounded input ({reason})")
     artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    usage = shutil.disk_usage(artifact.parent)
+    if (usage.free - MAX_CI_MATERIALIZATION_ARCHIVE_BYTES <
+            MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES):
+        raise WorkspaceIndexError(
+            "workspace_materialization_reserve",
+            "materialization archive cannot preserve the disk reserve")
     descriptor, temporary = tempfile.mkstemp(
         prefix=".ci-materialization-", suffix=".tar.gz", dir=artifact.parent)
     os.close(descriptor)
     temporary_path = Path(temporary)
     try:
-        with tarfile.open(temporary_path, "w:gz") as archive:
-            archive.add(checkout, arcname="workspace", recursive=True)
+        archive_entries = 0
+        archive_bytes = 0
+
+        def bounded_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+            nonlocal archive_entries, archive_bytes
+            archive_entries += 1
+            archive_bytes += member.size if member.isfile() else 0
+            if (archive_entries > MAX_CI_MATERIALIZATION_ENTRIES or
+                    archive_bytes > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_too_large",
+                    "materialization archive changed beyond its bounded input")
+            return member
+
+        class BoundedWriter:
+            def __init__(self, handle):
+                self.handle = handle
+                self.written = 0
+
+            def write(self, payload):
+                if self.written + len(payload) > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+                    raise WorkspaceIndexError(
+                        "workspace_materialization_too_large",
+                        "materialization archive exceeds its bounded output")
+                written = self.handle.write(payload)
+                self.written += written
+                return written
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+        with temporary_path.open("wb") as raw_archive:
+            writer = BoundedWriter(raw_archive)
+            with tarfile.open(fileobj=writer, mode="w:gz") as archive:
+                archive.add(
+                    checkout, arcname="workspace", recursive=True,
+                    filter=bounded_member)
+        size = temporary_path.stat().st_size
+        if size > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+            raise WorkspaceIndexError(
+                "workspace_materialization_too_large",
+                "materialization archive exceeds its bounded output")
+        if (shutil.disk_usage(artifact.parent).free <
+                MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES):
+            raise WorkspaceIndexError(
+                "workspace_materialization_reserve",
+                "materialization archive crossed the disk reserve")
         os.chmod(temporary_path, 0o600)
         digest = _file_sha256(temporary_path)
-        os.replace(temporary_path, artifact)
-        return digest
+        try:
+            os.link(temporary_path, artifact, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise WorkspaceIndexError(
+                "workspace_materialization_failed",
+                "materialization archive generation already exists") from exc
+        return digest, size
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -795,6 +957,13 @@ class WorkspaceService:
                     "workspace_materialization_unavailable",
                     "retained CI materialization artifact proof is incomplete")
             _restore_checkout(artifact, artifact_digest, checkout)
+            artifact_size = restore_authority.get("artifact_size_bytes")
+            if (isinstance(artifact_size, bool) or
+                    not isinstance(artifact_size, int) or artifact_size < 0 or
+                    artifact.stat().st_size != artifact_size):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_unavailable",
+                    "retained CI materialization size proof is incomplete")
             receipt_payload = {
                 "schema": 1, "workspace_path": str(checkout),
                 "source_identity": submission.source.identity,
@@ -823,9 +992,10 @@ class WorkspaceService:
                     "controller CI materialization failed") from exc
             receipt_payload = receipt.to_dict()
         generation = uuid.uuid4().hex
-        artifact = self._repo().index_path.parent / "ci-materializations" / (
-            generation + ".tar.gz")
-        artifact_digest = _archive_checkout(checkout, artifact)
+        if restore_authority is None:
+            artifact = self._repo().index_path.parent / "ci-materializations" / (
+                generation + ".tar.gz")
+            artifact_digest, artifact_size = _archive_checkout(checkout, artifact)
         authority = {
             "schema": 1,
             "owner": "controller-ci-materialization",
@@ -839,6 +1009,7 @@ class WorkspaceService:
             "generation": generation,
             "artifact_locator": str(artifact),
             "artifact_digest": artifact_digest,
+            "artifact_size_bytes": artifact_size,
         }
         authority["digest"] = _digest_payload(authority)
         return authority
@@ -923,13 +1094,36 @@ class WorkspaceService:
                 "ci_cleanup_authority": authority,
             } if authority is not None else {}),
         }
-        record, _created = self._register(
-            project_identity=submission.project_identity,
-            label=submission.workspace_label, namespace=namespace,
-            checkout_locator=checkout,
-            source="ci-materialization" if authority is not None else "job-reference",
-            deployment_proof=proof, mode=submission.workspace_mode,
-        )
+        try:
+            record, _created = self._register(
+                project_identity=submission.project_identity,
+                label=submission.workspace_label, namespace=namespace,
+                checkout_locator=checkout,
+                source="ci-materialization" if authority is not None else "job-reference",
+                deployment_proof=proof, mode=submission.workspace_mode,
+            )
+        except Exception as exc:
+            if authority is not None:
+                artifact = Path(authority["artifact_locator"])
+                artifact_root = repo.index_path.parent / "ci-materializations"
+                retired = False
+                try:
+                    artifact.resolve(strict=False).relative_to(
+                        artifact_root.resolve(strict=False))
+                    if (not artifact.is_symlink() and artifact.is_file() and
+                            artifact.stat().st_size == authority["artifact_size_bytes"] and
+                            _file_sha256(artifact) == authority["artifact_digest"]):
+                        artifact.unlink()
+                        retired = True
+                except (OSError, ValueError):
+                    raise WorkspaceIndexError(
+                        "workspace_materialization_failed",
+                        "unpublished materialization artifact could not be retired") from exc
+                if not retired:
+                    raise WorkspaceIndexError(
+                        "workspace_materialization_failed",
+                        "unpublished materialization artifact proof changed") from exc
+            raise
         if self.resource_binding_resolver is not None:
             bindings = self.resource_binding_resolver(submission) or ()
             for binding in bindings:
@@ -950,6 +1144,53 @@ class WorkspaceService:
             "legacy_root": str(self.repository.legacy_root),
             "deployment_root": str(Path(self.deployment_root)),
         }
+
+    def has_retained_materialization(self, job: dict) -> bool:
+        workspace_id = job.get("workspace_id")
+        if not isinstance(workspace_id, str):
+            return False
+        record = self._repo().get(workspace_id)
+        if record is None or record.source != "ci-materialization":
+            return False
+        authority = record.metadata.get("ci_cleanup_authority")
+        return (isinstance(authority, dict) and
+                authority.get("digest") == job.get("workspace_authority_digest") and
+                not record.metadata.get("ci_materialization_retired", False))
+
+    def retire_terminal_materialization(self, job: dict) -> bool:
+        """Retire the exact retained artifact, never a guessed generation."""
+        if not self.has_retained_materialization(job):
+            return False
+        workspace_id = job["workspace_id"]
+        repo = self._repo()
+        with repo.operation_lock(workspace_id):
+            record = repo.get(workspace_id)
+            if record is None:
+                raise WorkspaceIndexError(
+                    "workspace_identity_ambiguous", "workspace artifact owner is unavailable")
+            authority = record.metadata.get("ci_cleanup_authority")
+            artifact = Path(str(authority.get("artifact_locator")))
+            artifact_root = repo.index_path.parent / "ci-materializations"
+            try:
+                artifact.resolve(strict=False).relative_to(
+                    artifact_root.resolve(strict=False))
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape", "workspace artifact escapes retention root") from exc
+            expected_size = authority.get("artifact_size_bytes")
+            if (artifact.is_symlink() or not artifact.is_file() or
+                    isinstance(expected_size, bool) or
+                    not isinstance(expected_size, int) or
+                    artifact.stat().st_size != expected_size or
+                    _file_sha256(artifact) != authority.get("artifact_digest")):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift", "workspace artifact proof changed")
+            artifact.unlink()
+            repo.mark_lifecycle(
+                workspace_id, record.lifecycle, status=record.status,
+                metadata={"ci_materialization_retired": True},
+            )
+            return True
 
     def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
         """Release one exact job-owned disposable checkout after terminal proof."""
@@ -1053,6 +1294,15 @@ class WorkspaceService:
                         continue
                     raise WorkspaceIndexError(
                         "workspace_busy", f"recorded {role} process is still live")
+            child_pgid = process.get("child_pgid")
+            if child_pgid is not None and not _process_group_empty(int(child_pgid)):
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "recorded child process group is not proven empty")
+            child_cgroup = process.get("child_cgroup_path")
+            if child_cgroup is not None and not _owned_cgroup_empty(child_cgroup):
+                raise WorkspaceIndexError(
+                    "workspace_busy", "recorded child cgroup is not proven empty")
             if self.deployment_root is None:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
@@ -1115,11 +1365,18 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "terminal checkout filesystem identity changed")
-            quarantine = checkout_path.parent / (
-                f".sandbox-ci-cleanup-{workspace_id}-{authority_digest[-12:]}")
-            if quarantine.exists() or quarantine.is_symlink():
+            cleanup_root = deployment_root / ".sandbox-ci-cleanup"
+            try:
+                cleanup_root.mkdir(mode=0o700, exist_ok=True)
+                cleanup_identity = os.stat(cleanup_root, follow_symlinks=False)
+            except OSError as exc:
                 raise WorkspaceIndexError(
-                    "workspace_path_unsafe", "cleanup quarantine is occupied")
+                    "workspace_path_unsafe", "private cleanup root is unavailable") from exc
+            if (not stat.S_ISDIR(cleanup_identity.st_mode) or
+                    cleanup_identity.st_uid != os.getuid() or
+                    stat.S_IMODE(cleanup_identity.st_mode) & 0o077):
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "private cleanup root is not owner-only")
             repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
             try:
                 if checkout_path.exists():
@@ -1127,24 +1384,41 @@ class WorkspaceService:
                         raise WorkspaceIndexError(
                             "workspace_ownership_drift",
                             "terminal workspace is not a directory")
-                    parent_fd = os.open(checkout_path.parent, os.O_RDONLY)
+                    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                       getattr(os, "O_NOFOLLOW", 0))
+                    parent_fd = os.open(checkout_path.parent, directory_flags)
+                    cleanup_fd = os.open(cleanup_root, directory_flags)
+                    operation_name = uuid.uuid4().hex
+                    os.mkdir(operation_name, mode=0o700, dir_fd=cleanup_fd)
+                    operation_fd = os.open(operation_name, directory_flags,
+                                           dir_fd=cleanup_fd)
+                    owned_fd = None
                     try:
                         os.rename(
-                            checkout_path.name, quarantine.name,
-                            src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                            checkout_path.name, "owned",
+                            src_dir_fd=parent_fd, dst_dir_fd=operation_fd,
                         )
-                        if _filesystem_identity(quarantine) != expected_identity:
-                            if not checkout_path.exists():
-                                os.rename(
-                                    quarantine.name, checkout_path.name,
-                                    src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-                                )
+                        owned_fd = os.open("owned", directory_flags,
+                                           dir_fd=operation_fd)
+                        observed = os.fstat(owned_fd)
+                        if {"device": int(observed.st_dev),
+                            "inode": int(observed.st_ino)} != expected_identity:
+                            os.rename(
+                                "owned", checkout_path.name,
+                                src_dir_fd=operation_fd, dst_dir_fd=parent_fd,
+                            )
                             raise WorkspaceIndexError(
                                 "workspace_ownership_drift",
                                 "quarantined checkout identity changed")
+                        _remove_tree_fd(owned_fd)
+                        os.rmdir("owned", dir_fd=operation_fd)
                     finally:
+                        if owned_fd is not None:
+                            os.close(owned_fd)
+                        os.close(operation_fd)
+                        os.rmdir(operation_name, dir_fd=cleanup_fd)
+                        os.close(cleanup_fd)
                         os.close(parent_fd)
-                    shutil.rmtree(quarantine)
                 metadata_path.unlink()
                 metadata_path.parent.rmdir()
             except Exception:

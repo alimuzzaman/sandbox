@@ -145,11 +145,16 @@ is declared; that profile requests `ephemeral` cleanup for its isolated cells. A
 the job has a durable terminal row and complete retained output/artifact evidence, the
 supervisor may release only an exact indexed `workspace_id` backed by a controller-run
 CI materialization receipt whose immutable digest was stored with acceptance. A fresh
-check must prove no live recorded child/supervisor, container mount, host mount,
-resource binding, lease, or other active job. The owned filesystem identity is then
-renamed into an owner-only quarantine and revalidated before deletion, closing pathname
-replacement races. The same seam covers `supervisor_launch_failed`; a retry
-rematerializes from the retained exact source tree. Generic jobs, reusable/index/legacy
+check must prove no live recorded child/supervisor, residual child process group,
+owned child cgroup, container mount, host mountpoint or bind source, resource binding,
+lease, or other active job. The exact filesystem identity is moved into a private
+owner-only cleanup root and deleted through its continuously open directory descriptor;
+pathname replacements are never deletion targets. The same seam covers
+`supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB
+for both apparent input and compressed output, 100,000 entries, and a 1 GiB post-write
+free-space reserve; it does not accumulate a new archive per
+attempt. The ownership projection reports its retained byte count, and explicit/age or
+pressure cleanup retires the exact digest-verified archive. Generic jobs, reusable/index/legacy
 workspaces, `retain`, failed `on-success`, missing authority, unknown observations,
 ownership drift, and unsafe paths all prevent deletion. Cleanup failure is separate
 from lifecycle, exit code, result, logs, metrics, and artifacts. This is local candidate
@@ -158,7 +163,8 @@ behavior until the open remote and measured-reclamation gates in Spec 032 pass.
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
 For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,
-metrics, and artifacts and records `cleanup_state` in the registry.
+metrics, declared artifacts, and retained CI rematerialization archives, then records
+`cleanup_state` in the registry.
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

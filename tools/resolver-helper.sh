@@ -11,11 +11,11 @@ usage() {
     echo "       resolver-helper.sh install" >&2
     echo "       resolver-helper.sh installed-status" >&2
     echo "       resolver-helper.sh resolved-status" >&2
-    echo "       resolver-helper.sh authorize ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
-    echo "       resolver-helper.sh authorization-status ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
-    echo "       resolver-helper.sh revoke-authorization ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
-    echo "       resolver-helper.sh resolved-apply OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
-    echo "       resolver-helper.sh resolved-remove OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
+    echo "       resolver-helper.sh authorize ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256 [PID START UID CONTROL]" >&2
+    echo "       resolver-helper.sh authorization-status ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256 [PID START UID CONTROL]" >&2
+    echo "       resolver-helper.sh revoke-authorization ADAPTER OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256 [PID START UID CONTROL]" >&2
+    echo "       resolver-helper.sh resolved-apply OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256 PID START UID CONTROL" >&2
+    echo "       resolver-helper.sh resolved-remove OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256 PID START UID CONTROL" >&2
     echo "       resolver-helper.sh macos-apply OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
     echo "       resolver-helper.sh macos-remove OWNER_SHA256 SUFFIX ADDRESS PORT EXPECTED_SHA256" >&2
     echo "       resolver-helper.sh hosts-apply HOSTNAME ADDRESS" >&2
@@ -82,6 +82,44 @@ valid_port() {
     esac
     [ "$1" -ge 1024 ] && [ "$1" -le 65535 ] \
         || fail "authority port must be unprivileged"
+}
+
+valid_service_identity() {
+    identity_pid=$1 identity_start=$2 identity_uid=$3 identity_control=$4
+    case "$identity_pid:$identity_start:$identity_uid" in
+        *[!0-9:]*|0:*|*:0:*) fail "resolved service identity is invalid" ;;
+    esac
+    [ "$identity_control" = "/system.slice/systemd-resolved.service" ] \
+        || fail "resolved control identity is invalid"
+}
+
+resolved_identity_fields() {
+    systemctl is-active --quiet systemd-resolved.service \
+        || fail "systemd-resolved is not active"
+    service_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
+        || fail "systemd-resolved pid is unavailable"
+    case "$service_pid" in ''|*[!0-9]*|0) fail "systemd-resolved pid is invalid" ;; esac
+    [ -r "/proc/$service_pid/stat" ] || fail "systemd-resolved process is unavailable"
+    service_stat=$(cat "/proc/$service_pid/stat") \
+        || fail "systemd-resolved process identity is unavailable"
+    service_tail=${service_stat##*) }
+    service_start=$(printf '%s\n' "$service_tail" | awk '{print $20}')
+    service_uid=$(stat -c '%u' -- "/proc/$service_pid") \
+        || fail "systemd-resolved owner identity is unavailable"
+    service_control=$(systemctl show --property=ControlGroup --value systemd-resolved.service) \
+        || fail "systemd-resolved control identity is unavailable"
+    valid_service_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
+    confirmed_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
+        || fail "systemd-resolved pid confirmation is unavailable"
+    [ "$confirmed_pid" = "$service_pid" ] \
+        || fail "systemd-resolved changed during observation"
+    printf '%s %s %s %s\n' "$service_pid" "$service_start" "$service_uid" "$service_control"
+}
+
+require_resolved_identity() {
+    valid_service_identity "$@"
+    [ "$(resolved_identity_fields)" = "$1 $2 $3 $4" ] \
+        || fail "systemd-resolved identity changed before mutation"
 }
 
 canonical_candidate() {
@@ -275,8 +313,17 @@ authorization_path() {
 
 authorization_payload() {
     uid=$1 adapter=$2 owner=$3 suffix=$4 address=$5 port=$6 digest=$7
-    printf 'sandbox-resolver-authorization-v1 uid=%s adapter=%s owner=%s suffix=%s address=%s port=%s digest=%s\n' \
-        "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$digest"
+    shift 7
+    if [ "$adapter" = resolved ]; then
+        [ "$#" -eq 4 ] || fail "resolved authorization identity is missing"
+        valid_service_identity "$@"
+        printf 'sandbox-resolver-authorization-v2 uid=%s adapter=%s owner=%s suffix=%s address=%s port=%s digest=%s pid=%s start=%s service_uid=%s control=%s\n' \
+            "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$digest" \
+            "$1" "$2" "$3" "$4"
+    else
+        printf 'sandbox-resolver-authorization-v1 uid=%s adapter=%s owner=%s suffix=%s address=%s port=%s digest=%s\n' \
+            "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$digest"
+    fi
 }
 
 applied_path() {
@@ -345,6 +392,7 @@ install_receipt() {
 
 check_authorization() {
     adapter=$1 owner=$2 suffix=$3 address=$4 port=$5 expected=$6
+    shift 6
     valid_adapter "$adapter"; valid_suffix "$suffix"; valid_address "$address"
     valid_port "$port"; valid_digest "$owner"; valid_digest "$expected"
     actual_rendered=$(rendered_digest "$adapter" "$suffix" "$address" "$port")
@@ -352,7 +400,7 @@ check_authorization() {
     uid=$(caller_uid)
     require_authorization_root
     receipt=$(authorization_path "$uid" "$adapter" "$suffix" "$owner")
-    expected_payload=$(authorization_payload "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$expected")
+    expected_payload=$(authorization_payload "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$expected" "$@")
     receipt_matches "$receipt" "$expected_payload" \
         || fail "exact resolver authorization does not match"
     printf '%s\n' "$receipt"
@@ -407,10 +455,10 @@ case "$verb" in
         [ "$#" -eq 0 ] || usage
         require_root
         require_installed_helper
-        echo "ready"
+        echo "sandbox-resolver-helper-v2"
         ;;
     authorize)
-        [ "$#" -eq 6 ] || usage
+        case "${1:-}" in resolved) [ "$#" -eq 10 ] || usage ;; *) [ "$#" -eq 6 ] || usage ;; esac
         require_root
         require_installed_helper
         adapter=$1 owner=$2 suffix=$3 address=$4 port=$5 expected=$6
@@ -422,8 +470,18 @@ case "$verb" in
         authorization_root=/var/lib/sandbox/resolver/authorizations
         ensure_authorization_root
         receipt=$(authorization_path "$uid" "$adapter" "$suffix" "$owner")
-        payload=$(authorization_payload "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$expected")
+        shift 6
+        payload=$(authorization_payload "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$expected" "$@")
         if [ -e "$receipt" ]; then
+            if [ "$adapter" = resolved ]; then
+                legacy_payload=$(printf 'sandbox-resolver-authorization-v1 uid=%s adapter=%s owner=%s suffix=%s address=%s port=%s digest=%s\n' \
+                    "$uid" "$adapter" "$owner" "$suffix" "$address" "$port" "$expected")
+                if receipt_matches "$receipt" "$legacy_payload"; then
+                    install_receipt "$receipt" "$payload"
+                    echo "authorized"
+                    exit 0
+                fi
+            fi
             receipt_matches "$receipt" "$payload" \
                 || fail "a different resolver authorization already exists"
             echo "unchanged"
@@ -433,7 +491,7 @@ case "$verb" in
         echo "authorized"
         ;;
     revoke-authorization)
-        [ "$#" -eq 6 ] || usage
+        case "${1:-}" in resolved) [ "$#" -eq 10 ] || usage ;; *) [ "$#" -eq 6 ] || usage ;; esac
         require_root; require_installed_helper
         receipt=$(check_authorization "$@")
         adapter=$1 owner=$2 suffix=$3
@@ -443,7 +501,7 @@ case "$verb" in
         echo "revoked"
         ;;
     authorization-status)
-        [ "$#" -eq 6 ] || usage
+        case "${1:-}" in resolved) [ "$#" -eq 10 ] || usage ;; *) [ "$#" -eq 6 ] || usage ;; esac
         require_root
         require_installed_helper
         check_authorization "$@" >/dev/null
@@ -454,40 +512,21 @@ case "$verb" in
         require_root
         require_installed_helper
         [ "$(uname -s)" = "Linux" ] || fail "systemd-resolved is unavailable on this platform"
-        systemctl is-active --quiet systemd-resolved.service \
-            || fail "systemd-resolved is not active"
-        service_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
-            || fail "systemd-resolved pid is unavailable"
-        case "$service_pid" in ''|*[!0-9]*|0) fail "systemd-resolved pid is invalid" ;; esac
-        [ -r "/proc/$service_pid/stat" ] || fail "systemd-resolved process is unavailable"
-        service_stat=$(cat "/proc/$service_pid/stat") \
-            || fail "systemd-resolved process identity is unavailable"
-        service_tail=${service_stat##*) }
-        service_start=$(printf '%s\n' "$service_tail" | awk '{print $20}')
-        case "$service_start" in ''|*[!0-9]*|0) fail "systemd-resolved start identity is invalid" ;; esac
-        service_uid=$(stat -c '%u' -- "/proc/$service_pid") \
-            || fail "systemd-resolved owner identity is unavailable"
-        case "$service_uid" in ''|*[!0-9]*) fail "systemd-resolved owner identity is invalid" ;; esac
-        service_control=$(systemctl show --property=ControlGroup --value systemd-resolved.service) \
-            || fail "systemd-resolved control identity is unavailable"
-        [ "$service_control" = "/system.slice/systemd-resolved.service" ] \
-            || fail "systemd-resolved control identity is invalid"
-        confirmed_pid=$(systemctl show --property=MainPID --value systemd-resolved.service) \
-            || fail "systemd-resolved pid confirmation is unavailable"
-        [ "$confirmed_pid" = "$service_pid" ] \
-            || fail "systemd-resolved changed during observation"
+        set -- $(resolved_identity_fields)
         printf 'sandbox-resolved-service-v1 owner=systemd-resolved:host unit=systemd-resolved.service pid=%s start=%s uid=%s control=%s\n' \
-            "$service_pid" "$service_start" "$service_uid" "$service_control"
+            "$1" "$2" "$3" "$4"
         ;;
     resolved-apply)
-        [ "$#" -eq 5 ] || usage
+        [ "$#" -eq 9 ] || usage
         require_root
         require_installed_helper
         owner=$1 suffix=$2 address=$3 port=$4 expected=$5
+        service_pid=$6 service_start=$7 service_uid=$8 service_control=$9
         valid_suffix "$suffix"
         valid_address "$address"
         valid_port "$port"
-        check_authorization resolved "$owner" "$suffix" "$address" "$port" "$expected" >/dev/null
+        check_authorization resolved "$owner" "$suffix" "$address" "$port" "$expected" \
+            "$service_pid" "$service_start" "$service_uid" "$service_control" >/dev/null
         uid=$(caller_uid)
         applied=$(applied_path "$uid" resolved "$suffix" "$owner")
         applied_payload_value=$(applied_payload "$uid" resolved "$owner" "$suffix" "$address" "$port" "$expected")
@@ -497,6 +536,7 @@ case "$verb" in
         if [ -e /etc/systemd/resolved.conf.d ]; then
             require_root_directory /etc/systemd/resolved.conf.d
         fi
+        require_resolved_identity "$service_pid" "$service_start" "$service_uid" "$service_control"
         install -d -o root -g root -m 0755 /etc/systemd/resolved.conf.d
         require_root_directory /etc/systemd/resolved.conf.d
         temporary="$destination.new.$$"
@@ -539,13 +579,15 @@ case "$verb" in
         echo "applied"
         ;;
     resolved-remove)
-        [ "$#" -eq 5 ] || usage
+        [ "$#" -eq 9 ] || usage
         owner=$1 suffix=$2 address=$3 port=$4 expected=$5
+        service_pid=$6 service_start=$7 service_uid=$8 service_control=$9
         valid_suffix "$suffix"
         valid_digest "$expected"
         require_root
         require_installed_helper
-        receipt=$(check_authorization resolved "$owner" "$suffix" "$address" "$port" "$expected")
+        receipt=$(check_authorization resolved "$owner" "$suffix" "$address" "$port" "$expected" \
+            "$service_pid" "$service_start" "$service_uid" "$service_control")
         applied=$(check_applied resolved "$owner" "$suffix" "$address" "$port" "$expected")
         uid=$(caller_uid)
         other_status=0

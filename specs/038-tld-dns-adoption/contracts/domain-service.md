@@ -47,6 +47,10 @@ one of the accepted addresses.
 
 - Rejects expired/mismatched fingerprints before mutation.
 - Requires recorded consent or a current interactive acceptance.
+- Before resolver qualification, installs or upgrades the fixed helper to the exact
+  source-owned version. Its final read-only service identity (PID, start ticks, UID, and
+  control group) is bound into authorization and revalidated inside the helper immediately
+  before the resolver write.
 - Starts/updates the authority before adding a routed-resolver rule; removes candidate
   authority state if route activation fails.
 - Verifies fresh resolution to one accepted address. It does not call A to add a route.
@@ -119,3 +123,7 @@ An adapter may be selected only if:
 3. manifest proof tier permits adoption;
 4. pin, consent, credentials, and privilege are satisfied;
 5. no foreign binding/endpoint collision exists.
+
+The systemd-resolved implementation remains `implemented_unproven` and non-adoptable in
+ordinary support until T067's normal Linux CLI proof is captured. The example envelope
+above describes the eventual promoted state, not current advertised support.

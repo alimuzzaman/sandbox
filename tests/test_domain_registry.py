@@ -45,14 +45,14 @@ class TestDomainRegistry(unittest.TestCase):
         self.assertTrue(all(not item.adoptable for item in BUILTIN_RESOLVER_ADAPTERS
                             if item.support_tier != "external"))
 
-    def test_systemd_resolved_uses_fixed_source_evidence(self):
+    def test_systemd_resolved_stays_unadvertised_pending_live_proof(self):
         from sandbox.network.manifest import BUILTIN_RESOLVER_ADAPTERS, built_in_resolver_registry
 
         ordinary = built_in_resolver_registry({"systemd-resolved": object()})
-        self.assertTrue(ordinary.get("systemd-resolved").adoptable)
-        self.assertEqual(ordinary.get("systemd-resolved").evidence_id,
-                         "038-t034-ubuntu-2404")
-        self.assertEqual(BUILTIN_RESOLVER_ADAPTERS[0].support_tier, "adoptable")
+        self.assertFalse(ordinary.get("systemd-resolved").adoptable)
+        self.assertIsNone(ordinary.get("systemd-resolved").evidence_id)
+        self.assertEqual(BUILTIN_RESOLVER_ADAPTERS[0].support_tier,
+                         "implemented_unproven")
         self.assertEqual(BUILTIN_RESOLVER_ADAPTERS[0].capabilities,
                          frozenset({"exact"}))
 

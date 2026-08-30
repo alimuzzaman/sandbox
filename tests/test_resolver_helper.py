@@ -48,14 +48,33 @@ class TestResolverHelper(unittest.TestCase):
         status = text.split("    resolved-status)", 1)[1].split(
             "    resolved-apply)", 1,
         )[0]
-        self.assertIn("MainPID", status)
-        self.assertIn("/proc/$service_pid/stat", status)
-        self.assertIn("ControlGroup", status)
+        identity = text.split("resolved_identity_fields()", 1)[1].split(
+            "require_resolved_identity()", 1,
+        )[0]
+        self.assertIn("MainPID", identity)
+        self.assertIn("/proc/$service_pid/stat", identity)
+        self.assertIn("ControlGroup", identity)
         self.assertIn("sandbox-resolved-service-v1", status)
         self.assertNotIn("install ", status)
         self.assertNotIn("rm -f", status)
         self.assertNotIn("systemctl reload", status)
         self.assertIn("sandbox-resolver-helper resolved-status", text)
+
+    def test_resolved_apply_revalidates_authorized_identity_immediately_before_write(self):
+        text = HELPER.read_text()
+        apply = text.split("    resolved-apply)", 1)[1].split(
+            "    resolved-remove)", 1,
+        )[0]
+        self.assertIn("require_resolved_identity", apply)
+        self.assertLess(apply.index("check_authorization resolved"),
+                        apply.index("require_resolved_identity"))
+        self.assertLess(apply.index("require_resolved_identity"),
+                        apply.index("install -d"))
+        for name in ("service_pid", "service_start", "service_uid", "service_control"):
+            self.assertIn(name, apply)
+        self.assertIn("sandbox-resolver-authorization-v2", text)
+        self.assertIn("pid=%s start=%s service_uid=%s control=%s", text)
+        self.assertIn("legacy_payload", text)
 
     def test_apply_and_remove_require_exact_root_authorization_receipts(self):
         text = HELPER.read_text()

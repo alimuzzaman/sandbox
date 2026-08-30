@@ -55,6 +55,17 @@ class ProductionResolverQualification:
     def qualifies(self, *, observation, platform, capability, adapter,
                   preflight=_UNSET) -> bool:
         """Accept only the reviewed Linux resolved exact-name control shape."""
+        if not self.shape_qualifies(
+            observation=observation, platform=platform,
+            capability=capability, adapter=adapter,
+        ):
+            return False
+        evidence = (self.preflight(observation=observation, adapter=adapter)
+                    if preflight is _UNSET else preflight)
+        return evidence is not None
+
+    def shape_qualifies(self, *, observation, platform, capability, adapter) -> bool:
+        """Validate source-owned shape without touching the privileged helper."""
         if platform not in self.platforms or capability not in self.capabilities:
             return False
         if observation is None:
@@ -67,9 +78,12 @@ class ProductionResolverQualification:
                     "kind": "route-only-domain", "global_takeover": False,
                 }):
             return False
-        evidence = (self.preflight(observation=observation, adapter=adapter)
-                    if preflight is _UNSET else preflight)
-        return evidence is not None
+        required = (
+            "plan", "ensure_helper", "ensure_authorized",
+            "qualification_preflight", "revoke_authorization",
+            "apply", "rollback", "observe",
+        )
+        return all(callable(getattr(adapter, name, None)) for name in required)
 
 
 SYSTEMD_RESOLVED_QUALIFICATION = ProductionResolverQualification(

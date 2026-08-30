@@ -97,7 +97,7 @@ def observation(*, owner="systemd-resolved:host", manager="resolved",
 def service(*, adapter=None, observed=None, strategy="systemd-resolved",
             wildcard=False, platform="linux", authority=None):
     from sandbox.application.domain_service import DomainService
-    from sandbox.network.manifest import built_in_resolver_registry
+    from sandbox.network.registry import ResolverAdapterRegistry, ResolverAdapterSpec
     from sandbox.network.repository import DomainRepository
 
     temporary = tempfile.TemporaryDirectory()
@@ -121,7 +121,7 @@ def service(*, adapter=None, observed=None, strategy="systemd-resolved",
                 "domain": "stable.test",
             }),
         }),
-        adapters=built_in_resolver_registry({"systemd-resolved": implementation}),
+        adapters=ResolverAdapterRegistry(),
         repository=DomainRepository(Path(temporary.name) / "state.json"),
         process=object(), http=object(), endpoints=endpoints,
         observer=lambda _hostname: observed or observation(),
@@ -134,6 +134,10 @@ def service(*, adapter=None, observed=None, strategy="systemd-resolved",
         consent_decider=lambda _owner: True,
         platform=platform,
     )
+    instance.adapters.register(ResolverAdapterSpec(
+        "systemd-resolved", implementation, ("resolved",), ("linux",),
+        "adoptable", frozenset({"exact"}), "test-only-qualified", 10,
+    ))
     instance._qualification_temporary = temporary
     return instance, implementation, endpoints, authority
 
@@ -153,8 +157,9 @@ class TestResolverProductionQualification(unittest.TestCase):
             "networkmanager": object(),
         })
         resolved = registry.get("systemd-resolved")
-        self.assertTrue(resolved.adoptable)
-        self.assertEqual(resolved.evidence_id, "038-t034-ubuntu-2404")
+        self.assertFalse(resolved.adoptable)
+        self.assertIsNone(resolved.evidence_id)
+        self.assertEqual(resolved.support_tier, "implemented_unproven")
         self.assertEqual(resolved.platforms, ("linux",))
         self.assertEqual(resolved.capabilities, frozenset({"exact"}))
         self.assertEqual(SYSTEMD_RESOLVED_QUALIFICATION.evidence_id,
@@ -190,7 +195,7 @@ class TestResolverProductionQualification(unittest.TestCase):
                 "systemd-resolved": QualifiedAdapter(),
                 "networkmanager": QualifiedAdapter(),
             })
-        self.assertTrue(registry.get("systemd-resolved").adoptable)
+        self.assertFalse(registry.get("systemd-resolved").adoptable)
         self.assertEqual(registry.get("systemd-resolved").capabilities,
                          frozenset({"exact"}))
         self.assertFalse(registry.get("networkmanager").adoptable)
@@ -199,7 +204,7 @@ class TestResolverProductionQualification(unittest.TestCase):
         qualified, _adapter, endpoints, _authority = self._service()
         result = qualified.plan("/tmp/project")
         self.assertEqual(result.state, "pending_consent")
-        self.assertEqual(endpoints.calls, 1)
+        self.assertEqual(endpoints.calls, 0)
 
         cases = (
             ({"observed": observation(owner="resolved:changed")},
@@ -238,9 +243,7 @@ class TestResolverProductionQualification(unittest.TestCase):
         self.assertEqual(result.state, "foreign_collision")
         self.assertEqual(result.reason["code"], "authority_endpoint_collision")
         self.assertEqual(endpoints.calls, 0)
-        self.assertEqual(adapter.calls, [
-            ("qualification_preflight", "systemd-resolved:host"),
-        ])
+        self.assertEqual(adapter.calls, [])
         self.assertEqual(authority.calls, [])
 
     def test_foreign_service_owner_is_refused_before_name_or_authority_mutation(self):
@@ -257,15 +260,16 @@ class TestResolverProductionQualification(unittest.TestCase):
 
         result = refused.apply("/tmp/project", interactive=True)
 
-        self.assertEqual(result.reason["code"], "resolver_not_qualified")
+        self.assertEqual(result.reason["code"], "resolver_changed")
         self.assertEqual(endpoints.calls, 0)
         self.assertEqual(authority.calls, [])
         self.assertEqual(adapter.calls, [
+            ("ensure_helper", True),
             ("qualification_preflight", "systemd-resolved:host"),
         ])
 
-    def test_service_identity_change_is_refused_before_dns_or_authority_mutation(self):
-        first = {
+    def test_helper_is_ensured_before_identity_preflight_and_dns_mutation(self):
+        identity = {
             "schema": "sandbox-resolved-service-v1",
             "owner_id": "systemd-resolved:host",
             "unit": "systemd-resolved.service",
@@ -274,19 +278,16 @@ class TestResolverProductionQualification(unittest.TestCase):
             "uid": 992,
             "control_group": "/system.slice/systemd-resolved.service",
         }
-        changed = {**first, "pid": 654, "start_ticks": 987654}
-        refused, adapter, endpoints, authority = self._service(
-            adapter=QualifiedAdapter(preflights=(first, changed)),
+        qualified, adapter, endpoints, authority = self._service(
+            adapter=QualifiedAdapter(preflights=(identity,)),
         )
 
-        result = refused.apply("/tmp/project", interactive=True)
+        result = qualified.apply("/tmp/project", interactive=True)
 
-        self.assertEqual(result.reason["code"], "resolver_changed")
+        self.assertTrue(result.ok)
         self.assertEqual(endpoints.calls, 1)
-        self.assertEqual(authority.calls, [])
-        self.assertEqual(adapter.calls, [
-            ("qualification_preflight", "systemd-resolved:host"),
-            ("qualification_preflight", "systemd-resolved:host"),
+        self.assertEqual([call[0] for call in adapter.calls[:3]], [
+            "ensure_helper", "qualification_preflight", "ensure_authorized",
         ])
 
     def test_unselected_resolver_remains_default_and_never_auto_adopts(self):

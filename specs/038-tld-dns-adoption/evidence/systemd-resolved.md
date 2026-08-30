@@ -14,7 +14,8 @@ constructed inside the harness for that single invocation. `--consent` records t
 operator approved the first mutation of this machine's resolver; the run was authorized by
 the repository owner for this purpose.
 
-The current source-owned production qualification uses this evidence ID directly and
+The current source-owned qualification uses this evidence ID as a constraint but keeps
+ordinary support `implemented_unproven` with no advertised evidence ID. It
 accepts no attestation, CLI/config/environment value, or other runtime promotion input. It
 is Linux-only and exact-name-only. Before mutation, a read-only installed-helper preflight
 must bind the observed resolved owner to the active service PID, process start identity,
@@ -28,7 +29,7 @@ T067 remains open.
 ```text
 historical harness without attestation:  systemd-resolved adoptable = False
 historical harness with attestation:     systemd-resolved adoptable = True
-current source-owned composition:        systemd-resolved exact/Linux only
+current source-owned composition:        implemented_unproven, adoptable = False
 ```
 
 Nothing on the CLI or in configuration can widen the current fixed qualification.

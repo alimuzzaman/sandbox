@@ -38,18 +38,26 @@ CI return `pending_consent` or
 override beats project configuration, which beats detection, and status reports that
 source.
 
-Ordinary production composition advertises one host-owned path: Linux
-`systemd-resolved`, exact names only, bound to checked-in evidence
-`038-t034-ubuntu-2404`. No string, mapping, typed object, CLI option, config, environment,
+Source-owned qualification implements one candidate host-owned path: Linux
+`systemd-resolved`, exact names only, constrained by historical checked-in evidence
+`038-t034-ubuntu-2404`. It remains `implemented_unproven` and non-adoptable in ordinary
+support until the normal live CLI gate is captured. No string, mapping, typed object, CLI option, config, environment,
 MCP input, or harness input can add or widen that qualification. Before endpoint or DNS
-mutation, the installed helper performs a read-only preflight and binds the observed
+mutation, Sandbox installs or upgrades the fixed versioned helper after consent. The
+helper then performs a read-only preflight and binds the observed
 `systemd-resolved` owner to the active unit's PID, process start identity, owner UID, and
-control group. A missing helper, inactive or replaced service, second resolver owner,
+control group. That identity is included in the root authorization receipt and rechecked
+inside the helper immediately before its write. A missing helper, inactive or replaced service, second resolver owner,
 NetworkManager owner, wildcard request, non-Linux platform, or foreign authority state
 fails closed. The executable name and a boolean readiness result are not qualification.
 An unselected host resolver is never auto-adopted; Sandbox-owned Docker/Caddy resolution
 remains the default. Explicit `./sb domains use systemd-resolved` changes only the
 resolver selection, preserving the persisted hostname and existing instance.
+
+The fixed helper reports `sandbox-resolver-helper-v2`. An older installed copy is not
+treated as ready: after consent it is upgraded from the checked-in helper, and an exact
+legacy resolved authorization receipt may be replaced only during the interactive
+authorization step with the new identity-bound receipt.
 
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
 authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.

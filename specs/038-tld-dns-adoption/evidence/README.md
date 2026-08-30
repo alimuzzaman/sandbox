@@ -2,15 +2,16 @@
 
 The default Sandbox-owned strategy is proven live on macOS. The Ubuntu
 systemd-resolved lifecycle is captured through the historical single-invocation
-conformance harness. Source-owned production composition now qualifies only that exact
-Linux systemd-resolved path, but the normal CLI path has not yet been rerun live.
+conformance harness. Source-owned code now constrains only that exact Linux
+systemd-resolved candidate, but ordinary support remains `implemented_unproven` until the
+normal CLI path is rerun live.
 
 | Scenario | Evidence | Status | Still required |
 |---|---|---|---|
 | Default Sandbox-owned resolution | `default-strategy.md` | live (macOS) | Linux run |
 | Persisted `.tst` and Compose fallback | `compatibility.md` | live (macOS) | Linux run |
 | Read-only quickstart baseline | `quickstart-run.md` | partial (macOS) | adoption lifecycle section |
-| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (historical harness); source-qualified locally | normal `./sb domains use systemd-resolved` live run |
+| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (historical harness); implemented locally, unadvertised | normal `./sb domains use systemd-resolved` live run |
 | Cleanup, drift, and repeated cleanup | `cleanup.md` | live (Ubuntu 24.04) | owner change (needs a second resolver manager) |
 | Wildcard and shared-owner lifecycle | `wildcards.md` | live (Ubuntu 24.04) | the two-project shared-owner run |
 

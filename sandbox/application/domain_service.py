@@ -357,16 +357,10 @@ class DomainService:
                 message="The selected resolver does not support a scoped wildcard zone.",
             )
         capability = "zone" if policy.get("wildcard") else "exact"
-        qualification_preflight = None
-        if spec.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id:
-            qualification_preflight = SYSTEMD_RESOLVED_QUALIFICATION.preflight(
-                observation=observation, adapter=spec.adapter,
-            )
         if (spec.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
-                and not SYSTEMD_RESOLVED_QUALIFICATION.qualifies(
+                and not SYSTEMD_RESOLVED_QUALIFICATION.shape_qualifies(
                     observation=observation, platform=self.platform,
                     capability=capability, adapter=spec.adapter,
-                    preflight=qualification_preflight,
                 )):
             return None, self._result(
                 state="unsupported", hostname=hostname, policy=policy,
@@ -409,36 +403,69 @@ class DomainService:
                 reason_code="authority_endpoint_collision",
                 message="The scoped authority endpoint is owned by foreign state.",
             )
-        if authority_status.get("address") and authority_status.get("port"):
+        deferred = spec.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+        if deferred:
+            address = port = None
+            endpoint_existing = False
+        elif authority_status.get("address") and authority_status.get("port"):
             address = authority_status["address"]
             port = int(authority_status["port"])
             endpoint_existing = True
         else:
             address, port = self.endpoints.allocate()
             endpoint_existing = False
-        adapter_plan = (
-            spec.adapter.plan(suffix, address, port)
-            if hasattr(spec.adapter, "plan") and observation.manager == "resolved"
-            else {"kind": kind, "hostname": hostname, "address": target,
-                  "suffix": suffix, "port": port}
-        )
-        adapter_plan = {**adapter_plan, "owner_digest": canonical_digest(owner)}
-        binding = ResolutionBinding.create(
-            kind=kind, name=binding_name, target=target,
-            adapter_id=spec.adapter_id, owners=(owner,), desired=adapter_plan,
-        )
+        adapter_plan = None
+        binding = None
+        if not deferred:
+            adapter_plan = (
+                spec.adapter.plan(suffix, address, port)
+                if hasattr(spec.adapter, "plan") and observation.manager == "resolved"
+                else {"kind": kind, "hostname": hostname, "address": target,
+                      "suffix": suffix, "port": port}
+            )
+            adapter_plan = {**adapter_plan, "owner_digest": canonical_digest(owner)}
+            binding = ResolutionBinding.create(
+                kind=kind, name=binding_name, target=target,
+                adapter_id=spec.adapter_id, owners=(owner,), desired=adapter_plan,
+            )
         return {
             "config": config, "policy": policy, "hostname": hostname,
             "fallback": fallback, "observation": observation, "offer": offer,
             "accepted": accepted, "spec": spec, "address": address, "port": port,
             "endpoint_existing": endpoint_existing,
-            "binding": binding, "adapter_plan": {
-                **adapter_plan, "hostname": hostname, "target": target,
-                "binding_id": binding.binding_id,
-                "observation_fingerprint": observation.fingerprint,
-            },
-            "qualification_preflight": qualification_preflight,
+            "binding": binding, "adapter_plan": adapter_plan,
+            "owner": owner, "target": target, "suffix": suffix,
+            "kind": kind, "binding_name": binding_name,
+            "authority_status": authority_status,
         }, None
+
+    def _materialize_resolver(self, prepared: dict, service_identity: dict) -> None:
+        status = prepared["authority_status"]
+        if status.get("address") and status.get("port"):
+            address, port = status["address"], int(status["port"])
+            endpoint_existing = True
+        else:
+            address, port = self.endpoints.allocate()
+            endpoint_existing = False
+        plan = prepared["spec"].adapter.plan(prepared["suffix"], address, port)
+        plan = {
+            **plan, "owner_digest": canonical_digest(prepared["owner"]),
+            "service_identity": dict(service_identity),
+        }
+        binding = ResolutionBinding.create(
+            kind=prepared["kind"], name=prepared["binding_name"],
+            target=prepared["target"], adapter_id=prepared["spec"].adapter_id,
+            owners=(prepared["owner"],), desired=plan,
+        )
+        prepared.update({
+            "address": address, "port": port,
+            "endpoint_existing": endpoint_existing, "binding": binding,
+            "adapter_plan": {
+                **plan, "hostname": prepared["hostname"],
+                "target": prepared["target"], "binding_id": binding.binding_id,
+                "observation_fingerprint": prepared["observation"].fingerprint,
+            },
+        })
 
     def plan(self, project_dir: str, *, label: str = "default",
              offer_override=None) -> DomainResult:
@@ -500,25 +527,33 @@ class DomainService:
                 reason_code="resolver_changed",
                 message="Resolver ownership changed after planning; retry from observation.",
             )
-        current_preflight = None
         if prepared["spec"].adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id:
+            helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
+            if not helper.get("ok"):
+                return self._result(
+                    state="pending_privilege", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_helper_required",
+                    message=helper.get("error", "The scoped resolver helper is unavailable."),
+                    mutated=bool(helper.get("mutated")),
+                )
             current_preflight = SYSTEMD_RESOLVED_QUALIFICATION.preflight(
                 observation=current, adapter=prepared["spec"].adapter,
             )
-        if (prepared["spec"].adapter_id
-                == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
-                and (not SYSTEMD_RESOLVED_QUALIFICATION.qualifies(
+            if not SYSTEMD_RESOLVED_QUALIFICATION.qualifies(
                     observation=current, platform=self.platform,
                     capability="exact", adapter=prepared["spec"].adapter,
                     preflight=current_preflight,
-                ) or current_preflight != prepared["qualification_preflight"])):
-            return self._result(
-                state="fallback", hostname=prepared["hostname"],
-                policy=prepared["policy"], observation=current,
-                expected=prepared["accepted"], fallback=prepared["fallback"],
-                reason_code="resolver_changed",
-                message="Resolver service identity changed after planning; retry from observation.",
-            )
+                ):
+                return self._result(
+                    state="fallback", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_changed",
+                    message="Resolver service identity is not qualified for mutation.",
+                )
+            self._materialize_resolver(prepared, current_preflight)
         existing = self.repository.binding(prepared["binding"].binding_id)
         if existing is not None and existing.last_applied is not None:
             if self.authority is None:
@@ -529,7 +564,9 @@ class DomainService:
                     reason_code="authority_unavailable",
                     message="The scoped answering authority is unavailable.",
                 )
-            if hasattr(prepared["spec"].adapter, "ensure_helper"):
+            if (prepared["spec"].adapter_id
+                    != SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and hasattr(prepared["spec"].adapter, "ensure_helper")):
                 helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
                 if not helper.get("ok"):
                     return self._result(
@@ -626,7 +663,9 @@ class DomainService:
                 reason_code="authority_unavailable",
                 message="The scoped answering authority is unavailable.",
             )
-        if hasattr(prepared["spec"].adapter, "ensure_helper"):
+        if (prepared["spec"].adapter_id
+                != SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                and hasattr(prepared["spec"].adapter, "ensure_helper")):
             helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
             if not helper.get("ok"):
                 return self._result(

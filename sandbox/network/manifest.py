@@ -15,9 +15,8 @@ def _spec(adapter_id, managers, platforms, tier, capabilities, order, evidence=N
 
 BUILTIN_RESOLVER_ADAPTERS = (
     _spec("systemd-resolved", SYSTEMD_RESOLVED_QUALIFICATION.managers,
-          SYSTEMD_RESOLVED_QUALIFICATION.platforms, "adoptable",
-          SYSTEMD_RESOLVED_QUALIFICATION.capabilities, 10,
-          SYSTEMD_RESOLVED_QUALIFICATION.evidence_id),
+          SYSTEMD_RESOLVED_QUALIFICATION.platforms, "implemented_unproven",
+          SYSTEMD_RESOLVED_QUALIFICATION.capabilities, 10),
     _spec("networkmanager", ("networkmanager",), ("linux",), "implemented_unproven", ("exact", "zone"), 20),
     _spec("macos", ("macos",), ("darwin",), "implemented_unproven", ("exact", "zone"), 30),
     _spec("dnsmasq", ("dnsmasq",), ("linux", "darwin"), "implemented_unproven", ("exact", "zone"), 40),

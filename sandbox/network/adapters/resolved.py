@@ -9,6 +9,7 @@ import re
 
 
 INSTALLED_HELPER = "/usr/local/libexec/sandbox-resolver-helper"
+HELPER_VERSION = "sandbox-resolver-helper-v2"
 _PREFLIGHT = re.compile(
     r"^sandbox-resolved-service-v1 "
     r"owner=systemd-resolved:host unit=systemd-resolved\.service "
@@ -70,7 +71,7 @@ class ResolvedAdapter:
         status = self.process.run(
             ("sudo", "-n", self.helper, "installed-status"), timeout=5,
         )
-        if status.returncode == 0 and (status.stdout or "").strip() == "ready":
+        if status.returncode == 0 and (status.stdout or "").strip() == HELPER_VERSION:
             return {"ok": True, "mutated": False}
         if not interactive or not self.repository_helper:
             return {
@@ -86,16 +87,23 @@ class ResolvedAdapter:
         verified = self.process.run(
             ("sudo", "-n", self.helper, "installed-status"), timeout=5,
         )
+        verified_ok = (verified.returncode == 0
+                       and (verified.stdout or "").strip() == HELPER_VERSION)
         return {
-            "ok": verified.returncode == 0 and (verified.stdout or "").strip() == "ready",
+            "ok": verified_ok,
             "mutated": True,
-            "error": "" if verified.returncode == 0 else "installed resolver helper could not be verified",
+            "error": "" if verified_ok else "installed resolver helper could not be verified",
         }
 
     def ensure_authorized(self, plan: dict, *, interactive: bool) -> dict:
         suffix, address, port = plan["suffix"], plan["address"], int(plan["port"])
         digest = hashlib.sha256(self._content(suffix, address, port)).hexdigest()
-        args = ("resolved", plan["owner_digest"], suffix, address, str(port), digest)
+        identity = self._identity_args(plan)
+        if identity is None:
+            return {"ok": False, "mutated": False,
+                    "error": "Resolved authorization requires final service identity."}
+        args = ("resolved", plan["owner_digest"], suffix, address, str(port), digest,
+                *identity)
         status = self.process.run(
             ("sudo", "-n", self.helper, "authorization-status", *args), timeout=5,
         )
@@ -119,12 +127,16 @@ class ResolvedAdapter:
         else:
             return {"ok": False, "mutated": False,
                     "error": "resolved apply requires an owner-bound plan"}
+        identity = self._identity_args(plan)
+        if identity is None:
+            return {"ok": False, "mutated": False,
+                    "error": "resolved apply requires final service identity"}
         before = self.readlink("/etc/resolv.conf")
         content = self._content(suffix, address, int(port))
         digest = hashlib.sha256(content).hexdigest()
         result = self.process.run((
             "sudo", "-n", self.helper, "resolved-apply",
-            plan["owner_digest"], suffix, address, str(port), digest,
+            plan["owner_digest"], suffix, address, str(port), digest, *identity,
         ), timeout=30)
         if result.returncode != 0:
             return {"ok": False, "mutated": False,
@@ -134,6 +146,7 @@ class ResolvedAdapter:
             rollback = self.rollback({
                 "suffix": suffix, "address": address, "port": int(port),
                 "owner_digest": plan["owner_digest"],
+                "service_identity": plan["service_identity"],
                 "applied": {"fragment_digest": digest},
             })
             return {
@@ -158,11 +171,12 @@ class ResolvedAdapter:
 
     def rollback(self, plan: dict) -> dict:
         digest = (plan.get("applied") or plan).get("fragment_digest")
-        if not digest:
+        identity = self._identity_args(plan)
+        if not digest or identity is None:
             return {"ok": False, "mutated": False}
         result = self.process.run((
             "sudo", "-n", self.helper, "resolved-remove", plan["owner_digest"],
-            plan["suffix"], plan["address"], str(plan["port"]), digest,
+            plan["suffix"], plan["address"], str(plan["port"]), digest, *identity,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
 
@@ -170,27 +184,53 @@ class ResolvedAdapter:
         digest = hashlib.sha256(self._content(
             plan["suffix"], plan["address"], int(plan["port"]),
         )).hexdigest()
+        identity = self._identity_args(plan)
+        if identity is None:
+            return {"ok": False, "mutated": False}
         result = self.process.run((
             "sudo", "-n", self.helper, "revoke-authorization", "resolved",
             plan["owner_digest"],
-            plan["suffix"], plan["address"], str(plan["port"]), digest,
+            plan["suffix"], plan["address"], str(plan["port"]), digest, *identity,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
 
     def cleanup(self, binding) -> dict:
         return self.release_owner(binding, dict(binding.desired)["owner_digest"])
 
+    @staticmethod
+    def _identity_args(plan: dict) -> tuple[str, str, str, str] | None:
+        identity = plan.get("service_identity")
+        if not isinstance(identity, dict) or set(identity) != {
+            "schema", "owner_id", "unit", "pid", "start_ticks", "uid",
+            "control_group",
+        }:
+            return None
+        if (identity.get("schema") != "sandbox-resolved-service-v1"
+                or identity.get("owner_id") != "systemd-resolved:host"
+                or identity.get("unit") != "systemd-resolved.service"
+                or identity.get("control_group")
+                != "/system.slice/systemd-resolved.service"):
+            return None
+        values = (identity.get("pid"), identity.get("start_ticks"), identity.get("uid"))
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+               for value in values) or values[0] == 0 or values[1] == 0:
+            return None
+        return (str(values[0]), str(values[1]), str(values[2]),
+                identity["control_group"])
+
     def release_owner(self, binding, owner_digest: str) -> dict:
         desired = dict(binding.desired)
         digest = (dict(binding.last_applied) if binding.last_applied is not None else {}).get(
             "fragment_digest"
         )
-        if not digest:
+        identity = self._identity_args(desired)
+        if not digest or identity is None:
             return {"ok": False, "mutated": False,
                     "error": "resolver binding has no owned fragment receipt"}
         result = self.process.run((
             "sudo", "-n", self.helper, "resolved-remove", owner_digest,
             desired["suffix"], desired["address"], str(desired["port"]), digest,
+            *identity,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": (result.stderr or "")[:1000]}

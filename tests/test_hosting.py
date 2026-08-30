@@ -26,6 +26,7 @@ import sandbox.core._remote as remote  # noqa: E402
 import sandbox.core._secrets as personal_secrets  # noqa: E402
 import sandbox.commands.preview as preview  # noqa: E402
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
+from tests.subprocess_support import run_test_process  # noqa: E402
 
 
 def _manifest(aliases=None):
@@ -809,22 +810,146 @@ class TestHostingManifest(unittest.TestCase):
         self.assertTrue(commands[-1].endswith("up -d web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._preflight_no_build_images")
+    @patch("sandbox.commands.hosting._build_checked")
     @patch("sandbox.commands.hosting._remote_checked")
-    def test_build_false_deploys_without_rebuilding_any_image(self, remote_checked, _write):
+    def test_build_false_deploys_without_rebuilding_any_image(
+            self, remote_checked, build_checked, preflight, _write):
         with self._write(_manifest()) as directory:
             manifest = Path(directory) / "sandbox.hosting.yml"
             manifest.write_text(manifest.read_text().replace(
                 "container_port: 8080",
-                "container_port: 8080\n      build: false\n      init_services: [setup]",
+                "container_port: 8080\n      build: false\n"
+                "      background_services: [worker]\n      init_services: [setup]",
             ))
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertNotIn("--build", commands[0])
-        self.assertIn("up -d --force-recreate --renew-anon-volumes --remove-orphans web", commands[0])
-        self.assertFalse(any(command.endswith("build setup") for command in commands))
-        self.assertTrue(any(command.endswith("run --rm setup") for command in commands))
+        preflight.assert_called_once()
+        self.assertEqual(preflight.call_args.args[2], ["web", "worker", "setup"])
+        build_checked.assert_not_called()
+        self.assertNotIn("--build", "\n".join(commands))
+        self.assertTrue(all("--no-build" in command for command in commands))
+        self.assertIn(
+            "up -d --no-build --force-recreate --renew-anon-volumes "
+            "--remove-orphans web worker",
+            commands[0],
+        )
+        self.assertFalse(any(command.endswith(" build setup") for command in commands))
+        self.assertTrue(any(command.endswith("run --rm --no-build setup") for command in commands))
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._preflight_no_build_images")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_false_preflight_fails_before_active_compose_mutation(
+            self, remote_checked, preflight, _write):
+        with self._write(_manifest().replace(
+            "container_port: 8080", "container_port: 8080\n      build: false",
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        preflight.side_effect = RuntimeError(
+            "no-build image preflight failed: web has no explicit existing image"
+        )
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+
+        with self.assertRaisesRegex(RuntimeError, "no-build image preflight failed"):
+            hosting_cmd._run_compose(
+                {}, validated, "/srv/example", "/srv/runtime", runtime,
+            )
+
+        remote_checked.assert_not_called()
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._preflight_no_build_images")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_false_targeted_convergence_keeps_hard_no_build(
+            self, remote_checked, preflight, _write):
+        with self._write(_manifest().replace(
+            "container_port: 8080", "container_port: 8080\n      build: false",
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+
+        hosting_cmd._run_compose(
+            {}, validated, "/srv/example", "/srv/runtime", runtime,
+            force_recreate=False,
+            runtime_convergence_proof={
+                "requested_revision": "a" * 40,
+                "recorded_revision": "a" * 40,
+                "observed_runtime_revision": "a" * 40,
+                "requested_config_digest": "sha256:digest",
+                "recorded_config_digest": "sha256:digest",
+                "topology_state": "ready",
+                "health_state": "ready",
+                "source_revision_state": "ready",
+            },
+        )
+
+        preflight.assert_called_once()
+        self.assertTrue(all("--no-build" in call.args[1]
+                            for call in remote_checked.call_args_list))
+        self.assertFalse(any("--build" in call.args[1]
+                             for call in remote_checked.call_args_list))
+
+    def test_no_build_image_preflight_checks_explicit_images_for_all_services(self):
+        command = hosting_cmd._no_build_image_preflight_command(
+            "docker compose -p example -f compose.yml", ["web", "worker", "setup"],
+        )
+
+        self.assertIn("config --format json", command)
+        self.assertIn("docker", command)
+        self.assertIn("image", command)
+        self.assertIn("inspect", command)
+        self.assertIn("web", command)
+        self.assertIn("worker", command)
+        self.assertIn("setup", command)
+        self.assertIn("no-build image preflight failed", command)
+
+    def test_no_build_image_preflight_fails_closed_and_accepts_existing_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text(
+                f"#!{sys.executable}\n"
+                "import json,sys\n"
+                "args=sys.argv[1:]\n"
+                "if args[:1] == ['compose']:\n"
+                " mode=args[args.index('-p')+1]\n"
+                " image=None if mode == 'no-explicit' else "
+                "('missing:latest' if mode == 'missing-local' else 'present:latest')\n"
+                " service={'build': {'context': '.'}}\n"
+                " if image is not None: service['image']=image\n"
+                " padding=70000 if mode == 'large-valid' else "
+                "(1048576 if mode == 'oversized' else 0)\n"
+                " print(json.dumps({'services': {name: dict(service) for name in "
+                "('web','worker','setup')}, 'x-padding': 'x' * padding}))\n"
+                " raise SystemExit(0)\n"
+                "if args[:2] == ['image','inspect'] and args[-1] == 'present:latest':\n"
+                " print('sha256:present')\n"
+                " raise SystemExit(0)\n"
+                "raise SystemExit(1)\n"
+            )
+            docker.chmod(0o700)
+            results = {}
+            for mode in (
+                    "no-explicit", "missing-local", "ready", "large-valid", "oversized"):
+                command = hosting_cmd._no_build_image_preflight_command(
+                    f"docker compose -p {mode} -f compose.yml",
+                    ["web", "worker", "setup"],
+                )
+                argv = shlex.split(command)
+                argv[0] = sys.executable
+                results[mode] = run_test_process(
+                    argv, env={"PATH": directory}, capture_output=True, text=True,
+                    check=False, timeout=5,
+                )
+
+        self.assertNotEqual(results["no-explicit"].returncode, 0)
+        self.assertNotEqual(results["missing-local"].returncode, 0)
+        self.assertEqual(results["ready"].returncode, 0)
+        self.assertEqual(json.loads(results["ready"].stdout), {"ok": True, "services": 3})
+        self.assertEqual(results["large-valid"].returncode, 0)
+        self.assertNotEqual(results["oversized"].returncode, 0)
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")

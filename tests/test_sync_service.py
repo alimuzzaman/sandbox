@@ -403,6 +403,25 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(
             self.repository.metrics(relationship.relationship_id)["refused"], 1,
         )
+        stored = self.repository.get_relationship(relationship.relationship_id)
+        self.assertEqual(stored.lifecycle, "conflicted")
+        generation = self.repository.lookup_request(
+            relationship.relationship_id, "request-remote-conflict",
+        )
+        self.assertEqual(generation.lifecycle, "refused")
+        (self.root / "source.txt").write_text("changed after conflict\n")
+        replay = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-remote-conflict",
+        )
+        status = service.status(
+            self.root, remote="remote", workspace_id="workspace",
+        )
+        for conflict in (replay, status):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["status"], "conflicted")
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
 
     def test_lost_acknowledgment_reconciles_with_original_request(self):
         class Reconciling:

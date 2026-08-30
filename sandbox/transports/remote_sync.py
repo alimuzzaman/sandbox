@@ -33,6 +33,7 @@ class RemoteSyncTransportError(RuntimeError):
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SAFE_REMOTE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SAFE_PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 _PUBLISH_PROGRAM = r'''import hashlib, json, os, pathlib, stat, sys
@@ -221,6 +222,38 @@ class RemoteSyncTransport:
             raise RemoteSyncTransportError(
                 "remote workspace ownership does not match the synchronization relationship",
                 "ownership_conflict", retryable=False,
+            )
+        index = evidence.get("index")
+        checkout = evidence.get("checkout")
+        locator_digests = evidence.get("locator_digests")
+        deployment_proof = evidence.get("deployment_proof")
+        ready = (
+            evidence.get("ok") is True
+            and evidence.get("lifecycle") == "ready"
+            and evidence.get("state") == "ready"
+            and evidence.get("status") == "ready"
+            and evidence.get("error") is None
+            and isinstance(index, Mapping)
+            and index.get("complete") is True
+            and isinstance(index.get("generation"), int)
+            and not isinstance(index.get("generation"), bool)
+            and index.get("generation") >= 0
+            and isinstance(checkout, Mapping)
+            and checkout.get("present") is True
+            and isinstance(checkout.get("identity"), str)
+            and _SHA256.fullmatch(checkout["identity"]) is not None
+            and isinstance(locator_digests, Mapping)
+            and locator_digests.get("checkout") == checkout.get("identity")
+            and isinstance(locator_digests.get("source_checkout"), str)
+            and _SHA256.fullmatch(locator_digests["source_checkout"]) is not None
+            and isinstance(deployment_proof, Mapping)
+            and isinstance(deployment_proof.get("source_identity"), str)
+            and _SHA256.fullmatch(deployment_proof["source_identity"]) is not None
+        )
+        if not ready:
+            raise RemoteSyncTransportError(
+                "remote workspace is not ready with complete source binding",
+                "remote_unavailable", retryable=True,
             )
         return evidence
 

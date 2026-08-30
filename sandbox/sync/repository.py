@@ -521,6 +521,10 @@ class SyncRepository:
                     relationship, accepted_generation_id=generation_id,
                     pending_generation_id=(None if relationship.pending_generation_id == generation_id
                                            else relationship.pending_generation_id),
+                    lifecycle=(
+                        "active" if relationship.mode in {"live", "checkpoint"}
+                        else "stopped"
+                    ),
                     updated_at=when or utc_now(),
                 )
             elif lifecycle in {"refused", "failed", "diverged"}:
@@ -528,7 +532,14 @@ class SyncRepository:
                     relationship,
                     pending_generation_id=(None if relationship.pending_generation_id == generation_id
                                            else relationship.pending_generation_id),
-                    lifecycle=("diverged" if lifecycle == "diverged" else relationship.lifecycle),
+                    lifecycle=(
+                        "diverged" if lifecycle == "diverged"
+                        else "conflicted" if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        )
+                        else relationship.lifecycle
+                    ),
                     updated_at=utc_now(),
                 )
             value["generations"][generation_id] = updated.as_dict()

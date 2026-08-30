@@ -9,10 +9,38 @@ from types import SimpleNamespace
 
 from sandbox.sync.capture import capture_manifest
 from sandbox.sync.models import SourceGeneration, SynchronizationRelationship
-from sandbox.transports.remote_sync import HostSourceSyncTransport, RemoteSyncTransport
+from sandbox.transports.remote_sync import (
+    HostSourceSyncTransport,
+    RemoteSyncTransport,
+    RemoteSyncTransportError,
+)
 
 
 class RemoteSyncTransportTests(unittest.TestCase):
+    @staticmethod
+    def ready_workspace(relationship):
+        checkout = "sha256:" + "1" * 64
+        return {
+            "ok": True,
+            "workspace_id": relationship.workspace_id,
+            "project_identity": relationship.project_identity,
+            "lifecycle": "ready",
+            "state": "ready",
+            "status": "ready",
+            "index": {"generation": 4, "complete": True},
+            "checkout": {"present": True, "identity": checkout},
+            "locator_digests": {
+                "metadata": "sha256:" + "2" * 64,
+                "checkout": checkout,
+                "source_checkout": "sha256:" + "3" * 64,
+            },
+            "deployment_proof": {
+                "source_identity": "sha256:" + "4" * 64,
+                "source_commit": "a" * 40,
+            },
+            "error": None,
+        }
+
     def test_reconcile_returns_typed_original_generation_without_retransfer(self):
         relationship = SynchronizationRelationship(
             "rel_fixture", "project:fixture", "remote", "workspace",
@@ -34,10 +62,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
             ssh_run=ssh_run,
             ssh_process=lambda *_args, **_kwargs: self.fail("must not upload"),
             resolve_home=lambda _remote: "/srv/sandbox",
-            workspace_preflight=lambda relationship: {
-                "workspace_id": relationship.workspace_id,
-                "project_identity": relationship.project_identity,
-            },
+            workspace_preflight=self.ready_workspace,
         )
         result = transport.reconcile(relationship, generation)
         self.assertEqual(result["accepted_generation"], "gen_fixture")
@@ -75,10 +100,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
                 remote_lookup=lambda name: {"provisioned": True, "name": name},
                 ssh_run=ssh_run, ssh_process=ssh_process,
                 resolve_home=lambda _remote: "/srv/sandbox",
-                workspace_preflight=lambda relationship: {
-                    "workspace_id": relationship.workspace_id,
-                    "project_identity": relationship.project_identity,
-                },
+                workspace_preflight=self.ready_workspace,
             )
             result = transport.transfer(root, manifest, relationship, generation)
             self.assertEqual(result["status"], "accepted")
@@ -97,10 +119,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
             ssh_run=lambda *_args, **_kwargs: calls.append("run"),
             ssh_process=lambda *_args, **_kwargs: calls.append("process"),
             resolve_home=lambda _remote: "/srv/sandbox",
-            workspace_preflight=lambda relationship: {
-                "workspace_id": relationship.workspace_id,
-                "project_identity": relationship.project_identity,
-            },
+            workspace_preflight=self.ready_workspace,
         )
         with self.assertRaisesRegex(Exception, "not provisioned"):
             transport.transfer(Path("/tmp"), SimpleNamespace(entries=(), git_root=Path("/tmp")),
@@ -135,6 +154,38 @@ class RemoteSyncTransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "ownership_conflict")
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(calls, [])
+
+    def test_workspace_preflight_refuses_non_ready_or_unbound_canonical_status(self):
+        relationship = SynchronizationRelationship(
+            "rel_fixture", "project:fixture", "remote", "workspace",
+        )
+        baseline = self.ready_workspace(relationship)
+        cases = {
+            "destroyed": {**baseline, "lifecycle": "destroyed", "state": "destroyed",
+                          "status": "destroyed"},
+            "tombstoned": {**baseline, "lifecycle": "tombstoned",
+                           "state": "tombstoned", "status": "tombstoned"},
+            "unhealthy": {**baseline, "error": "runtime_unhealthy"},
+            "incomplete": {**baseline, "index": {"generation": 4, "complete": False}},
+            "missing_checkout": {key: value for key, value in baseline.items()
+                                 if key != "checkout"},
+            "ambiguous_state": {**baseline, "state": "provisioning"},
+            "missing_source_binding": {**baseline, "deployment_proof": None},
+        }
+        for label, evidence in cases.items():
+            with self.subTest(label=label):
+                calls = []
+                transport = RemoteSyncTransport(
+                    remote_lookup=lambda name: {"provisioned": True, "name": name},
+                    ssh_run=lambda *_args, **_kwargs: calls.append("run"),
+                    ssh_process=lambda *_args, **_kwargs: calls.append("process"),
+                    resolve_home=lambda _remote: "/srv/sandbox",
+                    workspace_preflight=lambda _relationship, value=evidence: value,
+                )
+                with self.assertRaises(RemoteSyncTransportError) as caught:
+                    transport._verify_workspace_owner(relationship)
+                self.assertEqual(caught.exception.code, "remote_unavailable")
+                self.assertEqual(calls, [])
 
     def test_host_source_transfer_uses_project_relative_manifest_without_restart(self):
         with tempfile.TemporaryDirectory() as temp:

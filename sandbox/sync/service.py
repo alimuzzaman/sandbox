@@ -106,6 +106,33 @@ class SyncService:
             )
         )
 
+    def _ownership_conflict_envelope(
+        self, relationship: SynchronizationRelationship,
+        generation=None,
+    ) -> dict | None:
+        candidates = (
+            (generation,)
+            if generation is not None
+            else reversed(self.repository.list_generations(
+                relationship.relationship_id
+            ))
+        )
+        for candidate in candidates:
+            if (
+                candidate.lifecycle == "refused"
+                and candidate.refusal_code == "ownership_conflict"
+            ):
+                return failure_envelope(
+                    code="ownership_conflict", status="conflicted",
+                    relationship_id=relationship.relationship_id,
+                    remote_name=relationship.remote_name,
+                    request_id=candidate.request_id,
+                    accepted_generation=relationship.accepted_generation_id,
+                    pending_generation=relationship.pending_generation_id,
+                    retryable=False,
+                )
+        return None
+
     def _reconcile_generation(self, relationship, generation, *, remote: str) -> dict:
         """Probe uncertain acceptance once and require exact generation evidence."""
         with self.coordinator.serialize_reconciliation(relationship.relationship_id):
@@ -178,6 +205,21 @@ class SyncService:
         relationship = self._relationship(project_dir, remote, workspace_id)
         if participant_id is not None:
             self.coordinator.participant(relationship.relationship_id, participant_id)
+        prior = self.repository.lookup_request(
+            relationship.relationship_id, request_id,
+        )
+        if (
+            prior is not None
+            and prior.lifecycle == "refused"
+            and prior.refusal_code == "ownership_conflict"
+        ):
+            current = (
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship
+            )
+            conflict = self._ownership_conflict_envelope(current, prior)
+            if conflict is not None:
+                return conflict
         # A checkpoint is an explicit request marker. It deliberately does not
         # change the persistent mode and follows the same screened transfer.
         _ = checkpoint
@@ -219,6 +261,23 @@ class SyncService:
             return success_envelope(
                 self.repository.get_relationship(relationship.relationship_id) or relationship,
                 generation, status="accepted", active_generation=generation.generation_id,
+            )
+        if (
+            replay
+            and generation.lifecycle == "refused"
+            and generation.refusal_code == "ownership_conflict"
+        ):
+            current = (
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship
+            )
+            return self._ownership_conflict_envelope(current, generation) or failure_envelope(
+                code="ownership_conflict", status="conflicted",
+                relationship_id=current.relationship_id, remote_name=remote,
+                request_id=generation.request_id,
+                accepted_generation=current.accepted_generation_id,
+                pending_generation=current.pending_generation_id,
+                retryable=False,
             )
         if replay and generation.lifecycle == "transferring":
             current = (self.repository.get_relationship(relationship.relationship_id)
@@ -309,6 +368,10 @@ class SyncService:
 
     def status(self, project_dir: str | Path, *, remote: str, workspace_id: str) -> dict:
         relationship = self._relationship(project_dir, remote, workspace_id, create=False)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         generation_id = relationship.pending_generation_id or relationship.accepted_generation_id
         generation = self.repository.get_generation(generation_id) if generation_id else None
         status = ("pending" if relationship.pending_generation_id else

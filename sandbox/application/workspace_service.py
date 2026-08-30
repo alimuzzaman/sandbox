@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -264,12 +264,102 @@ def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
     return {"containers": containers, "mounts": mounts}
 
 
-def _file_sha256(path: Path) -> str:
+def _file_sha256(path_or_handle) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    if hasattr(path_or_handle, "read") and hasattr(path_or_handle, "seek"):
+        handle = path_or_handle
+        handle.seek(0)
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
+        handle.seek(0)
+    else:
+        with Path(path_or_handle).open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _artifact_identity(observed) -> dict[str, int]:
+    return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
+
+
+@contextmanager
+def _verified_artifact(artifact: Path, expected_digest: str,
+                       expected_size: int):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(artifact, flags)
+    except OSError as exc:
+        raise WorkspaceIndexError(
+            "workspace_materialization_unavailable",
+            "retained CI materialization artifact is unavailable") from exc
+    handle = os.fdopen(descriptor, "rb", closefd=False)
+    try:
+        observed = os.fstat(descriptor)
+        if (not stat.S_ISREG(observed.st_mode) or
+                observed.st_size != expected_size or
+                _file_sha256(handle) != expected_digest):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "retained CI materialization artifact proof changed")
+        yield handle, _artifact_identity(observed)
+    finally:
+        handle.close()
+        os.close(descriptor)
+
+
+def _unlink_verified_artifact(artifact: Path, expected_digest: str,
+                              expected_size: int) -> None:
+    """Move and unlink only the exact verified archive directory entry."""
+    retirement_root = artifact.parent / ".retiring"
+    retirement_root.mkdir(mode=0o700, exist_ok=True)
+    retirement_identity = os.stat(retirement_root, follow_symlinks=False)
+    if (not stat.S_ISDIR(retirement_identity.st_mode) or
+            retirement_identity.st_uid != os.getuid() or
+            stat.S_IMODE(retirement_identity.st_mode) & 0o077):
+        raise WorkspaceIndexError(
+            "workspace_path_unsafe", "artifact retirement root is not owner-only")
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                       getattr(os, "O_NOFOLLOW", 0))
+    with _verified_artifact(
+            artifact, expected_digest, expected_size) as (_handle, identity):
+        parent_fd = os.open(artifact.parent, directory_flags)
+        retirement_fd = os.open(retirement_root, directory_flags)
+        retirement_name = uuid.uuid4().hex + ".tar.gz"
+        moved_fd = None
+        try:
+            os.rename(
+                artifact.name, retirement_name,
+                src_dir_fd=parent_fd, dst_dir_fd=retirement_fd)
+            moved_fd = os.open(
+                retirement_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=retirement_fd)
+            moved_identity = _artifact_identity(os.fstat(moved_fd))
+            if moved_identity != identity:
+                try:
+                    os.stat(artifact.name, dir_fd=parent_fd,
+                            follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(
+                        retirement_name, artifact.name,
+                        src_dir_fd=retirement_fd, dst_dir_fd=parent_fd)
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization artifact entry changed")
+            entry_identity = _artifact_identity(os.stat(
+                retirement_name, dir_fd=retirement_fd,
+                follow_symlinks=False))
+            if entry_identity != identity:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization retirement entry changed")
+            os.unlink(retirement_name, dir_fd=retirement_fd)
+        finally:
+            if moved_fd is not None:
+                os.close(moved_fd)
+            os.close(retirement_fd)
+            os.close(parent_fd)
 
 
 def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
@@ -353,23 +443,37 @@ def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
 
 
 def _restore_checkout(artifact: Path, expected_digest: str,
-                      checkout: Path) -> None:
-    if (not artifact.is_file() or artifact.is_symlink() or
-            _file_sha256(artifact) != expected_digest or checkout.exists()):
+                      expected_size: int, checkout: Path) -> None:
+    if checkout.exists():
         raise WorkspaceIndexError(
             "workspace_materialization_unavailable",
             "retained CI materialization artifact is unavailable")
     staging = checkout.parent / f".{checkout.name}.restore-{uuid.uuid4().hex}"
     try:
         staging.mkdir(mode=0o700)
-        with tarfile.open(artifact, "r:gz") as archive:
-            archive.extractall(staging, filter="data")
+        with _verified_artifact(
+                artifact, expected_digest, expected_size) as (handle, identity):
+            with tarfile.open(fileobj=handle, mode="r:gz") as archive:
+                archive.extractall(staging, filter="data")
+            try:
+                entry_identity = _artifact_identity(os.stat(
+                    artifact, follow_symlinks=False))
+            except OSError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization artifact entry changed") from exc
+            if entry_identity != identity:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization artifact entry changed")
         restored = staging / "workspace"
         if not restored.is_dir() or restored.is_symlink():
             raise WorkspaceIndexError(
                 "workspace_materialization_unavailable",
                 "retained CI materialization artifact is invalid")
         os.rename(restored, checkout)
+    except WorkspaceIndexError:
+        raise
     except (OSError, tarfile.TarError) as exc:
         raise WorkspaceIndexError(
             "workspace_materialization_failed",
@@ -956,14 +1060,14 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_materialization_unavailable",
                     "retained CI materialization artifact proof is incomplete")
-            _restore_checkout(artifact, artifact_digest, checkout)
             artifact_size = restore_authority.get("artifact_size_bytes")
             if (isinstance(artifact_size, bool) or
-                    not isinstance(artifact_size, int) or artifact_size < 0 or
-                    artifact.stat().st_size != artifact_size):
+                    not isinstance(artifact_size, int) or artifact_size < 0):
                 raise WorkspaceIndexError(
                     "workspace_materialization_unavailable",
                     "retained CI materialization size proof is incomplete")
+            _restore_checkout(
+                artifact, artifact_digest, artifact_size, checkout)
             receipt_payload = {
                 "schema": 1, "workspace_path": str(checkout),
                 "source_identity": submission.source.identity,
@@ -1106,23 +1210,16 @@ class WorkspaceService:
             if authority is not None:
                 artifact = Path(authority["artifact_locator"])
                 artifact_root = repo.index_path.parent / "ci-materializations"
-                retired = False
                 try:
                     artifact.resolve(strict=False).relative_to(
                         artifact_root.resolve(strict=False))
-                    if (not artifact.is_symlink() and artifact.is_file() and
-                            artifact.stat().st_size == authority["artifact_size_bytes"] and
-                            _file_sha256(artifact) == authority["artifact_digest"]):
-                        artifact.unlink()
-                        retired = True
+                    _unlink_verified_artifact(
+                        artifact, authority["artifact_digest"],
+                        authority["artifact_size_bytes"])
                 except (OSError, ValueError):
                     raise WorkspaceIndexError(
                         "workspace_materialization_failed",
                         "unpublished materialization artifact could not be retired") from exc
-                if not retired:
-                    raise WorkspaceIndexError(
-                        "workspace_materialization_failed",
-                        "unpublished materialization artifact proof changed") from exc
             raise
         if self.resource_binding_resolver is not None:
             bindings = self.resource_binding_resolver(submission) or ()
@@ -1145,6 +1242,16 @@ class WorkspaceService:
             "deployment_root": str(Path(self.deployment_root)),
         }
 
+    @staticmethod
+    def _submission_operation_key(project_identity: str,
+                                  workspace_label: str) -> str:
+        payload = f"{project_identity}\0{workspace_label}".encode("utf-8")
+        return "job-workspace-" + hashlib.sha256(payload).hexdigest()[:32]
+
+    def submission_guard(self, submission):
+        return self._repo().operation_lock(self._submission_operation_key(
+            submission.project_identity, submission.workspace_label))
+
     def has_retained_materialization(self, job: dict) -> bool:
         workspace_id = job.get("workspace_id")
         if not isinstance(workspace_id, str):
@@ -1159,16 +1266,20 @@ class WorkspaceService:
 
     def retire_terminal_materialization(self, job: dict) -> bool:
         """Retire the exact retained artifact, never a guessed generation."""
-        if not self.has_retained_materialization(job):
-            return False
         workspace_id = job["workspace_id"]
         repo = self._repo()
-        with repo.operation_lock(workspace_id):
+        key = self._submission_operation_key(
+            str(job.get("project_identity")), str(job.get("workspace_label")))
+        with repo.operation_lock(key):
             record = repo.get(workspace_id)
             if record is None:
                 raise WorkspaceIndexError(
                     "workspace_identity_ambiguous", "workspace artifact owner is unavailable")
             authority = record.metadata.get("ci_cleanup_authority")
+            if (not isinstance(authority, dict) or
+                    authority.get("digest") != job.get("workspace_authority_digest") or
+                    record.metadata.get("ci_materialization_retired", False)):
+                return False
             artifact = Path(str(authority.get("artifact_locator")))
             artifact_root = repo.index_path.parent / "ci-materializations"
             try:
@@ -1178,14 +1289,12 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_path_escape", "workspace artifact escapes retention root") from exc
             expected_size = authority.get("artifact_size_bytes")
-            if (artifact.is_symlink() or not artifact.is_file() or
-                    isinstance(expected_size, bool) or
-                    not isinstance(expected_size, int) or
-                    artifact.stat().st_size != expected_size or
-                    _file_sha256(artifact) != authority.get("artifact_digest")):
+            if (isinstance(expected_size, bool) or
+                    not isinstance(expected_size, int)):
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift", "workspace artifact proof changed")
-            artifact.unlink()
+            _unlink_verified_artifact(
+                artifact, authority.get("artifact_digest"), expected_size)
             repo.mark_lifecycle(
                 workspace_id, record.lifecycle, status=record.status,
                 metadata={"ci_materialization_retired": True},
@@ -1210,7 +1319,13 @@ class WorkspaceService:
                 "workspace_identity_ambiguous",
                 "terminal job has no exact workspace identity")
         repo = self._repo()
-        guard = repo.operation_lock(workspace_id)
+        preliminary = repo.get(workspace_id)
+        if preliminary is None:
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal workspace identity is unavailable")
+        guard = repo.operation_lock(self._submission_operation_key(
+            preliminary.project_identity, preliminary.label))
         with guard:
             record = repo.get(workspace_id)
             if record is None:
@@ -1411,6 +1526,15 @@ class WorkspaceService:
                                 "workspace_ownership_drift",
                                 "quarantined checkout identity changed")
                         _remove_tree_fd(owned_fd)
+                        entry = os.stat(
+                            "owned", dir_fd=operation_fd,
+                            follow_symlinks=False)
+                        opened = os.fstat(owned_fd)
+                        if (_artifact_identity(entry) !=
+                                _artifact_identity(opened)):
+                            raise WorkspaceIndexError(
+                                "workspace_ownership_drift",
+                                "emptied quarantine entry identity changed")
                         os.rmdir("owned", dir_fd=operation_fd)
                     finally:
                         if owned_fd is not None:

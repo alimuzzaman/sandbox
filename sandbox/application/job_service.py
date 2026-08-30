@@ -7,6 +7,7 @@ this module so CLI and MCP adapters share one service contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -56,39 +57,44 @@ class JobService:
             if self.sync_gateway is None:
                 raise RuntimeError("synchronized_job_authority_unavailable")
             submission = self.sync_gateway.prepare_submission(submission)
-        replay = self.repository.replay(submission)
-        if replay is not None:
-            return self._accepted(replay, replay=True)
-        # Production composition supplies the durable workspace boundary.  It
-        # must commit ownership before the job repository can acknowledge an
-        # acceptance, otherwise a detached job can outlive the only metadata
-        # capable of identifying its workspace.  The dependency stays optional
-        # for compatibility adapters and isolated repository tests.
-        workspace_id = None
-        workspace_authority_digest = None
-        if self.workspace_registry is not None:
-            previous_authority_digest = None
-            if submission.retry_of_job_id is not None:
-                previous_authority_digest = self.repository.get(
-                    submission.retry_of_job_id).get("workspace_authority_digest")
-            workspace = (
-                self.workspace_registry.ensure_submission(
-                    submission,
-                    expected_previous_authority_digest=previous_authority_digest,
+        guard = (
+            self.workspace_registry.submission_guard(submission)
+            if (self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "submission_guard"))
+            else nullcontext()
+        )
+        with guard:
+            replay = self.repository.replay(submission)
+            if replay is not None:
+                return self._accepted(replay, replay=True)
+            # Workspace validation/materialization and durable acceptance share
+            # the same controller lock as terminal deletion. A checkout cannot
+            # disappear between these two commits.
+            workspace_id = None
+            workspace_authority_digest = None
+            if self.workspace_registry is not None:
+                previous_authority_digest = None
+                if submission.retry_of_job_id is not None:
+                    previous_authority_digest = self.repository.get(
+                        submission.retry_of_job_id).get("workspace_authority_digest")
+                workspace = (
+                    self.workspace_registry.ensure_submission(
+                        submission,
+                        expected_previous_authority_digest=previous_authority_digest,
+                    )
+                    if submission.retry_of_job_id is not None
+                    else self.workspace_registry.ensure_submission(submission)
                 )
-                if submission.retry_of_job_id is not None
-                else self.workspace_registry.ensure_submission(submission)
-            )
-            workspace_id = getattr(workspace, "workspace_id", None)
-            if not isinstance(workspace_id, str):
-                raise RuntimeError("workspace_identity_ambiguous")
-            authority = getattr(workspace, "metadata", {}).get(
-                "ci_cleanup_authority")
-            if isinstance(authority, dict):
-                workspace_authority_digest = authority.get("digest")
-        row, replay = self.repository.accept(
-            submission, workspace_id=workspace_id,
-            workspace_authority_digest=workspace_authority_digest)
+                workspace_id = getattr(workspace, "workspace_id", None)
+                if not isinstance(workspace_id, str):
+                    raise RuntimeError("workspace_identity_ambiguous")
+                authority = getattr(workspace, "metadata", {}).get(
+                    "ci_cleanup_authority")
+                if isinstance(authority, dict):
+                    workspace_authority_digest = authority.get("digest")
+            row, replay = self.repository.accept(
+                submission, workspace_id=workspace_id,
+                workspace_authority_digest=workspace_authority_digest)
         if replay:
             return self._accepted(row, replay=True)
         if submission.compatibility_differences:

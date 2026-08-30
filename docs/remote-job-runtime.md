@@ -149,12 +149,19 @@ check must prove no live recorded child/supervisor, residual child process group
 owned child cgroup, container mount, host mountpoint or bind source, resource binding,
 lease, or other active job. The exact filesystem identity is moved into a private
 owner-only cleanup root and deleted through its continuously open directory descriptor;
-pathname replacements are never deletion targets. The same seam covers
+the final directory entry is revalidated against that descriptor, so pathname
+replacements are never deletion targets. Workspace validation/materialization and
+durable job acceptance hold the same controller lock as terminal deletion, so a new
+accept cannot commit after the final active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB
 for both apparent input and compressed output, 100,000 entries, and a 1 GiB post-write
 free-space reserve; it does not accumulate a new archive per
 attempt. The ownership projection reports its retained byte count, and explicit/age or
-pressure cleanup retires the exact digest-verified archive. Generic jobs, reusable/index/legacy
+pressure cleanup retires the exact digest-verified archive. Restore hashes, sizes, and
+extracts one open archive identity; retirement hashes and
+moves that same open identity before unlinking it. A path replacement fails closed and
+a failed restore removes staging without publishing a checkout.
+Generic jobs, reusable/index/legacy
 workspaces, `retain`, failed `on-success`, missing authority, unknown observations,
 ownership drift, and unsafe paths all prevent deletion. Cleanup failure is separate
 from lifecycle, exit code, result, logs, metrics, and artifacts. This is local candidate

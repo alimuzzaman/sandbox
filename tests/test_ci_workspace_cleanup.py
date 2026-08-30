@@ -5,6 +5,7 @@ import os
 import signal
 import shutil
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,6 +67,18 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             self.job_repository, self.storage, None, launcher=launcher,
             workspace_registry=self.workspaces,
         )
+
+    def _fd_path(self, descriptor):
+        if sys.platform.startswith("linux"):
+            return Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        encoded = fcntl.fcntl(
+            descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+        return Path(encoded.split(b"\0", 1)[0].decode())
+
+    def _materialization_artifact(self, accepted):
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        return Path(record.metadata["ci_cleanup_authority"]["artifact_locator"])
 
     def test_prelaunch_failure_retains_terminal_row_then_releases_exact_disposable_workspace(self):
         checkout = self._checkout("launch-failure")
@@ -443,6 +456,92 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(foreign[0].read_text(), "must survive")
         self.assertFalse((moved / "retained-evidence.txt").exists())
 
+    def test_empty_quarantine_aba_never_deletes_path_replacement(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("empty-quarantine-aba")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="empty-quarantine-aba-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        moved = self.deploy_root / "reviewer-empty-owned"
+        real_remove = workspace_module._remove_tree_fd
+
+        def replace_empty_quarantine(directory_fd):
+            real_remove(directory_fd)
+            candidate = self._fd_path(directory_fd)
+            candidate.rename(moved)
+            candidate.mkdir()
+
+        with patch(
+                "sandbox.application.workspace_service._remove_tree_fd",
+                side_effect=replace_empty_quarantine):
+            row = service.get(accepted["job_id"])
+
+        self.assertEqual(row["cleanup_state"], "failed")
+        replacements = tuple(self.deploy_root.glob(
+            ".sandbox-ci-cleanup/*/owned"))
+        self.assertEqual(len(replacements), 1)
+        self.assertTrue(replacements[0].is_dir())
+        self.assertTrue(moved.is_dir())
+
+    def test_concurrent_accept_during_delete_cannot_lose_checkout(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("concurrent-accept-delete")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="concurrent-delete-first"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        entered_delete = threading.Event()
+        continue_delete = threading.Event()
+        submit_finished = threading.Event()
+        submit_results = []
+        submit_errors = []
+        real_remove = workspace_module._remove_tree_fd
+
+        def pause_delete(directory_fd):
+            entered_delete.set()
+            if not continue_delete.wait(5):
+                raise RuntimeError("fixture delete wait expired")
+            return real_remove(directory_fd)
+
+        def cleanup_worker():
+            service.get(accepted["job_id"])
+
+        def submit_worker():
+            try:
+                submit_results.append(service.submit(self._submission(
+                    checkout, request_id="concurrent-delete-second")))
+            except Exception as exc:
+                submit_errors.append(exc)
+            finally:
+                submit_finished.set()
+
+        with patch(
+                "sandbox.application.workspace_service._remove_tree_fd",
+                side_effect=pause_delete):
+            cleanup_thread = threading.Thread(target=cleanup_worker)
+            cleanup_thread.start()
+            self.assertTrue(entered_delete.wait(5))
+            submit_thread = threading.Thread(target=submit_worker)
+            submit_thread.start()
+            submit_finished.wait(0.2)
+            continue_delete.set()
+            cleanup_thread.join(5)
+            submit_thread.join(5)
+
+        self.assertFalse(cleanup_thread.is_alive())
+        self.assertFalse(submit_thread.is_alive())
+        self.assertEqual(submit_results, [])
+        self.assertEqual(len(submit_errors), 1)
+        self.assertEqual(len(self.job_repository.list(limit=10)), 1)
+        self.assertFalse(checkout.exists())
+
     def test_retry_rematerializes_fresh_disposable_checkout_after_auto_release(self):
         checkout = self._checkout("retry-after-release")
         service = self._service(lambda _descriptor: None)
@@ -463,6 +562,99 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(len(tuple(
             self.workspace_repository.index_path.parent.glob(
                 "ci-materializations/*.tar.gz"))), 1)
+
+    def test_artifact_swap_after_hash_never_restores_replacement(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("restore-artifact-swap")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="restore-artifact-swap-first"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"],
+                         "completed")
+        artifact = self._materialization_artifact(accepted)
+        verified = artifact.with_name("reviewer-verified-restore.tar.gz")
+        replacement = b"unrelated replacement"
+        real_digest = workspace_module._file_sha256
+        attacked = False
+
+        def swap_after_hash(target):
+            nonlocal attacked
+            digest = real_digest(target)
+            if not attacked:
+                attacked = True
+                artifact.rename(verified)
+                artifact.write_bytes(replacement)
+            return digest
+
+        with patch(
+                "sandbox.application.workspace_service._file_sha256",
+                side_effect=swap_after_hash):
+            with self.assertRaisesRegex(Exception, "artifact entry changed"):
+                service.retry(
+                    accepted["job_id"], request_id="restore-artifact-swap-retry")
+
+        self.assertFalse(checkout.exists())
+        self.assertTrue(verified.is_file())
+        self.assertEqual(artifact.read_bytes(), replacement)
+
+    def test_failed_artifact_restore_rolls_back_checkout(self):
+        checkout = self._checkout("restore-artifact-failure")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="restore-artifact-failure-first"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        self._materialization_artifact(accepted).write_bytes(b"invalid archive")
+
+        with self.assertRaises(Exception):
+            service.retry(
+                accepted["job_id"], request_id="restore-artifact-failure-retry")
+
+        self.assertFalse(checkout.exists())
+
+    def test_retirement_swap_after_hash_never_deletes_replacement(self):
+        from sandbox.application import workspace_service as workspace_module
+
+        checkout = self._checkout("retire-artifact-swap")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="retire-artifact-swap-first"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        verified = artifact.with_name("reviewer-verified-retirement.tar.gz")
+        replacement = b"unrelated replacement"
+        real_digest = workspace_module._file_sha256
+        attacked = False
+
+        def swap_after_hash(target):
+            nonlocal attacked
+            digest = real_digest(target)
+            if not attacked:
+                attacked = True
+                artifact.rename(verified)
+                artifact.write_bytes(replacement)
+            return digest
+
+        with patch(
+                "sandbox.application.workspace_service._file_sha256",
+                side_effect=swap_after_hash):
+            with self.assertRaisesRegex(Exception, "artifact"):
+                service.cleanup(accepted["job_id"])
+
+        self.assertTrue(verified.is_file())
+        self.assertEqual(artifact.read_bytes(), replacement)
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        self.assertFalse(record.metadata.get("ci_materialization_retired", False))
 
     def test_materialization_archive_is_bounded_reserved_in_inventory_and_retired(self):
         checkout = self._checkout("archive-lifecycle")

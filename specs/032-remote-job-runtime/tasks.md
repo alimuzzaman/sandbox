@@ -508,5 +508,7 @@ and evidence actually present in this branch.
   projection, live-child refusal, pathname ABA, retry rematerialization, non-CI
   authority refusal, reusable/index/legacy compatibility, residual process-group and
   owned-cgroup refusal, FD-bound second-replacement safety, v5 request replay,
-  bind-source mount observation, and bounded/inventoried artifact retirement. Local regressions
+  bind-source mount observation, bounded/inventoried artifact retirement, empty-quarantine
+  replacement, accept-during-delete serialization, open-descriptor artifact swaps, and
+  failed-restore rollback. Local regressions
   exist; live disposable-remote acceptance and measured reclamation remain pending.

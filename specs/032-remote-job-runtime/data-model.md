@@ -131,8 +131,12 @@ Mode/policy and job-supplied paths never create cleanup authority. A fresh
 process-group/owned-cgroup/container/mountpoint/bind-source/binding/lease/job observation
 must prove zero live references. The owned filesystem identity then moves to a private
 owner-only root and deletion remains bound to its open descriptor through completion.
+Validation/materialization, durable acceptance, retry, artifact retirement, and terminal
+deletion serialize on one stable project-identity/workspace-label controller lock.
 Terminal job/result rows and one bounded materialization artifact remain retained;
-retry publishes fresh authority without creating another archive generation.
+retry publishes fresh authority without creating another archive generation. Archive
+digest, size, extraction, and retirement operate on one identity-checked open descriptor;
+an entry replacement fails closed and restore staging is rolled back.
 
 ### `process_identities`
 

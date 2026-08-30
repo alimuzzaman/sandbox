@@ -1228,10 +1228,27 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   source evidence, and leaves generic/reusable/index/legacy workspaces retained.
   All five reviewer reproductions are named regressions in
   `tests/test_ci_workspace_cleanup.py`.
+- A final Sol High review at `63d2464` found five more unsafe gaps: residual
+  process groups after leader exit, a second quarantine pathname race, v5 replay
+  drift from the nullable v6 field, bind-source mounts missed by the observer,
+  and unbounded retained archive generations. The current candidate records and
+  checks the owned PGID/dedicated cgroup, parses mount roots and mountpoints,
+  performs owner-only FD-bound deletion, omits the unset v6 field from canonical
+  input, and retains one archive with 512 MiB input/output, 100,000-entry, and
+  1 GiB reserve bounds. Workspace inventory reports the retained count/bytes;
+  job retention digest-verifies and retires it. Reviewer reproductions cover
+  background children, both pathname replacements, migrated-v5 replay,
+  bind-source mounts, reserve/size refusal, retry reuse, and retirement.
 - After merging `origin/latest` at
   `a0845e0f9438788820199ee4229f4484a93466f9`, the focused lifecycle, workspace,
   transport, MCP, architecture, remote-ensure, and bounded-process suites passed
   355 tests. This validates local behavior only; it does not close T171/T172.
+- After merging the reviewed Feature 046 `origin/latest` at
+  `74fcb955384bc69aa07062b9c901556a37121ab6`, the adversarial/transport/
+  architecture/bounded-process suite passed 130 tests with one Linux-only
+  mountinfo test skipped on macOS; all 181 job tests and all 133 workspace tests
+  also passed. These are local gates only. T171/T172 remain unchecked pending
+  disposable remote and measured reclamation proof.
 - Full unittest discovery was attempted but stopped during the unrelated live
   resource-probe suite after it produced large machine-state observations. Four
   failures observed earlier in that run reproduce independently on unchanged

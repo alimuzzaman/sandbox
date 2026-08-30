@@ -977,5 +977,22 @@ class TestRemoteProbeResilience(unittest.TestCase):
         )
         self.assertEqual(outcomes[0]["category"], "docker_storage")
 
+class TestHostMemoryRemoteTransport(unittest.TestCase):
+    def test_control_transport_has_no_ssh_fallback(self):
+        from sandbox.core import _remote
+        payload={"action":"host_memory_status","remote_name":"fixture","budget_seconds":15}
+        response={"resource_schema":1,"host_memory_schema":1,"transport":"control","service":{},"result":{}}
+        with unittest.mock.patch.object(_remote,"_remote_control_request",return_value=response) as request:
+            self.assertIs(_remote.remote_host_memory_request({},payload),response)
+        self.assertEqual(request.call_args.args[1],"/resources")
+
+    def test_transport_rejects_arbitrary_input_before_control(self):
+        from sandbox.core import _remote
+        with unittest.mock.patch.object(_remote,"_remote_control_request") as request:
+            with self.assertRaises(Exception):
+                _remote.remote_host_memory_request({}, {"action":"host_memory_status","remote_name":"fixture","path":"/tmp/x"})
+        request.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

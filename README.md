@@ -931,6 +931,17 @@ and can usually diagnose itself.
   for deferred product work.
 
 Re-run `./sb setup` after a global config change — it's idempotent.
+
+The Feature 046 remote host-memory contract uses `resources`: `swap-status`, controller-
+owned `swap-plan --operation enable|disable`, confirmed `swap-apply --plan-id`, and bounded
+`swap-history`. Every action requires `--remote`; enable accepts only integer `--size-gib`
+values from 1 through 8. The authenticated remote protocol has no SSH fallback and accepts
+only the fixed `host_memory_status`, `host_memory_history`, and `host_memory_apply` actions.
+See [resource monitoring](docs/resource-monitoring.md#remote-host-swap-and-memory-history).
+Local or synthetic tests do not prove live Linux mutation, reboot persistence, or release
+readiness.
+Protected apply dispatch remains gated and unreachable until the complete T047 preflight
+and refusal matrix is GREEN.
 ## Hermes Agent
 
 Remote Hermes control is documented in [docs/hermes-agent.md](docs/hermes-agent.md).

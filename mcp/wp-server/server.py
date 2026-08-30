@@ -4,6 +4,7 @@ import hmac
 import json
 import math
 import os
+import platform
 import shlex
 import stat
 import subprocess
@@ -100,6 +101,10 @@ def _diagnostic_process_snapshot() -> dict:
 
 def _resource_contract(payload: dict) -> dict:
     """Execute only the fixed resource probe contract on the co-located host."""
+    # Protected apply is deliberately not reachable until the complete T047
+    # refusal/preflight matrix is green. Keep status/history independently usable.
+    if payload.get("action") in {"host_memory_status", "host_memory_history"}:
+        return _host_memory_contract(payload)
     from sandbox.resources.remote import LocalProbeAdapter
 
     action = payload.get("action")
@@ -128,6 +133,55 @@ def _resource_contract(payload: dict) -> dict:
     if result is None:
         result = {"ok": False, "reason": "resource_response_invalid"}
     return {"resource_schema": 1, "transport": "control", "result": result}
+
+
+def _host_memory_contract(payload: dict) -> dict:
+    """Dispatch the three fixed Feature 046 actions with strict schemas."""
+    import hashlib
+
+    from sandbox.resources.host_memory.models import canonical_digest
+    from sandbox.resources.host_memory.policy import PolicyRefusal
+    from sandbox.resources.host_memory.provider import HostProvider, STATE
+    from sandbox.resources.host_memory.remote import validate_request
+    from sandbox.resources.host_memory.repository import HostMemoryRepository
+
+    request = validate_request(payload)
+    marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
+    revision = _live_runtime_revision()
+    provider = HostProvider()
+    repository = HostMemoryRepository(STATE)
+    action = request["action"]
+    try:
+        if action == "host_memory_status":
+            result = provider.observe()
+            identity_seed = platform.node().encode("utf-8", "replace")
+            result["target_identity"] = hashlib.sha256(identity_seed).hexdigest()[:24]
+            result["observation_digest"] = canonical_digest(result)
+        elif action == "host_memory_history":
+            result = repository.history_window(
+                request.get("since"), request.get("until"), request.get("limit", 288),
+            )
+        else:
+            try:
+                applied = provider.apply(request["plan"], request["operation_id"])
+                result = applied if isinstance(applied, dict) else {
+                    "status": "failed", "error": {"code": "response_invalid",
+                    "message": "provider returned no verified result", "retryable": False},
+                }
+            except PolicyRefusal as exc:
+                result = {"status": "refused", "data": {}, "error": {
+                    "code": exc.code, "message": str(exc)[:240], "retryable": False,
+                }}
+    except Exception:
+        result = {"status": "failed", "data": {}, "error": {
+            "code": "response_invalid", "message": "bounded host evidence unavailable",
+            "retryable": True,
+        }}
+    return {
+        "resource_schema": 1, "host_memory_schema": 1, "transport": "control",
+        "service": {"ownership_marker": marker, "runtime_revision": revision},
+        "result": result,
+    }
 
 
 def _remote_wp_error(code: str, message: str, *, status: str = "blocked") -> dict:

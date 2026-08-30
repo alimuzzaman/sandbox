@@ -12,8 +12,8 @@
 **Purpose**: Add narrow synthetic fixtures and an evidence ledger without implementing host behavior.
 
 - [ ] T001 [P] Add deterministic, secret-free host-memory fixtures with fixed `/proc`, cgroup, swap, ownership, and command-result values in `tests/host_memory_fixtures.py`
-- [ ] T002 [P] Add a Feature 046 acceptance ledger with separate local, synthetic-provider, human-review, live-Linux, and reboot sections in `specs/046-host-swap-monitor/acceptance-evidence.md`
-- [ ] T003 [P] Add shared assertions that reject raw command output, environment dumps, host paths, process arguments, and unbounded samples in `tests/host_memory_assertions.py`
+- [X] T002 [P] Add a Feature 046 acceptance ledger with separate local, synthetic-provider, human-review, live-Linux, and reboot sections in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T003 [P] Add shared assertions that reject raw command output, environment dumps, host paths, process arguments, and unbounded samples in `tests/host_memory_assertions.py`
 
 ---
 
@@ -32,11 +32,11 @@
 ### Foundational GREEN implementation
 
 - [ ] T009 Implement versioned immutable domain models, enums, validation, and bounded serialization in `sandbox/resources/host_memory/models.py` and export only public types from `sandbox/resources/host_memory/__init__.py`
-- [ ] T010 Implement pure byte-based planning, size-override bounds, thresholds, headroom, ownership, and fail-closed decision rules in `sandbox/resources/host_memory/policy.py`
+- [X] T010 Implement pure byte-based planning, size-override bounds, thresholds, headroom, ownership, and fail-closed decision rules in `sandbox/resources/host_memory/policy.py`
 - [ ] T011 Implement atomic versioned state, sample, ownership, and operation-journal persistence behind a repository API in `sandbox/resources/host_memory/repository.py`
 - [ ] T012 Implement the typed remote action/result adapter with evidence limits and the explicit `host_memory_status`, `host_memory_history`, and `host_memory_apply` allowlist in `sandbox/resources/host_memory/remote.py`
-- [ ] T013 Implement the base application-service response envelope, dependency interfaces, and read-only status projection contract in `sandbox/resources/host_memory/service.py`
-- [ ] T014 Wire the private host-memory service factory and dependency adapters without a governance mutation export in `sandbox/resources/context.py`
+- [X] T013 Implement the base application-service response envelope, dependency interfaces, and read-only status projection contract in `sandbox/resources/host_memory/service.py`
+- [X] T014 Wire the private host-memory service factory and dependency adapters without a governance mutation export in `sandbox/resources/context.py`
 - [ ] T015 Run `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, and `tests/test_host_memory_remote.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Typed foundations are usable. No host mutation is reachable.
@@ -62,8 +62,8 @@
 
 - [ ] T022 [US1] Implement bounded read-only Linux observation, cgroup normalization, swap enumeration, ownership classification, and explicit unknown results in `sandbox/resources/host_memory/provider.py`
 - [ ] T023 [US1] Compose provider observations, stored samples, policy warnings, freshness, and the only immutable governance projection in `sandbox/resources/host_memory/service.py` and expose that projection without mutation methods from `sandbox/resources/context.py`
-- [ ] T024 [US1] Register the authorized fixed `host_memory_status` control action without shell or arbitrary-command input in `mcp/wp-server/server.py`
-- [ ] T025 [US1] Add the controller-side typed status request and response mapping with no SSH fallback in `sandbox/core/_remote.py`
+- [X] T024 [US1] Register the authorized fixed `host_memory_status` control action without shell or arbitrary-command input in `mcp/wp-server/server.py`
+- [X] T025 [US1] Add the controller-side typed status request and response mapping with no SSH fallback in `sandbox/core/_remote.py`
 - [ ] T026 [US1] Add `resources swap-status` text and JSON presentation with stable error classes in `sandbox/commands/resources.py`
 - [ ] T027 [US1] Run the User Story 1 tests in `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_interfaces.py`, and `tests/test_host_memory_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
@@ -88,10 +88,10 @@
 
 ### Controller planning implementation - GREEN after T033
 
-- [ ] T034 [US2] Implement deterministic controller-side enable-plan construction, 4 GiB default, valid 1-8 GiB requested/effective sizing, every capacity calculation, preconditions, and confirmation digest rules in `sandbox/resources/host_memory/policy.py`
+- [X] T034 [US2] Implement deterministic controller-side enable-plan construction, 4 GiB default, valid 1-8 GiB requested/effective sizing, every capacity calculation, preconditions, and confirmation digest rules in `sandbox/resources/host_memory/policy.py`
 - [ ] T035 [US2] Implement stored plan, requested/effective policy, confirmation, request, phase, artifact, and ownership records with atomic transitions in `sandbox/resources/host_memory/repository.py`
-- [ ] T036 [US2] Implement read-only controller plan orchestration from `host_memory_status` evidence only, with no remote plan action or provider mutation, in `sandbox/resources/host_memory/service.py`
-- [ ] T037 [US2] Add `resources swap-plan` parsing and text/JSON rendering, including valid `--size-gib 1..8` propagation and disable-mode rejection, in `sandbox/commands/resources.py`
+- [X] T036 [US2] Implement read-only controller plan orchestration from `host_memory_status` evidence only, with no remote plan action or provider mutation, in `sandbox/resources/host_memory/service.py`
+- [X] T037 [US2] Add `resources swap-plan` parsing and text/JSON rendering, including valid `--size-gib 1..8` propagation and disable-mode rejection, in `sandbox/commands/resources.py`
 - [ ] T038 [US2] Run the plan-focused tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, and `tests/test_resource_interfaces.py`; require the read-only planning path GREEN while protected apply remains unavailable, and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: The reviewed plan is controller-owned and read-only. The remote allowlist still has no planning action, and protected apply is not registered or reachable.
@@ -161,8 +161,8 @@
 - [ ] T061 [US4] Implement aggregate-only monitor sampling and warning derivation inputs in `sandbox/resources/host_memory/provider.py`
 - [ ] T062 [US4] Implement the hard five-second collector deadline, timed-out child termination, durable partial/failed result, fixed non-overlapping monitor lock/timer behavior, and next-run recovery in `sandbox/resources/host_memory/provider.py` and `sandbox/resources/host_memory/service.py`
 - [ ] T063 [US4] Implement atomic bounded sample append, rotation, ordering, and corrupt-data isolation in `sandbox/resources/host_memory/repository.py`
-- [ ] T064 [US4] Implement bounded history orchestration and register the strict authorized `host_memory_history` action in `sandbox/resources/host_memory/service.py` and `mcp/wp-server/server.py`
-- [ ] T065 [US4] Add typed history transport and `resources swap-history` text/JSON presentation with enforced limits in `sandbox/core/_remote.py` and `sandbox/commands/resources.py`
+- [X] T064 [US4] Implement bounded history orchestration and register the strict authorized `host_memory_history` action in `sandbox/resources/host_memory/service.py` and `mcp/wp-server/server.py`
+- [X] T065 [US4] Add typed history transport and `resources swap-history` text/JSON presentation with enforced limits in `sandbox/core/_remote.py` and `sandbox/commands/resources.py`
 - [ ] T066 [US4] Run the User Story 4 tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Operators can inspect privacy-bounded aggregate history, and monitor overruns cannot overlap or fabricate samples.
@@ -226,9 +226,9 @@
 
 **Purpose**: Synchronize operator guidance, prove adjacent boundaries, and retain non-local release gates as explicit unchecked work.
 
-- [ ] T088 Document status, controller-owned planning, valid size overrides, apply, history, disable-history preservation, ownership, fixed paths, privacy, replay, rollback, normative outcomes/reason codes, and Feature 047 read-only composition in `docs/resource-monitoring.md`
+- [X] T088 Document status, controller-owned planning, valid size overrides, apply, history, disable-history preservation, ownership, fixed paths, privacy, replay, rollback, normative outcomes/reason codes, and Feature 047 read-only composition in `docs/resource-monitoring.md`
 - [ ] T089 [P] Update the resource command overview, JSON examples, size/mode validation, refusal semantics, and external acceptance caveats in `README.md`
-- [ ] T090 [P] Update CLI-first operator guidance, confirmation rules, replay rules, fixed underscore wire actions, controller-owned planning, and no-SSH-fallback constraints in `skills/sandbox-cli/SKILL.md`
+- [X] T090 [P] Update CLI-first operator guidance, confirmation rules, replay rules, fixed underscore wire actions, controller-owned planning, and no-SSH-fallback constraints in `skills/sandbox-cli/SKILL.md`
 - [ ] T091 [P] Add command registration, help, JSON schema, error-class, documentation-link, and remote-action regression coverage in `tests/test_resource_interfaces.py`, `tests/test_resource_remote.py`, and `tests/test_remote_service_help.py`
 - [ ] T092 [P] Add regression tests proving Spec 043 disk monitoring/scheduling, resource/MCP behavior, and workspace/remote contracts remain separate and gain no direct Feature 046 state access in `tests/test_storage_monitor_policy.py`, `tests/test_storage_monitor_schedule.py`, `tests/test_storage_monitor_runner.py`, `tests/test_mcp_resource_tier.py`, `tests/test_resource_service.py`, `tests/test_workspace_contracts.py`, and `tests/test_remote.py`
 - [ ] T093 Run all Feature 046 and adjacent regression tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_host_memory_interfaces.py`, `tests/test_resource_interfaces.py`, `tests/test_resource_remote.py`, `tests/test_remote_service_help.py`, `tests/test_storage_monitor_policy.py`, `tests/test_storage_monitor_schedule.py`, `tests/test_storage_monitor_runner.py`, `tests/test_mcp_resource_tier.py`, `tests/test_resource_service.py`, `tests/test_workspace_contracts.py`, and `tests/test_remote.py`; record exact bounded results in `specs/046-host-swap-monitor/acceptance-evidence.md`

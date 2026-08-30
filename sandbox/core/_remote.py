@@ -2285,6 +2285,20 @@ def remote_resource_request(remote: dict, payload: dict, *, timeout: int) -> dic
     return result
 
 
+def remote_host_memory_request(remote: dict, payload: dict) -> dict:
+    """Send one strict host-memory action over authenticated control only."""
+    from sandbox.resources.host_memory.remote import validate_request
+
+    request = validate_request(payload)
+    budget = request.get("budget_seconds", 15)
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        raise ValueError("host-memory budget is invalid")
+    timeout = min(max(int(budget) + 5, 5), 305)
+    return _remote_control_request(
+        remote, "/resources", timeout=timeout, payload=request,
+    )
+
+
 def remote_wp_cli(
     remote: dict,
     *,

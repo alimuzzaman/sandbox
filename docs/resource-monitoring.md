@@ -569,3 +569,42 @@ match `status --fast` and `status --refresh`; passing both is refused with
 `invalid_mode`.
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.
+
+## Remote host swap and memory history
+
+Feature 046 adds a remote-only, authenticated-control surface. It never falls back to SSH:
+
+```sh
+./sb resources swap-status --remote NAME --json
+./sb resources swap-plan --remote NAME --operation enable --size-gib 4 --json
+./sb resources swap-apply --remote NAME --plan-id PLAN --confirm --json
+./sb resources swap-history --remote NAME --limit 288 --json
+./sb resources swap-plan --remote NAME --operation disable --json
+```
+
+Planning is controller-owned and read-only. Enable sizes are integers from 1 through 8 GiB,
+with 4 GiB as the default; RAM, filesystem, and free-reserve calculations are bound into the
+immutable 15-minute plan. Apply accepts only the stored plan ID and explicit confirmation.
+The wire actions are exactly `host_memory_status`, `host_memory_history`, and
+`host_memory_apply`; there is no remote planning action or caller-selected path, argv,
+shell, unit text, or file body.
+
+The provider authority is limited to the fixed artifacts documented in the Feature 046
+control contract. Unknown ownership, unmanaged or multiple swap, revision/protocol skew,
+unsafe artifacts, concurrent work, incomplete rollback, capacity failure, drift, and
+ambiguous responses fail closed. Public outcomes remain `planned`, `applied`,
+`already_current`, `refused`, `partial`, `failed`, `rollback_complete`, and
+`rollback_incomplete`, with stable reason codes.
+
+History returns aggregate RAM, swap, PSI, and allowlisted VM counters only. It is bounded to
+1,000 samples and 1 MiB. Process/container identity, PID, command/argument/environment data,
+raw output, credentials, and private paths are never collected into the result. Disable
+stops future sampling but preserves bounded prior history under a minimal disabled receipt.
+Reboot persistence stays `unverified` until a separately authorized reboot acceptance.
+Feature 047 may consume only `HostMemoryStatusProjection`; it receives no planning,
+provider, repository, apply, rollback, or disable authority.
+
+Implementation-lane note: status/history registration and controller planning are present,
+but protected `host_memory_apply` dispatch remains deliberately unreachable until the full
+T047 preflight/refusal matrix is GREEN. Do not treat the command shape above as current
+apply availability or live-host proof.

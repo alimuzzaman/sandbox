@@ -87,3 +87,34 @@ def node_store_service(remote: str | None = None):
     return NodeStoreReclaimService(
         service.adapter, Path(RUNTIME_DIR) / "resource-plans",
     )
+
+
+def host_memory_service(remote: str | None = None):
+    """Build the remote-only Feature 046 controller service."""
+    if not remote:
+        raise ValueError("remote_required")
+    from sandbox.core import _remote
+    from sandbox.core._paths import RUNTIME_DIR
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    from .host_memory.repository import HostMemoryRepository
+    from .host_memory.service import HostMemoryService
+
+    record = _remote.get_remote(remote)
+    if not isinstance(record, dict):
+        raise ValueError("unknown_remote")
+    service = record.get("mcp_service") or {}
+    local_revision = _remote._remote_mcp_runtime_revision()
+    if service.get("runtime_revision") != local_revision:
+        raise RemoteProtocolError(
+            "remote_runtime_revision_mismatch",
+            "installed remote runtime does not match this controller",
+        )
+
+    def request(selected, payload):
+        return _remote.remote_host_memory_request(selected, payload)
+
+    adapter = HostMemoryRemote(remote, record, request)
+    repository = HostMemoryRepository(
+        Path(RUNTIME_DIR) / "resources" / "host-memory",
+    )
+    return HostMemoryService(adapter, repository)

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
 from sandbox.resources.context import (
-    host_memory_service, node_store_service, reclaim_service, resource_service,
+    host_memory_status, node_store_service, reclaim_service, resource_service,
 )
 from sandbox.resources.models import resource_cancellation_signal, redact
 from sandbox.resources.monitor import record_path, resolve_policy
@@ -1077,8 +1077,9 @@ def _host_memory_cli(args):
         return {"schema_version": 1, "ok": False, "action": action,
                 "status": "refused", "target": target, "data": {},
                 "error": {"code": "invalid_mode", "message": "option is not valid for this host-memory action", "retryable": False}}
+    budget = 15 if args.budget is None else args.budget
     try:
-        service = host_memory_service(remote)
+        return host_memory_status(remote,budget_seconds=budget)
     except Exception as exc:
         code = getattr(exc, "code", None) or str(exc)
         if code not in {"unknown_remote", "remote_runtime_revision_mismatch",
@@ -1087,8 +1088,6 @@ def _host_memory_cli(args):
         return {"schema_version": 1, "ok": False, "action": action,
                 "status": "refused", "target": target, "data": {},
                 "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
-    budget = args.budget
-    return service.status(budget or 15)
 
 
 def _emit_host_memory(payload, json_output):

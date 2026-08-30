@@ -570,7 +570,7 @@ match `status --fast` and `status --refresh`; passing both is refused with
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.
 
-## Remote host swap and memory history
+## Remote host swap and memory status
 
 Feature 046 adds a remote-only, authenticated-control surface. It never falls back to SSH:
 
@@ -579,16 +579,17 @@ Feature 046 adds a remote-only, authenticated-control surface. It never falls ba
 ```
 
 The current MVP registers only `host_memory_status`. It validates the complete typed status
-schema, composes retained controller history into monitor freshness and sustained-pressure
+schema, composes attested fixed host history into monitor freshness and sustained-pressure
 state, and reports only aggregate evidence. Planning, apply, disable, and history commands
 remain unimplemented and are not registered or reachable.
 
-The provider authority is limited to the fixed artifacts documented in the Feature 046
-control contract. Unknown ownership, unmanaged or multiple swap, revision/protocol skew,
-unsafe artifacts, concurrent work, incomplete rollback, capacity failure, drift, and
-ambiguous responses fail closed. Public outcomes remain `planned`, `applied`,
-`already_current`, `refused`, `partial`, `failed`, `rollback_complete`, and
-`rollback_incomplete`, with stable reason codes.
+This completed boundary is observation only. It can report an owned area only after the
+fixed receipt and swap file pass owner, type, mode, link-count, and target checks, and the
+fixed persistence unit and swappiness policy also match their receipt-bound digests. Any
+missing, malformed, contradictory, or partial
+evidence stays non-authorizing. The later planning, mutation, rollback, disable, and public
+history stories remain unchecked in the Feature 046 task ledger; their design contracts do
+not describe currently available commands.
 
 Process/container identity, PID, command/argument/environment data, raw output, credentials,
 and private paths are never collected into the result. Reboot persistence stays `unverified`

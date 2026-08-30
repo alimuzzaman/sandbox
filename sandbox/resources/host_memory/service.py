@@ -21,13 +21,14 @@ def failure(action,exc,target=None,status="refused"):
 
 
 class HostMemoryService:
-    def __init__(self, remote, repository, *, now=None):
-        self.remote=remote; self.repository=repository; self.now=now or (lambda:datetime.now(timezone.utc))
+    """Internal status adapter. Public consumers receive only value objects."""
+    def __init__(self, remote, *, now=None):
+        self._remote=remote; self._now=now or (lambda:datetime.now(timezone.utc))
     @property
-    def target(self): return {"kind":"remote","name":self.remote.name}
+    def target(self): return {"kind":"remote","name":self._remote.name}
 
     def status(self,budget_seconds=15):
-        try: data=self.remote.call("host_memory_status",budget_seconds=budget_seconds)
+        try: data=self._remote.call("host_memory_status",budget_seconds=budget_seconds)
         except Exception as exc: return failure("swap-status",exc,self.target,"failed")
         try:
             data = RemoteSwapState.from_dict(data, require_digest=True).to_dict()

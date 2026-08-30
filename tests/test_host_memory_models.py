@@ -37,6 +37,29 @@ class HostMemoryModelsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             RemoteSwapState.from_dict(malformed)
 
+    def test_remote_state_rejects_path_bearing_and_contradictory_known_evidence(self):
+        cases = (
+            status_state(target_identity="../../private/host"),
+            status_state(operation_block={"operation_id":"a"*64,
+                                          "reason":"/private/receipt.json"}),
+            status_state(memory={"total_bytes":None,"available_bytes":None,
+                                 "state":"known"}),
+            status_state(container_eligibility={"state":"unknown","version":"unknown",
+                "memory_limit_bytes":None,"memory_used_bytes":None,"swap_limit_bytes":None,
+                "swap_used_bytes":None,"evidence_state":"partial"}),
+            status_state(filesystem={"total_bytes":None,"free_bytes":None,"state":"known"}),
+            status_state(swappiness={"effective":15,"owned":False,"drifted":True}),
+            status_state(swap_areas=[{"area_id":"a"*24,"type":"file","total_bytes":1,
+                "used_bytes":0,"active":True,"persistent":True,"priority":-2,
+                "ownership":"unmanaged"}],evidence_state="unmanaged",ownership="unmanaged"),
+            status_state(container_eligibility={"state":"limited","version":"v2",
+                "memory_limit_bytes":None,"memory_used_bytes":1,"swap_limit_bytes":None,
+                "swap_used_bytes":0,"evidence_state":"known"}),
+        )
+        for payload in cases:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                RemoteSwapState.from_dict(payload, require_digest=True)
+
     def test_plan_operation_and_receipt_are_immutable_and_versioned(self):
         plan_payload = {
             "schema_version": 1, "plan_id": "a" * 64, "operation": "enable",

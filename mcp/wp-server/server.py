@@ -10,6 +10,7 @@ import stat
 import subprocess
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -140,7 +141,7 @@ def _host_memory_contract(payload: dict) -> dict:
     import hashlib
 
     from sandbox.resources.host_memory.models import RemoteSwapState
-    from sandbox.resources.host_memory.provider import HostProvider, STATE
+    from sandbox.resources.host_memory.provider import HostProvider, HISTORY, STATE
     from sandbox.resources.host_memory.remote import validate_request
     from sandbox.resources.host_memory.repository import HostMemoryRepository
 
@@ -152,10 +153,11 @@ def _host_memory_contract(payload: dict) -> dict:
     identity_seed = platform.node().encode("utf-8", "replace")
     target_identity = hashlib.sha256(identity_seed).hexdigest()[:24]
     provider = HostProvider(target_identity=target_identity)
-    repository = HostMemoryRepository(STATE)
+    repository = HostMemoryRepository(STATE,history_path=HISTORY,history_owner_uid=0)
+    deadline=time.monotonic()+float(request["budget_seconds"])
     try:
-        result = provider.observe()
-        history = repository.status_monitor_evidence(now=provider.now())
+        result = provider.observe(deadline=deadline)
+        history = repository.status_monitor_evidence(now=provider.now(),deadline=deadline)
         history_complete = history.pop("history_complete")
         result = dict(result)
         result.pop("observation_digest", None)

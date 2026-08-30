@@ -19,7 +19,9 @@ class HostMemoryRepositoryTest(unittest.TestCase):
             with self.assertRaises(RepositoryError): self.repo.history_window(limit=limit)
     def test_history_is_bounded_and_malformed_is_visible(self):
         self.repo.append_sample(sample()); self.repo.append_sample(sample("2026-08-30T11:55:00Z"))
-        with (Path(self.tmp.name)/"history.2.jsonl").open("w") as stream: stream.write("not-json\n")
+        malformed=Path(str(self.repo.history_path)+".2")
+        with malformed.open("w") as stream: stream.write("not-json\n")
+        malformed.chmod(0o600)
         result=self.repo.history_window(limit=1)
         self.assertEqual(result["counts"]["returned"],1); self.assertEqual(result["counts"]["malformed"],1); self.assertFalse(result["complete"])
     def test_operation_replay_evidence(self):
@@ -46,7 +48,7 @@ class HostMemoryRepositoryTest(unittest.TestCase):
     def test_history_rotation_keeps_current_plus_eight_and_total_bound(self):
         for index in range(12):
             self.repo.append_sample(sample(f"2026-08-30T{index:02d}:00:00Z"), maximum_bytes=700)
-        files = list(Path(self.tmp.name).glob("history*.jsonl"))
+        files = [path for path in self.repo._history_paths() if path.exists()]
         self.assertLessEqual(len(files), 9)
         self.assertLessEqual(sum(path.stat().st_size for path in files), 700)
 
@@ -61,3 +63,18 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         self.assertEqual(monitor["freshness"], "fresh")
         self.assertTrue(monitor["sustained_swap_use"])
         self.assertEqual(monitor["retention"]["current_files"], 1)
+        self.assertFalse(monitor["retention"]["truncated"])
+
+    def test_fixed_history_path_is_bounded_attested_and_budgeted(self):
+        history=Path(self.tmp.name)/"var/log/sandbox/host-memory.jsonl"
+        repo=HostMemoryRepository(Path(self.tmp.name)/"state",history_path=history)
+        for minute in (45,50,55):
+            repo.append_sample(sample(f"2026-08-30T11:{minute}:00Z"))
+        self.assertTrue(history.exists())
+        self.assertFalse((repo.root/"history.jsonl").exists())
+        self.assertFalse(repo.history_window(limit=3)["truncated"])
+        history.chmod(0o644)
+        with self.assertRaises(RepositoryError):
+            repo.history_window(limit=3)
+        with self.assertRaises(RepositoryError):
+            repo.history_window(limit=3,budget_seconds=0)

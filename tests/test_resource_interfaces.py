@@ -1008,7 +1008,7 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
                          "container_eligibility":{"state":"unknown"}},"error":None}
         class Service:
             def status(self,budget_seconds): return payload
-        with patch.object(resources,"host_memory_service",return_value=Service()):
+        with patch.object(resources,"host_memory_status",side_effect=lambda remote,budget_seconds:Service().status(budget_seconds)):
             human=StringIO()
             with redirect_stdout(human): resources.cmd_resources({},self._args(["swap-status","--remote","fixture"]))
             structured=StringIO()
@@ -1016,6 +1016,17 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertIn("ownership: absent", human.getvalue())
         self.assertIn("monitor: missing", human.getvalue())
         self.assertEqual(json.loads(structured.getvalue()),payload)
+
+    def test_explicit_zero_budget_is_not_replaced_by_default(self):
+        from sandbox.commands import resources
+        seen=[]
+        with patch.object(resources,"host_memory_status",
+                          side_effect=lambda remote,budget_seconds:seen.append(budget_seconds) or {
+                              "schema_version":1,"ok":False,"action":"swap-status","status":"failed",
+                              "target":None,"data":{},"error":{"code":"response_invalid",
+                              "message":"invalid budget","retryable":False}}):
+            resources._host_memory_cli(self._args(["swap-status","--remote","fixture","--budget","0"]))
+        self.assertEqual(seen,[0.0])
 
     def test_status_refusal_uses_exit_one_and_safe_json(self):
         from sandbox.commands import resources

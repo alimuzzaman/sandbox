@@ -4,9 +4,10 @@ from pathlib import Path
 from sandbox.resources.host_memory import HostMemoryStatusProjection
 
 class HostMemoryInterfacesTest(unittest.TestCase):
-    def test_public_package_exports_projection_and_service_only(self):
+    def test_public_package_exports_projection_only(self):
         import sandbox.resources.host_memory as package
-        self.assertEqual(set(package.__all__),{"HostMemoryService","HostMemoryStatusProjection"})
+        self.assertEqual(set(package.__all__),{"HostMemoryStatusProjection"})
+        self.assertFalse(hasattr(package,"HostMemoryService"))
     def test_feature_047_has_no_mutation_import(self):
         for path in Path("sandbox").rglob("*.py"):
             if "governance" not in path.name and "host_governance" not in str(path): continue
@@ -31,6 +32,9 @@ class HostMemoryInterfacesTest(unittest.TestCase):
         self.assertNotIn("host_memory_history",dispatch)
         contract=source.split("def _host_memory_contract",1)[1].split("def _remote_wp_error",1)[0]
         self.assertIn("status_monitor_evidence",contract)
+        self.assertIn("history_path=HISTORY",contract)
+        self.assertIn("provider.observe(deadline=deadline)",contract)
+        self.assertIn("status_monitor_evidence(now=provider.now(),deadline=deadline)",contract)
         self.assertNotIn("provider.apply",contract)
 
     def test_context_projection_adapter_returns_no_service(self):
@@ -46,7 +50,15 @@ class HostMemoryInterfacesTest(unittest.TestCase):
                 return HostMemoryStatusProjection("host",value["observed_at"],"known",10,8,0,0,
                                                   "absent","missing",False,"unknown",None)
         from unittest.mock import patch
-        with patch.object(context, "host_memory_service", return_value=Service()):
+        with patch.object(context, "_build_host_memory_service", return_value=Service()):
             projection = context.host_memory_status_projection("fixture")
         self.assertIsInstance(projection, HostMemoryStatusProjection)
         self.assertFalse(hasattr(projection, "apply"))
+
+    def test_context_and_service_hide_authority_dependencies(self):
+        from sandbox.resources import context
+        from sandbox.resources.host_memory.service import HostMemoryService
+        self.assertFalse(hasattr(context,"host_memory_service"))
+        service=HostMemoryService(object())
+        self.assertFalse(hasattr(service,"remote"))
+        self.assertFalse(hasattr(service,"repository"))

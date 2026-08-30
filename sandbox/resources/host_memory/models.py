@@ -198,7 +198,8 @@ class RemoteSwapState:
             raise ValueError("invalid remote swap state fields")
         parse_utc(value["observed_at"])
         if (not isinstance(value["target_identity"], str) or not value["target_identity"]
-                or len(value["target_identity"]) > 128):
+                or len(value["target_identity"]) > 128
+                or any(token in value["target_identity"] for token in ("/", "\\", "\x00"))):
             raise ValueError("invalid target identity")
         memory = value["memory"]
         if not isinstance(memory, Mapping) or set(memory) != {"total_bytes", "available_bytes", "state"}:
@@ -207,6 +208,10 @@ class RemoteSwapState:
             raise ValueError("invalid memory evidence state")
         total = _non_negative(memory.get("total_bytes"), "memory total", optional=True)
         available = _non_negative(memory.get("available_bytes"), "memory available", optional=True)
+        if (memory["state"] == "known") != (total is not None and available is not None):
+            raise ValueError("contradictory memory evidence")
+        if memory["state"] != "known" and (total is not None or available is not None):
+            raise ValueError("contradictory memory evidence")
         if total is not None and available is not None and available > total:
             raise ValueError("available memory exceeds total")
         filesystem = value["filesystem"]
@@ -216,6 +221,10 @@ class RemoteSwapState:
             raise ValueError("invalid filesystem evidence state")
         fs_total = _non_negative(filesystem.get("total_bytes"), "filesystem total", optional=True)
         fs_free = _non_negative(filesystem.get("free_bytes"), "filesystem free", optional=True)
+        if (filesystem["state"] == "known") != (fs_total is not None and fs_free is not None):
+            raise ValueError("contradictory filesystem evidence")
+        if filesystem["state"] != "known" and (fs_total is not None or fs_free is not None):
+            raise ValueError("contradictory filesystem evidence")
         if fs_total is not None and fs_free is not None and fs_free > fs_total:
             raise ValueError("filesystem free exceeds total")
         areas = value["swap_areas"]
@@ -234,6 +243,8 @@ class RemoteSwapState:
                 raise ValueError("swap used exceeds total")
             if not isinstance(area["active"], bool) or area["persistent"] not in {True, False, "unknown"}:
                 raise ValueError("invalid swap state")
+            if area["persistent"] is True and area["ownership"] != "owned":
+                raise ValueError("contradictory persistent swap evidence")
             if isinstance(area["priority"], bool) or not isinstance(area["priority"], int):
                 raise ValueError("invalid swap priority")
             if area["ownership"] not in {"owned", "unmanaged", "unknown"}:
@@ -248,6 +259,8 @@ class RemoteSwapState:
             raise ValueError("invalid swappiness value")
         if not isinstance(swappiness["owned"], bool) or not isinstance(swappiness["drifted"], bool):
             raise ValueError("invalid swappiness state")
+        if swappiness["drifted"] and not swappiness["owned"]:
+            raise ValueError("contradictory swappiness evidence")
         MonitorHealth(**dict(value["monitor"]))
         container = value["container_eligibility"]
         container_fields = {"state", "version", "memory_limit_bytes", "memory_used_bytes",
@@ -260,6 +273,18 @@ class RemoteSwapState:
             raise ValueError("invalid cgroup evidence state")
         for name in ("memory_limit_bytes", "memory_used_bytes", "swap_limit_bytes", "swap_used_bytes"):
             _non_negative(container[name], name, optional=True)
+        if container["evidence_state"] == "known":
+            if container["version"] not in {"v1", "v2"} or container["state"] not in {"eligible", "limited", "mixed"}:
+                raise ValueError("contradictory cgroup evidence")
+            if container["memory_used_bytes"] is None or container["swap_used_bytes"] is None:
+                raise ValueError("incomplete cgroup evidence")
+            has_limit=(container["memory_limit_bytes"] is not None
+                       or container["swap_limit_bytes"] is not None)
+            if (container["state"]=="eligible" and has_limit
+                    or container["state"]=="limited" and not has_limit):
+                raise ValueError("contradictory cgroup eligibility")
+        elif container["state"] not in {"unknown", "unsupported"}:
+            raise ValueError("contradictory cgroup evidence")
         reboot = value["reboot_verification"]
         if (not isinstance(reboot, Mapping) or set(reboot) != {"state", "observed_at"}
                 or reboot["state"] not in {"verified", "unverified", "unknown"}):
@@ -269,12 +294,21 @@ class RemoteSwapState:
         if block is not None:
             if (not isinstance(block, Mapping) or set(block) != {"operation_id", "reason"}
                     or not HEX64.fullmatch(str(block["operation_id"]))
-                    or not isinstance(block["reason"], str) or len(block["reason"]) > 64):
+                    or not isinstance(block["reason"], str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", block["reason"])):
                 raise ValueError("invalid operation block")
         if value["ownership"] not in {"owned", "absent", "unknown", "unmanaged"}:
             raise ValueError("invalid ownership evidence")
+        if swappiness["owned"] and value["ownership"]!="owned":
+            raise ValueError("contradictory ownership evidence")
         if value["evidence_state"] not in {item.value for item in EvidenceState}:
             raise ValueError("invalid evidence state")
+        if value["evidence_state"] == "known":
+            if (memory["state"] != "known" or filesystem["state"] != "known"
+                    or container["evidence_state"] != "known" or effective is None
+                    or value["ownership"] in {"unknown", "unmanaged"}
+                    or any(area["ownership"] != "owned" for area in areas)):
+                raise ValueError("contradictory known status")
         payload = {key: value[key] for key in required}
         digest = canonical_digest(payload)
         supplied = value.get("observation_digest")
@@ -381,6 +415,13 @@ class MonitorHealth:
             raise ValueError("invalid sustained swap state")
         if self.latest_sample_at is not None: parse_utc(self.latest_sample_at)
         if self.next_sample_at is not None: parse_utc(self.next_sample_at)
+        if self.freshness in {"fresh","stale"} and (self.latest_sample_at is None or self.age_seconds is None):
+            raise ValueError("contradictory monitor freshness")
+        if self.freshness=="missing" and any(value is not None for value in
+                (self.latest_sample_at,self.age_seconds,self.next_sample_at,self.sustained_swap_use)):
+            raise ValueError("contradictory missing monitor evidence")
+        if self.latest_sample_at is None and (self.age_seconds is not None or self.next_sample_at is not None):
+            raise ValueError("contradictory monitor timestamps")
         required = {"current_files", "history_files", "total_bytes", "compliant", "truncated"}
         if not isinstance(self.retention, Mapping) or set(self.retention) != required:
             raise ValueError("invalid retention evidence")

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import stat as statmod
 import tempfile
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -17,8 +20,35 @@ class RepositoryError(RuntimeError): pass
 
 
 class HostMemoryRepository:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, history_path: Path | None = None,
+                 history_owner_uid: int | None = None, monotonic=None):
         self.root = Path(root); self.plans = self.root / "plans"
+        self.history_path=Path(history_path) if history_path is not None else self.root/"history.jsonl"
+        self.history_owner_uid=os.getuid() if history_owner_uid is None else history_owner_uid
+        self.monotonic=monotonic or time.monotonic
+
+    def _history_paths(self):
+        return [self.history_path]+[Path(str(self.history_path)+f".{index}") for index in range(1,9)]
+
+    def _deadline(self,budget_seconds):
+        if (isinstance(budget_seconds,bool) or not isinstance(budget_seconds,(int,float))
+                or not math.isfinite(float(budget_seconds))
+                or budget_seconds<=0): raise RepositoryError("invalid_budget")
+        return self.monotonic()+float(budget_seconds)
+
+    def _check_deadline(self,deadline):
+        if self.monotonic()>=deadline: raise RepositoryError("history_unavailable")
+
+    def _attested_history_stat(self,path,deadline):
+        self._check_deadline(deadline)
+        try: info=path.lstat()
+        except FileNotFoundError: return None
+        except OSError: raise RepositoryError("history_unavailable") from None
+        self._check_deadline(deadline)
+        if (not statmod.S_ISREG(info.st_mode) or statmod.S_IMODE(info.st_mode)!=0o600
+                or info.st_uid!=self.history_owner_uid or info.st_nlink!=1):
+            raise RepositoryError("history_unavailable")
+        return info
 
     def _atomic(self, path, payload):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -88,8 +118,9 @@ class HostMemoryRepository:
             raise RepositoryError("ownership evidence is corrupt") from None
 
     def append_sample(self, sample, *, maximum_bytes=32 * 1024 * 1024):
-        history = self.root / "history.jsonl"
+        history = self.history_path
         history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(history.parent,0o700)
         line = json.dumps(AggregateMemorySample.from_dict(sample).to_dict(),
                           sort_keys=True, separators=(",", ":")) + "\n"
         encoded_size = len(line.encode())
@@ -97,19 +128,19 @@ class HostMemoryRepository:
             raise RepositoryError("sample exceeds history bound")
         if history.exists() and history.stat().st_size + encoded_size > maximum_bytes:
             for index in range(8, 0, -1):
-                source = self.root / ("history.%d.jsonl" % index)
+                source = Path(str(history)+f".{index}")
                 if index == 8:
                     try: source.unlink()
                     except FileNotFoundError: pass
                 elif source.exists():
-                    os.replace(source, self.root / ("history.%d.jsonl" % (index + 1)))
-            os.replace(history, self.root / "history.1.jsonl")
+                    os.replace(source,Path(str(history)+f".{index+1}"))
+            os.replace(history,Path(str(history)+".1"))
         with history.open("a", encoding="utf-8") as stream:
             stream.write(line); stream.flush(); os.fsync(stream.fileno())
-        files = sorted(self.root.glob("history*.jsonl"),
-                       key=lambda path: (path.name == "history.jsonl", path.name))
+        os.chmod(history,0o600)
+        files=[path for path in self._history_paths() if path.exists()]
         total = sum(path.stat().st_size for path in files)
-        for path in files:
+        for path in reversed(files):
             if total <= maximum_bytes:
                 break
             if path == history:
@@ -117,13 +148,22 @@ class HostMemoryRepository:
             total -= path.stat().st_size
             path.unlink()
 
-    def history_window(self, since=None, until=None, limit=288):
+    def history_window(self, since=None, until=None, limit=288, *, budget_seconds=5,
+                       deadline=None):
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise RepositoryError("invalid_limit")
-        samples=[]; malformed=0
-        for path in sorted(self.root.glob("history*.jsonl"))[:9]:
+        deadline=self._deadline(budget_seconds) if deadline is None else deadline
+        samples=[]; malformed=0; total_bytes=0
+        for path in self._history_paths():
             try:
-                for line in path.read_text().splitlines():
+                info=self._attested_history_stat(path,deadline)
+                if info is None: continue
+                total_bytes+=info.st_size
+                if total_bytes>32*1024*1024: raise RepositoryError("history_unavailable")
+                text=path.read_text(encoding="utf-8")
+                self._check_deadline(deadline)
+                for line in text.splitlines():
+                    self._check_deadline(deadline)
                     try:
                         row=AggregateMemorySample.from_dict(json.loads(line)).to_dict()
                     except (TypeError, ValueError): malformed += 1; continue
@@ -131,23 +171,31 @@ class HostMemoryRepository:
                     if (since and at < since) or (until and at > until): continue
                     samples.append(bounded(row, 16 * 1024))
             except OSError: malformed += 1
-        samples = sorted(samples, key=lambda x: x.get("sampled_at", ""), reverse=True)[:limit]
-        return bounded({"requested_range":{"since":since,"until":until},
+        samples=sorted(samples,key=lambda x:x.get("sampled_at",""),reverse=True)
+        truncated=len(samples)>limit
+        samples=samples[:limit]
+        try: return bounded({"requested_range":{"since":since,"until":until},
             "observed_range":{"since":samples[-1]["sampled_at"],"until":samples[0]["sampled_at"]} if samples else None,
             "samples":samples,"counts":{"returned":len(samples),"malformed":malformed},
-            "freshness":"unknown" if not samples else "observed","complete":malformed==0,
-            "truncated":len(samples)>=limit})
+            "freshness":"unknown" if not samples else "observed",
+            "complete":malformed==0 and not truncated,
+            "truncated":truncated})
+        except ValueError: raise RepositoryError("history_unavailable") from None
 
-    def status_monitor_evidence(self, *, now, interval_seconds=300):
+    def status_monitor_evidence(self, *, now, interval_seconds=300,
+                                budget_seconds=5,deadline=None):
         """Derive bounded monitor health from the retained aggregate history."""
-        window=self.history_window(limit=3)
+        deadline=self._deadline(budget_seconds) if deadline is None else deadline
+        window=self.history_window(limit=3,deadline=deadline)
         samples=window["samples"]
         latest=samples[0] if samples else None
         latest_at=latest.get("sampled_at") if latest else None
-        history_files=sorted(self.root.glob("history.*.jsonl"))
-        current=self.root/"history.jsonl"
-        paths=([current] if current.exists() else [])+history_files
-        total_bytes=sum(path.stat().st_size for path in paths)
+        paths=[]; total_bytes=0
+        for path in self._history_paths():
+            info=self._attested_history_stat(path,deadline)
+            if info is not None: paths.append(path); total_bytes+=info.st_size
+        current=self.history_path
+        history_files=[path for path in paths if path!=current]
         retention={"current_files":1 if current.exists() else 0,
                    "history_files":len(history_files),"total_bytes":total_bytes,
                    "compliant":(len(history_files)<=8 and total_bytes<=32*1024*1024

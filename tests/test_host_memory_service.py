@@ -1,7 +1,6 @@
 from __future__ import annotations
 import tempfile, unittest
 from pathlib import Path
-from sandbox.resources.host_memory.repository import HostMemoryRepository
 from sandbox.resources.host_memory.service import HostMemoryService
 from tests.host_memory_fixtures import MARKER, NOW, REVISION, status_state
 from tests.host_memory_fixtures import sample
@@ -17,7 +16,7 @@ class FakeRemote:
         return {"status":self.apply_status,"data":{"operation_id":fields["operation_id"]},"error":None}
 
 class HostMemoryServiceTest(unittest.TestCase):
-    def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.remote=FakeRemote(); self.service=HostMemoryService(self.remote,HostMemoryRepository(Path(self.tmp.name)),now=lambda:NOW)
+    def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.remote=FakeRemote(); self.service=HostMemoryService(self.remote,now=lambda:NOW)
     def tearDown(self): self.tmp.cleanup()
     def test_status_rejects_known_only_or_sensitive_fake_adapter_results(self):
         for state in ({"evidence_state":"known"},

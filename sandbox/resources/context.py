@@ -89,14 +89,12 @@ def node_store_service(remote: str | None = None):
     )
 
 
-def host_memory_service(remote: str | None = None):
+def _build_host_memory_service(remote: str | None = None):
     """Build the remote-only Feature 046 controller service."""
     if not remote:
         raise ValueError("remote_required")
     from sandbox.core import _remote
-    from sandbox.core._paths import RUNTIME_DIR
     from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
-    from .host_memory.repository import HostMemoryRepository
     from .host_memory.service import HostMemoryService
 
     record = _remote.get_remote(remote)
@@ -114,15 +112,17 @@ def host_memory_service(remote: str | None = None):
         return _remote.remote_host_memory_request(selected, payload)
 
     adapter = HostMemoryRemote(remote, record, request)
-    repository = HostMemoryRepository(
-        Path(RUNTIME_DIR) / "resources" / "host-memory",
-    )
-    return HostMemoryService(adapter, repository)
+    return HostMemoryService(adapter)
+
+
+def host_memory_status(remote: str, *, budget_seconds: float = 15):
+    """Return the bounded status envelope without exposing service authority."""
+    return _build_host_memory_service(remote).status(budget_seconds)
 
 
 def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
     """Return Feature 046's immutable read-only governance projection only."""
-    service = host_memory_service(remote)
+    service = _build_host_memory_service(remote)
     result = service.status(budget_seconds)
     if not result.get("ok"):
         error = result.get("error") or {}

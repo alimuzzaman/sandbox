@@ -12,6 +12,8 @@ NOW = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
 MARKER = "a" * 24
 REVISION = "b" * 24
 TARGET = "host-fixture"
+SWAP_UNIT_TEXT = "[Unit]\nDescription=Sandbox host memory swap\n[Swap]\nWhat=/var/lib/sandbox/host-memory/sandbox.swap\n"
+SYSCTL_TEXT = "vm.swappiness=15\n"
 PROC_MEMINFO = """\
 MemTotal:       16777216 kB
 MemFree:         2097152 kB
@@ -121,8 +123,16 @@ def ownership_receipt(*, lifecycle_state="enabled"):
             "warning_consecutive_samples": 3, "history_files": 9,
             "history_bytes": 32 * 1024 ** 2, "sample_timeout_seconds": 5,
         },
-        "artifacts": {"swap_file": {"kind": "regular", "mode": 0o600,
-                                     "digest": "e" * 64, "state": "active"}},
+        "artifacts": {
+            "swap_file": {"kind": "regular", "mode": 0o600,
+                          "digest": "e" * 64, "state": "active"},
+            "swap_unit": {"kind": "regular", "mode": 0o644,
+                          "digest": hashlib.sha256(SWAP_UNIT_TEXT.encode()).hexdigest(),
+                          "state": "enabled"},
+            "swappiness_policy": {"kind": "regular", "mode": 0o644,
+                                  "digest": hashlib.sha256(SYSCTL_TEXT.encode()).hexdigest(),
+                                  "state": "active"},
+        },
         "swap_area_id": "f" * 24,
         "prior_swappiness": {"effective": 60, "persistent": False},
         "verified_at": "2026-08-30T12:00:00Z",

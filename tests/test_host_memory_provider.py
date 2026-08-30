@@ -1,17 +1,29 @@
 from __future__ import annotations
 import unittest
 from unittest.mock import patch
-from sandbox.resources.host_memory.provider import RECEIPT, HostProvider
+from sandbox.resources.host_memory.provider import (
+    RECEIPT, STATE, SWAP, SWAP_UNIT, FIXED_ARTIFACTS, HostProvider,
+)
 from sandbox.resources.host_memory.models import canonical_digest
 from tests.host_memory_assertions import assert_privacy_bounded
 from tests.host_memory_fixtures import (
-    CGROUP_V1, CGROUP_V2, PROC_MEMINFO, PROC_SWAPS_EMPTY, TARGET,
-    command_result, ownership_receipt,
+    CGROUP_V1, CGROUP_V2, PROC_MEMINFO, PROC_SWAPS_EMPTY, SYSCTL_TEXT,
+    SWAP_UNIT_TEXT, TARGET, command_result, ownership_receipt,
 )
 import json
+import stat as statmod
+from pathlib import Path
+from types import SimpleNamespace
 
 class Usage:
     total=100*1024**3; free=80*1024**3
+
+def safe_stat(path):
+    path = str(path)
+    if path == str(STATE):
+        return SimpleNamespace(st_mode=statmod.S_IFDIR | 0o700, st_uid=0, st_nlink=2)
+    mode = 0o600 if path in {str(RECEIPT), str(SWAP)} else 0o644
+    return SimpleNamespace(st_mode=statmod.S_IFREG | mode, st_uid=0, st_nlink=1)
 
 class HostMemoryProviderTest(unittest.TestCase):
     def test_non_linux_is_explicit_and_read_only(self):
@@ -57,16 +69,19 @@ class HostMemoryProviderTest(unittest.TestCase):
         receipt = ownership_receipt()
         reads = {"/proc/meminfo": PROC_MEMINFO, "/proc/swaps": PROC_SWAPS_EMPTY,
                  "/proc/sys/vm/swappiness": "15\n", str(RECEIPT): json.dumps(receipt),
+                 str(SWAP_UNIT):SWAP_UNIT_TEXT,
+                 str(FIXED_ARTIFACTS["swappiness_policy"]):SYSCTL_TEXT,
                  "/proc/self/cgroup": "0::/\n", "/sys/fs/cgroup/memory.max": "max",
                  "/sys/fs/cgroup/memory.current": "0",
                  "/sys/fs/cgroup/memory.swap.max": "max",
                  "/sys/fs/cgroup/memory.swap.current": "0"}
         calls = []
         def run(argv, timeout=5):
-            calls.append(tuple(argv)); return command_result(output="active")
+            calls.append(tuple(argv)); return command_result(
+                output="enabled" if argv[1]=="is-enabled" else "active")
         with patch("platform.system", return_value="Linux"), \
              patch("shutil.disk_usage", return_value=Usage()):
-            result = HostProvider(read_text=lambda path: reads[str(path)], run=run,
+            result = HostProvider(read_text=lambda path: reads[str(path)], stat=safe_stat, run=run,
                                   target_identity=TARGET).observe()
         self.assertEqual(result["target_identity"], TARGET)
         self.assertEqual(result["ownership"], "owned")
@@ -108,17 +123,96 @@ class HostMemoryProviderTest(unittest.TestCase):
                 "/var/lib/sandbox/host-memory/sandbox.swap file 4194304 524288 -2\n")
         reads = {"/proc/meminfo": PROC_MEMINFO, "/proc/swaps": swap,
                  "/proc/sys/vm/swappiness": "15\n", str(RECEIPT):json.dumps(receipt),
+                 str(SWAP_UNIT):SWAP_UNIT_TEXT,
+                 str(FIXED_ARTIFACTS["swappiness_policy"]):SYSCTL_TEXT,
                  "/proc/self/cgroup":"0::/\n", "/sys/fs/cgroup/memory.max":"max",
                  "/sys/fs/cgroup/memory.current":"0", "/sys/fs/cgroup/memory.swap.max":"max",
                  "/sys/fs/cgroup/memory.swap.current":"0"}
         with patch("platform.system", return_value="Linux"), \
              patch("shutil.disk_usage", return_value=Usage()):
-            result = HostProvider(read_text=lambda path: reads[str(path)],
-                                  run=lambda *a, **k: command_result(),
+            result = HostProvider(read_text=lambda path: reads[str(path)], stat=safe_stat,
+                                  run=lambda argv, **k: command_result(
+                                      output="enabled" if argv[1]=="is-enabled" else "active"),
                                   target_identity=TARGET).observe()
         self.assertEqual(result["swap_areas"][0]["ownership"], "owned")
         self.assertTrue(result["swap_areas"][0]["persistent"])
         assert_privacy_bounded(self, result, maximum=256*1024)
+
+    def test_receipt_and_persistence_require_safe_fixed_artifact_attestation(self):
+        area_id=canonical_digest({"target_identity":TARGET,"logical_id":"swap_file",
+            "type":"file","total_bytes":4*1024**3,"priority":-2})[:24]
+        receipt=ownership_receipt(); receipt["swap_area_id"]=area_id
+        base={"/proc/meminfo":PROC_MEMINFO,"/proc/swaps":(
+              "Filename Type Size Used Priority\n"
+              f"{SWAP} file 4194304 524288 -2\n"),
+              "/proc/sys/vm/swappiness":"15\n",str(RECEIPT):json.dumps(receipt),
+              str(SWAP_UNIT):SWAP_UNIT_TEXT,
+              str(FIXED_ARTIFACTS["swappiness_policy"]):SYSCTL_TEXT,**CGROUP_V2}
+        unsafe_stats=(
+            lambda path: SimpleNamespace(st_mode=statmod.S_IFLNK | 0o777,st_uid=0,st_nlink=1)
+                if str(path)==str(RECEIPT) else safe_stat(path),
+            lambda path: SimpleNamespace(st_mode=statmod.S_IFREG | 0o600,st_uid=0,st_nlink=2)
+                if str(path)==str(RECEIPT) else safe_stat(path),
+            lambda path: SimpleNamespace(st_mode=statmod.S_IFREG | 0o666,st_uid=0,st_nlink=1)
+                if str(path)==str(RECEIPT) else safe_stat(path),
+            lambda path: SimpleNamespace(st_mode=statmod.S_IFREG | 0o600,st_uid=501,st_nlink=1)
+                if str(path)==str(RECEIPT) else safe_stat(path),
+        )
+        variants=[(base,stat_fn) for stat_fn in unsafe_stats]
+        variants.append(({**base,str(SWAP_UNIT):SWAP_UNIT_TEXT+"foreign"},safe_stat))
+        variants.append(({**base,str(FIXED_ARTIFACTS["swappiness_policy"]):"vm.swappiness=60\n"},safe_stat))
+        for reads, stat_fn in variants:
+            with self.subTest(reads=reads),patch("platform.system",return_value="Linux"), \
+                 patch("shutil.disk_usage",return_value=Usage()):
+                result=HostProvider(read_text=lambda path:reads[str(path)],stat=stat_fn,
+                                    target_identity=TARGET).observe()
+            self.assertNotEqual(result["ownership"],"owned")
+            self.assertEqual(result["swap_areas"][0]["ownership"],"unmanaged")
+            self.assertFalse(result["swap_areas"][0]["persistent"])
+            self.assertFalse(result["swappiness"]["owned"])
+
+        with patch("sandbox.resources.host_memory.provider.RECEIPT",
+                   Path("/outside/receipt.json")),patch("platform.system",return_value="Linux"), \
+             patch("shutil.disk_usage",return_value=Usage()):
+            result=HostProvider(read_text=lambda path:base[str(path)],stat=safe_stat,
+                                target_identity=TARGET).observe()
+        self.assertNotEqual(result["ownership"],"owned")
+
+    def test_proc_swaps_header_and_duplicate_cgroup_locators_fail_closed(self):
+        variants=(
+            {"/proc/swaps":"Path Type Size Used Priority\n",**CGROUP_V2},
+            {"/proc/swaps":PROC_SWAPS_EMPTY,**CGROUP_V2,
+             "/proc/meminfo":"MemTotal: 1 MB\nMemAvailable: 1 kB\n"},
+            {"/proc/swaps":PROC_SWAPS_EMPTY,**CGROUP_V2,
+             "/proc/meminfo":"MemTotal: 1 kB\nMemTotal: 2 kB\nMemAvailable: 1 kB\n"},
+            {"/proc/swaps":PROC_SWAPS_EMPTY,**CGROUP_V2,
+             "/proc/self/cgroup":"0::/fixture.scope\n0::/other.scope\n"},
+            {"/proc/swaps":PROC_SWAPS_EMPTY,**CGROUP_V2,
+             "/proc/self/cgroup":"0::/fixture.scope\n5:memory:/fixture.scope\n"},
+            {"/proc/swaps":("Filename Type Size Used Priority\n"
+                            "/same file 1 0 -2\n/same file 1 0 -2\n"),**CGROUP_V2},
+        )
+        for extra in variants:
+            reads={"/proc/meminfo":PROC_MEMINFO,"/proc/sys/vm/swappiness":"60\n",**extra}
+            with self.subTest(extra=extra),patch("platform.system",return_value="Linux"), \
+                 patch("shutil.disk_usage",return_value=Usage()):
+                result=HostProvider(read_text=lambda path:reads[str(path)],
+                                    target_identity=TARGET).observe()
+            self.assertNotEqual(result["evidence_state"],"known")
+
+    def test_observation_budget_reaches_systemctl_timeout(self):
+        receipt=ownership_receipt()
+        reads={"/proc/meminfo":PROC_MEMINFO,"/proc/swaps":PROC_SWAPS_EMPTY,
+               "/proc/sys/vm/swappiness":"15\n",str(RECEIPT):json.dumps(receipt),
+               str(SWAP_UNIT):SWAP_UNIT_TEXT,
+               str(FIXED_ARTIFACTS["swappiness_policy"]):SYSCTL_TEXT,**CGROUP_V2}
+        timeouts=[]
+        with patch("platform.system",return_value="Linux"),patch("shutil.disk_usage",return_value=Usage()):
+            HostProvider(read_text=lambda path:reads[str(path)],stat=safe_stat,
+                run=lambda argv,timeout: timeouts.append(timeout) or command_result(),
+                target_identity=TARGET).observe(budget_seconds=0.25)
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 0.25 for value in timeouts))
 
     def test_foreign_same_shape_swap_is_not_owned_by_receipt(self):
         area_id = canonical_digest({"target_identity":TARGET, "logical_id":"swap_file",

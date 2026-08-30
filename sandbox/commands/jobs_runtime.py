@@ -162,6 +162,7 @@ def _resolved_execution_policy(target, args):
             cancel_grace_seconds=getattr(args, "cancel_grace_seconds", None),
             cancel_on_stall=getattr(args, "cancel_on_stall", None),
             cleanup_policy=getattr(args, "cleanup_policy", None),
+            fallback_profile=getattr(args, "fallback_profile", "exec"),
         )
     except ValueError as exc:
         _die(str(exc))

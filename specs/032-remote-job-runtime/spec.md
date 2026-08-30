@@ -264,6 +264,13 @@ workspace cleanup, reset, destroy, or network release as part of indexing.
 - **FR-053**: Resource monitoring MUST consume a typed workspace ownership projection
   keyed by `workspace_id` and MUST classify duplicate or stale bindings as unknown/
   indeterminate; it MUST not infer ownership from path or network names.
+- **FR-054**: After terminal evidence is durable, including
+  `supervisor_launch_failed`, Sandbox MUST automatically release only the exact
+  job-owned workspace whose durable `workspace_id`, isolated/ephemeral mode,
+  cleanup policy, project identity, checkout digest, and containment all agree.
+  Persistent, reusable, retained, shared, foreign, ambiguous, or actively
+  referenced workspaces MUST NOT be deleted. Cleanup failure MUST be recorded
+  separately without changing the terminal job lifecycle, exit code, or result.
 
 ### Acceptance evidence required before closing this amendment
 

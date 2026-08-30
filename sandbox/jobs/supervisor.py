@@ -125,6 +125,9 @@ def run_descriptor(path: str | Path) -> int:
                 else:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
+        selector.close()
+        command.stdout.close()
+        command.stderr.close()
         output.finish("stdout"); output.finish("stderr")
         integrity = output.complete()
         # Artifacts describe successful job output. Do not let a missing
@@ -171,6 +174,14 @@ def run_descriptor(path: str | Path) -> int:
         try:
             repository.release_leases(job_id)
         except Exception:
+            pass
+        try:
+            from sandbox.application.workspace_service import finalize_terminal_workspace
+            finalize_terminal_workspace(
+                repository, job_id, descriptor.get("workspace_cleanup"))
+        except Exception:
+            # Terminal command truth is already durable. Cleanup failures are
+            # recorded by the shared seam and must never rewrite that result.
             pass
         repository.close()
 

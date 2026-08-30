@@ -140,6 +140,16 @@ fails `aggregate_retry_unsupported` until scoped graph retry exists. Failed reus
 workspaces are retained by default. Reset and destroy are explicit and refuse active
 workspace leases.
 
+Remote CI uses the built-in `ci` execution profile when no project/workspace profile
+is declared; that profile requests `ephemeral` cleanup for its isolated cells. After
+the job has a durable terminal row and complete retained output/artifact evidence, the
+supervisor releases only the exact indexed `workspace_id` owned by that job. The same
+seam covers a pre-launch `supervisor_launch_failed` transition. `retain`, failed
+`on-success`, persistent/reusable mode, another active exact owner, missing IDs,
+ownership drift, foreign records, unsafe paths, and incomplete evidence all prevent
+deletion. Cleanup state becomes `failed` when release fails, while lifecycle, exit
+code, result, logs, metrics, and artifacts keep their original truth.
+
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
 For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,

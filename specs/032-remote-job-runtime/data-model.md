@@ -82,6 +82,7 @@ One durable accepted execution or aggregate parent.
 | `project_identity` | TEXT | stable hash/slug, never an unowned global project |
 | `target_kind` | TEXT | `local` or `remote` as submitted/result provenance |
 | `remote_name` | TEXT nullable | registered remote selected by caller/config |
+| `workspace_id` | TEXT nullable | exact opaque workspace owner fixed before acceptance; null only for legacy/unindexed rows |
 | `workspace_label` | TEXT | validated label |
 | `workspace_mode` | TEXT | persistent or isolated/ephemeral |
 | `lifecycle` | TEXT | lifecycle enum |
@@ -120,6 +121,12 @@ Indexes: `(project_identity, accepted_at)`, `(workspace_label, lifecycle)`,
 `(parent_job_id, attempt)`, `(lifecycle, priority, accepted_at)`, and unique
 `(target_kind, COALESCE(remote_name,''), project_identity, request_id)` when request ID
 is non-null.
+
+For terminal workspace cleanup, `workspace_id` is the only deletion identity.
+`project_identity`, `workspace_label`, paths, age, and naming patterns are
+cross-check evidence and can never substitute for a missing or conflicting ID.
+Terminal job/result rows remain retained even after an authorized disposable
+checkout is released.
 
 ### `process_identities`
 

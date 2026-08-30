@@ -56,14 +56,22 @@ class JobService:
             if self.sync_gateway is None:
                 raise RuntimeError("synchronized_job_authority_unavailable")
             submission = self.sync_gateway.prepare_submission(submission)
+        replay = self.repository.replay(submission)
+        if replay is not None:
+            return self._accepted(replay, replay=True)
         # Production composition supplies the durable workspace boundary.  It
         # must commit ownership before the job repository can acknowledge an
         # acceptance, otherwise a detached job can outlive the only metadata
         # capable of identifying its workspace.  The dependency stays optional
         # for compatibility adapters and isolated repository tests.
+        workspace_id = None
         if self.workspace_registry is not None:
-            self.workspace_registry.ensure_submission(submission)
-        row, replay = self.repository.accept(submission)
+            workspace = self.workspace_registry.ensure_submission(submission)
+            workspace_id = getattr(workspace, "workspace_id", None)
+            if not isinstance(workspace_id, str):
+                raise RuntimeError("workspace_identity_ambiguous")
+        row, replay = self.repository.accept(
+            submission, workspace_id=workspace_id)
         if replay:
             return self._accepted(row, replay=True)
         if submission.compatibility_differences:
@@ -78,6 +86,7 @@ class JobService:
                 row = self.repository.transition(row["job_id"], Lifecycle.CANCELLED,
                     termination_reason="dependency_failed",
                     result_json=__import__("json").dumps({"dependencies": list(submission.depends_on)}, sort_keys=True))
+                self._finalize_terminal_workspace(row["job_id"])
                 return self._accepted(row, replay=False)
             if dependency_state != "ready":
                 row = self.repository.transition(row["job_id"], Lifecycle.QUEUED,
@@ -104,6 +113,7 @@ class JobService:
             if self.scheduler is not None:
                 self.scheduler.release(row["job_id"])
             self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed")
+            self._finalize_terminal_workspace(row["job_id"])
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
 
@@ -145,6 +155,10 @@ class JobService:
                     row["project_root"], label="default",
                 ) else "host"
             )
+        cleanup_context = None
+        if self.workspace_registry is not None and hasattr(
+                self.workspace_registry, "terminal_cleanup_context"):
+            cleanup_context = self.workspace_registry.terminal_cleanup_context()
         return {"job_id": row["job_id"], "registry_path": str(self.repository.path),
                 "runtime_dir": str(self.storage.root.parent), "argv": __import__("json").loads(row["command_json"]),
                 "project_root": row["project_root"], "label": "default",
@@ -155,6 +169,7 @@ class JobService:
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
                 "execution_runtime": execution_runtime,
                 "artifact_paths": list(submission.artifact_paths),
+                "workspace_cleanup": cleanup_context,
                 "generation": ({
                     "relationship_id": submission.sync_relationship_id,
                     "generation_id": submission.sync_generation_id,
@@ -307,11 +322,25 @@ class JobService:
             snapshot["health_evidence"] = evidence
         if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             self.scheduler.release(job_id)
+        if snapshot["lifecycle"] in {item.value for item in (
+                Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            self._finalize_terminal_workspace(job_id)
+            snapshot = self.repository.snapshot(job_id)
         if self.scheduler is not None and snapshot["lifecycle"] == Lifecycle.QUEUED.value:
             queue = self.scheduler.queue_details(snapshot)
             snapshot["queue"] = queue
             snapshot["queue_position"] = queue["position"]
         return snapshot
+
+    def _finalize_terminal_workspace(self, job_id: str) -> dict:
+        from sandbox.application.workspace_service import finalize_terminal_workspace
+
+        context = None
+        if self.workspace_registry is not None and hasattr(
+                self.workspace_registry, "terminal_cleanup_context"):
+            context = self.workspace_registry.terminal_cleanup_context()
+        return finalize_terminal_workspace(self.repository, job_id, context)
 
     @staticmethod
     def _supervisor_is_owned(snapshot: dict) -> bool:
@@ -602,6 +631,8 @@ class JobService:
             except ValueError:
                 pass
         stale = self.scheduler.reconcile_stale() if self.scheduler is not None else []
+        for job_id in interrupted:
+            self._finalize_terminal_workspace(job_id)
         return {"ok": True, "interrupted": interrupted, "released_leases": stale}
 
     def read_output(self, job_id: str, query: OutputQuery | None = None):
@@ -658,8 +689,12 @@ class JobService:
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
             if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
-                return self.repository.transition(job_id, Lifecycle.CANCELLED,
+                self.repository.transition(job_id, Lifecycle.CANCELLED,
                     termination_reason="cancelled_before_process_start")
+                if self.scheduler is not None:
+                    self.scheduler.release(job_id)
+                self._finalize_terminal_workspace(job_id)
+                return self.repository.snapshot(job_id)
             raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))

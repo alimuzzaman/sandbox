@@ -37,7 +37,7 @@ class JobRegistryTests(unittest.TestCase):
 
     def test_schema_uses_wal_foreign_keys_and_version(self):
         repo = self.repository()
-        self.assertEqual(repo.schema_version(), 4)
+        self.assertEqual(repo.schema_version(), 5)
         self.assertEqual(repo.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(repo.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         names = {row[0] for row in repo.connection.execute(
@@ -140,7 +140,8 @@ class JobRegistryTests(unittest.TestCase):
         from sandbox.jobs.registry import read_resource_index
 
         repo = self.repository()
-        row, _ = repo.accept(submission())
+        workspace_id = "ws_" + "a" * 32
+        row, _ = repo.accept(submission(), workspace_id=workspace_id)
         indexed = read_resource_index(self.path)["jobs"]
         self.assertEqual(len(indexed), 1)
         self.assertEqual(indexed[0]["job_id"], row["job_id"])
@@ -148,6 +149,7 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(indexed[0]["project_root"], "/tmp/project")
         self.assertEqual(indexed[0]["target_kind"], "local")
         self.assertIsNone(indexed[0]["remote_name"])
+        self.assertEqual(indexed[0]["workspace_id"], workspace_id)
 
     def test_heartbeat_updates_preserve_prior_observation_timestamps(self):
         repo = self.repository()
@@ -267,7 +269,7 @@ class JobRegistryTests(unittest.TestCase):
                 connection.execute("ALTER TABLE jobs DROP COLUMN submission_json")
             connection.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
         reopened = self.repository()
-        self.assertEqual(reopened.schema_version(), 4)
+        self.assertEqual(reopened.schema_version(), 5)
         self.assertIsNone(reopened.submission_snapshot(row["job_id"]))
         self.assertEqual(reopened.get(row["job_id"])["lifecycle"], "accepted")
 

@@ -545,7 +545,8 @@ class WorkspaceService:
 
     def _register(self, *, project_identity: str, label: str, namespace: str,
                   checkout_locator: str | None = None, source: str = "index",
-                  deployment_proof: dict[str, str] | None = None):
+                  deployment_proof: dict[str, Any] | None = None,
+                  mode: str = "persistent"):
         if not isinstance(label, str) or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
             raise WorkspaceIndexError(
@@ -602,7 +603,7 @@ class WorkspaceService:
                 "label": label,
                 "target": "remote" if namespace.startswith("remote-") else "local",
                 "namespace": namespace.replace("-", ":", 2),
-                "mode": "persistent",
+                "mode": mode,
                 "path": str(directory),
                 "project_identity": project_identity,
                 "workspace_id": workspace_id,
@@ -631,7 +632,7 @@ class WorkspaceService:
             raise
         return record, True
 
-    def ensure_submission(self, submission) -> None:
+    def ensure_submission(self, submission):
         repo = self._repo()
         existing = repo.find(
             submission.project_identity, submission.workspace_label)
@@ -650,10 +651,28 @@ class WorkspaceService:
                     "workspace_index_incomplete",
                     "legacy workspace metadata must be migrated before accepting a job")
         namespace = _durable_namespace(submission.project_identity)
+        checkout = str(Path(submission.project_root).resolve(strict=False))
+        proof = {
+            "checkout_locator": checkout,
+            "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                checkout.encode()).hexdigest(),
+            "workspace_mode": submission.workspace_mode,
+            "job_owned": True,
+        }
+        if existing is not None:
+            existing_locator = existing.metadata.get("checkout_locator")
+            existing_mode = existing.metadata.get("workspace_mode")
+            if (existing.source != "job" or
+                    existing_locator not in {None, checkout} or
+                    existing_mode not in {None, submission.workspace_mode}):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "job workspace identity conflicts with an existing workspace")
         record, _created = self._register(
             project_identity=submission.project_identity,
             label=submission.workspace_label, namespace=namespace,
-            checkout_locator=submission.project_root, source="job",
+            checkout_locator=checkout, source="job",
+            deployment_proof=proof, mode=submission.workspace_mode,
         )
         if self.resource_binding_resolver is not None:
             bindings = self.resource_binding_resolver(submission) or ()
@@ -664,6 +683,135 @@ class WorkspaceService:
                         "workspace resource binding is invalid")
                 repo.bind_resource(
                     record.workspace_id, str(binding[0]), str(binding[1]))
+        return record
+
+    def terminal_cleanup_context(self) -> dict[str, str] | None:
+        """Return the owner-only paths needed by a detached supervisor."""
+        if self.repository is None or self.deployment_root is None:
+            return None
+        return {
+            "index_path": str(self.repository.index_path),
+            "legacy_root": str(self.repository.legacy_root),
+            "deployment_root": str(Path(self.deployment_root)),
+        }
+
+    def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
+        """Release one exact job-owned disposable checkout after terminal proof."""
+        terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
+        if job.get("lifecycle") not in terminal:
+            raise WorkspaceIndexError(
+                "active_job_protected", "workspace cleanup requires a terminal job")
+        policy = job.get("cleanup_policy")
+        mode = job.get("workspace_mode")
+        authorized = (
+            mode in {"isolated", "ephemeral"}
+            and (policy in {"always", "ephemeral"}
+                 or policy == "on-success" and job.get("lifecycle") == "succeeded")
+        )
+        if not authorized:
+            job_repository.set_cleanup_state(job["job_id"], "retained")
+            return {"ok": True, "status": "retained"}
+        workspace_id = job.get("workspace_id")
+        if not isinstance(workspace_id, str) or not re.fullmatch(
+                r"ws_[0-9a-f]{32}", workspace_id):
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal job has no exact workspace identity")
+        repo = self._repo()
+        guard = repo.operation_lock(workspace_id)
+        with guard:
+            record = repo.get(workspace_id)
+            if record is None:
+                raise WorkspaceIndexError(
+                    "workspace_identity_ambiguous",
+                    "terminal workspace identity is unavailable")
+            if record.lifecycle == "destroyed" and record.status == "destroyed":
+                job_repository.set_cleanup_state(job["job_id"], "completed")
+                return {"ok": True, "status": "already_released"}
+            checkout = str(Path(str(job.get("project_root"))).resolve(strict=False))
+            expected_digest = "sha256:" + hashlib.sha256(checkout.encode()).hexdigest()
+            if (record.project_identity != job.get("project_identity") or
+                    record.label != job.get("workspace_label") or
+                    record.source != "job" or
+                    record.lifecycle != "ready" or record.status != "ready" or
+                    record.metadata.get("job_owned") is not True or
+                    record.metadata.get("workspace_mode") != mode or
+                    record.metadata.get("checkout_locator") != checkout or
+                    record.metadata.get("checkout_locator_digest") != expected_digest):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal job does not exactly own the indexed workspace")
+            active = job_repository.connection.execute(
+                "SELECT job_id FROM jobs WHERE workspace_id=? AND job_id<>? "
+                "AND lifecycle IN ('accepted','queued','running','cancelling') LIMIT 1",
+                (workspace_id, job["job_id"]),
+            ).fetchone()
+            if active is not None:
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "another active job still owns the disposable workspace")
+            if self.deployment_root is None:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "deployment root is unavailable for terminal cleanup")
+            deployment_root = Path(self.deployment_root).resolve(strict=False)
+            checkout_path = Path(checkout).resolve(strict=False)
+            try:
+                checkout_path.relative_to(deployment_root)
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape",
+                    "terminal workspace escapes deploy storage") from exc
+            if checkout_path == deployment_root or checkout_path.is_symlink():
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe",
+                    "terminal workspace locator is unsafe")
+            metadata_path = Path(record.path) if isinstance(record.path, str) else None
+            legacy_root = repo.legacy_root.resolve(strict=False)
+            if (metadata_path is None or metadata_path.name != "workspace.json" or
+                    metadata_path.is_symlink() or metadata_path.parent.is_symlink()):
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "workspace metadata is unsafe")
+            try:
+                metadata_path.parent.resolve(strict=False).relative_to(legacy_root)
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape", "workspace metadata escapes its owner root") from exc
+            try:
+                metadata_payload = json.loads(
+                    metadata_path.read_text(encoding="utf-8"))
+                metadata_entries = tuple(metadata_path.parent.iterdir())
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace metadata cannot prove exact ownership") from exc
+            if (not isinstance(metadata_payload, dict) or
+                    metadata_payload.get("workspace_id") != workspace_id or
+                    metadata_payload.get("project_identity") != job.get("project_identity") or
+                    metadata_payload.get("label") != job.get("workspace_label") or
+                    metadata_payload.get("mode") != mode or
+                    metadata_payload.get("path") != str(metadata_path.parent) or
+                    metadata_entries != (metadata_path,)):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace metadata directory is not an exact owned leaf")
+            repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
+            try:
+                if checkout_path.exists():
+                    if not checkout_path.is_dir():
+                        raise WorkspaceIndexError(
+                            "workspace_ownership_drift",
+                            "terminal workspace is not a directory")
+                    shutil.rmtree(checkout_path)
+                metadata_path.unlink()
+                metadata_path.parent.rmdir()
+            except Exception:
+                repo.mark_lifecycle(
+                    workspace_id, "indeterminate", status="indeterminate")
+                raise
+            repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
+            job_repository.set_cleanup_state(job["job_id"], "completed")
+            return {"ok": True, "status": "released"}
 
     def create(self, request):
         target = self._target(request)
@@ -937,3 +1085,52 @@ class WorkspaceService:
 
     def destroy(self, request):
         return self._mutate(request, "destroy")
+
+
+def finalize_terminal_workspace(job_repository, job_id: str,
+                                context: dict[str, Any] | None) -> dict[str, Any]:
+    """Run the shared fail-closed cleanup seam without changing job result truth."""
+    job = job_repository.get(job_id)
+    if job.get("cleanup_state") in {"completed", "retained"}:
+        return {"ok": True, "status": job["cleanup_state"]}
+    if not isinstance(context, dict) or set(context) != {
+            "index_path", "legacy_root", "deployment_root"}:
+        # Compatibility compositions without a workspace index cannot infer a
+        # deletion target. Retention is the only safe terminal outcome.
+        job_repository.set_cleanup_state(job_id, "retained")
+        return {"ok": True, "status": "retained"}
+    try:
+        registry_path = Path(job_repository.path).resolve(strict=False)
+        runtime_root = registry_path.parent.parent
+        expected = {
+            "index_path": runtime_root / "workspaces" / "index.sqlite3",
+            "legacy_root": registry_path.parent / "workspaces",
+            "deployment_root": runtime_root.parent / "deploy-src",
+        }
+        if any(Path(context[key]).resolve(strict=False) != value.resolve(strict=False)
+               for key, value in expected.items()):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "terminal cleanup context does not match the job registry owner")
+        repository = WorkspaceRepository(
+            context["index_path"], context["legacy_root"],
+            job_index_reader=lambda: __import__(
+                "sandbox.jobs.registry", fromlist=["read_resource_index"]
+            ).read_resource_index(job_repository.path),
+        )
+        service = WorkspaceService(
+            None, repository=repository,
+            deployment_root=Path(context["deployment_root"]),
+        )
+        result = service.release_terminal_job(job, job_repository)
+        job_repository.append_event(
+            job_id, "workspace_cleanup", {"status": result["status"]})
+        return result
+    except Exception as exc:
+        job_repository.set_cleanup_state(job_id, "failed")
+        code = getattr(exc, "code", "workspace_cleanup_failed")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            code = "workspace_cleanup_failed"
+        job_repository.append_event(
+            job_id, "workspace_cleanup", {"status": "failed", "code": code})
+        return {"ok": False, "status": "failed", "code": code}

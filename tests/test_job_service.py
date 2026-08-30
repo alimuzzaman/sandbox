@@ -62,6 +62,7 @@ class JobServiceTests(unittest.TestCase):
             class Registry:
                 def ensure_submission(self, submission):
                     observed.append((submission.project_identity, repository.list()))
+                    return type("Workspace", (), {"workspace_id": "ws_" + "a" * 32})()
 
             service = JobService(
                 repository, JobStorage(temp, free_disk_reserve=0), None,

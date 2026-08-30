@@ -1441,15 +1441,19 @@ class WorkspaceRepository:
                 connection.close()
         def project(item: WorkspaceRecord) -> dict[str, Any]:
             active_jobs = sum(
-                row.get("project_identity") == item.project_identity
-                and row.get("workspace_label") == item.label
+                (row.get("workspace_id") == item.workspace_id
+                 if row.get("workspace_id") is not None
+                 else (row.get("project_identity") == item.project_identity
+                       and row.get("workspace_label") == item.label))
                 and row.get("lifecycle") in {
                     "accepted", "queued", "running", "cancelling"}
                 for row in projection_jobs
             )
             active_leases = sum(
-                row.get("project_identity") == item.project_identity
-                and row.get("workspace_label") == item.label
+                (row.get("workspace_id") == item.workspace_id
+                 if row.get("workspace_id") is not None
+                 else (row.get("project_identity") == item.project_identity
+                       and row.get("workspace_label") == item.label))
                 and row.get("lifecycle") in {"running", "cancelling"}
                 for row in projection_jobs
             )

@@ -1209,3 +1209,35 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   Compose/initializers regardless of phase, while a different known v2 dirty artifact is
   treated as a real source change and takes full convergence. Only the exact unversioned
   v1 empty-overlay proof migrates. These remain local code/test claims.
+
+## Disposable CI terminal-workspace cleanup — 2026-08-31
+
+- Feedback `52622c4577419a51f02d728f886b40f0` and incident
+  `7ba71712a512c41794c72116ab503b70` exposed a missing lifecycle seam: terminal
+  jobs retained their evidence but did not release their job-owned disposable
+  checkout, including the pre-launch `supervisor_launch_failed` path.
+- Jobs now persist the exact workspace ID established before acceptance. One
+  terminal cleanup seam covers supervisor completion, launch failure, startup
+  reconciliation, dependency failure, and pre-start cancellation. It authorizes
+  deletion only from the exact owned workspace ID plus matching project,
+  checkout digest, mode, policy, containment, and inactive-reference evidence.
+  Persistent, retained, foreign, ambiguous, legacy, and still-active workspaces
+  fail closed.
+- `.cli-venv/bin/python -m unittest -v tests.test_ci_workspace_cleanup
+  tests.test_job_service tests.test_job_supervisor tests.test_job_registry
+  tests.test_job_scheduler tests.test_job_cancellation
+  tests.test_job_reconciliation tests.test_job_retry tests.test_job_matrix
+  tests.test_workspace_runtime tests.test_workspace_repository
+  tests.test_workspace_concurrency tests.test_workspace_resource_ownership
+  tests.test_resource_adapters tests.test_remote_ci_jobs
+  tests.test_runtime_config tests.test_remote_job_transport tests.test_job_mcp
+  tests.test_architecture_boundaries` passed 286 tests.
+- Full unittest discovery was attempted but stopped during the unrelated live
+  resource-probe suite after it produced large machine-state observations. Four
+  failures observed earlier in that run reproduce independently on unchanged
+  files: three tests mutate the immutable `ExplicitEnvironment` test helper and
+  one stale guidance assertion expects `--async` in a catalog description.
+- This is local unit/static evidence only. No remote runtime, live workspace,
+  deployment, cleanup command, secret, or machine-local feedback status was
+  changed. Live disposable-remote acceptance and disk-reclamation proof remain
+  pending under separate authorization.

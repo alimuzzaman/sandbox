@@ -15,7 +15,7 @@
 | `registry` | bool | referenced by the instance registry |
 | `indexed` | bool | present in the workspace index |
 | `hosted` | bool | belongs to a registered hosted site |
-| `active_job` | bool | bound by a non-terminal or retained job |
+| `active_job` | bool | bound by a non-terminal job through exact `workspace_id`; terminal evidence remains retained without an active projection |
 | `protections` | list[str] | protection reasons already known host-side |
 
 ## ClassifiedEntry (decision, produced by `reclaim.py`)

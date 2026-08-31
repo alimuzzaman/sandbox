@@ -10,7 +10,7 @@
 
 **Drafting Model**: `gpt-5.6-sol` High
 
-**Final Validation**: `PASS` — independent `gpt-5.6-sol` High
+**Final Validation**: PASS — gpt-5.6-sol High
 
 **Validated On**: 2026-08-31
 

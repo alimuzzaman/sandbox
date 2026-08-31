@@ -25,7 +25,7 @@ from sandbox.core import (
     _ensure_proxy_up,
     _herd_db_name, _instance_reachable, _is_herd_instance, _local_yaml,
     _pin_wp_constants_in_config, _remove_obsolete_builder_authoring_assets,
-    _tld, _web_services, _write_host_runtime_muplugins,
+    _server_runtime, _tld, _web_services, _write_host_runtime_muplugins,
     _write_dl_cache_muplugin, _write_licensing_muplugin, _write_local_yaml,
     _write_mail_muplugin, _write_loopback_muplugin, _write_ondemand_muplugin,
     _write_snapshot_muplugin,
@@ -1066,35 +1066,40 @@ def cmd_shell(cfg, args) -> None:
     compose("exec", "wp", "bash", instance=args.resolved_instance)
 
 
-def _download_wordpress_core(instance: str, args: list[str]) -> None:
+def _download_wordpress_core(instance: str, args: list[str], server: str) -> None:
     """Install core as the same unprivileged user used by the web tier.
 
-    The official image can seed a bind-mounted document root as the host user.
-    Reconcile that ownership before forcing a versioned core download; otherwise
-    tar emits one permission error per core file and a remote bootstrap can
-    appear to hang while its output pipe fills.
+    The official Apache/FPM images seed a bind-mounted document root before
+    Sandbox replaces that tree. OpenLiteSpeed does not ship WordPress core, so
+    waiting for the same seed there can never complete. Reconcile each Docker
+    runtime's actual docroot and uid before downloading; otherwise tar emits one
+    permission error per core file and a remote bootstrap can appear to hang
+    while its output pipe fills.
     """
-    if not _is_herd_instance(instance):
-        deadline = time.monotonic() + 30
-        while True:
-            seeded = compose(
-                "exec", "-T", "wp", "sh", "-c",
-                "test -f /var/www/html/wp-includes/version.php && "
-                "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
-                "|| test -f /var/www/html/wp-includes/Requests/Requests.php; }",
-                instance=instance, check=False, capture=True, timeout=5,
-            )
-            if getattr(seeded, "returncode", 1) == 0:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    "WordPress image bootstrap did not finish within 30s; "
-                    "the document root is still incomplete"
+    if server != "herd":
+        runtime = _server_runtime(server)
+        docroot = runtime["docroot"]
+        if server in ("apache", "nginx"):
+            deadline = time.monotonic() + 30
+            while True:
+                seeded = compose(
+                    "exec", "-T", "wp", "sh", "-c",
+                    f"test -f {docroot}/wp-includes/version.php && "
+                    f"{{ test -f {docroot}/wp-includes/Requests/src/Requests.php "
+                    f"|| test -f {docroot}/wp-includes/Requests/Requests.php; }}",
+                    instance=instance, check=False, capture=True, timeout=5,
                 )
-            time.sleep(0.25)
+                if getattr(seeded, "returncode", 1) == 0:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "WordPress image bootstrap did not finish within 30s; "
+                        "the document root is still incomplete"
+                    )
+                time.sleep(0.25)
         compose(
-            "exec", "-T", "wp", "chown", "-R", "www-data:www-data",
-            "/var/www/html", instance=instance, check=True,
+            "exec", "-T", "wp", "chown", "-R", runtime["uid"], docroot,
+            instance=instance, check=True,
         )
     # `wp core download` operates on archive files and does not bootstrap the
     # currently mounted WordPress tree, which may be incomplete on first boot.
@@ -1124,7 +1129,7 @@ def cmd_install(cfg, args) -> None:
     if wp_v:
         info(f"downloading WordPress {wp_v}…")
         _download_wordpress_core(
-            inst, ["core", "download", "--force", f"--version={wp_v}"]
+            inst, ["core", "download", "--force", f"--version={wp_v}"], server
         )
     else:
         info("downloading WordPress core (latest)…")
@@ -1133,7 +1138,8 @@ def cmd_install(cfg, args) -> None:
         # lets WP-CLI verify the downloaded archive without a second
         # version-check request that commonly times out on disposable hosts.
         _download_wordpress_core(
-            inst, ["core", "download", WORDPRESS_LATEST_DOWNLOAD_URL, "--force"]
+            inst, ["core", "download", WORDPRESS_LATEST_DOWNLOAD_URL, "--force"],
+            server,
         )
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:

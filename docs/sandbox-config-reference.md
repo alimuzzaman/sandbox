@@ -588,7 +588,13 @@ image tag at all:
 The WP version is deliberately kept OUT of the image tag (the @wordpress/env
 approach): a PHP-only base image plus an in-container core download avoids
 `manifest unknown` errors for patch-level tags Docker Hub never published
-(`wordpress:6.9.4-php8.1`), and keeps every server stack on ONE bootstrap path.
+(`wordpress:6.9.4-php8.1`), and keeps every server stack on ONE download path.
+Apache and nginx wait for their official WordPress image to finish seeding the
+bind-mounted `/var/www/html` before that download replaces it. OpenLiteSpeed
+ships no WordPress core, so Sandbox skips that seed wait, repairs its actual
+`/var/www/vhosts/localhost/html` docroot to the lsphp `1000:1000` owner, and
+downloads core directly. This also lets `ensure` resume an earlier LiteSpeed
+bootstrap whose reachable container still has an empty document root.
 When `wpVersion` is omitted, that bootstrap passes
 `https://wordpress.org/latest.tar.gz` directly to WP-CLI instead of first
 calling the WordPress.org version-check API; WP-CLI still performs its normal

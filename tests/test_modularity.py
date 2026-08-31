@@ -151,7 +151,7 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 90,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "kind_referencing_conditionals": 205,
+                "kind_referencing_conditionals": 212,
             },
         )
 
@@ -170,6 +170,7 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/commands/instances_cmd.py", "cmd_init"): 2,
                 ("sandbox/commands/instances_cmd.py", "cmd_instance"): 1,
                 ("sandbox/commands/net.py", "cmd_secure"): 1,
+                ("sandbox/commands/wp.py", "_cmd_remote_wp"): 1,
                 ("sandbox/commands/activation.py", "invoke"): 1,
                 ("sandbox/commands/activation.py", "observe"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_up"): 1,
@@ -186,6 +187,7 @@ class TestModularityInventory(unittest.TestCase):
                 ("mcp/wp-server/tools/instances.py", "secure_instance"): 1,
                 ("mcp/wp-server/tools/runtime.py", "_typed_invoke"): 1,
                 ("mcp/wp-server/tools/runtime.py", "_wordpress_extension_status"): 1,
+                ("mcp/wp-server/server.py", "_remote_wp_contract"): 1,
             }),
         )
 

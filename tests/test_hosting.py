@@ -2200,7 +2200,10 @@ class TestHostingManifest(unittest.TestCase):
                 validated, {}, "myvps", runtime, state, False, "main",
             )
 
-        self.assertEqual(events[:6], ["secrets", "capture", "push", "render", "reset", "compose"])
+        self.assertEqual(
+            events[:7],
+            ["secrets", "capture", "render", "push", "render", "reset", "compose"],
+        )
         self.assertEqual(
             pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
         )
@@ -2237,8 +2240,11 @@ class TestHostingManifest(unittest.TestCase):
                 )
         reset.assert_not_called()
         compose.assert_not_called()
-        save_state.assert_not_called()
-        self.assertEqual(state, {"version": 1, "hosts": {}})
+        save_state.assert_called_once_with(state)
+        self.assertEqual(state, {
+            "version": 1,
+            "hosts": {hosting.state_key("myvps", validated): {"generation": 1}},
+        })
 
     def test_post_push_dirty_clean_source_fails_before_remote_mutation_or_state(self):
         revision = "d" * 40
@@ -2428,7 +2434,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         key = hosting.state_key("myvps", validated)
         state = {"version": 1, "hosts": {key: {
             "requested_revision": revision, "staged_revision": revision,
@@ -2483,7 +2491,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         identity = "sha256:" + "e" * 64
         key = hosting.state_key("myvps", validated)
         snapshot = {"identity": identity, "digest": "e" * 64,
@@ -2528,7 +2538,8 @@ class TestHostingManifest(unittest.TestCase):
                 compose.assert_not_called()
                 runtime_health.assert_not_called()
                 edge.assert_not_called()
-                save.assert_not_called()
+                save.assert_called_once_with(state)
+                original_state["hosts"][key]["generation"] = 1
                 self.assertEqual(state, original_state)
 
     def test_current_dirty_changed_artifact_runs_full_recreate(self):
@@ -2542,7 +2553,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         key = hosting.state_key("myvps", validated)
         state = {"version": 1, "hosts": {key: {
             "recorded_revision": revision, "observed_runtime_revision": revision,
@@ -2580,7 +2593,7 @@ class TestHostingManifest(unittest.TestCase):
         compose.assert_called_once()
         self.assertTrue(compose.call_args.kwargs["force_recreate"])
 
-    def test_legacy_dirty_or_missing_identity_policy_switch_refuses_before_mutation(self):
+    def test_legacy_dirty_or_missing_identity_policy_switch_refuses_before_remote_mutation(self):
         revision = "c" * 40
         with self._write(_public_acme_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
@@ -2590,7 +2603,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         key = hosting.state_key("myvps", validated)
         cases = ({}, {
             "source_state_identity": "sha256:" + "d" * 64,
@@ -2626,7 +2641,8 @@ class TestHostingManifest(unittest.TestCase):
                 update_source.assert_not_called()
                 observe.assert_not_called()
                 compose.assert_not_called()
-                save.assert_not_called()
+                save.assert_called_once_with(state)
+                original_state["hosts"][key]["generation"] = 1
                 self.assertEqual(state, original_state)
 
     def test_changed_source_with_same_saved_config_runs_full_recreate(self):
@@ -2639,7 +2655,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         key = hosting.state_key("myvps", validated)
         state = {"version": 1, "hosts": {key: {
             "commit": old_revision, "recorded_revision": old_revision,
@@ -2692,7 +2710,9 @@ class TestHostingManifest(unittest.TestCase):
         digest_runtime["environment"] = hosting.render_env_file(
             validated, {}, pushed_commit_sha=revision,
         )
-        digest = hosting_cmd._host_config_digest(validated, digest_runtime)
+        digest = hosting_cmd._host_config_digest(
+            validated, digest_runtime, binding_key=b"\0" * 32,
+        )
         key = hosting.state_key("myvps", validated)
         state = {"version": 1, "hosts": {key: {
             "commit": revision, "recorded_revision": revision,

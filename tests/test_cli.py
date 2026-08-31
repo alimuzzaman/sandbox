@@ -1424,11 +1424,10 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint.parent.mkdir(parents=True)
             hint.write_text(str(selected) + "\n")
 
-            env = synthetic_environment()
-            env["HOME"] = str(home)
-            env.pop("SANDBOX_HOME", None)
-            env.pop("SANDBOX_RUNTIME", None)
-            env["PYTHONPATH"] = str(root)
+            env = synthetic_environment({
+                "HOME": str(home),
+                "PYTHONPATH": str(root),
+            })
             register = (
                 "import sandbox_core; sandbox_core.registry_put(%r, instance=%r)"
                 % (str(project), "cli-instance")
@@ -1460,11 +1459,10 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint = home / ".config" / "sandbox" / "home"
             hint.parent.mkdir(parents=True)
             hint.write_text("relative-state\n")
-            env = synthetic_environment()
-            env["HOME"] = str(home)
-            env.pop("SANDBOX_HOME", None)
-            env.pop("SANDBOX_RUNTIME", None)
-            env["PYTHONPATH"] = str(root)
+            env = synthetic_environment({
+                "HOME": str(home),
+                "PYTHONPATH": str(root),
+            })
             probe = (
                 "import sandbox.cli; from sandbox.core._paths import _sandbox_base; "
                 "print(_sandbox_base())"

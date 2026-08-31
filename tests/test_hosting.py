@@ -13,7 +13,7 @@ import time
 import types
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
@@ -1463,6 +1463,127 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("subprocess.Popen", program)
         self.assertNotIn("capture_output=True", program)
 
+    def test_observer_binds_remote_git_and_every_declared_compose_file_in_epoch(self):
+        paths = ("/src/compose.yml", "/src/worker.yml", "/run/override.yml")
+        command = hosting_cmd._host_observation_command(
+            "docker compose", ["web"], ["SOURCE_REVISION"], 60,
+            config_paths=paths, source_dir="/src")
+        argv = shlex.split(command)
+        program = argv[2]
+        payload = json.loads(base64.b64decode(argv[3]))
+        self.assertEqual(payload["config_paths"], list(paths))
+        self.assertEqual(payload["source_dir"], "/src")
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1 git", program)
+        self.assertIn("env -i PATH=/usr/local/bin:/usr/bin:/bin", program)
+        self.assertIn("GIT_OPTIONAL_LOCKS=0", program)
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1", program)
+        self.assertIn("core.fsmonitor=false", program)
+        self.assertIn("core.untrackedCache=false", program)
+        self.assertNotIn("--ignore-submodules=all", program)
+        self.assertIn("status --porcelain", program)
+        self.assertIn("source_branch", program)
+        self.assertIn("sha256sum", program)
+        compile(program, "<host-observer>", "exec")
+
+        key = "remote/project/development"
+        operation = {
+            "compose_file_count": 1,
+            "expected_persistent_services": ["web"],
+            "expected_initializer_services": [],
+            "expected_one_shot_phases": [],
+            "source": {"commit": "a" * 40},
+            "evidence": {
+                "secret_binding_metadata_id": "sha256:" + "5" * 64,
+                "secret_binding_revision": 1,
+                "secret_binding_key_version": "v1-test",
+                "source_branch": "main", "one_shot_phases": [
+                    {"phase": "init:setup", "state": "pending"}],
+            },
+        }
+        operation["digest"] = hosting_cmd.canonical_digest(operation)
+        state = {"version": 1, "hosts": {key: {"hosting_operation": operation}}}
+        saved = MagicMock()
+        with patch.object(hosting_cmd.personal_secrets,
+                          "hosting_binding_broker_lock", return_value=nullcontext()), \
+             patch.object(hosting_cmd.personal_secrets,
+                          "read_hosting_binding_metadata", return_value={
+                              "metadata_id": "sha256:" + "5" * 64,
+                              "revision": 1}), \
+             patch.object(hosting_cmd.personal_secrets, "hosting_binding_key",
+                          return_value=(b"k" * 32, "v1-test")):
+            hosting_cmd._refresh_hosting_operation(
+                state, key,
+                classified={"source_revision": {"state": "ready"}, "phases": []},
+                observation={
+                    "source_head": "a" * 40, "source_branch": "main",
+                    "source_clean": True, "images": [],
+                    "configured_services": [], "config_digests": [
+                        {"name": str(index), "digest": "sha256:" + "6" * 64}
+                        for index in range(4)]},
+                save_state=saved)
+        saved.assert_called_once_with(state)
+        self.assertNotEqual(
+            state["hosts"][key]["hosting_operation"]["evidence"]
+            ["config_file_digests"][2]["digest"], "sha256:" + "6" * 64)
+        saved.reset_mock()
+        with patch.object(hosting_cmd, "_write_remote_text"):
+            hosting_cmd._mark_hosting_init_complete(
+                state, key, entry={}, runtime_dir="/runtime", save_state=saved)
+        saved.assert_called_once_with(state)
+
+        near_operation = {
+            "evidence": {"one_shot_phases": [
+                {"phase": "init:setup", "state": "pending"}]},
+            "padding": "", "digest": "sha256:" + "0" * 64,
+        }
+        encoded = lambda value: len(json.dumps(
+            value, sort_keys=True, separators=(",", ":")).encode())
+        near_operation["padding"] = "x" * (
+            hosting_cmd.MAX_RECEIPT_BYTES - encoded(near_operation))
+        self.assertEqual(encoded(near_operation), hosting_cmd.MAX_RECEIPT_BYTES)
+        near_state = {"version": 1, "hosts": {
+            key: {"hosting_operation": near_operation}}}
+        before = json.loads(json.dumps(near_state))
+        remote_write = MagicMock()
+        saved.reset_mock()
+        with patch.object(hosting_cmd, "_write_remote_text", remote_write), \
+             self.assertRaisesRegex(RuntimeError, "persistence bound"):
+            hosting_cmd._mark_hosting_init_complete(
+                near_state, key, entry={}, runtime_dir="/runtime", save_state=saved)
+        remote_write.assert_not_called()
+        saved.assert_not_called()
+        self.assertEqual(near_state, before)
+
+    def test_secret_bearing_environment_digest_is_opaque_before_evidence(self):
+        raw = "sha256:" + "1" * 64
+        observation = {"config_digests": [
+            {"name": "0", "digest": "sha256:" + "2" * 64},
+            {"name": "1", "digest": "sha256:" + "3" * 64},
+            {"name": "2", "digest": raw},
+            {"name": "3", "digest": "sha256:" + "4" * 64},
+        ]}
+        result = hosting_cmd._opaque_recovery_config_digests(
+            observation, 1, b"k" * 32)
+        self.assertEqual(result[0]["digest"], "sha256:" + "2" * 64)
+        self.assertNotEqual(result[2]["digest"], raw)
+        self.assertRegex(result[2]["digest"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_config_digest_keys_secret_bearing_environment(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        first = {"compose_override": "services: {}\n", "environment": "TOKEN=first\n"}
+        second = {"compose_override": "services: {}\n", "environment": "TOKEN=second\n"}
+        keyed_first = hosting_cmd._host_config_digest(
+            validated, first, binding_key=b"k" * 32)
+        keyed_second = hosting_cmd._host_config_digest(
+            validated, second, binding_key=b"k" * 32)
+        plain = "sha256:" + hashlib.sha256(json.dumps({
+            "compose": validated["compose"], "compose_override": "services: {}\n",
+            "environment": "TOKEN=first\n", "services": ["web"],
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertNotEqual(keyed_first, plain)
+        self.assertNotEqual(keyed_first, keyed_second)
+
     def test_mismatched_revision_value_is_never_retained_or_exposed(self):
         with self._write(_manifest_with_derived_revision()) as directory:
             validated = hosting.validate_manifest(directory)
@@ -2776,6 +2897,119 @@ class TestHostingManifest(unittest.TestCase):
         self.assertTrue(authenticated_request.get_header("Authorization").startswith("Basic "))
         self.assertNotIn(secret, authenticated_request.full_url)
         self.assertNotIn(secret, repr(authenticated_request))
+
+
+    def test_host_apply_and_recovery_share_target_single_flight(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = RecoveryRepository(
+                Path(temporary) / "hosts.json", Path(temporary) / "locks")
+            target = "remote/project/development"
+            with repository.target_lock(target):
+                with self.assertRaisesRegex(TimeoutError, "operation_busy"):
+                    with repository.target_lock(target, timeout_seconds=0.01):
+                        self.fail("competing apply/recovery lock must not be acquired")
+
+    def test_apply_refuses_persisted_active_recovery_owner(self):
+        state = {"version": 1, "hosts": {
+            "remote/project/development": {
+                "active_operation": {"request_id": "recover-owner"},
+                "hosting_operation": {"request_id": "old-apply"},
+            }}}
+        before = json.loads(json.dumps(state))
+        with self.assertRaisesRegex(hosting.HostingError, "owns this target"):
+            hosting_cmd._assert_no_active_host_operation(
+                state, "remote/project/development")
+        self.assertEqual(state, before)
+
+        for field in ("active_operation", "recovery_uncertainty"):
+            with self.subTest(malformed_non_null=field):
+                malformed = {"version": 1, "hosts": {
+                    "remote/project/development": {field: {}}}}
+                snapshot = json.loads(json.dumps(malformed))
+                with self.assertRaisesRegex(hosting.HostingError, "target"):
+                    hosting_cmd._assert_no_active_host_operation(
+                        malformed, "remote/project/development")
+                self.assertEqual(malformed, snapshot)
+
+    def test_sync_and_login_writer_seam_refuses_active_recovery_owner(self):
+        from contextlib import nullcontext
+
+        state = {"version": 1, "hosts": {
+            "remote/project/development": {
+                "active_operation": {"request_id": "recover-owner"}}}}
+        repository = MagicMock()
+        repository.target_lock.return_value = nullcontext()
+        repository.effect_lock.return_value = nullcontext()
+        repository.state_lock.return_value = nullcontext()
+        validated = {"project": "project", "environment": "development"}
+        for writer, seam in (
+                ("sync", hosting_cmd._with_host_effect_lease),
+                ("login-url", hosting_cmd._with_host_writer_lock)):
+            witness = []
+            with self.subTest(writer=writer), \
+                 patch.object(hosting_cmd, "RecoveryRepository", return_value=repository), \
+                 patch.object(hosting_cmd.hosting, "load_host_state", return_value=state):
+                with self.assertRaisesRegex(hosting.HostingError, "owns this target"):
+                    if writer == "login-url":
+                        seam(validated, "remote",
+                             lambda _state, _save: witness.append(writer))
+                    else:
+                        seam(validated, "remote", lambda _state: witness.append(writer))
+            self.assertEqual(witness, [])
+
+        clean_state = {"version": 1, "hosts": {
+            "remote/project/development": {}}}
+        repository._write.reset_mock()
+        with patch.object(hosting_cmd, "RecoveryRepository", return_value=repository), \
+             patch.object(hosting_cmd.hosting, "load_host_state",
+                          return_value=clean_state):
+            hosting_cmd._with_host_writer_lock(
+                validated, "remote",
+                lambda current, durable_save: durable_save(current))
+        repository._write.assert_called_once_with(clean_state)
+
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            durable_repository = RecoveryRepository(
+                root / "hosts.json", root / "locks")
+            with patch.object(hosting_cmd, "RecoveryRepository",
+                              return_value=durable_repository), \
+                 patch.object(hosting_cmd.hosting, "load_host_state",
+                              return_value=clean_state), \
+                 patch("sandbox.hosting.recovery.repository.os.fsync",
+                       wraps=os.fsync) as fsync:
+                hosting_cmd._with_host_writer_lock(
+                    validated, "remote",
+                    lambda current, durable_save: durable_save(current))
+            self.assertGreaterEqual(fsync.call_count, 2)
+            self.assertTrue((root / "hosts.json").is_file())
+
+    def test_direct_apply_persists_revocation_before_first_remote_effect(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        runtime = hosting.desired_runtime(validated, "remote", state)
+        repository = MagicMock()
+
+        def first_effect(*_args, **_kwargs):
+            repository._write.assert_called_once_with(state)
+            raise RuntimeError("stop-before-effect")
+
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="a" * 40), \
+             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay", return_value={
+                 "identity": "sha256:" + "1" * 64}), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv"), \
+             patch.object(hosting_cmd, "_accept_hosting_operation", return_value=None), \
+             patch.object(hosting_cmd, "_prepare_host_apply", side_effect=first_effect):
+            with self.assertRaisesRegex(RuntimeError, "stop-before-effect"):
+                hosting_cmd._apply_host(
+                    validated, {}, "remote", runtime, state, False, "main",
+                    recovery_repository=repository)
 
 
 class _Response:

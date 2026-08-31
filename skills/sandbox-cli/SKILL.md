@@ -179,6 +179,67 @@ Every deletion is recorded in
 
 ## Durable remote-first jobs
 
+### Failed hosting apply recovery
+
+Use recovery when the first safe step must be observation. Do not substitute ordinary
+`host apply`, because apply may stage source before deciding replay safety.
+
+```sh
+sb host status --project-dir DIR --environment ENV --remote NAME --json
+sb host recover --project-dir DIR --environment ENV --remote NAME \
+  --job-id JOB_ID --original-request-id APPLY_REQUEST \
+  --request-id RECOVERY_REQUEST --expected-generation N --json
+```
+
+Only a current-contract terminal failed apply with a pre-effect receipt can reconcile.
+Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
+before protected effects. Receipt-only success is not deployment or public production
+proof. Continue the sole pending edge only with a separate identity, the successful
+observation/evidence IDs, unchanged generation, authorizing governance, and `--confirm`.
+Feature 047 does not yet publish that governance projection, so public continuation
+currently refuses with `governance_unavailable`; do not describe the tested edge adapter
+seam as a reachable public recovery path.
+Recovery never resolves or parses secrets. It accepts only exact owner-only opaque
+binding metadata created by an eligible apply; missing, stale, environment-backed, or
+manually changed secret-source metadata refuses. Missing, symbolic-link, non-regular,
+or non-owner-only secret sources and binding keys never carry authorizing epoch/identity.
+The broker revision is guarded from validation through commit, and the raw digest of
+secret-bearing `environment.env` is never a receipt field. `host sync --watch` uses only
+a target effect lease after its short active-owner state check, so unrelated targets are
+not locked for the watch duration.
+The finite broker transaction shares the canonical per-source secret lock with generic
+secret writes. Apply computes only an owner-keyed environment/config identity inside that
+transaction; legacy refusal creates no target or broker lock artifacts.
+All locked apply state writes use the durable file-and-parent-fsync writer. Binding-key
+publication and newly created authority-directory entries are parent-fsynced before
+host state can depend on them.
+Recovery binds the normalized registered SSH/control endpoints, transport, Tailscale
+host, MCP port, remote name, and runtime home without binding or exposing the bearer
+token. It also requires Feature 046's authenticated stable machine identity from the
+original apply and fresh observation; endpoint configuration alone never authorizes
+recovery. Missing, rebuilt, repointed, or legacy identity refuses. Registration is
+re-resolved after target ownership and guarded through durable commit against supported
+re-registration. Apply without that projection keeps no recovery authority.
+Apply rebuilds every origin/DNS/Cloudflare precondition from the guarded registration.
+Recovery binds a canonical non-secret edge intent digest, rechecks it during observation
+and immediately before edge authority, and uses only its bound records for continuation.
+Same-machine origin drift refuses before effects. Unsafe or linked registration lock
+directories/files are non-authorizing.
+The bound intent carries Origin CA certificate hostnames. Recovery authority is limited
+to 64 routes, 128 DNS records, 64 unique certificate hostnames, 64 KiB edge intent, and
+128 KiB total operation; overflow leaves no recoverable authority.
+The exact prospective envelope is checked with an in-memory prepared key before a key or
+metadata directory is published. Recovery writes only a non-authorizing provisional marker,
+re-observes immediately, then promotes matching evidence in a separate atomic commit. Only the
+same pre-effect or provisional observation owner may resume its matching phase; effect-entered
+and malformed state stays fenced. Exact edge replay returns its recorded edge terminal class
+without re-entry.
+Its command-owned predispatch skips compatibility migration/finalization and
+Compose/environment writers. Hosted login receipt writes remain target-locked and use
+the durable recovery repository writer.
+Never repeat `effect_unknown` or work around a refusal with raw DNS, Caddy, SSH, Docker,
+or another apply.
+
 When a project configures `runtime.default: "remote"`, use the configured
 provisioned remote by default. Pass `--local` only when deliberately running on
 the workstation. Every long-running command needs a finite `--timeout`; use

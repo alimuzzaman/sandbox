@@ -909,6 +909,138 @@ install, not backed up or losslessly recoverable.
 
 ## 9. Troubleshooting a failed `host apply`
 
+### Observation-only receipt recovery
+
+Do not retry ordinary `host apply` merely to learn whether a failed durable apply
+already left its exact runtime ready. Apply may stage source before deciding replay
+safety. Use the fenced recovery path:
+
+```sh
+./sb host status --project-dir DIR --environment ENV --remote NAME --json
+./sb host recover --project-dir DIR --environment ENV --remote NAME \
+  --job-id JOB_ID --original-request-id APPLY_REQUEST \
+  --request-id RECOVERY_REQUEST --expected-generation N --json
+```
+
+Only a current-contract terminal `failed` job with a pre-effect hosting receipt can
+reconcile. Generic and older jobs return `legacy_evidence`. Dirty or changed source,
+target, manifest, deployed config, images, topology, one-shot receipts, partial
+observation, torn epochs, stale generations, and mutation-requiring states refuse
+before source, Compose, initializer, image, DNS, or Caddy effects. Exact success
+changes only Sandbox-owned receipts and advances the generation once. Exact replay
+returns `already_reconciled` without another observation or generation advance.
+Recovery first writes an explicitly non-authorizing provisional marker, then immediately
+re-observes under the same ownership. That marker advances no generation and exposes no
+receipt, terminal success, or edge authority. A separate atomic commit promotes success only
+when pre/post evidence identities match; a deterministic change returns `evidence_changed`
+without any success window. A process-lost observation may resume only for the same
+request/digest and persisted pre-effect phase. A process-lost provisional resumes only its
+post-write observation. Different, malformed, or effect-entered ownership stays fenced.
+The target identity covers the normalized registered SSH endpoint, control transport and
+URL, Tailscale host, MCP port, remote name, and runtime home, but never the bearer token.
+Endpoint configuration alone is not host authority. Current-contract recovery also binds
+Feature 046's authenticated stable machine identity from apply to both sides of fresh
+runtime observation. Missing, legacy, rebuilt, or repointed identity refuses. Recovery
+uses an opaque domain-separated digest of the remote machine ID, not its hostname; the
+raw machine ID is never returned or persisted in hosting state. Invalid or unavailable
+machine ID makes the projection non-authorizing. Recovery
+resolves registration only after target ownership and holds the shared registration guard
+through durable commit; supported registration updates use that same guard. If apply
+cannot measure Feature 046 identity, apply may continue but no recovery authority is kept.
+Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
+and Cloudflare preconditions from the entry held under that guard. Recovery authority
+stores a canonical non-secret desired edge intent plus digest; observation and immediate
+pre-edge validation require an exact match, and the adapter uses the bound records. A
+same-machine origin change refuses before DNS or Caddy effects.
+Bound edge intent also supplies the exact certificate hostnames for proxied Origin CA
+issuance. Limits are 64 routes, 128 DNS records, 64 unique certificate hostnames, 64 KiB
+for edge intent, and 128 KiB for the complete operation. Overflow mints no recovery
+authority.
+Recovery has a command-owned predispatch path, so compatibility migration/finalization
+and Compose/environment writers do not run before a recovery refusal.
+Recovery requires explicit non-empty `--project-dir` and `--environment`; omission refuses
+before manifest inference, remote lookup, target construction, or a writer. Its local and
+remote Git head, branch, and clean-state probes run with a fixed synthetic environment and
+`GIT_OPTIONAL_LOCKS=0`, without copying the caller environment. Every Git invocation overrides
+repository `core.fsmonitor` and `core.untrackedCache` configuration. Status includes tracked
+submodule worktrees, so neither configured executables nor a dirty committed submodule can
+hide changed source.
+JSON selector refusal is one bounded schema-1 envelope and a nonzero exit.
+
+Eligible durable apply creates separate owner-only opaque secret-binding metadata.
+Recovery reads only its metadata ID, key version, key identity, and non-secret secret-file
+stat epoch; it
+never calls the secret resolver or parses values. Missing, stale, environment-backed,
+manually changed, or symbolic-link secret sources refuse before remote
+observation. The source and binding key must remain safe owner-only regular files; source
+epoch and key identity must remain exact.
+The broker metadata root itself must be canonical and exact owner-only `0700`. Metadata is
+read descriptor-relative without following links, bounded before JSON parsing, and must be
+an owner-only regular `0600` single-link inode with the exact nested schema. Symlinks,
+hardlinks, broad modes, wrong shapes, and oversized metadata refuse without exposing values.
+Target ownership is acquired before the broker revision lock, which stays held from
+metadata validation through durable receipt commit. The remote digest of secret-bearing
+`environment.env` is HMAC-blinded locally before it enters persisted or public evidence.
+The bounded broker guard also holds the canonical `.<name>.sb-secrets.lock` used by
+generic personal-secret updates. Apply resolves and caches secret values, computes the
+owner-keyed configuration identity, creates metadata, and durably accepts authority in
+that one transaction. Every apply state write uses the file-and-parent-fsynced recovery
+writer. The exact prospective operation, including an in-memory prepared key identity and
+metadata reference, must fit before first key or metadata-directory publication. First key
+publication and newly created authority-directory entries are parent
+fsynced before hosts state can reference them. Legacy refusal occurs before target or
+broker lock artifacts.
+One-time login receipt updates also use that durable writer under their target/state lock.
+The registration guard rejects symlinked or unsafe directories and symlinked, non-regular,
+wrong-owner, broadly accessible, or multiply linked lock files.
+Recovery lock/authority directories are exact owner-only `0700`; all existing parent
+components are checked before creation, so a symlinked parent creates no child. A trusted
+controller-owned `0755` runtime parent remains compatible, while `hosts.json` itself must be
+an owner-only regular `0600` single-link file opened without following links.
+
+Confirmed `--continue-edge` is a separate request referencing the successful
+observation and evidence ID. It revalidates under the same lock and can call only the
+declared Caddy/Cloudflare adapter. Missing governance, broader pending work, changed
+evidence, or missing confirmation refuses. An uncertain edge effect creates a
+target-level fence and cannot be repeated with another request.
+
+Feature 047's immutable-image edge journal authorizes replay only inside its own
+recorded image operation. Host recovery does not treat that journal, image state, or
+retained edge readiness as governance approval. Until a canonical host-recovery
+governance verifier exists, the public continuation command fails closed with
+`governance_unavailable`.
+Exact terminal edge replay returns the recorded `edge_only_completed` result with a replay
+marker and never enters the adapter again; only observation replay uses `already_reconciled`.
+Retained attempts and compacted tombstones are exact bounded schemas. Unknown/private fields
+or impossible action, effect, result, and generation combinations invalidate the target before
+replay; public replay is reconstructed from the validated safe fields only.
+The complete timestamped prospective terminal is validated and reconstructed before commit
+can mutate generation, receipts, provisional markers, uncertainty fences, or attempt history.
+Active/provisional request IDs and digests must be disjoint from retained terminal identities.
+Exact validated terminal replay is checked before live job lookup, so an expired job backend
+cannot erase idempotence. Never-seen identities still require the job and create no state or
+lock artifacts. One-shot initializer evidence is an exact bounded unique phase/state list
+bound to the operation's expected initializer phases and topology; malformed, missing,
+duplicate, or incomplete evidence cannot reconcile. Broker metadata opens nonblocking before
+inode validation, so a FIFO or device path cannot stall recovery.
+The durable operation independently binds the validated manifest's exact persistent and
+initializer service partitions. Observed topology must equal their union, fresh service IDs
+must equal the persistent partition, and completed one-shot IDs must equal the initializer
+projection. Missing initializer projections or an empty persistent partition fails closed.
+
+The reviewed Feature 047 implementation has no host-recovery governance projection.
+The public command therefore returns `governance_unavailable` for edge continuation
+in this revision. Its schema-v2 image planes are preserved as opaque sibling state and
+never interpreted as recovery authority. The narrow adapter remains implemented and
+locally tested for later activation; its presence does not make public continuation reachable.
+
+Recovery evidence is not deployment or production proof. Production still needs the
+exact terminal job, declared-service health, edge readiness, and direct public checks.
+
+Long-running `host sync --watch` holds only its target effect lease after a short shared
+state check. It does not hold the global hosting-state transaction for the watch duration,
+so unrelated targets can continue. Login issuance stays under the bounded full lock.
+
 **Read the error, not the exit code of a pipe.** `sb host apply` exits non-zero on
 every failure, including a branch-gate refusal. Piping it to `tail`/`head` replaces
 that status with the pager's, which reads as success — use `set -o pipefail`, check

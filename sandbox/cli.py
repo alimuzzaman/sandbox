@@ -859,15 +859,16 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
-    host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
+    host_p.add_argument("--confirm", action="store_true",
+        help="allow protected host apply or separately confirmed edge continuation")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",
@@ -881,7 +882,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
     host_p.add_argument("--request-id", default=None,
-        help="replay-safe host sync request identity (auto-generated when omitted)")
+        help="replay-safe host sync/recovery request identity")
+    host_p.add_argument("--job-id", default=None,
+        help="failed durable host-apply job identity for recovery")
+    host_p.add_argument("--original-request-id", default=None,
+        help="original failed host-apply request identity")
+    host_p.add_argument("--expected-generation", type=int, default=None,
+        help="exact hosting generation fence for recovery")
+    host_p.add_argument("--continue-edge", action="store_true",
+        help="continue only the proven pending edge after a successful observation")
+    host_p.add_argument("--observation-request-id", default=None,
+        help="successful observation request referenced by edge continuation")
+    host_p.add_argument("--evidence-id", default=None,
+        help="exact observation evidence digest referenced by edge continuation")
     host_p.add_argument("--include", action="append", default=None, metavar="PATH",
         help="explicit relative source path to include (repeatable; credential-like paths are refused)")
     host_p.add_argument("--watch", action="store_true",

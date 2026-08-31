@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import os
 import re
 import secrets
@@ -12,12 +13,13 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+from contextlib import contextmanager, nullcontext
 from getpass import getpass
 from pathlib import Path
 
 from sandbox.core import die, info, ok
 from sandbox.core._paths import RUNTIME_DIR
-from sandbox.registry import register
+from sandbox.registry import CommandSpec, register_specs
 from sandbox.sync.repository import SyncRepository
 from sandbox.sync.service import SyncService
 from sandbox.sync.models import failure_envelope, validate_sync_envelope
@@ -26,6 +28,12 @@ import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
+from sandbox.hosting.recovery.models import (
+    MAX_RECEIPT_BYTES, RecoveryAction, RecoveryRequest, TargetIdentity,
+    canonical_digest, validate_edge_intent,
+)
+from sandbox.hosting.recovery.repository import RecoveryRepository
+from sandbox.hosting.recovery.service import RecoveryAuthorityError, RecoveryService
 
 
 _HOST_SYNC_WATCH_EXCLUDES = frozenset({
@@ -39,7 +47,8 @@ _HOST_OBSERVATION_MAX_SERVICES = 16
 _HOST_OBSERVATION_MAX_KEYS = 16
 _HOST_OBSERVATION_MAX_ROWS = 64
 _HOST_OBSERVATION_MAX_CONFIGURED_SERVICES = 64
-_HOST_OBSERVATION_MAX_PHASES = 2 + _HOST_OBSERVATION_MAX_SERVICES
+_HOST_OBSERVATION_MAX_CONFIG_DIGESTS = 64
+_HOST_OBSERVATION_MAX_PHASES = 6 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
 _HOST_NO_BUILD_CONFIG_MAX_BYTES = 1_048_576
@@ -1028,7 +1037,9 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
 
 
 def _host_observation_command(prefix: str, services: list[str],
-                              revision_keys: list[str], deadline_seconds: int) -> str:
+                              revision_keys: list[str], deadline_seconds: int,
+                              *, config_paths: tuple[str, ...] = (),
+                              source_dir: str = "") -> str:
     """Build one remote observer with one monotonic total deadline."""
     if len(services) > _HOST_OBSERVATION_MAX_SERVICES:
         raise ValueError("host observation exceeds the declared service limit")
@@ -1050,15 +1061,17 @@ def _host_observation_command(prefix: str, services: list[str],
         "prefix": prefix, "services": services,
         "revision_keys": revision_keys, "deadline_seconds": deadline_seconds,
         "revision_commands": revision_commands,
+        "config_paths": list(config_paths),
+        "source_dir": source_dir,
     }, separators=(",", ":")).encode()).decode()
     program = "\n".join((
-        "import base64,json,os,selectors,signal,subprocess,sys,time",
+        "import base64,hashlib,json,os,selectors,signal,subprocess,sys,time",
         f"MAX_OUTPUT_BYTES={_HOST_OBSERVATION_MAX_OUTPUT_BYTES}",
         f"MAX_ROWS={_HOST_OBSERVATION_MAX_ROWS}",
         f"MAX_CONFIGURED={_HOST_OBSERVATION_MAX_CONFIGURED_SERVICES}",
         f"MAX_PHASES={_HOST_OBSERVATION_MAX_PHASES}",
         "p=json.loads(base64.b64decode(sys.argv[1]));end=time.monotonic()+p['deadline_seconds']",
-        "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[],'bounded':True}",
+        "r={'schema_version':1,'complete':False,'configured_services':[],'rows':[],'revision_checks':[],'phases':[],'images':[],'config_digests':[],'source_head':None,'source_branch':None,'source_clean':False,'epoch_start':None,'epoch_end':None,'bounded':True}",
         "expired=False",
         "def stop(q):",
         " try:os.killpg(q.pid,signal.SIGKILL)",
@@ -1101,8 +1114,17 @@ def _host_observation_command(prefix: str, services: list[str],
         " state='partial' if truncated else ('unavailable' if q.returncode else 'complete')",
         " if len(r['phases'])<MAX_PHASES:r['phases'].append({'phase':phase,'state':state,'bytes':len(output.encode('utf-8')),'truncated':truncated})",
         " return output",
-        "configured=run('compose_config',p['prefix']+\" --profile '*' config --services\")",
+        "quoted=' '.join(__import__('shlex').quote(x) for x in p['config_paths'])",
+        "source=__import__('shlex').quote(p['source_dir'])",
+        "git='env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C LC_ALL=C GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c core.untrackedCache=false'",
+        "epoch_command=\"(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); docker info --format '{{.ID}}' 2>/dev/null; \"+git+\" -C \"+source+\" rev-parse HEAD; \"+git+\" -C \"+source+\" branch --show-current; \"+git+\" -C \"+source+\" status --porcelain; for f in \"+quoted+\"; do test -f \\\"$f\\\" && sha256sum -- \\\"$f\\\" || printf 'missing\\n'; done; \"+p['prefix']+\" ps --format json; \"+p['prefix']+\" --profile '*' images --format json\"",
+        "marker=run('epoch_start',epoch_command)",
+        "if marker is not None:r['epoch_start']='sha256:'+hashlib.sha256(marker.encode()).hexdigest()",
+        "configured=None if expired else run('compose_config',p['prefix']+\" --profile '*' config --services\")",
         "if configured is not None:r['configured_services']=[x.strip() for x in configured.splitlines() if x.strip()][:MAX_CONFIGURED]",
+        "git_state=None if expired else run('source_git',git+\" -C \"+source+\" rev-parse HEAD && \"+git+\" -C \"+source+\" branch --show-current && \"+git+\" -C \"+source+\" status --porcelain\")",
+        "if git_state is not None:",
+        " lines=git_state.splitlines();r['source_head']=lines[0] if lines else None;r['source_branch']=lines[1] if len(lines)>1 else None;r['source_clean']=len(lines)==2",
         "rows=None if expired else run('compose_runtime',p['prefix']+' ps --format json')",
         "if rows is not None:",
         " try:parsed=json.loads(rows)",
@@ -1115,6 +1137,22 @@ def _host_observation_command(prefix: str, services: list[str],
         "   try:item=json.loads(line)",
         "   except Exception:continue",
         "   if isinstance(item,dict):r['rows'].append(item)",
+        "images=None if expired else run('compose_images',p['prefix']+' --profile \\'*\\' images --format json')",
+        "if images is not None:",
+        " for line in images.splitlines():",
+        "  if len(r['images'])>=32:break",
+        "  try:item=json.loads(line)",
+        "  except Exception:continue",
+        "  if isinstance(item,dict):",
+        "   service=item.get('Service') or item.get('Name');image_id=item.get('ID')",
+        "   if service and image_id:r['images'].append({'name':str(service)[:128],'id':str(image_id)[:160]})",
+        "if p['config_paths'] and not expired:",
+        " command='for f in '+quoted+\"; do test -f \\\"$f\\\" && sha256sum -- \\\"$f\\\" || printf 'missing  %s\\n' \\\"$f\\\"; done\"",
+        " digests=run('config_digests',command)",
+        " if digests is not None:",
+        "  for index,line in enumerate(digests.splitlines()[:len(p['config_paths'])]):",
+        "   value=line.split()[0] if line.split() else ''",
+        "   if len(value)==64:r['config_digests'].append({'name':str(index),'digest':'sha256:'+value})",
         "for probe in p['revision_commands']:",
         " if expired or not p['revision_keys']:break",
         " service=probe['service'];output=run('source_revision:'+service,probe['command'])",
@@ -1124,6 +1162,8 @@ def _host_observation_command(prefix: str, services: list[str],
         "   key,sep,value=line.partition('=')",
         "   if sep and key in p['revision_keys']:values[key]=value",
         " for key in p['revision_keys']:r['revision_checks'].append({'service':service,'key':key,'observed':values.get(key)})",
+        "marker=None if expired else run('epoch_end',epoch_command)",
+        "if marker is not None:r['epoch_end']='sha256:'+hashlib.sha256(marker.encode()).hexdigest()",
         "r['complete']=bool(r['phases']) and not expired and all(x['state']=='complete' for x in r['phases'])",
         "print(json.dumps(r,separators=(',',':')))",
     ))
@@ -1144,24 +1184,38 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
     prefix = _compose_prefix(validated, source_dir,
                              f"{runtime_dir}/compose.override.yml",
                              f"{runtime_dir}/environment.env")
+    compose_paths = tuple(
+        f"{source_dir}/{name}" for name in validated["compose"]["files"])
+    if len(compose_paths) + 3 > _HOST_OBSERVATION_MAX_CONFIG_DIGESTS:
+        raise ValueError("host observation exceeds the Compose config digest limit")
     raw = _remote_checked(
-        entry, _host_observation_command(prefix, services, revision_keys, deadline_seconds),
+        entry, _host_observation_command(
+            prefix, services, revision_keys, deadline_seconds,
+            config_paths=(*compose_paths,
+                          f"{runtime_dir}/compose.override.yml",
+                          f"{runtime_dir}/environment.env",
+                          f"{runtime_dir}/recovery-phases.json"),
+            source_dir=source_dir,
+        ),
         timeout=deadline_seconds + 5,
     )
     if len((raw or "").encode("utf-8", "replace")) > _HOST_OBSERVATION_MAX_RECEIPT_BYTES:
         return {"schema_version": 1, "complete": False, "bounded": True,
                 "configured_services": [], "rows": [], "revision_checks": [],
+                "images": [], "config_digests": [],
                 "phases": [{"phase": "observation", "state": "receipt_too_large"}]}
     try:
         receipt = json.loads((raw or "").strip())
     except (TypeError, ValueError, json.JSONDecodeError):
         receipt = {"schema_version": 1, "complete": False,
                    "configured_services": [], "rows": [], "revision_checks": [],
+                   "images": [], "config_digests": [],
                    "phases": [{"phase": "observation", "state": "unavailable"}]}
     if not isinstance(receipt, dict):
         raise RuntimeError("remote host observation returned an invalid receipt")
     for key, default in (("complete", False), ("configured_services", []),
-                         ("rows", []), ("revision_checks", []), ("phases", [])):
+                         ("rows", []), ("revision_checks", []), ("phases", []),
+                         ("images", []), ("config_digests", [])):
         receipt.setdefault(key, default)
     def bounded_list(value, limit):
         return list(value)[:limit] if isinstance(value, list) else []
@@ -1174,6 +1228,9 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
         _HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS,
     )
     receipt["phases"] = bounded_list(receipt["phases"], _HOST_OBSERVATION_MAX_PHASES)
+    receipt["images"] = bounded_list(receipt["images"], 32)
+    receipt["config_digests"] = bounded_list(
+        receipt["config_digests"], _HOST_OBSERVATION_MAX_CONFIG_DIGESTS)
     receipt["bounded"] = True
     return receipt
 
@@ -1253,17 +1310,446 @@ def _classify_host_observation(validated: dict, observation: dict,
             "phases": phase_values[:_HOST_OBSERVATION_MAX_PHASES]}
 
 
-def _host_config_digest(validated: dict, runtime: dict) -> str:
+def _host_config_digest(validated: dict, runtime: dict, *, binding_key: bytes | None = None) -> str:
+    environment = str(runtime.get("environment") or "")
+    if binding_key is None:
+        # Compatibility callers without rendered secrets retain a deterministic
+        # non-secret shape. Public apply always supplies the owner key.
+        environment_identity = canonical_digest({
+            "keys": sorted(line.partition("=")[0] for line in environment.splitlines()
+                           if line and "=" in line)})
+    else:
+        environment_identity = "sha256:" + hmac.new(
+            binding_key, b"hosting-config-environment-v1\0" + environment.encode(),
+            hashlib.sha256).hexdigest()
     payload = {
         "compose": validated["compose"],
         "compose_override": runtime.get("compose_override"),
-        "environment": runtime.get("environment"),
+        "environment_identity": environment_identity,
         "services": [validated["compose"]["service"],
                      *validated["compose"].get("background_services", [])],
     }
     return "sha256:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _registered_host_identity(entry: dict, remote_name: str, home: str) -> str:
+    """Bind the non-secret registered target without persisting private values."""
+    ssh = remote.remote_ssh_parts(entry)
+    control_url = entry.get("control_url")
+    if isinstance(control_url, str):
+        control_url = control_url.strip().rstrip("/")
+    transport = entry.get("control_transport") or (
+        "tailscale" if entry.get("tailscale_host") else "https")
+    identity = {
+        "remote": remote_name,
+        "ssh": {"target": ssh["target"], "host": ssh["host"],
+                "port": ssh.get("port")},
+        "control_transport": transport,
+        "control_url": control_url,
+        "tailscale_host": (
+            str(entry.get("tailscale_host")).strip().lower()
+            if entry.get("tailscale_host") else None),
+        "mcp_port": int(entry.get("mcp_port") or remote.DEFAULT_MCP_PORT),
+        "runtime_home": str(home).rstrip("/") or "/",
+    }
+    return canonical_digest(identity)
+
+
+def _desired_edge_intent(validated: dict, entry: dict) -> dict:
+    """Return the canonical non-secret edge and DNS intent for one registration."""
+    plan = hosting.desired_plan(
+        validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
+    return validate_edge_intent({
+        "records": sorted(({
+            "hostname": item.get("hostname"), "address": item.get("address"),
+            "proxied": item.get("proxied"), "mode": item.get("mode"),
+            "target": item.get("target"),
+        } for item in plan["records"]),
+            key=lambda item: (str(item["hostname"]), str(item["address"]))),
+        "routes": list(validated.get("routes") or []),
+        "certificate_hostnames": sorted(
+            {str(item.get("hostname")) for item in validated.get("routes", [])}),
+        "proxied": bool((validated.get("cloudflare") or {}).get("proxied")),
+        "healthcheck_path": (validated.get("healthcheck") or {}).get("path"),
+        "basic_auth": {
+            "enabled": bool(validated.get("basic_auth")),
+            "username": (validated.get("basic_auth") or {}).get("username"),
+        },
+    })
+
+
+def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
+                             *, allow_zone_ssl_change: bool) -> dict:
+    """Recompute every registration-derived apply precondition under its guard."""
+    if not entry.get("provisioned"):
+        raise hosting.HostingError("registered remote changed before host apply")
+    if not entry.get("origin_ipv4"):
+        raise hosting.HostingError(
+            f"remote '{remote_name}' has no public origin address; "
+            "run `./sb remote set-origin`")
+    plan = hosting.desired_plan(
+        validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
+    plan["remote"] = remote_name
+    plan["remote_selection"] = "explicit"
+    plan["cloudflare"] = _cloudflare_drift(plan)
+    ssl = (plan["cloudflare"].get("ssl") if
+           isinstance(plan.get("cloudflare"), dict) else None)
+    if ssl and not allow_zone_ssl_change:
+        non_strict = [zone for zone, mode in ssl.items() if mode != "strict"]
+        if non_strict:
+            raise hosting.HostingError(
+                "these zones require --allow-zone-ssl-change: " +
+                ", ".join(non_strict))
+    return plan
+
+
+def _authenticated_machine_identity(remote_name: str) -> str:
+    """Read Feature 046's authenticated stable host projection."""
+    from sandbox.resources.context import host_memory_status_projection
+
+    try:
+        projection = host_memory_status_projection(remote_name, budget_seconds=15)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RecoveryAuthorityError(
+            "stable machine identity is unavailable") from exc
+    identity = getattr(projection, "target_identity", None)
+    evidence_state = getattr(projection, "evidence_state", None)
+    if (not isinstance(identity, str) or not identity or len(identity) > 128 or
+            evidence_state != "known"):
+        raise RecoveryAuthorityError("stable machine identity is unavailable")
+    return identity
+
+
+@contextmanager
+def _registered_recovery_authority(validated: dict, remote_name: str, operation: dict,
+                                   authority: dict):
+    """Hold supported registration stable from validation through commit."""
+    with remote.registered_remote_lock():
+        current = remote.get_remote(remote_name)
+        if not isinstance(current, dict) or not current.get("provisioned"):
+            raise RecoveryAuthorityError("registered remote is unavailable")
+        home = remote.resolve_sandbox_home(current)
+        expected = operation.get("evidence") or {}
+        if (_registered_host_identity(current, remote_name, home) !=
+                expected.get("host_identity")):
+            raise RecoveryAuthorityError("registered remote changed")
+        machine_identity = _authenticated_machine_identity(remote_name)
+        if machine_identity != expected.get("machine_identity"):
+            raise RecoveryAuthorityError("stable machine identity changed")
+        try:
+            current_edge_intent = _desired_edge_intent(validated, current)
+            expected_edge_intent = validate_edge_intent(expected.get("edge_intent"))
+        except ValueError:
+            raise RecoveryAuthorityError("registered edge intent is invalid") from None
+        if (canonical_digest(current_edge_intent) !=
+                expected.get("edge_intent_digest") or
+                current_edge_intent != expected_edge_intent):
+            raise RecoveryAuthorityError("registered edge intent changed")
+        authority["entry"] = current
+        authority["machine_identity"] = machine_identity
+        authority["edge_intent"] = current_edge_intent
+        try:
+            yield
+        finally:
+            authority.clear()
+
+
+def _nonsecret_host_intent(validated: dict) -> str:
+    declared_secrets = validated.get("secrets") or {}
+    secret_shape = {
+        name: sorted((declared_secrets.get(name) or {}).keys())
+        for name in ("values", "required", "generated")
+        if isinstance(declared_secrets.get(name), dict)
+    }
+    return canonical_digest({
+        "project": validated.get("project"),
+        "environment": validated.get("environment"),
+        "compose": validated.get("compose"),
+        "deploy": validated.get("deploy"),
+        "routes": validated.get("routes"),
+        "healthcheck": validated.get("healthcheck"),
+        "cloudflare": validated.get("cloudflare"),
+        "basic_auth": {key: value for key, value in
+                       (validated.get("basic_auth") or {}).items()
+                       if key != "password"},
+        "secret_shape": secret_shape,
+    })
+
+
+def _durable_host_context() -> dict | None:
+    fields = {
+        "job_id": os.environ.get("SANDBOX_DURABLE_JOB_ID"),
+        "request_id": os.environ.get("SANDBOX_DURABLE_REQUEST_ID"),
+        "project_identity": os.environ.get("SANDBOX_DURABLE_PROJECT_IDENTITY"),
+        "project_root_digest": os.environ.get("SANDBOX_DURABLE_PROJECT_ROOT_DIGEST"),
+        "source_identity": os.environ.get("SANDBOX_DURABLE_SOURCE_IDENTITY"),
+        "source_commit": os.environ.get("SANDBOX_DURABLE_SOURCE_COMMIT"),
+        "source_dirty_digest": os.environ.get("SANDBOX_DURABLE_SOURCE_DIRTY_DIGEST"),
+    }
+    required = ("job_id", "request_id", "project_identity", "project_root_digest",
+                "source_identity", "source_commit")
+    if any(not isinstance(fields[key], str) or not fields[key] for key in required):
+        return None
+    return fields
+
+
+def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
+                              entry: dict, remote_name: str, home: str,
+                              source_state_identity: str, source_clean: bool,
+                              source_commit: str, source_branch: str, config_digest: str,
+                              secret_values: dict[str, str], save_state=None,
+                              binding_key: bytes | None = None,
+                              key_version: str | None = None,
+                              machine_identity: str | None = None,
+                              edge_intent: dict | None = None,
+                              broker_locked: bool = False,
+                              publish_binding_key: bool = False) -> dict | None:
+    """Persist current-contract apply authority before the first host effect."""
+    context = _durable_host_context()
+    if context is None:
+        return None
+    try:
+        edge_intent = validate_edge_intent(edge_intent)
+    except ValueError:
+        return None
+    if (not machine_identity or
+            not source_clean or context.get("source_dirty_digest") or
+            context.get("source_commit") != source_commit):
+        return None
+    save_state = save_state or hosting.save_host_state
+    record = (state.get("hosts") or {}).get(key) or {}
+    generation = record.get("generation", 0)
+    operation = {
+        "schema_version": 1,
+        "accepted_before_effects": True,
+        "job_id": context["job_id"],
+        "request_id": context["request_id"],
+        "project_identity": context["project_identity"],
+        "project_root_digest": context["project_root_digest"],
+        "target": {"remote": remote_name, "project": validated["project"],
+                   "environment": validated["environment"]},
+        "compose_file_count": len(validated["compose"]["files"]),
+        "expected_persistent_services": [
+            validated["compose"]["service"],
+            *validated["compose"].get("background_services", [])],
+        "expected_initializer_services": list(
+            validated["compose"].get("init_services", [])),
+        "expected_one_shot_phases": [
+            f"init:{name}" for name in validated["compose"].get("init_services", [])],
+        "starting_generation": generation,
+        "accepted_at": int(time.time()),
+        "source": {"clean": True, "commit": source_commit,
+                   "identity": context["source_identity"],
+                   "state_identity": source_state_identity},
+        "evidence": {
+            "host_identity": _registered_host_identity(entry, remote_name, home),
+            "machine_identity": machine_identity,
+            "edge_intent": edge_intent,
+            "edge_intent_digest": canonical_digest(edge_intent),
+            "runtime_identity": canonical_digest({
+                "project": validated["project"],
+                "environment": validated["environment"],
+                "compose_project": hosting.compose_project_name(validated),
+            }),
+            "source_identity": source_state_identity,
+            "source_revision": source_commit,
+            "source_branch": source_branch,
+            "source_clean": True,
+            "config_digest": config_digest,
+            "manifest_digest": _nonsecret_host_intent(validated),
+            "topology": [validated["compose"]["service"],
+                         *validated["compose"].get("background_services", []),
+                         *validated["compose"].get("init_services", [])],
+            "images": [],
+            "config_file_digests": [],
+            "phase_receipt_digest": None,
+            "one_shot_phases": [
+                {"phase": f"init:{name}", "state": "pending"}
+                for name in validated["compose"].get("init_services", [])
+            ],
+            "pending_phases": ["edge"],
+        },
+        "phases": [],
+    }
+    guard = nullcontext() if broker_locked else personal_secrets.hosting_binding_broker_lock()
+    with guard:
+        if binding_key is None or key_version is None:
+            try:
+                binding_key, key_version = personal_secrets.hosting_binding_key(
+                    create=False)
+            except ValueError:
+                binding_key, key_version = personal_secrets.prepare_hosting_binding_key()
+                publish_binding_key = True
+        prospective = personal_secrets.prospective_hosting_binding_reference(
+            key, secret_values, key=binding_key, key_version=key_version)
+        preflight = json.loads(json.dumps(operation))
+        preflight["evidence"].update({
+            "secret_binding_metadata_id": prospective["metadata_id"],
+            "secret_binding_revision": prospective["revision"],
+            "secret_binding_key_version": prospective["key_version"],
+        })
+        preflight["digest"] = canonical_digest(preflight)
+        if len(json.dumps(
+                preflight, sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
+            return None
+        if publish_binding_key:
+            published_key, published_version = personal_secrets.hosting_binding_key(
+                prepared=(binding_key, key_version))
+            if published_key != binding_key or published_version != key_version:
+                raise RuntimeError("hosting recovery binding key changed before publication")
+        binding_metadata = personal_secrets.write_hosting_binding_metadata(
+            key, secret_values, key=binding_key, key_version=key_version,
+            prepared=prospective)
+        if (binding_metadata.get("revision") != prospective["revision"] or
+                binding_metadata.get("key_version") != prospective["key_version"]):
+            raise RuntimeError("hosting secret binding revision changed")
+        record = state.setdefault("hosts", {}).setdefault(key, {})
+        record.setdefault("generation", generation)
+        record.pop("consumed_observation_authority", None)
+        operation["evidence"].update({
+            "secret_binding_metadata_id": binding_metadata["metadata_id"],
+            "secret_binding_revision": binding_metadata["revision"],
+            "secret_binding_key_version": key_version,
+        })
+        operation["digest"] = canonical_digest(operation)
+        if len(json.dumps(operation, sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
+            return None
+        record["hosting_operation"] = operation
+        save_state(state)
+    return operation
+
+
+def _assert_no_active_host_operation(state: dict, key: str) -> None:
+    record = state.setdefault("hosts", {}).setdefault(key, {})
+    if record.get("active_operation") is not None:
+        raise hosting.HostingError("another host apply or recovery owns this target")
+    if record.get("recovery_uncertainty") is not None:
+        raise hosting.HostingError("uncertain host recovery state fences this target")
+
+
+def _opaque_recovery_config_digests(observation: dict, compose_file_count: int,
+                                    binding_key: bytes) -> list[dict]:
+    """Blind only environment.env; never persist its raw content digest."""
+    env_index = str(compose_file_count + 1)
+    result = []
+    for item in list(observation.get("config_digests") or [])[:
+                     _HOST_OBSERVATION_MAX_CONFIG_DIGESTS]:
+        if not isinstance(item, dict):
+            continue
+        name, digest = item.get("name"), item.get("digest")
+        if name == env_index:
+            digest = personal_secrets.opaque_hosting_digest(
+                digest, key=binding_key, label="environment.env")
+        result.append({"name": name, "digest": digest})
+    return sorted(result, key=lambda item: str(item.get("name")))
+
+
+def _with_host_writer_lock(validated: dict, remote_name: str, callback):
+    """Serialize same-target writers with apply/recovery and reload their state."""
+    repository = RecoveryRepository()
+    key = hosting.state_key(remote_name, validated)
+    with repository.target_lock(key):
+        state = hosting.load_host_state()
+        _assert_no_active_host_operation(state, key)
+        return callback(state, repository._write)
+
+
+def _with_host_effect_lease(validated: dict, remote_name: str, callback):
+    """Hold target effect ownership while releasing shared state after validation."""
+    repository = RecoveryRepository()
+    key = hosting.state_key(remote_name, validated)
+    with repository.effect_lock(key):
+        with repository.state_lock():
+            state = hosting.load_host_state()
+            _assert_no_active_host_operation(state, key)
+        return callback(state)
+
+
+def _refresh_hosting_operation(state: dict, key: str, *, classified: dict,
+                               observation: dict, save_state=None) -> None:
+    operation = (state["hosts"].get(key) or {}).get("hosting_operation")
+    if not isinstance(operation, dict):
+        return
+    candidate_operation = json.loads(json.dumps(operation))
+    evidence = candidate_operation.get("evidence")
+    if not isinstance(evidence, dict):
+        return
+    save_state = save_state or hosting.save_host_state
+    with personal_secrets.hosting_binding_broker_lock():
+        binding_metadata = personal_secrets.read_hosting_binding_metadata(key)
+        if (binding_metadata.get("metadata_id") !=
+                evidence.get("secret_binding_metadata_id") or
+                binding_metadata.get("revision") != evidence.get("secret_binding_revision")):
+            raise RuntimeError("hosting secret binding authority changed during apply")
+        binding_key, key_version = personal_secrets.hosting_binding_key(create=False)
+        if key_version != evidence.get("secret_binding_key_version"):
+            raise RuntimeError("hosting secret binding key changed during apply")
+        evidence["images"] = sorted(
+            list(observation.get("images") or [])[:32],
+            key=lambda item: str(item.get("name")) if isinstance(item, dict) else "",
+        )
+        evidence["config_file_digests"] = _opaque_recovery_config_digests(
+            observation, candidate_operation.get("compose_file_count", 0), binding_key)
+        evidence["phase_receipt_digest"] = next((
+            item.get("digest") for item in evidence["config_file_digests"]
+            if isinstance(item, dict) and item.get("name") ==
+            str(candidate_operation.get("compose_file_count", 0) + 2)
+        ), None)
+        evidence["topology"] = sorted(
+            str(item) for item in observation.get("configured_services", []) if item)
+        candidate_operation["evidence"]["source_revision"] = (
+            candidate_operation.get("source", {}).get("commit")
+            if (classified.get("source_revision", {}).get("state") == "ready" and
+                observation.get("source_head") == candidate_operation.get("source", {}).get("commit") and
+                observation.get("source_branch") == evidence.get("source_branch") and
+                observation.get("source_clean") is True) else None
+        )
+        candidate_operation["phases"] = list(
+            classified.get("phases") or [])[:_HOST_OBSERVATION_MAX_PHASES]
+        candidate_operation["digest"] = canonical_digest({
+            name: value for name, value in candidate_operation.items() if name != "digest"})
+        if len(json.dumps(candidate_operation, sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
+            raise RuntimeError("hosting operation exceeds its persistence bound")
+        candidate_state = json.loads(json.dumps(state))
+        candidate_state["hosts"][key]["hosting_operation"] = candidate_operation
+        save_state(candidate_state)
+        state.clear()
+        state.update(candidate_state)
+
+
+def _mark_hosting_init_complete(state: dict, key: str, *, entry: dict,
+                                runtime_dir: str, save_state=None) -> None:
+    operation = (state["hosts"].get(key) or {}).get("hosting_operation")
+    if not isinstance(operation, dict):
+        return
+    candidate_operation = json.loads(json.dumps(operation))
+    evidence = candidate_operation.get("evidence")
+    phases = evidence.get("one_shot_phases") if isinstance(evidence, dict) else None
+    if not isinstance(phases, list):
+        return
+    save_state = save_state or hosting.save_host_state
+    evidence["one_shot_phases"] = [
+        {"phase": item.get("phase"), "state": "complete"}
+        for item in phases if isinstance(item, dict)
+    ]
+    candidate_operation["digest"] = canonical_digest({name: value for name, value in candidate_operation.items()
+                                             if name != "digest"})
+    if len(json.dumps(candidate_operation, sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
+        raise RuntimeError("hosting operation exceeds its persistence bound")
+    _write_remote_text(
+        entry, f"{runtime_dir}/recovery-phases.json",
+        json.dumps({"schema_version": 1,
+                    "phases": evidence["one_shot_phases"]},
+                   sort_keys=True, separators=(",", ":")) + "\n",
+        "0600",
+    )
+    candidate_state = json.loads(json.dumps(state))
+    candidate_state["hosts"][key]["hosting_operation"] = candidate_operation
+    save_state(candidate_state)
+    state.clear()
+    state.update(candidate_state)
 
 
 def _source_revision_evidence_ready(validated: dict, classified: dict,
@@ -1375,7 +1861,7 @@ def _safe_source_revision_receipt(source: dict | None) -> dict:
 
 
 def _persist_runtime_observation(state: dict, key: str, classified: dict,
-                                 *, runtime_state: str) -> None:
+                                 *, runtime_state: str, save_state=None) -> None:
     record = state["hosts"][key]
     record["observed_runtime_revision"] = classified.get("observed_runtime_revision")
     record["runtime"] = {
@@ -1389,7 +1875,7 @@ def _persist_runtime_observation(state: dict, key: str, classified: dict,
         "observation": list(classified.get("phases") or [])[:_HOST_OBSERVATION_MAX_PHASES],
     }
     record["edge"] = {"state": "pending"}
-    hosting.save_host_state(state)
+    (save_state or hosting.save_host_state)(state)
 
 
 def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dict,
@@ -1397,7 +1883,8 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
                                    entry: dict | None = None,
                                    source_dir: str = "/unresolved/source",
                                    runtime_dir: str = "/unresolved/runtime",
-                                   observation: dict | None = None) -> bool:
+                                   observation: dict | None = None,
+                                   save_state=None) -> bool:
     """Repair only the local receipt when exact runtime evidence is complete."""
     key = hosting.state_key(remote_name, validated)
     record = state.setdefault("hosts", {}).get(key)
@@ -1442,7 +1929,7 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
         },
     })
     record.setdefault("edge", {"state": "pending"})
-    hosting.save_host_state(state)
+    (save_state or hosting.save_host_state)(state)
     return True
 
 
@@ -1471,6 +1958,8 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "observed_runtime_revision": recorded.get("observed_runtime_revision"),
         "runtime": recorded_runtime,
         "edge": recorded.get("edge") or {"state": "unknown"},
+        "generation": recorded.get("generation", 0),
+        "latest_recovery": _latest_recovery_summary(recorded),
         "state_record": "present" if recorded else "missing",
         "services": [],
         "topology": {
@@ -1500,6 +1989,356 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         )})
     except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
         result["health"] = {"state": "unavailable", "reason": remote.redact_text(str(exc))[:500]}
+    return result
+
+
+def _latest_recovery_summary(record: dict) -> dict | None:
+    attempts = record.get("recovery_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return None
+    latest = attempts[-1]
+    if not isinstance(latest, dict):
+        return None
+    return {key: latest.get(key) for key in (
+        "schema_version", "request_id", "action", "result_family",
+        "result_class", "effect_scope", "generation",
+    )}
+
+
+def _recovery_job_lookup(job_id: str) -> dict:
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import JobRepository
+
+    repository = JobRepository(RUNTIME_DIR / "jobs" / "registry.sqlite3")
+    try:
+        value = repository.snapshot(job_id)
+        value["submission"] = repository.submission_snapshot(job_id)
+        return value
+    finally:
+        repository.close()
+
+
+def _recovery_source_check(validated: dict, operation: dict) -> bool:
+    source = operation.get("source") if isinstance(operation, dict) else None
+    if not isinstance(source, dict) or source.get("clean") is not True:
+        return False
+    try:
+        project_root = validated["project_root"]
+        child_environment = {
+            "PATH": os.defpath,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        def probe(*arguments):
+            return subprocess.run(
+                ["git", "-c", "core.fsmonitor=false", "-c",
+                 "core.untrackedCache=false", "-C", str(project_root), *arguments], check=True,
+                capture_output=True, text=True, env=child_environment).stdout
+        branch = probe("branch", "--show-current").strip()
+        if branch != (operation.get("evidence") or {}).get("source_branch"):
+            return False
+        commit = probe("rev-parse", "HEAD").strip()
+        dirty = probe("status", "--porcelain=v1", "--untracked-files=all")
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return not dirty and commit == source.get("commit")
+
+
+def _recovery_observer(validated: dict, entry: dict, remote_name: str,
+                       request: RecoveryRequest, operation: dict,
+                       machine_identity: str | None = None,
+                       edge_intent: dict | None = None) -> dict:
+    target_key = hosting.state_key(remote_name, validated)
+    expected_evidence = operation.get("evidence") or {}
+    try:
+        binding_metadata = personal_secrets.read_hosting_binding_metadata(target_key)
+        binding_key, binding_key_version = personal_secrets.hosting_binding_key(
+            create=False)
+        if (binding_metadata.get("metadata_id") !=
+                expected_evidence.get("secret_binding_metadata_id") or
+                binding_metadata.get("revision") !=
+                expected_evidence.get("secret_binding_revision") or
+                binding_key_version !=
+                expected_evidence.get("secret_binding_key_version")):
+            raise ValueError("hosting secret binding metadata changed")
+    except ValueError:
+        # Validate broker authority before the first remote observation.
+        raise RuntimeError("hosting secret binding metadata is unavailable or stale") from None
+    home = remote.resolve_sandbox_home(entry)
+    source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    raw = _observe_host_runtime(validated, entry, source_dir, runtime_dir)
+    fresh_machine_identity = _authenticated_machine_identity(remote_name)
+    if not machine_identity:
+        raise RecoveryAuthorityError("stable machine identity is unavailable")
+    revision = (operation.get("source") or {}).get("commit")
+    classified = _classify_host_observation(validated, raw, revision)
+    declared = [validated["compose"]["service"],
+                *validated["compose"].get("background_services", []),
+                *validated["compose"].get("init_services", [])]
+    configured = sorted(str(item) for item in raw.get("configured_services", []))
+    images = sorted(
+        ({"name": str(item.get("name")), "id": str(item.get("id"))}
+         for item in raw.get("images", []) if isinstance(item, dict)
+         and item.get("name") and item.get("id")),
+        key=lambda item: item["name"],
+    )
+    services = [{"service": item["service"],
+                 "state": "ready" if item.get("state") == "running"
+                 and item.get("health") == "healthy" else "unavailable"}
+                for item in classified.get("services", [])]
+    return {
+        "schema_version": 1,
+        "complete": bool(raw.get("complete")) and sorted(declared) == configured,
+        "bounded": raw.get("bounded") is True,
+        "epoch_start": raw.get("epoch_start"),
+        "epoch_end": raw.get("epoch_end"),
+        "host_identity": _registered_host_identity(entry, remote_name, home),
+        "machine_identity": fresh_machine_identity,
+        "edge_intent_digest": canonical_digest(edge_intent),
+        "runtime_identity": canonical_digest({
+            "project": validated["project"], "environment": validated["environment"],
+            "compose_project": hosting.compose_project_name(validated),
+        }),
+        "source_revision": (raw.get("source_head") if
+                            classified.get("source_revision", {}).get("state") == "ready"
+                            and raw.get("source_head") == revision else None),
+        "source_branch": (raw.get("source_branch") if
+                          raw.get("source_branch") in validated["deploy"]["allowed_branches"]
+                          or "*" in validated["deploy"]["allowed_branches"] else None),
+        "source_clean": raw.get("source_clean") is True,
+        "topology": configured,
+        "images": images,
+        "config_file_digests": _opaque_recovery_config_digests(
+            raw, len(validated["compose"]["files"]), binding_key),
+        "phase_receipt_digest": next((
+            item.get("digest") for item in raw.get("config_digests", [])
+            if isinstance(item, dict) and item.get("name") ==
+            str(len(validated["compose"]["files"]) + 2)
+        ), None),
+        "manifest_digest": _nonsecret_host_intent(validated),
+        "secret_binding_key_version": binding_key_version,
+        "secret_binding_metadata_id": binding_metadata["metadata_id"],
+        "secret_binding_revision": binding_metadata["revision"],
+        "pending_phases": ["edge"] if (
+            ((hosting.load_host_state().get("hosts") or {}).get(
+                hosting.state_key(remote_name, validated)) or {}).get("edge", {}).get("state")
+            == "pending") else [],
+        "one_shot_phases": list(
+            (operation.get("evidence") or {}).get("one_shot_phases") or []),
+        "services": services,
+        "phases": [{"phase": str(item.get("phase")),
+                    "state": "complete" if item.get("state") == "complete" else "unavailable"}
+                   for item in raw.get("phases", []) if isinstance(item, dict)],
+    }
+
+
+def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> None:
+    required = {
+        "--job-id": getattr(args, "job_id", None),
+        "--original-request-id": getattr(args, "original_request_id", None),
+        "--request-id": getattr(args, "request_id", None),
+        "--expected-generation": getattr(args, "expected_generation", None),
+    }
+    missing = [name for name, value in required.items() if value is None or value == ""]
+    if missing:
+        _recovery_cli_refusal(validated, remote_name, args,
+                              "host recover requires " + ", ".join(missing))
+    action = (RecoveryAction.CONTINUE_EDGE if getattr(args, "continue_edge", False)
+              else RecoveryAction.OBSERVE_RECONCILE)
+    try:
+        request = RecoveryRequest(
+            action=action, request_id=args.request_id, job_id=args.job_id,
+            original_request_id=args.original_request_id,
+            target=TargetIdentity(remote_name, validated["project"], validated["environment"]),
+            expected_generation=args.expected_generation,
+            observation_request_id=getattr(args, "observation_request_id", None),
+            evidence_id=getattr(args, "evidence_id", None),
+            confirmed=bool(getattr(args, "confirm", False)),
+        )
+    except ValueError as exc:
+        _recovery_cli_refusal(validated, remote_name, args, str(exc))
+    authority = {}
+
+    service = RecoveryService(
+        repository=RecoveryRepository(), job_lookup=_recovery_job_lookup,
+        source_check=lambda operation: _recovery_source_check(validated, operation),
+        observer=lambda recovery_request, operation: _recovery_observer(
+            validated, authority["entry"], remote_name, recovery_request, operation,
+            authority["machine_identity"], authority["edge_intent"]),
+        edge_adapter=lambda recovery_request, operation: _continue_host_edge_only(
+            validated, authority["entry"], remote_name, recovery_request, operation),
+        governance_check=lambda _request: _recovery_governance_authorized(
+            validated, remote_name),
+        broker_guard=lambda _request: personal_secrets.hosting_binding_broker_lock(),
+        authority_guard=lambda _request, operation: _registered_recovery_authority(
+            validated, remote_name, operation, authority),
+    )
+    result = service.recover(request)
+    if args.json:
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        print(f"host recovery {result['result_class']} "
+              f"(generation {result['generation']['resulting']}, "
+              f"scope={result['effect_scope']})")
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
+def _recovery_cli_refusal(validated: dict, remote_name: str, args,
+                          message: str) -> None:
+    if not getattr(args, "json", False):
+        die(message)
+    action = "continue_edge" if getattr(args, "continue_edge", False) else "observe_reconcile"
+    expected = getattr(args, "expected_generation", None)
+    payload = {
+        "ok": False, "schema_version": 1, "action": action,
+        "result_family": "refused", "result_class": "binding_mismatch",
+        "request_id": getattr(args, "request_id", None),
+        "original": {"job_id": getattr(args, "job_id", None),
+                     "request_id": getattr(args, "original_request_id", None)},
+        "target": {"remote": remote_name, "project": validated["project"],
+                   "environment": validated["environment"]},
+        "generation": {"expected": expected, "resulting": expected},
+        "effect_scope": "edge_only" if action == "continue_edge" else "receipt_only",
+        "evidence": {"id": None, "complete": False, "expires_at": None},
+        "phases": [], "error": message[:500],
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1)
+
+
+def _recovery_selector_refusal(args, missing: list[str]) -> None:
+    """Emit one bounded refusal before a recovery target can be inferred."""
+    action = ("continue_edge" if getattr(args, "continue_edge", False)
+              else "observe_reconcile")
+    expected = getattr(args, "expected_generation", None)
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        expected = 0
+    payload = {
+        "ok": False, "schema_version": 1, "action": action,
+        "result_family": "refused", "result_class": "binding_mismatch",
+        "request_id": "unresolved",
+        "original": {"job_id": "unresolved", "request_id": "unresolved"},
+        "target": {"remote": "unresolved", "project": "unresolved",
+                   "environment": "unresolved"},
+        "generation": {"expected": expected, "resulting": expected},
+        "effect_scope": "edge_only" if action == "continue_edge" else "receipt_only",
+        "evidence": {"id": None, "complete": False, "expires_at": None},
+        "phases": [],
+        "error": ("host recover requires explicit " + " and ".join(missing))[:500],
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1)
+
+
+def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
+    # Reviewed Feature 047 publishes an operation-local immutable-image edge
+    # journal, not a host-recovery governance projection. Never reinterpret
+    # that journal, image state, or hand-edited hosting state as authority.
+    # Keep this adapter seam inactive until a canonical verifier is supplied.
+    del validated, remote_name
+    return False
+
+
+def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
+                             _request: RecoveryRequest, operation: dict) -> dict:
+    """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
+    secret_values, missing = _secret_status(validated)
+    if missing:
+        raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
+    state = hosting.load_host_state()
+    key = hosting.state_key(remote_name, validated)
+    recorded = dict((state.get("hosts") or {}).get(key) or {})
+    if (recorded.get("hosting_operation") or {}).get("digest") != operation.get("digest"):
+        raise RuntimeError("hosting operation changed before edge continuation")
+    port = recorded.get("loopback_port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+        raise RuntimeError("edge continuation requires a proven existing loopback port")
+    home = remote.resolve_sandbox_home(entry)
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    apply_log = f"{runtime_dir}/apply.log"
+    try:
+        edge_intent = validate_edge_intent(
+            (operation.get("evidence") or {}).get("edge_intent"))
+    except ValueError:
+        raise RuntimeError("edge continuation intent is unavailable") from None
+    if (
+            canonical_digest(edge_intent) !=
+            (operation.get("evidence") or {}).get("edge_intent_digest")):
+        raise RuntimeError("edge continuation intent is unavailable")
+    client = cloudflare.Client()
+    caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    previous_caddy = _read_remote_optional(
+        entry, f"/etc/caddy/conf.d/{caddy_name}.caddy")
+    changes: list[dict] = []
+
+    def rollback() -> None:
+        failures = []
+        for change in reversed(changes):
+            try:
+                client.restore_record(
+                    change["zone_id"], change["previous"], change["created_id"])
+            except Exception as exc:
+                failures.append(f"DNS restore: {exc}")
+        try:
+            _restore_host_caddy(entry, caddy_name, previous_caddy, log_path=apply_log)
+        except Exception as exc:
+            failures.append(f"Caddy restore: {exc}")
+        if failures:
+            raise hosting.HostingError("; ".join(failures))
+
+    result: dict = {}
+
+    def apply() -> None:
+        proxied = edge_intent["proxied"]
+        cert_path = key_path = certificate = None
+        runtime = {"loopback_port": port, "records": edge_intent["records"],
+                   "certificate_hostnames": edge_intent["certificate_hostnames"]}
+        if proxied:
+            cert_path, key_path, certificate = _origin_certificate(
+                entry, validated, runtime, recorded, client, home)
+        basic_hash = None
+        if validated.get("basic_auth"):
+            password_secret = validated["basic_auth"]["password_secret"]
+            basic_hash = _remote_basic_auth_hash(entry, secret_values[password_secret])
+        content = hosting.caddyfile(validated, port, cert_path, key_path, basic_hash)
+        _configure_host_caddy(
+            entry, caddy_name, content, previous_caddy, log_path=apply_log)
+        zones: dict[str, dict] = {}
+        for wanted in edge_intent["records"]:
+            hostname = wanted["hostname"]
+            zone = zones.setdefault(hostname, _zone_for_hostname(client, hostname))
+            if proxied and client.current_ssl_mode(zone["id"]) != "strict":
+                raise RuntimeError("edge recovery requires an already-strict zone policy")
+            kind = "AAAA" if ":" in wanted["address"] else "A"
+            records = client.records(zone["id"], hostname)
+            cname = next((item for item in records if item.get("type") == "CNAME"), None)
+            if cname:
+                raise RuntimeError(
+                    f"declared hostname {hostname} has a conflicting CNAME; edge recovery does not replace it")
+            previous = next((item for item in records if item.get("type") == kind), None)
+            created = client.upsert_address(
+                zone["id"], hostname, wanted["address"], proxied=proxied)
+            changes.append({"zone_id": zone["id"], "previous": previous,
+                            "created_id": created.get("id")})
+        credentials = None
+        if validated.get("basic_auth"):
+            auth = validated["basic_auth"]
+            credentials = (auth["username"], secret_values[auth["password_secret"]])
+        kwargs = {"healthcheck_path": edge_intent["healthcheck_path"],
+                  "basic_auth_enabled": edge_intent["basic_auth"]["enabled"]}
+        if credentials is not None:
+            kwargs["basic_auth_credentials"] = credentials
+        _verify_edge(edge_intent["routes"], **kwargs)
+        result["record"] = {
+            "certificate": certificate, "records": changes,
+            "caddy_name": caddy_name, "edge": {"state": "ready"},
+        }
+
+    hosting.apply_with_rollback(apply, rollback)
     return result
 
 
@@ -1570,7 +2409,8 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
 
 
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
-                          state: dict, ttl_seconds: int | None) -> dict:
+                          state: dict, ttl_seconds: int | None,
+                          save_state=None) -> dict:
     config = validated.get("autologin")
     if not config:
         raise hosting.HostingError("this hosting environment does not declare autologin")
@@ -1604,7 +2444,7 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     ), timeout=60)
     _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
     host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
-    hosting.save_host_state(state)
+    (save_state or hosting.save_host_state)(state)
     return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
             "one_time": True, "user": config["user"]}
 
@@ -1789,25 +2629,70 @@ def _resolve_host_source_commit(project_root: str) -> str:
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
-                progress=None) -> dict:
-    secret_values, missing = _secret_status(validated)
-    if missing:
-        raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
-    base_commit = _resolve_host_source_commit(validated["project_root"])
-    diff, untracked = remote.capture_uncommitted(validated["project_root"])
-    require_clean = validated["deploy"]["require_clean"]
-    if require_clean and (diff or untracked):
-        raise hosting.HostingError(
-            f"{validated['environment']} working tree changed before source staging"
-        )
-    source_snapshot = remote.snapshot_dirty_overlay(
-        validated["project_root"], diff, untracked,
-        max_files=_HOST_SOURCE_SNAPSHOT_MAX_FILES,
-        max_bytes=_HOST_SOURCE_SNAPSHOT_MAX_BYTES,
-    )
-    source_state_identity = source_snapshot["identity"]
-    source_state_clean = not bool(diff or untracked)
-    home = remote.resolve_sandbox_home(entry)
+                progress=None, recovery_repository=None) -> dict:
+    durable_save = (recovery_repository._write if recovery_repository is not None
+                    else hosting.save_host_state)
+    broker_guard = (personal_secrets.hosting_binding_broker_lock()
+                    if recovery_repository is not None else nullcontext())
+    with broker_guard:
+        secret_values, missing = _secret_status(validated)
+        if missing:
+            raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
+        if recovery_repository is not None:
+            try:
+                binding_key, key_version = personal_secrets.hosting_binding_key(
+                    create=False)
+                publish_binding_key = False
+            except ValueError:
+                binding_key, key_version = personal_secrets.prepare_hosting_binding_key()
+                publish_binding_key = True
+        else:
+            # Internal unit seams never authorize recovery or touch broker state.
+            binding_key, key_version = b"\0" * 32, "test-unavailable"
+            publish_binding_key = False
+        base_commit = _resolve_host_source_commit(validated["project_root"])
+        diff, untracked = remote.capture_uncommitted(validated["project_root"])
+        require_clean = validated["deploy"]["require_clean"]
+        if require_clean and (diff or untracked):
+            raise hosting.HostingError(
+                f"{validated['environment']} working tree changed before source staging")
+        source_snapshot = remote.snapshot_dirty_overlay(
+            validated["project_root"], diff, untracked,
+            max_files=_HOST_SOURCE_SNAPSHOT_MAX_FILES,
+            max_bytes=_HOST_SOURCE_SNAPSHOT_MAX_BYTES)
+        source_state_identity = source_snapshot["identity"]
+        source_state_clean = not bool(diff or untracked)
+        home = remote.resolve_sandbox_home(entry)
+        runtime["environment"] = hosting.render_env_file(
+            validated, secret_values, pushed_commit_sha=base_commit)
+        key = runtime["key"]
+        _assert_no_active_host_operation(state, key)
+        config_digest = _host_config_digest(
+            validated, runtime, binding_key=binding_key)
+        try:
+            machine_identity = _authenticated_machine_identity(remote_name)
+        except RecoveryAuthorityError:
+            # Applying remains supported, but no recoverable authority may be
+            # minted without the authenticated stable-host projection.
+            machine_identity = None
+        operation = _accept_hosting_operation(
+            state, key, validated=validated, entry=entry, remote_name=remote_name,
+            home=home, source_state_identity=source_state_identity,
+            source_clean=source_state_clean, source_commit=base_commit,
+            source_branch=branch, config_digest=config_digest,
+            secret_values=secret_values, save_state=durable_save,
+            binding_key=binding_key, key_version=key_version,
+            machine_identity=machine_identity,
+            edge_intent=_desired_edge_intent(validated, entry),
+            broker_locked=True, publish_binding_key=publish_binding_key)
+        if operation is None:
+            record = state["hosts"].setdefault(key, {})
+            record.pop("hosting_operation", None)
+            record.pop("recovery_uncertainty", None)
+            record.pop("consumed_observation_authority", None)
+            generation = record.get("generation", 0)
+            record["generation"] = generation + 1 if isinstance(generation, int) else 1
+            durable_save(state)
     reservation = _prepare_host_apply(entry, home, validated)
     try:
         target = _ensure_host_source(entry, home, validated["project"])
@@ -1836,7 +2721,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     runtime["environment"] = hosting.render_env_file(
         validated, secret_values, pushed_commit_sha=sha,
     )
-    key = runtime["key"]
     previous_entry = dict(state["hosts"].get(key) or {})
     legacy_clean = "sha256:" + hashlib.sha256(
         b"sandbox-dirty-overlay-v1\0"
@@ -1849,7 +2733,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         previous_entry["source_state_identity"] = source_state_identity
         previous_entry["source_state_clean"] = True
         previous_entry["source_state_identity_version"] = _SOURCE_STATE_IDENTITY_VERSION
-    config_digest = _host_config_digest(validated, runtime)
+    config_digest = _host_config_digest(
+        validated, runtime, binding_key=binding_key)
     if _source_replay_must_refuse(
             previous_entry, sha, config_digest,
             source_state_identity, source_state_clean):
@@ -1884,7 +2769,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},
     }
-    hosting.save_host_state(state)
+    durable_save(state)
     stream_progress = None
     if progress is not None:
         def stream_progress(message: str) -> None:
@@ -1981,6 +2866,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             if classified is not None:
                 _persist_runtime_observation(
                     state, key, classified, runtime_state="unverified",
+                    save_state=durable_save,
                 )
             detail = f": {evidence_error}" if evidence_error is not None else ""
             raise RuntimeError(
@@ -1990,7 +2876,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if decision == "edge_only":
             if not _reconcile_exact_runtime_state(
                     validated, remote_name, state, sha, config_digest,
-                    observation=classified):
+                    observation=classified, save_state=durable_save):
                 raise RuntimeError("exact runtime reconciliation evidence was rejected")
         else:
             _run_compose(
@@ -1998,6 +2884,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 stream_progress, apply_log,
                 force_recreate=True,
             )
+            _mark_hosting_init_complete(
+                state, key, entry=entry, runtime_dir=runtime_dir,
+                save_state=durable_save)
             health_receipt = _verify_remote_health(entry, runtime, stream_progress)
             try:
                 observation = _observe_host_runtime(validated, entry, target, runtime_dir)
@@ -2014,6 +2903,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 classified = _classify_host_observation(validated, observation, sha)
                 _persist_runtime_observation(
                     state, key, classified, runtime_state="unverified",
+                    save_state=durable_save,
                 )
                 raise RuntimeError(f"runtime observation failed: {exc}") from exc
             classified = _classify_host_observation(validated, observation, sha)
@@ -2029,15 +2919,22 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             if not runtime_ready or not source_ready:
                 _persist_runtime_observation(
                     state, key, classified, runtime_state="unverified",
+                    save_state=durable_save,
                 )
                 raise RuntimeError(
                     "remote runtime source/topology/health is not fully proven ready"
                 )
-            _persist_runtime_observation(state, key, classified, runtime_state="ready")
+            _persist_runtime_observation(
+                state, key, classified, runtime_state="ready",
+                save_state=durable_save)
+            _refresh_hosting_operation(
+                state, key, classified=classified, observation=observation,
+                save_state=durable_save,
+            )
             record = state["hosts"][key]
             record.update({"commit": sha, "recorded_revision": sha})
             record["runtime"]["loopback_health"] = health_receipt
-            hosting.save_host_state(state)
+            durable_save(state)
         proxied = validated["cloudflare"]["proxied"]
         cert_path = key_path = None
         certificate = None
@@ -2112,7 +3009,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "caddy_name": caddy_name,
             "edge": {"state": "ready"},
         })
-        hosting.save_host_state(state)
+        durable_save(state)
 
     hosting.apply_with_rollback(apply, rollback)
     result = {
@@ -2131,6 +3028,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
 
 def cmd_host(cfg, args) -> None:
+    if args.action == "recover":
+        missing = []
+        if not isinstance(getattr(args, "project_dir", None), str) or not args.project_dir.strip():
+            missing.append("--project-dir")
+        if not isinstance(getattr(args, "environment", None), str) or not args.environment.strip():
+            missing.append("--environment")
+        if missing:
+            if getattr(args, "json", False):
+                _recovery_selector_refusal(args, missing)
+            die("host recover requires explicit " + " and ".join(missing) +
+                "; no manifest, target, or writer was opened")
     if getattr(args, "all", False):
         if args.action != "validate":
             die("--all is only valid with `host validate`; no command was executed")
@@ -2166,7 +3074,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, status, diagnose, apply, logs, sync, and login-url")
+        die("--remote is required for host plan, status, diagnose, apply, recover, logs, sync, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -2179,8 +3087,18 @@ def cmd_host(cfg, args) -> None:
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
+    if args.action == "recover":
+        _cmd_host_recover(validated, entry, args.remote, args)
+        return
     if args.action == "sync":
-        _cmd_host_sync(validated, entry, args.remote, args)
+        try:
+            _with_host_effect_lease(
+                validated, args.remote,
+                lambda _state: _cmd_host_sync(validated, entry, args.remote, args))
+        except TimeoutError:
+            die("another host apply or recovery owns this target")
+        except hosting.HostingError as exc:
+            die(str(exc))
         return
     if args.action == "status":
         result = _host_runtime_status(validated, entry, args.remote, state)
@@ -2190,6 +3108,9 @@ def cmd_host(cfg, args) -> None:
             print(f"{result['project']} / {result['environment']} ({result['remote']})")
             print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
             print(f"  health: {result['health']['state']}")
+            print(f"  generation: {result['generation']}")
+            if result.get("latest_recovery"):
+                print(f"  latest recovery: {result['latest_recovery']['result_class']}")
             for service in result["services"]:
                 print(f"  {service['service']}: {service['state']} ({service['health']})")
             if result["health"].get("reason"):
@@ -2244,8 +3165,14 @@ def cmd_host(cfg, args) -> None:
         if not entry.get("provisioned"):
             die(f"remote '{args.remote}' is not provisioned")
         try:
-            result = _issue_host_autologin(validated, entry, args.remote, state,
-                                           getattr(args, "ttl_seconds", None))
+            result = _with_host_writer_lock(
+                validated, args.remote,
+                lambda current, durable_save: _issue_host_autologin(
+                    validated, entry, args.remote, current,
+                    getattr(args, "ttl_seconds", None),
+                    save_state=durable_save))
+        except TimeoutError:
+            die("another host apply or recovery owns this target")
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
             die(str(exc))
         if args.json:
@@ -2253,39 +3180,57 @@ def cmd_host(cfg, args) -> None:
         else:
             print(result["url"])
         return
-    plan = hosting.desired_plan(validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
-    # Host operations currently require an explicit remote.  Surface that
-    # choice in both plan and apply evidence so a future inferred-target path
-    # cannot silently change machines.
-    plan["remote"] = args.remote
-    plan["remote_selection"] = "explicit"
-    plan["runtime"] = hosting.desired_runtime(validated, args.remote, state)
-    plan["runtime"]["records"] = plan["records"]
-    _, missing = _secret_status(validated)
-    plan["secrets"] = {"missing": missing, "required": sorted(_declared_secret_sources(validated))}
-    plan["basic_auth"] = {"enabled": bool(validated.get("basic_auth")),
-                           "username": (validated.get("basic_auth") or {}).get("username")}
-    plan["cloudflare"] = _cloudflare_drift(plan)
     if args.action == "plan":
+        plan = hosting.desired_plan(
+            validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
+        # Planning is read-only. Apply separately rebuilds this entire shape
+        # from the entry resolved under registration ownership.
+        plan["remote"] = args.remote
+        plan["remote_selection"] = "explicit"
+        plan["runtime"] = hosting.desired_runtime(validated, args.remote, state)
+        plan["runtime"]["records"] = plan["records"]
+        _, missing = _secret_status(validated)
+        plan["secrets"] = {
+            "missing": missing,
+            "required": sorted(_declared_secret_sources(validated)),
+        }
+        plan["basic_auth"] = {
+            "enabled": bool(validated.get("basic_auth")),
+            "username": (validated.get("basic_auth") or {}).get("username"),
+        }
+        plan["cloudflare"] = _cloudflare_drift(plan)
         _emit({"ok": True, **plan}, args.json)
         return
-    if not entry.get("provisioned"):
-        die(f"remote '{args.remote}' is not provisioned")
-    if not entry.get("origin_ipv4"):
-        die(f"remote '{args.remote}' has no public origin address; run `./sb remote set-origin`")
-    ssl = plan["cloudflare"].get("ssl") if isinstance(plan.get("cloudflare"), dict) else None
-    if ssl and not getattr(args, "allow_zone_ssl_change", False):
-        non_strict = [zone for zone, mode in ssl.items() if mode != "strict"]
-        if non_strict:
-            die("these zones require --allow-zone-ssl-change: " + ", ".join(non_strict))
     progress = (lambda _message: None) if args.json else (
         lambda message: info(f"host apply: {message}")
     )
     try:
-        result = _apply_host(
-            validated, entry, args.remote, plan["runtime"], state,
-            bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
-        )
+        recovery_repository = RecoveryRepository()
+        target_key = hosting.state_key(args.remote, validated)
+        with recovery_repository.target_lock(target_key):
+            with remote.registered_remote_lock():
+                # Resolve registration only after target ownership. Supported
+                # re-registration cannot repoint it before durable authority
+                # and effects finish.
+                current_entry = remote.get_remote(args.remote)
+                if not isinstance(current_entry, dict):
+                    raise hosting.HostingError("registered remote changed before host apply")
+                current_plan = _guarded_host_apply_plan(
+                    validated, current_entry, args.remote,
+                    allow_zone_ssl_change=bool(getattr(
+                        args, "allow_zone_ssl_change", False)))
+                # Apply and recovery share one owner. Reload after acquisition so
+                # the generation/receipt view cannot be stale at the first effect.
+                state = hosting.load_host_state()
+                runtime = hosting.desired_runtime(validated, args.remote, state)
+                runtime["records"] = current_plan["records"]
+                result = _apply_host(
+                    validated, current_entry, args.remote, runtime, state,
+                    bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
+                    recovery_repository=recovery_repository,
+                )
+    except TimeoutError:
+        die("another host apply or recovery owns this target")
     except (hosting.HostingError, cloudflare.CloudflareError, RuntimeError,
             subprocess.SubprocessError, OSError) as exc:
         die(str(exc))
@@ -2309,4 +3254,12 @@ def cmd_host(cfg, args) -> None:
         )
 
 
-register({"host": cmd_host})
+def _host_predispatch_policy(args) -> bool:
+    """Keep observation recovery ahead of compatibility state writers."""
+    return getattr(args, "action", None) == "recover"
+
+
+register_specs((CommandSpec(
+    "host", cmd_host, owner=__name__, scope="global", legacy_id="host",
+    predispatch_policy=_host_predispatch_policy,
+),))

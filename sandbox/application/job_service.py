@@ -193,6 +193,18 @@ class JobService:
                 "execution_runtime": execution_runtime,
                 "artifact_paths": list(submission.artifact_paths),
                 "workspace_cleanup": cleanup_context,
+                # Fixed, non-secret identity only. The supervisor injects these
+                # exact values without copying or enumerating its environment.
+                "authoritative_context": {
+                    "job_id": row["job_id"],
+                    "request_id": row.get("request_id"),
+                    "project_identity": row.get("project_identity"),
+                    "project_root_digest": "sha256:" + hashlib.sha256(
+                        str(row.get("project_root") or "").encode()).hexdigest(),
+                    "source_identity": row.get("source_identity"),
+                    "source_commit": row.get("source_commit"),
+                    "source_dirty_digest": row.get("source_dirty_digest"),
+                },
                 "generation": ({
                     "relationship_id": submission.sync_relationship_id,
                     "generation_id": submission.sync_generation_id,

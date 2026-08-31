@@ -9,6 +9,7 @@ import selectors
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Lifecycle
@@ -19,6 +20,47 @@ from .storage import JobStorage
 from .artifacts import collect as collect_artifacts
 from .metrics import append as append_metric, sample as sample_metric
 from sandbox.services.redaction import redact_structure, redact_text
+
+
+_CHILD_CONTEXT_KEYS = {
+    "job_id": "SANDBOX_DURABLE_JOB_ID",
+    "request_id": "SANDBOX_DURABLE_REQUEST_ID",
+    "project_identity": "SANDBOX_DURABLE_PROJECT_IDENTITY",
+    "project_root_digest": "SANDBOX_DURABLE_PROJECT_ROOT_DIGEST",
+    "source_identity": "SANDBOX_DURABLE_SOURCE_IDENTITY",
+    "source_commit": "SANDBOX_DURABLE_SOURCE_COMMIT",
+    "source_dirty_digest": "SANDBOX_DURABLE_SOURCE_DIRTY_DIGEST",
+}
+
+
+@contextmanager
+def _child_identity_context(value: object):
+    """Temporarily add only fixed authoritative keys for one child launch.
+
+    The detached supervisor is single-purpose. This intentionally does not
+    enumerate, copy, unpack, log, or persist the inherited environment.
+    """
+    context = value if isinstance(value, dict) else {}
+    previous = {}
+    changed = []
+    try:
+        for field, environment_key in _CHILD_CONTEXT_KEYS.items():
+            item = context.get(field)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or "\x00" in item:
+                raise ValueError("durable child identity context is invalid")
+            previous[environment_key] = os.environ.get(environment_key)
+            os.environ[environment_key] = item
+            changed.append(environment_key)
+        yield
+    finally:
+        for environment_key in changed:
+            old = previous[environment_key]
+            if old is None:
+                os.environ.pop(environment_key, None)
+            else:
+                os.environ[environment_key] = old
 
 
 def _linux_cgroup_path(pid: int) -> str | None:
@@ -58,9 +100,12 @@ def run_descriptor(path: str | Path) -> int:
         output = JobOutputStore(storage, repository, job_id, secrets=descriptor.get("redaction_secrets", ()))
         if _managed_native_job(descriptor):
             return _run_managed_native(descriptor, repository, output)
-        command = subprocess.Popen(descriptor["argv"], cwd=descriptor["cwd"], env=descriptor.get("environment"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, close_fds=True)
+        with _child_identity_context(descriptor.get("authoritative_context")):
+            command = subprocess.Popen(
+                descriptor["argv"], cwd=descriptor["cwd"],
+                env=descriptor.get("environment"), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True, close_fds=True)
         child = capture_process_identity(command.pid)
         if child is None:
             raise RuntimeError("could not capture child process identity")

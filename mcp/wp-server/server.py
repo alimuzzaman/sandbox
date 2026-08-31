@@ -4,7 +4,6 @@ import hmac
 import json
 import math
 import os
-import platform
 import shlex
 import stat
 import subprocess
@@ -150,8 +149,15 @@ def _host_memory_contract(payload: dict) -> dict:
     revision = _live_runtime_revision()
     if request["action"] != "host_memory_status":
         raise ValueError("host-memory action is not registered")
-    identity_seed = platform.node().encode("utf-8", "replace")
-    target_identity = hashlib.sha256(identity_seed).hexdigest()[:24]
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip().lower()
+    except OSError:
+        raise ValueError("stable machine identity is unavailable") from None
+    if _re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ValueError("stable machine identity is unavailable")
+    target_identity = hashlib.sha256(
+        b"sandbox-host-machine-id-v1\0" + machine_id.encode("ascii")
+    ).hexdigest()[:24]
     provider = HostProvider(target_identity=target_identity)
     repository = HostMemoryRepository(STATE,history_path=HISTORY,history_owner_uid=0,
                                       history_ancestor_root=Path("/"))

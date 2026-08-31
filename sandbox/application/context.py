@@ -239,10 +239,7 @@ def domain_service(cfg, **overrides):
         project_registry=overrides.pop("project_registry", sc),
         adapters=overrides.pop(
             "adapters",
-            built_in_resolver_registry(
-                implementations,
-                proof_attestation=overrides.pop("proof_attestation", None),
-            ),
+            built_in_resolver_registry(implementations),
         ),
         repository=overrides.pop("repository", DomainRepository(state_path)),
         process=process,

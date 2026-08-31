@@ -14,6 +14,7 @@ from sandbox.network.models import (
     CleanupRecovery, ConsentRecord, DomainResult, ResolutionBinding,
     canonical_digest, project_diagnostic,
 )
+from sandbox.network.qualification import SYSTEMD_RESOLVED_QUALIFICATION
 
 
 class DomainContextError(ValueError):
@@ -326,18 +327,21 @@ class DomainService:
                 message="The persisted hostname is preserved but requires an explicit migration.",
             )
         pin = policy.get("strategy")
-        if pin:
-            spec = self.adapters.get(pin)
-            if spec is None:
-                return None, self._result(
-                    state="unsupported", hostname=hostname, policy=policy,
-                    observation=observation, expected=accepted, fallback=fallback,
-                    reason_code="pinned_resolver_unavailable",
-                    message=f"Pinned resolver {pin!r} is not available in this build.",
-                )
-        else:
-            matches = self.adapters.matching(observation.manager, self.platform)
-            spec = matches[0] if matches else None
+        if not pin:
+            return None, self._result(
+                state="fallback", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="resolver_not_selected",
+                message="Sandbox-owned resolution remains selected by default.",
+            )
+        spec = self.adapters.get(pin)
+        if spec is None:
+            return None, self._result(
+                state="unsupported", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="pinned_resolver_unavailable",
+                message=f"Pinned resolver {pin!r} is not available in this build.",
+            )
         if spec is None or not spec.adoptable or spec.adapter is None:
             return None, self._result(
                 state="unsupported", hostname=hostname, policy=policy,
@@ -352,16 +356,18 @@ class DomainService:
                 reason_code="wildcard_unsupported",
                 message="The selected resolver does not support a scoped wildcard zone.",
             )
-        authority_status = self.authority.status() if self.authority is not None and hasattr(
-            self.authority, "status"
-        ) else {}
-        if authority_status.get("address") and authority_status.get("port"):
-            address = authority_status["address"]
-            port = int(authority_status["port"])
-            endpoint_existing = True
-        else:
-            address, port = self.endpoints.allocate()
-            endpoint_existing = False
+        capability = "zone" if policy.get("wildcard") else "exact"
+        if (spec.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                and not SYSTEMD_RESOLVED_QUALIFICATION.shape_qualifies(
+                    observation=observation, platform=self.platform,
+                    capability=capability, adapter=spec.adapter,
+                )):
+            return None, self._result(
+                state="unsupported", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="resolver_not_qualified",
+                message="The observed resolver does not match the qualified control path.",
+            )
         target = accepted[0]
         suffix = policy["tld"]
         owner = f"{Path(config['root']).resolve()}::{label}"
@@ -387,28 +393,79 @@ class DomainService:
                     reason_code="owned_namespace_collision",
                     message="An existing owned DNS namespace points at another backend.",
                 )
-        adapter_plan = (
-            spec.adapter.plan(suffix, address, port)
-            if hasattr(spec.adapter, "plan") and observation.manager == "resolved"
-            else {"kind": kind, "hostname": hostname, "address": target,
-                  "suffix": suffix, "port": port}
-        )
-        adapter_plan = {**adapter_plan, "owner_digest": canonical_digest(owner)}
-        binding = ResolutionBinding.create(
-            kind=kind, name=binding_name, target=target,
-            adapter_id=spec.adapter_id, owners=(owner,), desired=adapter_plan,
-        )
+        authority_status = self.authority.status() if self.authority is not None and hasattr(
+            self.authority, "status"
+        ) else {}
+        if authority_status.get("health") == "foreign_collision":
+            return None, self._result(
+                state="foreign_collision", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="authority_endpoint_collision",
+                message="The scoped authority endpoint is owned by foreign state.",
+            )
+        deferred = spec.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+        if deferred:
+            address = port = None
+            endpoint_existing = False
+        elif authority_status.get("address") and authority_status.get("port"):
+            address = authority_status["address"]
+            port = int(authority_status["port"])
+            endpoint_existing = True
+        else:
+            address, port = self.endpoints.allocate()
+            endpoint_existing = False
+        adapter_plan = None
+        binding = None
+        if not deferred:
+            adapter_plan = (
+                spec.adapter.plan(suffix, address, port)
+                if hasattr(spec.adapter, "plan") and observation.manager == "resolved"
+                else {"kind": kind, "hostname": hostname, "address": target,
+                      "suffix": suffix, "port": port}
+            )
+            adapter_plan = {**adapter_plan, "owner_digest": canonical_digest(owner)}
+            binding = ResolutionBinding.create(
+                kind=kind, name=binding_name, target=target,
+                adapter_id=spec.adapter_id, owners=(owner,), desired=adapter_plan,
+            )
         return {
             "config": config, "policy": policy, "hostname": hostname,
             "fallback": fallback, "observation": observation, "offer": offer,
             "accepted": accepted, "spec": spec, "address": address, "port": port,
             "endpoint_existing": endpoint_existing,
-            "binding": binding, "adapter_plan": {
-                **adapter_plan, "hostname": hostname, "target": target,
-                "binding_id": binding.binding_id,
-                "observation_fingerprint": observation.fingerprint,
-            },
+            "binding": binding, "adapter_plan": adapter_plan,
+            "owner": owner, "target": target, "suffix": suffix,
+            "kind": kind, "binding_name": binding_name,
+            "authority_status": authority_status,
         }, None
+
+    def _materialize_resolver(self, prepared: dict, service_identity: dict) -> None:
+        status = prepared["authority_status"]
+        if status.get("address") and status.get("port"):
+            address, port = status["address"], int(status["port"])
+            endpoint_existing = True
+        else:
+            address, port = self.endpoints.allocate()
+            endpoint_existing = False
+        plan = prepared["spec"].adapter.plan(prepared["suffix"], address, port)
+        plan = {
+            **plan, "owner_digest": canonical_digest(prepared["owner"]),
+            "service_identity": dict(service_identity),
+        }
+        binding = ResolutionBinding.create(
+            kind=prepared["kind"], name=prepared["binding_name"],
+            target=prepared["target"], adapter_id=prepared["spec"].adapter_id,
+            owners=(prepared["owner"],), desired=plan,
+        )
+        prepared.update({
+            "address": address, "port": port,
+            "endpoint_existing": endpoint_existing, "binding": binding,
+            "adapter_plan": {
+                **plan, "hostname": prepared["hostname"],
+                "target": prepared["target"], "binding_id": binding.binding_id,
+                "observation_fingerprint": prepared["observation"].fingerprint,
+            },
+        })
 
     def plan(self, project_dir: str, *, label: str = "default",
              offer_override=None) -> DomainResult:
@@ -470,6 +527,33 @@ class DomainService:
                 reason_code="resolver_changed",
                 message="Resolver ownership changed after planning; retry from observation.",
             )
+        if prepared["spec"].adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id:
+            helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
+            if not helper.get("ok"):
+                return self._result(
+                    state="pending_privilege", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_helper_required",
+                    message=helper.get("error", "The scoped resolver helper is unavailable."),
+                    mutated=bool(helper.get("mutated")),
+                )
+            current_preflight = SYSTEMD_RESOLVED_QUALIFICATION.preflight(
+                observation=current, adapter=prepared["spec"].adapter,
+            )
+            if not SYSTEMD_RESOLVED_QUALIFICATION.qualifies(
+                    observation=current, platform=self.platform,
+                    capability="exact", adapter=prepared["spec"].adapter,
+                    preflight=current_preflight,
+                ):
+                return self._result(
+                    state="fallback", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_changed",
+                    message="Resolver service identity is not qualified for mutation.",
+                )
+            self._materialize_resolver(prepared, current_preflight)
         existing = self.repository.binding(prepared["binding"].binding_id)
         if existing is not None and existing.last_applied is not None:
             if self.authority is None:
@@ -480,7 +564,9 @@ class DomainService:
                     reason_code="authority_unavailable",
                     message="The scoped answering authority is unavailable.",
                 )
-            if hasattr(prepared["spec"].adapter, "ensure_helper"):
+            if (prepared["spec"].adapter_id
+                    != SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and hasattr(prepared["spec"].adapter, "ensure_helper")):
                 helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
                 if not helper.get("ok"):
                     return self._result(
@@ -577,7 +663,9 @@ class DomainService:
                 reason_code="authority_unavailable",
                 message="The scoped answering authority is unavailable.",
             )
-        if hasattr(prepared["spec"].adapter, "ensure_helper"):
+        if (prepared["spec"].adapter_id
+                != SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                and hasattr(prepared["spec"].adapter, "ensure_helper")):
             helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
             if not helper.get("ok"):
                 return self._result(
@@ -807,8 +895,16 @@ class DomainService:
             )
         incomplete = False
         mutated = False
+        refusal_reason = None
         for binding in bindings:
             recovery = self.repository.snapshot()["recovery"].get(binding.binding_id) or {}
+            if (binding.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and recovery.get("reason_code") == "authority_cleanup_failed"):
+                incomplete = True
+                refusal_reason = (
+                    refusal_reason or "resolved_cleanup_atomicity_unproven"
+                )
+                continue
             if recovery.get("reason_code") == "authority_cleanup_failed":
                 try:
                     removed = self.authority is not None and self.authority.remove(
@@ -826,6 +922,24 @@ class DomainService:
                 continue
             spec = self.adapters.get(binding.adapter_id)
             adapter = spec.adapter if spec is not None else None
+            if (binding.adapter_id == SYSTEMD_RESOLVED_QUALIFICATION.adapter_id
+                    and adapter is not None):
+                helper = adapter.ensure_helper(interactive=interactive)
+                expected_identity = dict(binding.desired).get("service_identity")
+                current_identity = (
+                    SYSTEMD_RESOLVED_QUALIFICATION.preflight(
+                        observation=observation, adapter=adapter,
+                    ) if helper.get("ok") else None
+                )
+                if current_identity is None or current_identity != expected_identity:
+                    self.repository.put_recovery(CleanupRecovery(
+                        binding.binding_id, binding.adapter_id,
+                        binding.last_applied_digest or canonical_digest(binding.desired),
+                        None, "resolver_owner_changed", None, "unavailable",
+                    ))
+                    incomplete = True
+                    refusal_reason = refusal_reason or "resolver_owner_changed"
+                    continue
             observed = (
                 self.binding_observer(binding, adapter)
                 if self.binding_observer is not None and adapter is not None else None
@@ -866,12 +980,14 @@ class DomainService:
                 result = adapter.cleanup(binding)
             if result is not None:
                 if not result.get("ok"):
+                    result_code = result.get("code") or "resolver_cleanup_failed"
                     self.repository.put_recovery(CleanupRecovery(
                         binding.binding_id, binding.adapter_id,
                         binding.last_applied_digest, observed_digest,
-                        "resolver_cleanup_failed", None, "unavailable",
+                        result_code, None, "unavailable",
                     ))
                     incomplete = True
+                    refusal_reason = refusal_reason or result_code
                     continue
             if len(binding.owners) > 1:
                 if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
@@ -896,8 +1012,12 @@ class DomainService:
             return self._result(
                 state="cleanup_incomplete", hostname=hostname, policy=policy,
                 observation=observation, expected=(), fallback=fallback,
-                reason_code="cleanup_incomplete",
-                message="One or more resolver bindings drifted or were unavailable; retry state was retained.",
+                reason_code=refusal_reason or "cleanup_incomplete",
+                message=(
+                    "Resolver cleanup was refused because atomic service ownership is unproven; managed state was retained."
+                    if refusal_reason == "resolved_cleanup_atomicity_unproven" else
+                    "One or more resolver bindings drifted or were unavailable; retry state was retained."
+                ),
                 mutated=mutated, ownership="residual",
             )
         return self._result(

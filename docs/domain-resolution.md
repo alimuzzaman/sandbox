@@ -38,6 +38,34 @@ CI return `pending_consent` or
 override beats project configuration, which beats detection, and status reports that
 source.
 
+Source-owned qualification implements one candidate host-owned path: Linux
+`systemd-resolved`, exact names only, constrained by historical checked-in evidence
+`038-t034-ubuntu-2404`. It remains `implemented_unproven` and non-adoptable in ordinary
+support until the normal live CLI gate is captured. No string, mapping, typed object, CLI option, config, environment,
+MCP input, or harness input can add or widen that qualification. Before endpoint or DNS
+mutation, Sandbox installs or upgrades the fixed versioned helper after consent. The
+helper then performs a read-only preflight and binds the observed
+`systemd-resolved` owner to the active unit's PID, process start identity, owner UID, and
+control group. That identity is included in the root authorization receipt and rechecked
+inside the helper immediately before its write. A missing helper, inactive or replaced service, second resolver owner,
+NetworkManager owner, wildcard request, non-Linux platform, or foreign authority state
+fails closed. The executable name and a boolean readiness result are not qualification.
+An unselected host resolver is never auto-adopted; Sandbox-owned Docker/Caddy resolution
+remains the default. Explicit `./sb domains use systemd-resolved` changes only the
+resolver selection, preserving the persisted hostname and existing instance.
+
+The fixed helper reports `sandbox-resolver-helper-v2`. An older installed copy is not
+treated as ready: after consent it is upgraded from the checked-in helper, and an exact
+legacy resolved authorization receipt may be replaced only during the interactive
+authorization step with the new identity-bound receipt.
+
+Systemd-resolved cleanup is not promoted by this batch. DomainService still compares the
+live helper preflight with the binding's stored identity, but a check cannot make an
+external reload atomic against service replacement. Therefore `resolved-remove` and the
+adapter release path return `resolved_cleanup_atomicity_unproven` before any receipt,
+fragment, or reload mutation. All managed state remains for later reconciliation until an
+atomic service-identity ownership mechanism is proven under T070.
+
 Failure never blocks the per-port URL. Status distinguishes owner changes, binding drift,
 authority failure, answer mismatch/stale cache, and selected-ingress diagnostic failures.
 Use `domains reconsider --resolver ID` to clear remembered consent after reviewing a
@@ -53,8 +81,10 @@ application state.
 
 Sandbox writes only marked fragments through fixed, schema-validated helper verbs. It
 does not replace resolver-managed `resolv.conf`, foreign dnsmasq fragments, hosts entries,
-or public DNS. Apply validates complete configuration and rolls back on reload or fresh
-DNS/HTTP verification failure. Cleanup compares the observed state with the stored
+or public DNS. Apply validates complete configuration. Adapters with proven atomic
+rollback revert on reload or fresh DNS/HTTP verification failure; the unadvertised
+systemd-resolved candidate instead retains residual recovery because its remove path is
+disabled. Cleanup compares the observed state with the stored
 receipt; drift and unavailable managers produce durable `cleanup_incomplete` recovery
 instead of deleting ambiguous state. Recovery remains retryable after instance deletion.
 
@@ -104,11 +134,10 @@ pair, has no upstream resolver, ignores host resolver files, and answers only ow
 Resolver adoption does not provide workload isolation; managed native runtimes enforce
 their own network namespace and default-deny egress separately.
 
-The disposable live conformance harness may inject an in-memory typed proof attestation.
-No CLI flag, project setting, machine override, string, or mapping can promote an adapter.
-The attestation affects only that composed service object and never changes the built-in
-manifest, MCP behavior, or later commands. Evidence review and a separate manifest change
-are required before support is advertised.
+The historical disposable conformance harness used an invocation-scoped attestation to
+capture evidence. Production qualification no longer accepts any proof input. Evidence
+review and a checked-in manifest/qualification change are required before another
+adapter, platform, or capability can be advertised.
 
 Legacy `domains setup|up|down|teardown` remains a rollback control while adoption is
 unadvertised. Instance lifecycle entry points first offer the composed ingress→DNS→ingress

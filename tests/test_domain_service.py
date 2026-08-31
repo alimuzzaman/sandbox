@@ -230,9 +230,9 @@ class TestDomainServiceIntegration(unittest.TestCase):
         service = DomainService(
             config_loader=lambda root, label=None: {
                 "root": root, "slug": "demo",
-                "domains": {"hostname": "demo.test", "tld": "test", "strategy": None,
+                "domains": {"hostname": "demo.test", "tld": "test", "strategy": "resolved",
                             "wildcard": False, "hostnameSource": "project",
-                            "strategySource": "default"},
+                            "strategySource": "project"},
             },
             project_registry=type("Registry", (), {
                 "registry_get": staticmethod(lambda root, label=None: {

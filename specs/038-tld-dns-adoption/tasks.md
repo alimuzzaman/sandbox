@@ -254,14 +254,20 @@ proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
       (documentation reconciliation)
 - [ ] T067 Define and implement a non-forgeable production qualification path for a
       live-proven resolver adapter, then verify normal `./sb domains use systemd-resolved`
-      setup can adopt only within its evidenced constraints (FR-027, FR-031; missing)
+      setup can adopt only within its evidenced constraints (FR-027, FR-031; source-owned
+      exact/Linux qualification and identity-bound pre-mutation helper gate complete
+      locally for apply; cleanup is a typed no-mutation refusal pending T070, and support
+      remains implemented_unproven/non-adoptable; normal live Linux CLI proof still missing)
 - [ ] T068 Resolve the managed-Linux default-path gap: implement and prove a
       Sandbox-owned default resolution path for supported systemd-resolved/NetworkManager
       hosts, or obtain an approved scope change before narrowing FR-029 and SC-011
-      (FR-029, SC-011; missing)
+      (FR-029, SC-011; blocked on the default-path implementation versus approved
+      adoption-only scope decision; no implementation or proof claimed)
 - [ ] T069 Prove default Sandbox-owned resolution on a Linux host with a plain
       `/etc/resolv.conf`, including fresh DNS, HTTP through the default ingress, and
       repeatability without a per-port-only result (T065, SC-011; missing host proof)
 - [ ] T070 Capture the remaining resolver host-proof gates: owner change between apply and
       cleanup, two-project wildcard shared-owner release, and the exact-name-only negative
-      multisite case (FR-015, FR-020, SC-006; missing host proof)
+      multisite case; first prove an atomic systemd-resolved service-identity ownership
+      mechanism before enabling receipt/fragment/reload cleanup (FR-015, FR-020, SC-006;
+      missing mechanism and host proof)

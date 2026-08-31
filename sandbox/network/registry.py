@@ -39,7 +39,8 @@ class ResolverAdapterSpec:
 
     @property
     def adoptable(self) -> bool:
-        return self.support_tier == "adoptable" and bool(self.evidence_id)
+        return (self.adapter is not None and self.support_tier == "adoptable"
+                and bool(self.evidence_id))
 
 
 class ResolverAdapterRegistry:

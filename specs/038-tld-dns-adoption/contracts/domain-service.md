@@ -47,15 +47,25 @@ one of the accepted addresses.
 
 - Rejects expired/mismatched fingerprints before mutation.
 - Requires recorded consent or a current interactive acceptance.
-- Starts/updates the authority before adding a routed-resolver rule; removes candidate
-  authority state if route activation fails.
+- Before resolver qualification, installs or upgrades the fixed helper to the exact
+  source-owned version. Its final read-only service identity (PID, start ticks, UID, and
+  control group) is bound into authorization and revalidated inside the helper immediately
+  before the resolver write.
+- Starts/updates the authority before adding a routed-resolver rule. Candidate authority
+  is removed after route failure only when the resolver adapter has a proven atomic
+  rollback; systemd-resolved currently retains residual reconciliation state instead.
 - Verifies fresh resolution to one accepted address. It does not call A to add a route.
 
 `cleanup(owner, interactive) -> CleanupResult`
 
 - Removes only unchanged owned binding state.
+- For systemd-resolved, returns `resolved_cleanup_atomicity_unproven` without mutating
+  receipts, fragments, or resolver state. Preflight comparison alone cannot make an
+  external reload atomic against service replacement; managed state remains for later
+  reconciliation until T070 proves an ownership mechanism.
 - Removes a shared zone only after its final owner is gone.
-- Reverts routed-resolver state before stopping the final authority binding.
+- Reverts a routed-resolver state before stopping the final authority binding only for an
+  adapter with a proven atomic cleanup mechanism.
 - Returns incomplete recovery for drift/unavailability; safe to repeat.
 
 ### Read-only selected-ingress diagnostic
@@ -119,3 +129,7 @@ An adapter may be selected only if:
 3. manifest proof tier permits adoption;
 4. pin, consent, credentials, and privilege are satisfied;
 5. no foreign binding/endpoint collision exists.
+
+The systemd-resolved implementation remains `implemented_unproven` and non-adoptable in
+ordinary support until T067's normal Linux CLI proof is captured. The example envelope
+above describes the eventual promoted state, not current advertised support.

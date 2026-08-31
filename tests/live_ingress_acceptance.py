@@ -3,8 +3,8 @@
 
 Drives the composed clean-URL handshake (ingress capabilities -> resolver naming
 -> route activation) against a REAL incumbent and records before/after route
-health. System-Caddy ingress qualification comes only from checked-in source;
-the evidence flag remains scoped to the resolver's live proof.
+health. Ingress and resolver qualification come only from checked-in source;
+the evidence flag labels this live run and cannot widen either path.
 
 Usage:
     python3 tests/live_ingress_acceptance.py --project-dir <dir> [--label L]
@@ -63,8 +63,6 @@ def main() -> None:
     args = parser.parse_args()
 
     from sandbox.application.context import clean_url_service, domain_service, ingress_service
-    from sandbox.network.manifest import ResolverProofAttestation
-
     baseline = tuple(args.baseline_url)
     observed: dict[str, object] = {"evidence_id": args.evidence_id,
                                    "before": incumbent_state(baseline)}
@@ -85,8 +83,7 @@ def main() -> None:
     }
 
     domains = domain_service(
-        None, proof_attestation=ResolverProofAttestation("systemd-resolved", args.evidence_id),
-        consent_decider=lambda _owner: bool(args.consent),
+        None, consent_decider=lambda _owner: bool(args.consent),
     )
     service = clean_url_service(None, ingress=ingress, domains=domains)
 

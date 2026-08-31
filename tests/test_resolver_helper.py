@@ -43,7 +43,51 @@ class TestResolverHelper(unittest.TestCase):
         self.assertNotIn("sandbox-resolver-helper authorize *", text)
         self.assertIn("visudo -cf", text)
 
-    def test_apply_and_remove_require_exact_root_authorization_receipts(self):
+    def test_resolved_status_is_read_only_and_binds_live_service_identity(self):
+        text = HELPER.read_text()
+        status = text.split("    resolved-status)", 1)[1].split(
+            "    resolved-apply)", 1,
+        )[0]
+        identity = text.split("resolved_identity_fields()", 1)[1].split(
+            "require_resolved_identity()", 1,
+        )[0]
+        self.assertIn("MainPID", identity)
+        self.assertIn("/proc/$service_pid/stat", identity)
+        self.assertIn("ControlGroup", identity)
+        self.assertIn("sandbox-resolved-service-v1", status)
+        self.assertNotIn("install ", status)
+        self.assertNotIn("rm -f", status)
+        self.assertNotIn("systemctl reload", status)
+        self.assertIn("sandbox-resolver-helper resolved-status", text)
+
+    def test_resolved_apply_revalidates_authorized_identity_immediately_before_write(self):
+        text = HELPER.read_text()
+        apply = text.split("    resolved-apply)", 1)[1].split(
+            "    resolved-remove)", 1,
+        )[0]
+        self.assertIn("require_resolved_identity", apply)
+        self.assertLess(apply.index("check_authorization resolved"),
+                        apply.index("require_resolved_identity"))
+        self.assertLess(apply.index("require_resolved_identity"),
+                        apply.index("install -d"))
+        for name in ("service_pid", "service_start", "service_uid", "service_control"):
+            self.assertIn(name, apply)
+        self.assertIn("sandbox-resolver-authorization-v2", text)
+        self.assertIn("pid=%s start=%s service_uid=%s control=%s", text)
+        self.assertIn("legacy_payload", text)
+
+    def test_resolved_remove_refuses_before_any_cleanup_mutation(self):
+        text = HELPER.read_text()
+        remove = text.split("    resolved-remove)", 1)[1].split(
+            "    macos-apply)", 1,
+        )[0]
+        self.assertIn("resolved cleanup requires atomic service identity ownership", remove)
+        self.assertNotIn("rm -f", remove)
+        self.assertNotIn("mv -f", remove)
+        self.assertNotIn("reload-or-restart", remove)
+        self.assertNotIn("install_receipt", remove)
+
+    def test_apply_requires_exact_receipt_while_remove_is_disabled(self):
         text = HELPER.read_text()
         resolved_apply = text.split("    resolved-apply)", 1)[1].split(
             "    resolved-remove)", 1,
@@ -52,11 +96,11 @@ class TestResolverHelper(unittest.TestCase):
             "    macos-apply)", 1,
         )[0]
         self.assertIn("check_authorization resolved", resolved_apply)
-        self.assertIn("check_authorization resolved", resolved_remove)
+        self.assertIn("resolved cleanup requires atomic service identity ownership",
+                      resolved_remove)
         self.assertIn("/var/lib/sandbox/resolver/authorizations", text)
         self.assertIn("owner=%s", text)
-        self.assertIn("echo \"retained\"", resolved_remove)
-        self.assertIn("check_applied resolved", resolved_remove)
+        self.assertNotIn("check_applied resolved", resolved_remove)
         self.assertIn("refusing to adopt an identical foreign resolver fragment", resolved_apply)
         revoke = text.split("    revoke-authorization)", 1)[1].split(
             "    authorization-status)", 1,

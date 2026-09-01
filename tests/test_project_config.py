@@ -63,6 +63,253 @@ from unittest import mock
 
 
 class TestProjectConfig(unittest.TestCase):
+    def test_explicit_nested_config_owns_family_and_beats_automatic_homes(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            selected = root / "plugin-config"
+            selected.mkdir()
+            (root / "sandbox.config.json").write_text(json.dumps({"slug": "automatic"}))
+            (selected / "sandbox.config.json").write_text(json.dumps({
+                "slug": "explicit", "phpVersion": "8.1",
+                "plugins": {"fixture": {"path": "plugins/fixture"}},
+            }))
+            (selected / "sandbox.config.override.json").write_text(json.dumps({
+                "phpVersion": "8.2",
+            }))
+            (selected / "sandbox.config.qa.json").write_text(json.dumps({
+                "wpVersion": "6.8",
+            }))
+
+            result = sandbox_core.load_project_config(
+                root, label="qa", config_file="plugin-config/sandbox.config.json",
+            )
+
+        self.assertEqual(result["slug"], "explicit")
+        self.assertEqual(result["phpVersion"], "8.2")
+        self.assertEqual(result["wpVersion"], "6.8")
+        self.assertEqual(result["root"], str(root))
+        self.assertEqual(
+            result["plugins_resolved"]["fixture"]["source"]["value"],
+            "plugins/fixture",
+        )
+
+    def test_explicit_config_never_falls_back_or_mixes_families(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp)
+            selected = root / "config"
+            selected.mkdir()
+            (root / "sandbox.config.json").write_text(json.dumps({"slug": "root"}))
+            (root / "sandbox.config.override.json").write_text(json.dumps({"phpVersion": "8.4"}))
+            (selected / "sandbox.config.json").write_text(json.dumps({"slug": "selected"}))
+            result = sandbox_core.load_project_config(
+                root, config_file=selected / "sandbox.config.json",
+            )
+
+        self.assertEqual(result["slug"], "selected")
+        self.assertNotEqual(result["phpVersion"], "8.4")
+
+    def test_explicit_config_rejects_override_and_label_symlink_escape(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "project"
+            selected = root / "config"
+            selected.mkdir(parents=True)
+            primary = selected / "sandbox.config.json"
+            primary.write_text("{}")
+            outside = Path(tmp) / "outside.json"
+            outside.write_text("{}")
+            for name in ("sandbox.config.override.json", "sandbox.config.qa.json"):
+                sibling = selected / name
+                sibling.symlink_to(outside)
+                with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "explicit config family",
+                ):
+                    sandbox_core.load_project_config(
+                        root, label="qa", config_file=primary,
+                    )
+                sibling.unlink()
+
+    def test_explicit_config_rejects_symlinked_selected_parent(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "project"
+            real = root / "real-config"
+            real.mkdir(parents=True)
+            (real / "sandbox.config.json").write_text("{}")
+            alias = root / "config"
+            alias.symlink_to(real, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "directory must not be a symbolic link"):
+                sandbox_core.load_project_config(
+                    root, config_file=alias / "sandbox.config.json",
+                )
+
+    def test_explicit_config_rejects_escape_symlink_directory_and_wrong_basename(self):
+        import sandbox_core
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            outside = Path(tmp) / "sandbox.config.json"
+            outside.write_text("{}")
+            linked = root / "sandbox.config.json"
+            linked.symlink_to(outside)
+            for value, message in (
+                ("../sandbox.config.json", "inside the project root"),
+                ("sandbox.config.json", "inside the project root"),
+                ("config.json", "basename"),
+            ):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
+                    sandbox_core.load_project_config(root, config_file=value)
+            linked.unlink()
+            linked.mkdir()
+            with self.assertRaisesRegex(ValueError, "regular non-symbolic-link"):
+                sandbox_core.load_project_config(root, config_file=linked)
+            linked.rmdir()
+            real = root / "real" / "sandbox.config.json"
+            real.parent.mkdir()
+            real.write_text("{}")
+            linked.symlink_to(real)
+            with self.assertRaisesRegex(ValueError, "regular non-symbolic-link"):
+                sandbox_core.load_project_config(root, config_file=linked)
+
+    def test_shared_git_config_home_loads_complete_family_without_tree_writes(self):
+        import sandbox_core
+        from sandbox.config.descriptors import project_config_key
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            base = Path(tmp)
+            root = base / "fresh-worktree"
+            home = base / "sandbox-home"
+            root.mkdir()
+            (root / ".git").write_text("gitdir: /fixture/repo/.git/worktrees/fresh\n")
+            with mock.patch("sandbox.config.descriptors._git_output") as git_output:
+                git_output.side_effect = lambda _root, *args: (
+                    "git@example.test:team/plugin.git"
+                    if args[:2] == ("config", "--get") else None
+                )
+                key = project_config_key(root)
+                shared = home / "projects" / key
+                shared.mkdir(parents=True)
+                (shared / "sandbox.config.json").write_text(json.dumps({
+                    "slug": "shared-plugin", "phpVersion": "8.2",
+                }))
+                (shared / "sandbox.config.override.json").write_text(json.dumps({
+                    "phpVersion": "8.3",
+                }))
+                (shared / "sandbox.config.qa.json").write_text(json.dumps({
+                    "wpVersion": "6.8",
+                }))
+                before = set(root.iterdir())
+                with mock.patch.dict(os.environ, {
+                    "SANDBOX_HOME": str(home),
+                    "SANDBOX_USER_CONFIG": str(base / "missing-global.json"),
+                }):
+                    result = sandbox_core.load_project_config(root, label="qa")
+
+            self.assertEqual(result["slug"], "shared-plugin")
+            self.assertEqual(result["phpVersion"], "8.3")
+            self.assertEqual(result["wpVersion"], "6.8")
+            self.assertEqual(set(root.iterdir()), before)
+            self.assertEqual(result["root"], str(root))
+
+    def test_in_tree_primary_takes_priority_over_shared_git_config(self):
+        import sandbox_core
+        from sandbox.config.descriptors import project_config_key
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            base = Path(tmp)
+            root = base / "worktree"
+            home = base / "sandbox-home"
+            root.mkdir()
+            (root / "sandbox.config.json").write_text(json.dumps({"slug": "in-tree"}))
+            with mock.patch("sandbox.config.descriptors._git_output") as git_output:
+                git_output.return_value = "git@example.test:team/plugin.git"
+                shared = home / "projects" / project_config_key(root)
+                shared.mkdir(parents=True)
+                (shared / "sandbox.config.json").write_text(json.dumps({"slug": "shared"}))
+                with mock.patch.dict(os.environ, {
+                    "SANDBOX_HOME": str(home),
+                    "SANDBOX_USER_CONFIG": str(base / "missing-global.json"),
+                }):
+                    result = sandbox_core.load_project_config(root)
+
+            self.assertEqual(result["slug"], "in-tree")
+
+    def test_project_config_key_falls_back_to_git_common_dir(self):
+        from sandbox.config.descriptors import project_config_key
+
+        roots = (Path("/tmp/repo"), Path("/tmp/worktree"))
+        with mock.patch("sandbox.config.descriptors._git_output") as git_output:
+            git_output.side_effect = lambda _root, *args: (
+                None if args[:2] == ("config", "--get") else "/srv/source/plugin/.git"
+            )
+            self.assertEqual(project_config_key(roots[0]), project_config_key(roots[1]))
+
+    def test_relative_origins_use_distinct_git_common_directory_keys(self):
+        from sandbox.config.descriptors import project_config_key
+
+        roots = (Path("/tmp/one/repo"), Path("/tmp/two/repo"))
+        with mock.patch("sandbox.config.descriptors._git_output") as git_output:
+            def output(root, *args):
+                if args[:2] == ("config", "--get"):
+                    return "../upstream.git"
+                return str(root / ".git")
+
+            git_output.side_effect = output
+            self.assertNotEqual(project_config_key(roots[0]), project_config_key(roots[1]))
+
+    def test_shared_config_rejects_symlinked_home_and_family_files(self):
+        from sandbox.config.descriptors import config_home, project_config_key
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            base = Path(tmp)
+            root = base / "worktree"
+            home = base / "sandbox-home"
+            root.mkdir()
+            (root / ".git").mkdir()
+            with mock.patch("sandbox.config.descriptors._git_output") as git_output:
+                git_output.return_value = "git@example.test:team/plugin.git"
+                shared = home / "projects" / project_config_key(root)
+                sibling = home / "projects" / "other-repo"
+                sibling.mkdir(parents=True)
+                (sibling / "sandbox.config.json").write_text("{}")
+                shared.symlink_to(sibling, target_is_directory=True)
+                with mock.patch.dict(os.environ, {"SANDBOX_HOME": str(home)}):
+                    with self.assertRaisesRegex(ValueError, "symbolic links"):
+                        config_home(root)
+
+                shared.unlink()
+                shared.mkdir()
+                outside = base / "outside.json"
+                outside.write_text("{}")
+                for name in (
+                    "sandbox.config.json",
+                    "sandbox.config.override.json",
+                    "sandbox.config.qa.json",
+                ):
+                    for existing in shared.iterdir():
+                        existing.unlink()
+                    # A real primary selects the shared family when the layer
+                    # under test is an override or label file.
+                    (shared / "sandbox.config.json").write_text("{}")
+                    if name != "sandbox.config.json":
+                        (shared / name).symlink_to(outside)
+                    else:
+                        (shared / name).unlink()
+                        (shared / name).symlink_to(outside)
+                    with self.subTest(name=name), mock.patch.dict(
+                        os.environ, {"SANDBOX_HOME": str(home)}
+                    ):
+                        with self.assertRaisesRegex(ValueError, "symbolic link"):
+                            config_home(root)
+
     def test_bare_wordpress_plugin_root_gets_header_slug_self_mapping(self):
         import sandbox_core
 

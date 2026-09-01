@@ -74,6 +74,68 @@ class TestRuntimeTestModes(unittest.TestCase):
             "sb", "test", "--local", "--project-dir", ".", "integration", "--", "--filter", "Smoke")
             for item in submissions))
 
+    def test_remote_wordpress_workspace_repetitions_preserve_explicit_config_selector(self):
+        import sandbox.commands.debug as debug
+
+        target = SimpleNamespace(project_root="/fixture", remote_name="vps",
+                                 sources={"identity": "project:fixture"})
+        submissions = debug._remote_test_matrix_submissions(
+            target, "unit", [], ["wp-a", "wp-b"], 120, "smart",
+            "tooling/sandbox.config.json",
+        )
+
+        self.assertEqual([item.argv for item in submissions], [
+            ("sb", "test", "--local", "--project-dir", ".", "--config-file",
+             "tooling/sandbox.config.json", "unit"),
+            ("sb", "test", "--local", "--project-dir", ".", "--config-file",
+             "tooling/sandbox.config.json", "unit"),
+        ])
+
+    def test_local_generic_compose_test_operation_preserves_explicit_config_selector(self):
+        import sandbox.commands.debug as debug
+        from sandbox.runtimes.base import OperationResult
+
+        captured = []
+        args = SimpleNamespace(
+            project_dir="/fixture", config_file="tooling/sandbox.config.json",
+            label=None, instance=None, mode="fast", local=True, remote=None,
+            workspace=None, timeout=60, output_profile="smart", json=False,
+            passthrough=[],
+        )
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None, config_file=None):
+                self.assertEqual(config_file, "tooling/sandbox.config.json")
+                return {"root": "/fixture", "kind": "compose", "tests": {
+                    "modes": {"fast": {"argv": ["npm", "test"]}},
+                }}
+
+            @staticmethod
+            def registry_get(_root, label=None):
+                return {"instance": "fixture", "label": "default"}
+
+        class Service:
+            def invoke(self, request):
+                captured.append(request)
+                return OperationResult(True, "exec", "/fixture", "compose",
+                                       {"output": ""})
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(
+                        resolve=lambda _request: SimpleNamespace(kind="local")),
+                }), patch("sandbox.application.context.runtime_service",
+                          return_value=Service()):
+            debug.cmd_test({}, args)
+
+        self.assertEqual(captured[0].arguments, {
+            "argv": ["npm", "test"],
+            "config_file": "tooling/sandbox.config.json",
+        })
+
     def test_trailing_json_is_not_forwarded_to_phpunit(self):
         import sandbox.commands.debug as debug
 
@@ -282,6 +344,55 @@ class TestRuntimeTestModes(unittest.TestCase):
         self.assertEqual(str(captured[0]["phpunit"]),
                          "/usr/local/libexec/sandbox-phpunit.phar")
         self.assertEqual(str(captured[0]["composer"]), "/usr/bin/composer")
+
+    def test_explicit_managed_integration_never_provisions_legacy_harness(self):
+        import sandbox.commands.debug as debug
+
+        captured = []
+        args = SimpleNamespace(
+            project_dir="/fixture", config_file="tooling/sandbox.config.json",
+            label=None, instance=None, mode="integration", provision_only=False,
+            local=True, remote=None, workspace=None, timeout=60,
+            output_profile="smart", json=False, passthrough=[],
+        )
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None, config_file=None):
+                return {"root": "/fixture", "tests": {"suite": "integration"}}
+
+            @staticmethod
+            def registry_get(_root, label=None):
+                return {"instance": "fixture", "label": "default"}
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [{"label": "default"}]
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(
+                        resolve=lambda _request: SimpleNamespace(kind="local")),
+                }), patch("sandbox.application.context.managed_native_instance_selected",
+                          return_value=("/fixture", "default")) as selected, \
+                patch.object(debug, "_provision_test_harness") as provision, \
+                patch.object(debug, "_ensure_test_runner_tools") as host_tools, \
+                patch.object(debug, "_run_tests") as legacy_runner, \
+                patch.object(debug, "_run_tests_unit",
+                             side_effect=lambda *_args, **kwargs:
+                             captured.append((_args, kwargs)) or 0):
+            debug.cmd_test({}, args)
+
+        selected.assert_called_once_with(
+            "fixture", config_file="tooling/sandbox.config.json",
+        )
+        provision.assert_not_called()
+        host_tools.assert_not_called()
+        legacy_runner.assert_not_called()
+        self.assertEqual(captured[0][1]["config_file"],
+                         "tooling/sandbox.config.json")
 
     def test_provision_only_rejects_unit_before_harness(self):
         import sandbox.commands.debug as debug

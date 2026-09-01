@@ -29,6 +29,20 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_explicit_config_requires_project_dir_on_supported_commands(self):
+        for command in ("ensure", "apply", "test"):
+            result = run_sb(command, "--config-file", "nested/sandbox.config.json")
+            with self.subTest(command=command):
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--config-file requires an explicit --project-dir", result.stderr)
+
+    def test_supported_project_commands_advertise_explicit_config(self):
+        for command in ("ensure", "apply", "test"):
+            result = run_sb(command, "--help")
+            with self.subTest(command=command):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--config-file", result.stdout)
+
     def test_host_help_advertises_sync_action(self):
         result = run_sb("host", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)

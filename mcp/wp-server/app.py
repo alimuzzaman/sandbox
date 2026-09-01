@@ -154,7 +154,8 @@ def _project_instance(project_dir: str, label: str | None = None):
     return entry["instance"], None
 
 
-def _require_project_capability(project_dir: str, label: str | None, capability: str):
+def _require_project_capability(project_dir: str, label: str | None, capability: str,
+                                config_file: str | None = None):
     """Return an MCP error before tool-specific helpers run, or None."""
     # The MCP server is normally launched from ``mcp/wp-server`` (or an
     # installed wrapper), so the repository root is not guaranteed to be on
@@ -168,7 +169,7 @@ def _require_project_capability(project_dir: str, label: str | None, capability:
 
     try:
         error = wordpress_runtime_service(load_config()).check(
-            project_dir, capability, label=label or "default"
+            project_dir, capability, label=label or "default", config_file=config_file,
         )
     except Exception as exc:
         return {"ok": False, "error": f"project capability resolution failed: {exc}"}

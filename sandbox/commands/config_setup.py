@@ -419,6 +419,7 @@ def cmd_apply_config(cfg, args) -> None:
             project_root=pd,
             operation="apply",
             label=label or "default",
+            arguments={"config_file": getattr(args, "config_file", None)},
         ))
     except sc.ConfigError as e:
         die(str(e))

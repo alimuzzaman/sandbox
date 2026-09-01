@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import stat
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -41,6 +42,52 @@ def _first_config(home: Path) -> Path | None:
     """Return the first primary descriptor in a config home."""
     return next((home / name for name in CONFIG_BASENAMES
                  if (home / name).exists()), None)
+
+
+def explicit_primary_config(root: str | Path, config_file: str | Path) -> Path:
+    """Validate and return one explicitly selected project descriptor.
+
+    Relative values are project-root-relative.  The selected file must use a
+    canonical primary basename and be a real regular file inside the canonical
+    project root.  Its parent owns the complete override/label family.
+    """
+    root = Path(root).expanduser().resolve()
+    raw = Path(config_file).expanduser()
+    candidate = raw if raw.is_absolute() else root / raw
+    if candidate.name not in CONFIG_BASENAMES:
+        raise ValueError(
+            "Sandbox --config-file basename must be sandbox.config.json, "
+            "sandbox.config.yml, or sandbox.config.yaml"
+        )
+    if candidate.parent.is_symlink():
+        raise ValueError("Sandbox --config-file directory must not be a symbolic link")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        mode = candidate.lstat().st_mode
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "Sandbox --config-file must be an existing file inside the project root"
+        ) from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ValueError("Sandbox --config-file must be a regular non-symbolic-link file")
+    selected_home = resolved.parent
+    for family_path in candidate.parent.glob("sandbox.config.*"):
+        try:
+            family_mode = family_path.lstat().st_mode
+            family_resolved = family_path.resolve(strict=True)
+            family_resolved.relative_to(selected_home)
+            family_resolved.relative_to(root)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                "Sandbox explicit config family must stay inside its selected directory"
+            ) from exc
+        if stat.S_ISLNK(family_mode) or not stat.S_ISREG(family_mode):
+            raise ValueError(
+                f"Sandbox explicit config family file must be a regular "
+                f"non-symbolic-link file: {family_path.name}"
+            )
+    return resolved
 
 
 def _inside(root: Path, path: Path, *, label: str) -> Path:
@@ -145,7 +192,7 @@ def _validate_shared_home(projects: Path, shared_home: Path) -> None:
         _inside(shared_home, path, label="shared config file")
 
 
-def config_home(root: str | Path) -> Path:
+def config_home(root: str | Path, config_file: str | Path | None = None) -> Path:
     """Select the authoritative project-local Sandbox config home.
 
     Root-level configuration remains the compatibility default.  When the
@@ -156,6 +203,8 @@ def config_home(root: str | Path) -> Path:
     under ``$SANDBOX_HOME/projects`` may own the family for every worktree.
     """
     root = Path(root).expanduser().resolve()
+    if config_file is not None:
+        return explicit_primary_config(root, config_file).parent
     root_home = root
     nested_home = root.joinpath(*CONFIG_SUBDIRECTORY)
 
@@ -188,8 +237,10 @@ def config_home(root: str | Path) -> Path:
     return root_home
 
 
-def primary_config(root: str | Path) -> Path | None:
+def primary_config(root: str | Path, config_file: str | Path | None = None) -> Path | None:
     """Return the selected home's primary descriptor, if one exists."""
+    if config_file is not None:
+        return explicit_primary_config(root, config_file)
     return _first_config(config_home(root))
 
 
@@ -200,10 +251,10 @@ def config_layer(root: str | Path, names: tuple[str, ...], *, home: Path | None 
                  if (selected / name).exists()), None)
 
 
-def discover_project_kind(root: str | Path) -> str:
+def discover_project_kind(root: str | Path, config_file: str | Path | None = None) -> str:
     """Read only the committed native descriptor needed to select its schema."""
     root = Path(root).expanduser().resolve()
-    path = primary_config(root)
+    path = primary_config(root, config_file)
     if path is not None:
         kind = _load_mapping(path).get("kind", "wordpress")
         if not isinstance(kind, str) or not kind.strip():

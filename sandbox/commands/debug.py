@@ -188,6 +188,8 @@ def cmd_introspect(cfg, args) -> None:
 def cmd_test(cfg, args) -> None:
     """Run a project's resolved unit or integration PHPUnit environment."""
     if getattr(args, "mode", None) == "matrix":
+        if getattr(args, "config_file", None):
+            die("--config-file is not supported by `sb test matrix`; run a declared test mode directly")
         from sandbox.commands.jobs_runtime import cmd_declared_test_plan, cmd_job_matrix
         remainder = list(getattr(args, "passthrough", ()) or ())
         local = bool(getattr(args, "local", False)); remote = getattr(args, "remote", None)
@@ -246,7 +248,9 @@ def cmd_test(cfg, args) -> None:
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)
     try:
-        pconf = sc.load_project_config(pd)
+        config_file = getattr(args, "config_file", None)
+        pconf = (sc.load_project_config(pd, config_file=config_file)
+                 if config_file else sc.load_project_config(pd))
     except sc.ConfigError as e:
         die(str(e))
     # Generic Compose projects never infer package scripts. Their checked-in
@@ -266,6 +270,7 @@ def cmd_test(cfg, args) -> None:
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
                 project_dir=pd, local=_test_requests_explicit_local(args),
+                config_file=getattr(args, "config_file", None),
                 remote=getattr(args, "remote", None),
                 workspace=(getattr(args, "workspace", None) or [None])[0],
                 required_capability="job.exec" if not _test_requests_explicit_local(args) else None,
@@ -329,6 +334,7 @@ def cmd_test(cfg, args) -> None:
     try:
         selected_target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=pd, local=_test_requests_explicit_local(args),
+            config_file=getattr(args, "config_file", None),
             remote=getattr(args, "remote", None), workspace=(
                 requested_workspaces[0]
                 if getattr(args, "mode", None) == "matrix" else None),
@@ -347,7 +353,12 @@ def cmd_test(cfg, args) -> None:
         # phpunit passthrough.  Keep target-selection options before the mode
         # so the nested invocation cannot accidentally resolve the deployed
         # project's remote-first default again.
-        command = ["sb", "test", "--local", "--project-dir", ".", mode]
+        command = ["sb", "test", "--local", "--project-dir", "."]
+        if getattr(args, "config_file", None):
+            from sandbox.config.descriptors import explicit_primary_config
+            selected = explicit_primary_config(pconf["root"], args.config_file)
+            command.extend(["--config-file", str(selected.relative_to(Path(pconf["root"])))])
+        command.append(mode)
         if extra:
             command += ["--", *extra]
         timeout = getattr(args, "timeout", None)
@@ -400,7 +411,9 @@ def cmd_test(cfg, args) -> None:
         die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
     # Re-load with the RESOLVED label so a per-label sandbox.config.<label>.json
     # layer (if present) applies — the first load above only existed to find root.
-    pconf = sc.load_project_config(pd, label=entry.get("label"))
+    config_file = getattr(args, "config_file", None)
+    pconf = (sc.load_project_config(pd, label=entry.get("label"), config_file=config_file)
+             if config_file else sc.load_project_config(pd, label=entry.get("label")))
     inst = entry["instance"]
     try:
         mode = resolve_test_mode(

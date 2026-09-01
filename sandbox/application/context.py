@@ -799,8 +799,8 @@ def runtime_service(cfg):
     from sandbox.runtimes.incumbent.herd import HerdAdapter
     from sandbox.runtimes.incumbent.valet import ValetAdapter
 
-    def resolve_descriptor(root, label=None):
-        return sc.load_project_config(root, label=label)
+    def resolve_descriptor(root, label=None, config_file=None):
+        return sc.load_project_config(root, label=label, config_file=config_file)
 
     def ensure(request: OperationRequest):
         return core.ensure_instance(
@@ -808,10 +808,14 @@ def runtime_service(cfg):
             request.project_root,
             label=request.label,
             create=bool(request.arguments.get("create", False)),
+            config_file=request.arguments.get("config_file"),
         )
 
     def apply(request: OperationRequest):
-        return core.apply_config(cfg, request.project_root, label=request.label)
+        return core.apply_config(
+            cfg, request.project_root, label=request.label,
+            config_file=request.arguments.get("config_file"),
+        )
 
     def status(request: OperationRequest):
         entry = sc.registry_get(request.project_root, label=request.label)
@@ -1114,7 +1118,8 @@ def execute_project(cfg, execution):
     })
 
 
-def managed_native_project_selected(project_root: str, *, label: str = "default") -> bool:
+def managed_native_project_selected(project_root: str, *, label: str = "default",
+                                    config_file: str | None = None) -> bool:
     """Read the selected runtime through the application boundary.
 
     Legacy execution callers use this solely to fail closed before dispatching
@@ -1122,7 +1127,8 @@ def managed_native_project_selected(project_root: str, *, label: str = "default"
     """
     import sandbox_core as sc
 
-    config = sc.load_project_config(project_root, label=label)
+    config = (sc.load_project_config(project_root, label=label, config_file=config_file)
+              if config_file is not None else sc.load_project_config(project_root, label=label))
     runtime = config.get("wordpressRuntime", {}) if isinstance(config, dict) else {}
     return runtime.get("mode", "compose") == "managed_native"
 

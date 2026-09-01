@@ -233,6 +233,33 @@ An in-tree primary descriptor always wins over this shared fallback. Overrides
 and per-label files are read only from the selected home, so layers are never
 mixed between the working tree and `$SANDBOX_HOME`.
 
+For a plugin that keeps its Sandbox descriptor in another directory inside the
+checkout, select it explicitly:
+
+```sh
+sb ensure --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+sb test --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+sb apply --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+```
+
+`--config-file` always requires an explicit `--project-dir`. Relative paths are
+resolved from that canonical project root. The file must remain inside the
+project, must be a regular non-symlink file, and its basename must be exactly
+`sandbox.config.json`, `sandbox.config.yml`, or `sandbox.config.yaml`. Its
+non-symlink parent directory owns the complete sibling override and per-label
+family; every matching family entry must also be a regular non-symlink file
+inside that exact directory and the project root.
+Explicit selection never mixes with or falls back to root, `.config/sandbox`,
+or shared config layers. Paths declared inside the descriptor still resolve
+from the project root, not the descriptor directory. CLI and matching MCP
+ensure/apply/test operations use the same contract; remote execution forwards
+only the validated project-relative selector after deploying the checkout.
+Durable `sb test matrix` orchestration does not yet accept this selector and
+fails explicitly instead of falling back to another descriptor family.
+
 ### User-global config (`$SANDBOX_HOME/config.json`)
 
 A machine-wide layer that applies to **every** project on this machine — declare

@@ -777,6 +777,9 @@ Two layers:
 - **Per-project** `sandbox.config.json` (in the plugin repo, canonical) +
   gitignored `sandbox.config.override.json`. This is what makes a plugin a
   sandbox project. See [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).
+  A descriptor in another checkout directory can be selected with
+  `--project-dir DIR --config-file path/to/sandbox.config.json` for
+  ensure/apply/test; the path must stay inside `DIR`.
 - **Machine/global** [`sandbox.yml`](sandbox.yml) — ports base, admin creds,
   image defaults. Per-machine overrides go in the gitignored `sandbox.local.yml`:
 

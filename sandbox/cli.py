@@ -196,6 +196,7 @@ def _die_status_resolution(args, code: str, message: str, hint: str) -> None:
 
 _TEST_ROUTING_OPTIONS = {
     "--project-dir": True,
+    "--config-file": True,
     "--label": True,
     "--provision-only": False,
     "--local": False,
@@ -414,6 +415,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     ap.add_argument("--project-dir", dest="project_dir", default=None,
         help="reconcile this project's running instance with its current "
              "config (constants/plugins/themes/multisite) without dropping the DB")
+    ap.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     ap.add_argument("--json", action="store_true",
         help="print the reconciled instance record as JSON (for the MCP server)")
     ap.add_argument("--label", default=argparse.SUPPRESS,
@@ -620,6 +624,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="declared Compose mode, or WordPress auto/unit/integration/matrix")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    ts.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     ts.add_argument("--label", default=argparse.SUPPRESS,
         help="which of --project-dir's instances to test, when it owns more "
              "than one (multi-instance-per-root, e.g. a CI matrix cell); "
@@ -984,6 +991,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
     en.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    en.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     en.add_argument("--json", action="store_true",
         help="print the instance record as JSON (for the MCP server)")
     en.add_argument("--label", default=argparse.SUPPRESS,
@@ -1209,6 +1219,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     if not args.cmd:
         p.print_help()
         return
+
+    if getattr(args, "config_file", None) and not getattr(args, "project_dir", None):
+        die("--config-file requires an explicit --project-dir", 2)
 
     if (args.cmd == "wp" and getattr(args, "remote", None)
             and _explicit_global_option(raw_argv, "--instance")):

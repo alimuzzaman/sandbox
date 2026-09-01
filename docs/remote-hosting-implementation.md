@@ -4,6 +4,49 @@ The remote features share a VPS but serve four distinct workflows. Keeping the
 boundaries explicit prevents a test job, a source snapshot, or an MCP connection
 from being mistaken for a production change.
 
+## Feature 049 OCI trust boundary
+
+`sandbox.hosting.images` is an effect-free value/policy package. Its verifier accepts
+three separate closed channels: a private machine-boundary-issued policy token,
+untrusted `ProjectImageIntent`, and untrusted `ReleaseReceipt`. The token type and its
+issuer are not public package contracts, and ordinary construction lacks the
+module-owned capability and refuses. The verifier imports no config loader,
+credential broker, filesystem, Docker, process, transport, clock, random source, or
+state repository. Receipt, machine-policy, and plan hashes use separate domain strings
+over bounded canonical JSON.
+
+Raw project, machine, and receipt JSON is accepted only as exact built-in
+dict/list/scalar values at its owning boundary. Canonical traversal charges a running
+node and encoded-byte budget before copying each value. The pure verifier accepts only
+the three exact immutable channel types and safe-projects every exception without
+retaining its text. V1 provenance is not extensible metadata: builder, workflow,
+invocation, materials, and build identities are fixed lowercase SHA-256 digests.
+Source repository is a canonical lowercase owner/repository name, and source revision
+is exact lowercase 40- or 64-hex identity.
+
+The config manifest registers two explicit owners. `hostingImages` is preserved by
+both project schema providers and normalized only by
+`sandbox.config.hosting_images`. `hosting.images.policies` is normalized only through
+the machine provider. Both project schemas preserve one explicit raw primary-project
+layer. Only that selected primary descriptor may declare `hostingImages`; global,
+machine override, and label files are ignored for this channel. If the primary key is
+absent, the final descriptor adds no key and has no behavior change.
+
+Machine policy owns the primary service and the maximum persistent/one-shot service
+partitions. Project intent can only choose subsets, must retain the primary service in
+the persistent partition, and cannot move a service between partitions. The resulting
+`DeliveryIdentityProjection` freezes target scope, canonical GHCR repository-qualified
+manifest digest, configuration digest, OCI image-manifest media type, exact platform,
+selected topology, and intended-private declaration. Every selected service consumes
+that one identity.
+
+Features 050 and 051 may call `validate_verified_image_plan` and copy the projection.
+They may not recompute or weaken policy, provenance, media type, platform, signature,
+or topology. Feature 047 image journals and Feature 048 recovery state enter only the
+explicit legacy refusal adapter; the adapter does not traverse or mutate them. A valid
+plan still is not credential, registry-observation, staging, runtime, deployment, edge,
+or production evidence.
+
 ## 1. Source deploy: make a current checkout available remotely
 
 ```sh

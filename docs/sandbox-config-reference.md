@@ -13,6 +13,53 @@ MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
 
 There is **no central catalog**; each plugin self-describes here.
 
+## Optional immutable OCI project intent
+
+Feature 049 adds one kind-neutral, untrusted project channel. It applies to both
+WordPress and generic Compose descriptors and is absent by default:
+
+```json
+{
+  "hostingImages": {
+    "schema_version": 1,
+    "policy_selector": "production-widget",
+    "declared_services": ["db", "migrate", "web", "worker"],
+    "persistent_services": ["web", "worker"],
+    "one_shot_services": ["migrate"]
+  }
+}
+```
+
+Service arrays are unique, bounded, and normalized into canonical order. The project
+may narrow a named machine policy. It cannot declare policy authority, an image,
+provenance, or the primary service.
+
+`hostingImages` is project-owned and primary-file-only. Sandbox reads it from the
+selected primary `sandbox.config.{json,yml,yaml}` in the project root or selected
+`.config/sandbox` home. User-global configuration, `sandbox.config.override.*`, and
+label-specific files cannot add, inherit, or replace this key. Their copies are ignored.
+When the primary key is absent, the normalized descriptor has no `hostingImages` key.
+
+The matching trusted collection is machine-owned under
+`hosting.images.policies.<policy_selector>`. Each closed policy carries its own
+`authority_id`, positive revision, canonical domain-separated `policy_digest`, target
+scope, approved canonical receipt-payload digest, exact GHCR OCI image-manifest and
+configuration digests, platform, provenance, `not_required` signature mode, primary
+service, and maximum persistent/one-shot partitions. Do not derive the policy or its
+digest from project content. An authorized release process must supply the exact
+receipt/image facts before machine approval.
+Provenance is a closed four-field digest identity: `builder_id`, `workflow_id`,
+`invocation_id`, and `materials_digest` are each exact lowercase `sha256` values;
+`build_identity` is also a digest. Source repository is a canonical lowercase
+owner/repository name with no traversal or dot segments, and source revision is exact
+lowercase 40- or 64-hex. These fields cannot carry paths, bare tokens, authorization or
+API-key shapes, environment values, diagnostics, URLs, or arbitrary annotations.
+Machine normalization issues a private policy token; neither its type nor issuer is
+exported by the public image-trust package.
+
+This configuration only enables pure equality verification. It neither loads a
+credential nor observes, stages, starts, deploys, or proves an image.
+
 ## Generic Compose projects
 
 For non-WordPress projects, set `kind` to `compose` (the aliases `php`, `js`,

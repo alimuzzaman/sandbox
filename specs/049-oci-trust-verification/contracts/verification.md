@@ -4,11 +4,24 @@
 
 Three already-bounded channels:
 
-1. trusted `MachinePolicyAuthority` plus policy payload;
+1. a private machine-boundary-issued trusted policy token;
 2. untrusted `ProjectImageIntent`;
 3. untrusted `ReleaseReceiptPayload` plus its claimed external digest.
 
 No channel contains credentials or an effect callback.
+
+The trusted token type and issuer are not public package symbols. Direct ordinary
+construction fails because only the machine normalization boundary holds the private
+construction capability.
+
+Raw JSON objects are parsed only by their owning project-config, machine-config, or
+receipt boundary. Those boundaries accept exact built-in JSON containers/primitives
+and issue distinct immutable channel types. The pure verifier accepts only those exact
+types; mappings and channel interchange refuse.
+
+The project-config boundary reads `hostingImages` only from the selected primary
+project descriptor. Global/default, override, label, and legacy-loader copies do not
+create or replace this channel; primary absence issues no project intent.
 
 ## Success
 

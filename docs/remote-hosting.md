@@ -1,5 +1,34 @@
 # Remote VPS hosting for sandbox instances
 
+## Immutable OCI trust is a pure preflight
+
+An optional project `hostingImages` declaration selects one machine-owned policy and
+narrows its allowed persistent and one-shot application services. The project cannot
+declare the authority ID, policy digest, release digest, repository, platform,
+provenance, signature mode, or primary service. The primary service is a trusted
+machine-topology constraint and must remain in the project's persistent selection.
+Only the selected primary project descriptor may declare `hostingImages`. Global,
+`sandbox.config.override.*`, and label-specific files cannot add or replace it.
+
+The machine policy lives under `hosting.images.policies` in machine configuration. It
+approves one canonical release-receipt payload digest, one intended-private GHCR
+repository, one exact target-platform OCI image-manifest digest, its configuration
+digest, provenance, platform, and bounded service topology. Verification returns an
+immutable `VerifiedImagePlan`; invalid or substituted input returns only a stable safe
+refusal. Projects without `hostingImages` keep their existing hosting behavior.
+The machine provider issues a private authority token whose type and issuer are not
+exported; callers cannot construct one through the public image-trust package.
+Builder, workflow, invocation, materials, and build identities are lowercase SHA-256
+digests. Source repository is canonical lowercase owner/repository, and source revision
+is exact lowercase 40- or 64-hex. Free-form release metadata is not retained.
+
+This decision proves equality to machine approval only. `private` is intent, not an
+observed registry visibility result. Registry login is transport access, not trust.
+Feature 049 does not prove registry availability, manifest/configuration byte
+relationship, publisher identity, a signature, staging, a running container, remote
+health, edge readiness, deployment, or production. Those require later authorized
+observation and exact public evidence.
+
 ## Agent-aware source sync
 
 Use the opt-in one-time path to transfer one credential-screened generation

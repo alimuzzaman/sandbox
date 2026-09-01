@@ -106,14 +106,18 @@ or unknown plans fail without invoking the trust decision again.
 ### Functional Requirements
 
 - **FR-001**: Verification MUST accept three separate channels: trusted machine-policy
-  input, untrusted project intent, and untrusted release receipt/provenance input.
+  input, untrusted project intent, and untrusted release receipt/provenance input. The
+  trusted token type and issuer MUST NOT be public exports, ordinary construction MUST
+  fail, and only machine-config normalization may issue it using a private capability.
 - **FR-002**: Trusted policy MUST contain a stable machine/policy authority identity,
   canonical policy digest, schema version, policy revision, exact target scope,
   repository allowlist entry, approved canonical receipt-payload digest, approved
   target-platform manifest/configuration digests, platform, provenance constraints,
   signature mode, and application topology constraints.
 - **FR-003**: Project and receipt input MUST NOT supply, replace, or widen any trusted
-  policy authority; attempted channel substitution MUST refuse.
+  policy authority; attempted channel substitution MUST refuse. Project intent MUST
+  come only from the selected primary project descriptor; global, override, and label
+  layers MUST NOT add, inherit, or replace it.
 - **FR-004**: V1 MUST accept only policy-approved `intended_private` canonical
   `ghcr.io/<owner>/<repository>` identities and MUST reject alternate registries or
   ambiguous repository spelling; it MUST NOT claim registry visibility was observed.
@@ -127,7 +131,11 @@ or unknown plans fail without invoking the trust decision again.
   payload digest and exact repository-qualified image identity.
 - **FR-009**: Receipt verification MUST compare exact repository, manifest digest,
   configuration digest, platform, source repository, source revision, build identity,
-  provenance values, and receipt schema.
+  provenance values, and receipt schema. `builder_id`, `workflow_id`, `invocation_id`,
+  `materials_digest`, and `build_identity` are exact lowercase SHA-256 digests.
+  `source_repository` is canonical lowercase owner/repository without traversal or dot
+  segments; `source_revision` is exact lowercase 40 or 64 hex. Arbitrary metadata,
+  paths, token/authorization/API-key shapes, and diagnostics are not accepted or retained.
 - **FR-010**: V1 signature mode MUST be exactly `not_required`; verification MUST NOT
   infer signature presence, validity, or publisher identity.
 - **FR-011**: Project topology MUST contain one non-empty persistent application-service

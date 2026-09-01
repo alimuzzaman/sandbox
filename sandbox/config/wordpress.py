@@ -25,6 +25,10 @@ class WordPressSchemaProvider:
         home = config_home(root)
         project_path = primary_config(root)
         project_document = _load_mapping(project_path) if project_path is not None else {}
+        project_hosting_images = {
+            "declared": "hostingImages" in project_document,
+            "project_primary": project_document.get("hostingImages"),
+        }
         project_domains = raw_domain_layer(project_document)
         project_runtime = raw_wordpress_runtime_layer(project_document)
         project_secrets = raw_secret_layer(project_document)
@@ -66,6 +70,9 @@ class WordPressSchemaProvider:
         result["_secrets_raw"] = {
             "project": project_secrets, "machine_override": machine_secrets,
         }
+        # Keep the optional project channel kind-neutral.  Common config owns
+        # normalization, and absence must not alter legacy descriptors.
+        result["_hosting_images_raw"] = project_hosting_images
         if lifecycle_declared:
             result["instanceLifecycle"] = lifecycle
         if "tests" not in result:

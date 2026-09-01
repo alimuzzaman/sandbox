@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from sandbox.services.environment import compatible_subprocess_environment
+
 CONFIG_BASENAMES = ("sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml")
 # A project may keep the complete Sandbox descriptor family in the repository
 # root (the historical layout) or in this one conventional project-local
@@ -124,6 +126,7 @@ def _git_output(root: Path, *args: str) -> str | None:
             text=True,
             timeout=2,
             check=False,
+            env=compatible_subprocess_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -139,7 +142,7 @@ def project_config_key(root: str | Path) -> str | None:
     all linked worktrees.  Non-Git directories have no external config home.
     """
     root = Path(root).expanduser().resolve()
-    origin = _git_output(root, "config", "--get", "remote.origin.url")
+    origin = _git_output(root, "config", "--local", "--get", "remote.origin.url")
     # Relative filesystem remotes are contextual: the same text in unrelated
     # repositories can name different targets.  Use the Git common directory
     # for those instead of creating a cross-repository key collision.

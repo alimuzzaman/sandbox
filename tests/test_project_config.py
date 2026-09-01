@@ -192,7 +192,7 @@ class TestProjectConfig(unittest.TestCase):
             with mock.patch("sandbox.config.descriptors._git_output") as git_output:
                 git_output.side_effect = lambda _root, *args: (
                     "git@example.test:team/plugin.git"
-                    if args[:2] == ("config", "--get") else None
+                    if args[:3] == ("config", "--local", "--get") else None
                 )
                 key = project_config_key(root)
                 shared = home / "projects" / key
@@ -248,9 +248,92 @@ class TestProjectConfig(unittest.TestCase):
         roots = (Path("/tmp/repo"), Path("/tmp/worktree"))
         with mock.patch("sandbox.config.descriptors._git_output") as git_output:
             git_output.side_effect = lambda _root, *args: (
-                None if args[:2] == ("config", "--get") else "/srv/source/plugin/.git"
+                None if args[:3] == ("config", "--local", "--get")
+                else "/srv/source/plugin/.git"
             )
             self.assertEqual(project_config_key(roots[0]), project_config_key(roots[1]))
+
+    def test_git_identity_probe_ignores_foreign_repository_environment(self):
+        import sandbox_core
+        from sandbox.config.descriptors import project_config_key
+
+        def write_repository(path, origin=None):
+            git = path / ".git"
+            (git / "objects").mkdir(parents=True)
+            (git / "refs" / "heads").mkdir(parents=True)
+            (git / "HEAD").write_text("ref: refs/heads/main\n")
+            config = (
+                "[core]\n"
+                "\trepositoryformatversion = 0\n"
+                "\tbare = false\n"
+            )
+            if origin is not None:
+                config += "[remote \"origin\"]\n" f"\turl = {origin}\n"
+            (git / "config").write_text(config)
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            base = Path(tmp)
+            hostile_home = base / "hostile-home"
+            root = hostile_home / "wanted"
+            fallback = hostile_home / "fallback"
+            foreign = hostile_home / "foreign"
+            home = hostile_home / "sandbox-home"
+            hostile_home.mkdir()
+            root.mkdir(); fallback.mkdir(); foreign.mkdir()
+            write_repository(root, "https://example.invalid/team/wanted.git")
+            write_repository(fallback)
+            write_repository(foreign, "https://example.invalid/attacker/foreign.git")
+
+            expected_key = project_config_key(root)
+            expected_fallback_key = project_config_key(fallback)
+            shared = home / "projects"
+            (shared / expected_key).mkdir(parents=True)
+            (shared / expected_key / "sandbox.config.json").write_text(json.dumps({
+                "slug": "wanted-descriptor",
+            }))
+            (shared / expected_fallback_key).mkdir(parents=True)
+            (shared / expected_fallback_key / "sandbox.config.json").write_text(json.dumps({
+                "slug": "fallback-descriptor",
+            }))
+            conditional = hostile_home / "conditional.gitconfig"
+            conditional.write_text(
+                "[remote \"origin\"]\n"
+                "\turl = https://example.invalid/conditional.git\n"
+            )
+            (hostile_home / ".gitconfig").write_text(
+                "[remote \"origin\"]\n"
+                "\turl = https://example.invalid/global.git\n"
+                f"[includeIf \"gitdir:{fallback / '.git'}/\"]\n"
+                f"\tpath = {conditional}\n"
+            )
+            hostile = {
+                "HOME": str(hostile_home),
+                "SANDBOX_HOME": str(home),
+                "SANDBOX_USER_CONFIG": str(base / "missing-global.json"),
+                "GIT_DIR": str(foreign / ".git"),
+                "GIT_WORK_TREE": str(foreign),
+                "GIT_COMMON_DIR": str(foreign / ".git"),
+                "GIT_OBJECT_DIRECTORY": str(foreign / ".git" / "objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(root / ".git" / "objects"),
+                "GIT_INDEX_FILE": str(foreign / ".git" / "index"),
+                "GIT_CONFIG": str(foreign / ".git" / "config"),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "remote.origin.url",
+                "GIT_CONFIG_VALUE_0": "https://example.invalid/injected.git",
+                "GIT_CONFIG_PARAMETERS": "'remote.origin.url=https://example.invalid/parameter.git'",
+                "GIT_CEILING_DIRECTORIES": str(base),
+                "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+            }
+            with mock.patch.dict(os.environ, hostile):
+                observed_key = project_config_key(root)
+                observed_fallback_key = project_config_key(fallback)
+                descriptor = sandbox_core.load_project_config(root)
+                fallback_descriptor = sandbox_core.load_project_config(fallback)
+
+            self.assertEqual(observed_key, expected_key)
+            self.assertEqual(observed_fallback_key, expected_fallback_key)
+            self.assertEqual(descriptor["slug"], "wanted-descriptor")
+            self.assertEqual(fallback_descriptor["slug"], "fallback-descriptor")
 
     def test_relative_origins_use_distinct_git_common_directory_keys(self):
         from sandbox.config.descriptors import project_config_key
@@ -258,7 +341,7 @@ class TestProjectConfig(unittest.TestCase):
         roots = (Path("/tmp/one/repo"), Path("/tmp/two/repo"))
         with mock.patch("sandbox.config.descriptors._git_output") as git_output:
             def output(root, *args):
-                if args[:2] == ("config", "--get"):
+                if args[:3] == ("config", "--local", "--get"):
                     return "../upstream.git"
                 return str(root / ".git")
 

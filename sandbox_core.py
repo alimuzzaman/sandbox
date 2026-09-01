@@ -12,6 +12,8 @@ for a directory (highest priority last):
     ~/.config/sandbox/config.json               (user-global, machine-wide)
     sandbox.config.json | sandbox.config.yml   (canonical, native)
       + sandbox.config.override.{json,yml}      (gitignored, deep-merged on top)
+    $SANDBOX_HOME/projects/<repo-key>/sandbox.config.*
+                                                (fallback when absent in-tree)
     .wp-env.json                                (import/fallback only)
 
 The user-global layer sits UNDER the project: the project wins scalar

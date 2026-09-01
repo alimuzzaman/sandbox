@@ -210,12 +210,28 @@ priority last):
 2. **user-global** — `~/.config/sandbox/config.json` (machine-wide; see below)
 3. `sandbox.config.json` **or** `sandbox.config.yml` / `.yaml` (canonical, native)
    - `+ sandbox.config.override.{json,yml,yaml}` — gitignored, **deep-merged on top**
+   - when neither the repo root nor `.config/sandbox/` contains a primary
+     descriptor, the complete family may instead live in
+     `$SANDBOX_HOME/projects/<repo-key>/`; the key is derived from the Git
+     origin URL, falling back to the Git common directory, so all worktrees
+     share it
 4. `.wp-env.json` — **import/fallback only** (mapped field-by-field; see below).
    `sandbox init` converts it to a native `sandbox.config.json`.
 
 The project root is found by walking up from the directory to the nearest
 `sandbox.config.*` / `.wp-env.json` / `.git`. Paths must live under `$HOME` (or a
 `SANDBOX_PROJECT_ROOTS` entry) — `project_dir=/etc` is rejected.
+
+To find the exact shared directory for a checkout without writing anything,
+run:
+
+```sh
+python3 -c 'from sandbox.config.descriptors import shared_config_home; import sys; print(shared_config_home(sys.argv[1]) or "")' /path/to/repo
+```
+
+An in-tree primary descriptor always wins over this shared fallback. Overrides
+and per-label files are read only from the selected home, so layers are never
+mixed between the working tree and `$SANDBOX_HOME`.
 
 ### User-global config (`$SANDBOX_HOME/config.json`)
 

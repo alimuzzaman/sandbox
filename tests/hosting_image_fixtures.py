@@ -171,3 +171,126 @@ def reverse_objects(value):
     if isinstance(value, list):
         return [reverse_objects(item) for item in value]
     return value
+
+
+# Feature 050 production ownership is intentionally explicit. These modules did
+# not exist before the implementation-order waiver recorded in quickstart.md.
+STAGING_PRODUCTION_FILES = (
+    "sandbox/hosting/images/staging_models.py",
+    "sandbox/hosting/images/staging_policy.py",
+    "sandbox/hosting/images/staging_repository.py",
+    "sandbox/hosting/images/staging_service.py",
+    "sandbox/hosting/images/staging_worker.py",
+    "sandbox/hosting/images/staging_helper.py",
+    "sandbox/transports/remote_hosting_images.py",
+)
+
+
+def staging_target():
+    from sandbox.hosting.images.staging_models import StagingTarget
+    return StagingTarget("machine-a", "target-a", "daemon-a")
+
+
+def staging_policy():
+    from sandbox.hosting.images import validate_verified_image_plan
+    from sandbox.hosting.images.staging_models import (
+        HelperIdentity, StagingPolicy, staging_digest,
+    )
+    plan = validate_verified_image_plan(verified_plan_mapping())
+    helper = HelperIdentity("sha256:" + "9" * 64, "sandbox-image-stage-helper-v1",
+                            "a" * 40, "systemd-cgroup-v2-stage-v1")
+    target = staging_target()
+    projection = plan.delivery_identity_projection
+    values = {"schema_version": 1, "plan_digest": plan.plan_digest,
+              "target": target.as_mapping(), "helper": helper.as_mapping(),
+              "broker_recipient": f"ghcr-repository-read:{projection.image.repository}@{projection.image.manifest_digest}",
+              "broker_binding_id": "binding-a", "broker_binding_version": 3,
+              "credential_reference_revision": "credential-revision-a",
+              "operation": "ghcr.repository.read",
+              "capability_revision": "stage-capability-v1",
+              "delivery_identity_projection": projection.as_mapping()}
+    digest = staging_digest("sandbox.hosting.images.staging-policy.v1", values)
+    return StagingPolicy(1, digest, plan.plan_digest, target, helper,
+                         values["broker_recipient"], "binding-a", 3,
+                         "credential-revision-a", "ghcr.repository.read",
+                         "stage-capability-v1", projection)
+
+
+def stage_request(*, request_id="stage-request-a", generation=0, policy=None):
+    from sandbox.hosting.images import validate_verified_image_plan
+    from sandbox.hosting.images.staging_models import StageRequest
+    policy = policy or staging_policy()
+    return StageRequest.create(request_id=request_id, expected_generation=generation,
+                               plan=validate_verified_image_plan(verified_plan_mapping()),
+                               staging_policy_digest=policy.policy_digest,
+                               target=policy.target, confirmed=True)
+
+
+def local_observation(policy=None):
+    from sandbox.hosting.images.staging_models import LocalImageObservation, staging_digest
+    policy = policy or staging_policy(); projection = policy.projection
+    registry = {"anonymous_exact_manifest": "denied",
+                "authenticated_exact_manifest": "succeeded"}
+    registry["observation_digest"] = staging_digest(
+        "sandbox.hosting.images.registry-observation.v1", registry)
+    values = {"target_epoch_start": "machine-a", "target_epoch_end": "machine-a",
+              "daemon_epoch_start": "daemon-a", "daemon_epoch_end": "daemon-a",
+              "target": policy.target.as_mapping(), "repository": projection.image.repository,
+              "repo_digest": projection.image.repository_qualified_digest,
+              "config_digest": projection.image.config_digest,
+              "platform": projection.image.platform.as_mapping(),
+              "local_image_id": projection.image.config_digest,
+              "topology_digest": staging_digest("sandbox.hosting.images.topology.v1",
+                                                 projection.topology.as_mapping()),
+              "observed_topology": projection.topology.as_mapping(), **registry}
+    identity = staging_digest("sandbox.hosting.images.local-observation.v1", values)
+    return LocalImageObservation(identity, values["target_epoch_start"],
+                                 values["target_epoch_end"], values["daemon_epoch_start"],
+                                 values["daemon_epoch_end"], policy.target,
+                                 values["repository"], values["repo_digest"],
+                                 values["config_digest"], values["platform"],
+                                 values["local_image_id"], values["topology_digest"],
+                                 values["observed_topology"],
+                                 registry["anonymous_exact_manifest"],
+                                 registry["authenticated_exact_manifest"],
+                                 registry["observation_digest"])
+
+
+class FakeBroker:
+    def __init__(self, credential=b"synthetic-stage-canary"):
+        self.credential = credential; self.calls = []
+    def consume_for_stage(self, **kwargs):
+        self.calls.append({key: value for key, value in kwargs.items() if key != "consumer"})
+        return kwargs["consumer"](self.credential)
+    def prepare_for_stage(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        credential = self.credential
+        class Lease:
+            def __init__(self): self.used = False
+            def consume(self, consumer):
+                if self.used: raise RuntimeError("used")
+                self.used = True; return consumer(credential)
+            def invalidate(self): self.used = True
+        return Lease()
+
+
+class FakePreparedWorker:
+    def __init__(self, policy): self.policy = policy; self.calls = []; self.frame = {"unit_name": "sandbox-image-stage-fake.service"}
+    def deliver(self, credential):
+        self.calls.append(len(credential))
+        return local_observation(self.policy), {
+            "unit_name": self.frame["unit_name"], "cgroup": "/fake", "delegated": False,
+            "escape_allowed": False, "unit_inactive": True, "cgroup_empty_or_removed": True,
+        }, {"complete": True}
+    def cancel(self):
+        self.calls.append("cancel")
+        return {"unit_inactive": True, "cgroup_empty_or_removed": True,
+                "cleanup_complete": True}
+
+
+class FakeWorker:
+    def __init__(self): self.calls = []; self.prepared = None
+    def prepare(self, request, policy):
+        self.calls.append((request.request_id, policy.policy_digest))
+        self.prepared = FakePreparedWorker(policy)
+        return self.prepared

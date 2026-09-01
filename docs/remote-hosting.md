@@ -1145,3 +1145,61 @@ Remote instance inventory and teardown are explicit and name-scoped:
 Use the inventory instead of guessing a runtime directory. Deletion targets
 one validated instance name and lets the remote Sandbox CLI remove its own
 runtime, volume, config block, and registry identity.
+# Secure private image staging (Feature 050)
+
+`sb host stage` is a confirmation-gated boundary between image trust and host
+activation. It accepts one closed Feature 049 `VerifiedImagePlan`, an explicit
+registered remote/project/environment, a replay-safe request ID, and an expected
+stage generation. Machine-owned policy supplies the exact target, helper measurement,
+credential binding, and GHCR repository-read recipient. Caller input cannot replace
+those values.
+
+The broker first takes one safe source snapshot: its opaque revision and the one-use lease
+bytes come from that same snapshot, and consume never reopens the source. The transport then
+opens the root-owned, mode-constrained helper directories, artifact, and manifest without
+following symlinks. It hashes and executes the same already-open artifact inode through
+`/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
+helper or manifest evidence is never overwritten when it disagrees. The configured
+credential-source opaque revision must match before the helper launches.
+Consume and invalidation share one lock. Invalidation can win first and wipe/refuse the
+snapshot, or consume can win first and atomically detach that exact snapshot before delivery.
+Once detached, later invalidation cannot replace or clear the delivered bytes. The detached
+mutable copy is wiped after the callback on success and failure. Generic legacy broker leases
+retain their separate consume-time source-read behavior and are never used for staging.
+
+```sh
+./sb host stage --project-dir /absolute/project --environment production \
+  --remote production-host --verified-plan /absolute/verified-plan.json \
+  --request-id release-2026-09-01 --expected-generation 0 --confirm --json
+```
+
+The command returns only a bounded `success`, `refused`, `failed`, `cancelled`, or
+`uncertain` envelope. Success includes a canonical `StagedImageProof`; it does not
+claim Compose, init, migration, service health, edge readiness, activation, adoption,
+rollback, deployment, or production availability.
+
+Per target, Feature 050 retains at most 64 full proofs, 4096 permanent request
+tombstones, 64 live activation proof leases/pins, and 16 MiB of serialized authority.
+At 4096 tombstones every new request ID returns `retention_full` before a helper or
+credential effect. Replay of a compacted proof returns `proof_expired` and cannot
+authorize activation.
+One nonterminal request durably owns the target, including phase, effect boundary, unit,
+cgroup, and cleanup evidence. Another request returns `target_busy`; uncertainty keeps the
+owner as a fence. Admission reserves a full 1-MiB terminal proof frame plus its result
+envelope inside the 16-MiB ledger before effects, so a terminal commit cannot discover
+capacity only after pulling.
+An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
+`--stage-status` reports the same authority without opening a credential source or helper.
+Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
+workspace, and no-effect evidence; possible-effect reconciliation observes or fences and
+never launches a duplicate helper.
+
+Success requires unchanged machine and daemon epochs, exact RepoDigest, config digest,
+platform, image ID, and topology read from the digest-bound
+`org.sandbox.application-topology.v1` image-config label. Failure or cancellation is safely
+terminal only after the exact unit is inactive, its exact cgroup is empty or removed, and
+the credential workspace is verified absent. Otherwise the result is uncertain and fenced.
+The workspace parent is mechanically required to be root-owned mode 0700 on `/run` tmpfs
+before READY and therefore before credential transfer. READY has a finite timeout that kills
+the whole unit. The transient unit remains inspectable until it is explicitly stopped,
+checked, and collected.

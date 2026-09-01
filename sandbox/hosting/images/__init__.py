@@ -17,6 +17,16 @@ from .models import (
     validate_verified_image_plan,
 )
 from .trust import VerificationResult, reject_legacy_image_authority, verify_image_plan
+from .staging_models import (
+    AtomicHostStateEvidence,
+    DurableTerminalAuthorityEvidence,
+    ProofCustodyPort,
+    StageProofActivationLease,
+    StageRequest,
+    StageResult,
+    StagedImageProof,
+    validate_staged_image_proof,
+)
 
 __all__ = (
     "ApplicationTopology", "DeliveryIdentityProjection", "ImageContractError",
@@ -25,4 +35,7 @@ __all__ = (
     "VerificationResult",
     "VerifiedImagePlan", "machine_policy_digest", "receipt_payload_digest",
     "reject_legacy_image_authority", "validate_verified_image_plan", "verify_image_plan",
+    "AtomicHostStateEvidence", "DurableTerminalAuthorityEvidence",
+    "ProofCustodyPort", "StageProofActivationLease", "StageRequest", "StageResult",
+    "StagedImageProof", "validate_staged_image_proof",
 )

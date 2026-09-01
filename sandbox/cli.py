@@ -859,8 +859,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -883,6 +883,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="read the protected replayable host-apply log instead of service logs")
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
+    host_p.add_argument("--verified-plan", default=None, metavar="PATH",
+        help="closed Feature 049 VerifiedImagePlan JSON for host stage")
+    host_p.add_argument("--stage-status", action="store_true",
+        help="read the exact Feature 050 request status without helper or credential access")
     host_p.add_argument("--job-id", default=None,
         help="failed durable host-apply job identity for recovery")
     host_p.add_argument("--original-request-id", default=None,

@@ -188,3 +188,50 @@ Feature 047 has no implemented authorizing projection yet, so the public edge pa
 currently unreachable and returns `governance_unavailable`; only the bounded adapter
 seam is present and covered by an authorized synthetic fixture.
 Local tests do not prove an installed remote runtime or Lenzora deployment.
+# Immutable image delivery boundaries
+
+Feature 049 is pure trust policy. It validates release authority and emits a closed
+`VerifiedImagePlan`; it never reads credentials or contacts a registry or host.
+
+Feature 050 consumes that plan only through its public validation/projection API. A
+separate owner-only stage ledger durably accepts a request before a credential is
+resolved. A fixed measured helper is launched in a transient systemd cgroup-v2 unit
+before `BrokerLease.consume` delivers bytes through its private frame. The helper pulls
+only the exact repository-qualified digest, removes its volatile Docker credential
+workspace, and returns one coherent daemon observation. Feature 050 emits a
+secret-free `StagedImageProof` and stops.
+
+The installed helper is content-addressed and rehashed on every install. Installer and
+transport require root-owned, non-symlink, mode-constrained directories, artifact, and
+manifest. Launch opens those components no-follow, hashes the artifact descriptor, and
+executes that same inode through `/proc/self/fd`; the closed manifest is checked in the same
+launch boundary. The GHCR adapter atomically derives the configured opaque revision and
+one-use lease bytes from one source snapshot before helper launch. Local observation derives the config digest from Docker's immutable image
+ID, keeps that local ID as a separate evidence field, and reads topology from the immutable
+config label rather than echoing the request. Start/end machine and daemon epochs must match.
+The model requires local image ID equality with config digest even after all digests are
+recomputed.
+Revision-bound lease consume checks revoked/used state, marks the lease used, and detaches
+the required snapshot under the same lock. Thus concurrent invalidation has one deterministic
+winner: it either wipes before consume, or loses after consume has detached the exact bytes.
+There is no registered-source fallback for this lease type, and detached mutable material is
+wiped after every callback path. Legacy generic leases are explicitly separate.
+
+Feature 051 may receive only the verified plan, staged proof, proof validator, and
+authenticated proof-custody port. It must prepare a durable lease/pin before proof
+validation, then acquire locks in this order: target mutation, shared host-state
+transaction, stage-ledger target. The stage lock stays held through durable host-state
+acceptance and pin promotion. Expiry never auto-unpins; only the exact durable
+activation owner can cancel, promote, or release under the contract.
+Custody has no stage-lock-only facade. It is yielded only inside target mutation, atomic
+host-state, then stage-ledger transactions. Promotion/cancellation/release require evidence
+objects authenticated by the active host-state transaction. A lease binds the retained
+proof's stored staging generation and commit ledger revision, so a later successful stage
+does not invalidate exact custody of an older retained proof.
+
+Feature 048 remains observation-only recovery for the existing host path. Its
+`hosts.json` repository, receipts, and target lock are not staging authority and are
+never read, parsed, or written by Feature 050.
+
+None of these layers is public production proof. Runtime health, edge readiness, and
+direct public behavior remain separate evidence gates.

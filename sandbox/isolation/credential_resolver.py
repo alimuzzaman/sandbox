@@ -75,6 +75,7 @@ class BrokerLease:
     __slots__ = (
         "_resolver", "_reference", "_binding_id", "_binding_version", "_deadline",
         "_lease_id", "_lock", "_used", "_revoked", "__weakref__",
+        "_material", "_snapshot_bound",
     )
 
     def __init__(
@@ -86,7 +87,11 @@ class BrokerLease:
         binding_version: int,
         deadline: datetime,
         lease_id: str,
+        material: bytes | None = None,
+        snapshot_bound: bool = False,
     ) -> None:
+        if snapshot_bound is not (material is not None):
+            raise ValueError("snapshot-bound lease material is invalid")
         self._resolver = resolver
         self._reference = reference
         self._binding_id = binding_id
@@ -96,6 +101,8 @@ class BrokerLease:
         self._lock = threading.Lock()
         self._used = False
         self._revoked = False
+        self._material = bytearray(material) if material is not None else None
+        self._snapshot_bound = snapshot_bound
 
     @property
     def binding_id(self) -> str:
@@ -126,6 +133,9 @@ class BrokerLease:
     def invalidate(self) -> None:
         with self._lock:
             self._revoked = True
+            if self._material is not None:
+                self._material[:] = b"\x00" * len(self._material)
+                self._material = None
 
     revoke = invalidate
 
@@ -140,6 +150,8 @@ class BrokerLease:
 
         if not callable(consumer):
             raise _safe_error("lease_consumer_invalid", "broker lease consumer is invalid")
+        detached: bytearray | None = None
+        snapshot_bound = False
         with self._lock:
             if self._used:
                 raise _safe_error("lease_used", "broker lease has already been consumed")
@@ -147,14 +159,31 @@ class BrokerLease:
                 raise _safe_error("lease_revoked", "broker lease is revoked")
             if datetime.now(timezone.utc) >= self._deadline:
                 self._used = True
+                if self._material is not None:
+                    self._material[:] = b"\x00" * len(self._material)
+                    self._material = None
                 raise _safe_error("lease_expired", "broker lease has expired")
             self._used = True
+            snapshot_bound = self._snapshot_bound
+            if snapshot_bound:
+                # Detach the exact revision-bound snapshot while invalidation is
+                # excluded by the same lock. A staging lease can never fall back
+                # to a later registry read.
+                if self._material is None:
+                    raise _safe_error("lease_revoked", "broker lease snapshot is unavailable")
+                detached = self._material
+                self._material = None
 
         material: bytes | None = None
         transient: bytearray | None = None
         try:
             try:
-                material = self._resolver._read_reference(self._reference)
+                if snapshot_bound:
+                    material = bytes(detached)
+                else:
+                    # Legacy generic leases intentionally read only here. They
+                    # are distinct from revision-bound staging leases.
+                    material = self._resolver._read_reference(self._reference)
             except SecretBrokerError:
                 raise
             transient = bytearray(material)
@@ -175,6 +204,8 @@ class BrokerLease:
         finally:
             if transient is not None:
                 transient[:] = b"\x00" * len(transient)
+            if detached is not None:
+                detached[:] = b"\x00" * len(detached)
             material = None
 
 
@@ -374,6 +405,65 @@ class SecretReferenceResolver:
         return lease
 
     lease = issue
+
+    def issue_revision_bound(self, binding: CredentialBinding, *, expected_revision: str,
+                             revision_key: bytes) -> BrokerLease:
+        """Atomically bind one source snapshot revision to one-use lease bytes.
+
+        The source is read exactly once. Its opaque revision and the selected
+        credential are derived from that same immutable ``SafeSource`` snapshot;
+        later consume never reopens the source.
+        """
+        import hmac
+        import uuid
+        from sandbox.secrets.writer import opaque_revision
+
+        if not isinstance(binding, CredentialBinding) or not isinstance(expected_revision, str) \
+                or not isinstance(revision_key, bytes):
+            raise _safe_error("binding_invalid", "revision-bound credential lease is invalid")
+        if binding.state != "ready":
+            raise _safe_error("binding_not_ready", "credential binding is not ready")
+        if binding.is_expired():
+            raise _safe_error("binding_expired", "credential binding has expired")
+        if self.owner is not None and binding.owner != self.owner:
+            raise _safe_error("binding_owner_denied", "credential binding owner is not authorized")
+        reference = self._parse_reference(binding.source_reference)
+        try:
+            observation = self.registry.probe(reference.alias)
+            if not isinstance(observation, dict) or observation.get("safety") != "safe" \
+                    or observation.get("broker_readable") is not True:
+                raise _safe_error("source_unavailable", "registered credential source is not broker-readable")
+            safe = self.registry.read(reference.alias)
+            current_revision = opaque_revision(revision_key, safe.content)
+        except SecretBrokerError:
+            raise _safe_error("source_unavailable", "registered credential source is unavailable") from None
+        if not hmac.compare_digest(current_revision, expected_revision):
+            raise _safe_error("revision_conflict", "staging credential source revision changed")
+        try:
+            if safe.policy.format == "dotenv":
+                document = parse_document(safe.content)
+            else:
+                document = parse_secret_document(safe.content, safe.policy.format)
+            record = document.entries.get(reference.key)
+            value = getattr(record, "value", None) if record is not None else None
+            if not isinstance(value, str) or not value:
+                raise _safe_error("source_key_missing", "registered credential key is unavailable")
+            material = value.encode("utf-8")
+            if len(material) > MAX_VALUE_BYTES:
+                raise _safe_error("source_too_large", "registered credential value exceeds the broker limit")
+        except SecretBrokerError:
+            raise
+        except (SecretParseError, SecretFormatError, UnicodeError):
+            raise _safe_error("source_invalid", "registered credential source could not be read safely") from None
+        now = datetime.now(timezone.utc)
+        deadline = min(_parse_expiry(binding.expires_at),
+                       now + timedelta(seconds=self.lease_seconds))
+        lease = BrokerLease(self, reference, binding_id=binding.binding_id,
+            binding_version=binding.version, deadline=deadline,
+            lease_id=f"lease-{uuid.uuid4().hex}", material=material,
+            snapshot_bound=True)
+        self._leases.add(lease)
+        return lease
 
     def invalidate(self, binding_id: str, *, binding_version: int | None = None) -> int:
         """Invalidate outstanding leases for a binding before durable revoke."""

@@ -3027,7 +3027,94 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     return result
 
 
+def _cmd_host_stage(args) -> None:
+    """Static Feature 050 dispatch with no manifest/Compose/runtime preflight."""
+    required = {
+        "--project-dir": getattr(args, "project_dir", None),
+        "--environment": getattr(args, "environment", None),
+        "--remote": getattr(args, "remote", None),
+        "--request-id": getattr(args, "request_id", None),
+        "--verified-plan": getattr(args, "verified_plan", None),
+    }
+    missing = [name for name, value in required.items()
+               if not isinstance(value, str) or not value.strip()]
+    if missing or getattr(args, "expected_generation", None) is None:
+        if getattr(args, "expected_generation", None) is None: missing.append("--expected-generation")
+        die("host stage requires explicit " + ", ".join(missing) + "; no staging state was opened")
+    status_only = getattr(args, "stage_status", False)
+    if not status_only and not getattr(args, "confirm", False):
+        die("host stage is protected; pass --confirm after reviewing the exact verified plan")
+    try:
+        from sandbox.core._paths import ENV_LOCAL, RUNTIME_DIR
+        from sandbox.hosting.images import validate_verified_image_plan
+        from sandbox.hosting.images.staging_models import StageRequest, StagingPolicy
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_service import ImageStagingService
+        from sandbox.hosting.images.staging_worker import StageWorker
+        from sandbox.isolation.credential_binding import CredentialBinding
+        from sandbox.isolation.credential_resolver import SecretReferenceResolver
+        from sandbox.secrets.service import GHCRStagingCredentialAdapter
+        from sandbox.secrets.sources import SourceRegistry
+        from sandbox.secrets.writer import load_revision_key
+        from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+
+        project_root = Path(args.project_dir).expanduser().resolve(strict=True)
+        raw_plan = json.loads(Path(args.verified_plan).expanduser().read_text())
+        plan = validate_verified_image_plan(raw_plan)
+        scope = plan.delivery_identity_projection.target_scope
+        if (scope.remote, scope.environment) != (args.remote, args.environment):
+            raise ValueError("verified plan target scope does not match explicit stage selectors")
+        scope_id = hashlib.sha256(
+            f"{args.remote}\0{scope.project}\0{args.environment}".encode()).hexdigest()
+        policy_path = RUNTIME_DIR / "hosting" / "image-staging" / "policies" / f"{scope_id}.json"
+        private = json.loads(policy_path.read_text())
+        if type(private) is not dict or set(private) != {"policy", "binding", "secret_sources"}:
+            raise ValueError("machine staging policy is invalid")
+        policy = StagingPolicy.from_mapping(private["policy"])
+        binding = CredentialBinding.from_dict(private["binding"])
+        request = StageRequest.create(
+            request_id=args.request_id, expected_generation=args.expected_generation,
+            plan=plan, staging_policy_digest=policy.policy_digest, target=policy.target,
+            confirmed=True,
+        )
+        repository = StageRepository()
+        if status_only:
+            result = ImageStagingService(
+                repository=repository, broker=None, worker=None).status(request)
+        else:
+            registry = SourceRegistry(
+                project_root, private["secret_sources"], personal_path=ENV_LOCAL,
+                project_scope=str(project_root),
+            )
+            resolver = SecretReferenceResolver(registry, owner=binding.owner)
+            revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
+            broker = GHCRStagingCredentialAdapter(
+                resolver, binding, recipient=policy.broker_recipient,
+                credential_reference_revision=policy.credential_reference_revision,
+                revision_key=revision_key,
+            )
+            service = ImageStagingService(
+                repository=repository, broker=broker,
+                worker=StageWorker(RegisteredRemoteImageTransport()),
+            )
+            result = service.stage(request, policy)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, RuntimeError):
+        # Private paths, remote diagnostics, helper output, and broker details
+        # never cross the public stage envelope.
+        payload = {"schema_version": 1, "ok": False, "result_class": "refused",
+                   "code": "policy_mismatch", "request_id": str(args.request_id)[:256],
+                   "generation": int(args.expected_generation)}
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        raise SystemExit(1)
+    payload = result.as_mapping()
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    if not result.ok and result.result_class != "in_progress": raise SystemExit(1)
+
+
 def cmd_host(cfg, args) -> None:
+    if args.action == "stage":
+        _cmd_host_stage(args)
+        return
     if args.action == "recover":
         missing = []
         if not isinstance(getattr(args, "project_dir", None), str) or not args.project_dir.strip():
@@ -3256,7 +3343,7 @@ def cmd_host(cfg, args) -> None:
 
 def _host_predispatch_policy(args) -> bool:
     """Keep observation recovery ahead of compatibility state writers."""
-    return getattr(args, "action", None) == "recover"
+    return getattr(args, "action", None) in {"recover", "stage"}
 
 
 register_specs((CommandSpec(

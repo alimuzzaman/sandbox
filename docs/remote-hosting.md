@@ -1203,3 +1203,101 @@ The workspace parent is mechanically required to be root-owned mode 0700 on `/ru
 before READY and therefore before credential transfer. READY has a finite timeout that kills
 the whole unit. The transient unit remains inspectable until it is explicitly stopped,
 checked, and collected.
+
+### Immutable staged-image activation
+
+Immutable delivery has four separate owners:
+
+- Feature 049 verifies trust and creates an exact plan. It performs no pull or deploy.
+- Feature 050 stages that exact image locally and owns proof custody. It does not activate.
+- Feature 051 runs inspected init, exact no-build/no-pull replacement, health/edge proof,
+  activation state, zero-init adoption, and one-generation local rollback.
+- Feature 048 only observes interrupted Feature 051 runtime evidence.
+
+The static command group is:
+
+```text
+./sb host image activate --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+./sb host image adopt --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+./sb host image rollback --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+./sb host image recover --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --activation-transaction sha256:... --confirm
+```
+
+The plan and proof paths are caller claims. Machine activation policy, exact authority
+binding, rollback grant/subject, runtime capability, and edge policy are owner-only state;
+the command cannot replace or widen them. Activation refuses aliases, tags, indexes,
+builds, pulls, platform substitutions, missing/duplicate services, unsafe dependencies,
+unexpected orphans, changed local identity, incomplete health, or uncertain edge delivery.
+
+`host image recover` never changes the existing failed-apply `host recover` contract. It
+performs two read-only observations around a Feature 051-owned non-authorizing provisional
+and never starts init/services, pulls/builds, or changes edge. Adoption requires a plan with
+no init steps and performs no runtime or edge effect. Rollback uses only the one retained
+previous local image and never obtains credentials or contacts a registry.
+
+Local fake/unit acceptance does not prove a registered remote, live edge, rollback,
+deployment, or production. Do not use these commands against a live target without the
+separate authorization and validation gate for that environment.
+
+Activation admission refuses before effects when proof custody is expired or ambiguous, or
+when bounded terminal storage cannot be reserved. Recovery never accepts a caller digest or
+partial container list as runtime proof. It requires every persisted selected service with
+exact health, platform, local image, topology, and stable runtime identity, plus the exact
+terminal edge receipt when edge is required. Init inspection is derived from actual runtime
+inspect output and a fresh runtime epoch; expected values are not inspection evidence.
+
+Machine activation policy now includes the exact Compose projection and edge route digest.
+`edge_required` is authority, not a caller toggle. Terminal replay uses private retained proof
+pin evidence to release exact custody without another runtime or edge observation. Image
+defaults outside the declared init environment do not authorize init and do not cause a false
+mismatch.
+
+Image recovery represents a first activation with an explicit absent prior generation; that state
+can classify only exact-new, never exact-prior. Recovery result slots are checked before the first
+observation/provisional write, and every stored result has a closed versioned schema, SHA-256 request
+binding, exact generation relation, and an `ok` value used identically by fresh and replayed CLI
+responses. Edge observation derives its normalized route plan from the current validated manifest;
+it never repeats a caller route claim as evidence. Adoption renders the authenticated machine-bound
+Compose files and project while remaining read-only. Local, running, recovery, and init evidence use
+fresh registered-target and Docker-daemon observations. Init platform architecture comes from an
+independent image inspection, not an optional container-inspect default.
+
+An exact activation terminal is looked up before current policy, grant, deadline, or custody
+admission. It returns the immutable result and never recreates a released lease. Image recovery
+atomically terminalizes the interrupted original activation as well as its separate recovery result;
+exact-prior is a stable refused `recovery_no_effect` result and exits nonzero, while exact-new
+promotion alone is successful. The retained terminal pin is closed and validates canonical lease,
+holder, proof digest, and host-acceptance identities before it can release Feature 050 custody.
+Initializer values come only from the already rendered bound Compose service environment or a narrow
+opaque provider. Values exist only in the synthetic child environment and private inspect comparison;
+they are not placed in activation state, receipts, output, or command arguments. Running OS and
+architecture come from an independent inspection of each container's exact local image ID.
+
+Terminal replay uses the private retained pin before returning the public result. If the exact
+accepted Feature 050 lease still exists after a crash, replay releases it; if it is already absent,
+replay does not prepare or recreate it. Declared init values cross SSH only in a bounded private
+stdin frame. The SSH command contains the public Docker argv and environment key names, never values;
+remote output is value-redacted before capture. No value enters activation state or receipts. An
+uncertain terminal envelope may coexist only with the same exact active request, transaction, digest,
+and pin. That narrow pair remains fenced and exact replay returns uncertainty without new effects.
+
+Raw `docker compose config` environment values and raw container `Config.Env` values never cross SSH
+stdout. The fixed remote launcher strips Compose environments, selects only declared initializer keys
+inside the remote process, compares inspected values there, and returns only key presence plus a match
+boolean. After Docker creates an initializer, every later cache/image/runtime/target failure triggers
+bounded stopped-container removal and private-cache erasure before refusal. The uncertain overlap also
+requires `active.phase == uncertain` and byte-exact equality between `active.result` and the retained
+public result; absent, distinct, or promotable variants are invalid state.
+
+The private Compose selector is bound to the exact successful admitted render: Compose files, project,
+closed image-override environment, and the SHA-256 digest of the sanitized rendered configuration.
+Remote declared-value selection reruns with those exact inputs, refuses nonzero status or any stderr,
+parses only bounded valid JSON, strips environment maps, and requires the same render digest before
+selecting declared keys. No value is returned or persisted.

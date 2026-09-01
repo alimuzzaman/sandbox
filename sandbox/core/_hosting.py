@@ -21,6 +21,29 @@ class HostingError(ValueError):
     pass
 
 
+# One explicit capability registry names every target mutation that must share
+# the RecoveryRepository owner/CAS boundary.  Consumers validate membership
+# before opening state or entering an effect.  Unknown/bypass names fail closed.
+TARGET_MUTATION_CAPABILITIES = {
+    "apply": "hosting.apply.v1",
+    "sync": "hosting.sync.v1",
+    "login-url": "hosting.login-url.v1",
+    "edge-continue": "hosting.edge-continue.v1",
+    "failed-apply-recover": "hosting.failed-apply-recover.v1",
+    "image-stage": "hosting.image-stage.v1",
+    "activate": "hosting.image-activate.v1",
+    "adopt": "hosting.image-adopt.v1",
+    "rollback": "hosting.image-rollback.v1",
+    "image-recover": "hosting.image-recover.v1",
+}
+
+
+def target_mutation_capability(name: object) -> str:
+    if type(name) is not str or name not in TARGET_MUTATION_CAPABILITIES:
+        raise HostingError("unknown target mutation capability")
+    return TARGET_MUTATION_CAPABILITIES[name]
+
+
 _SERVICE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _BASIC_AUTH_BYPASS_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})

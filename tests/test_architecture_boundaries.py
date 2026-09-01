@@ -14,6 +14,36 @@ def production_python_files():
 
 
 class TestArchitectureBoundaries(unittest.TestCase):
+    def test_activation_package_exports_only_narrow_closed_contract(self):
+        import sandbox.hosting.images.activation as activation
+        self.assertEqual(set(activation.__all__), {
+            "ActivationAuthorityBinding", "ActivationContractError", "ActivationPolicy",
+            "ActivationRequest", "ActivationResult", "ActivationService",
+            "ForwardRollbackSubject", "RollbackCompatibilityGrant",
+            "validate_activation_artifacts",
+        })
+        self.assertFalse(hasattr(activation, "StageRepository"))
+        self.assertFalse(hasattr(activation, "RecoveryRepository"))
+
+    def test_activation_repository_has_no_outer_hosts_json_writer_primitives(self):
+        source = (ROOT / "sandbox/hosting/images/activation/repository.py").read_text()
+        tree = ast.parse(source)
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                    for alias in node.names}
+        calls = {getattr(node.func, "attr", getattr(node.func, "id", ""))
+                 for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        self.assertFalse({"os", "fcntl", "tempfile", "pathlib"} & imported)
+        self.assertFalse({"open", "replace", "fsync", "flock"} & calls)
+
+    def test_activation_reaches_feature_050_only_through_proof_custody_transaction(self):
+        source = (ROOT / "sandbox/hosting/images/activation/repository.py").read_text()
+        tree = ast.parse(source)
+        stage_calls = [node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute)
+                       and isinstance(node.func.value, ast.Attribute)
+                       and node.func.value.attr == "stage_repository"]
+        self.assertEqual(set(stage_calls), {"proof_custody_transaction"})
+
     def test_tests_cannot_materialize_or_pass_parent_environment(self):
         from sandbox.testing_boundaries import inspect_test_environment_boundaries
 

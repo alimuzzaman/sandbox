@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 
 from .models import (
-    MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, RecoveryRequest, RecoveryAction,
-    canonical_digest,
+    MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, ActivationRecoveryObservation,
+    ActivationTransitionProjection, RecoveryRequest, RecoveryAction, canonical_digest,
     validate_edge_intent, validate_observation,
 )
 
@@ -299,3 +299,54 @@ def validate_edge_request(request: RecoveryRequest, observation_attempt: object,
     if pending != ["edge"]:
         return "mutation_required"
     return None
+
+
+def classify_activation_transition(
+        projection: ActivationTransitionProjection, observation: object
+) -> ActivationRecoveryObservation:
+    """Classify exact new/prior/neither/ambiguous from one coherent epoch."""
+    if type(projection) is not ActivationTransitionProjection or type(observation) is not dict:
+        raise ValueError("activation observation is invalid")
+    required = {"target_epoch_start", "target_epoch_end", "runtime_epoch_start",
+                "runtime_epoch_end", "generation_digest", "services"}
+    if set(observation) != required:
+        raise ValueError("activation observation is invalid")
+    epochs = tuple(observation[name] for name in (
+        "target_epoch_start", "target_epoch_end", "runtime_epoch_start", "runtime_epoch_end"))
+    if any(not isinstance(value, str) or not _PHASE_ID.fullmatch(value) for value in epochs):
+        raise ValueError("activation observation is invalid")
+    services = observation["services"]
+    ambiguous = (epochs[0] != epochs[1] or epochs[2] != epochs[3] or
+                 not isinstance(services, list) or not 1 <= len(services) <= MAX_SERVICES or
+                 any(not isinstance(item, dict) for item in services))
+    if not ambiguous:
+        identities = [item.get("service") for item in services]
+        ambiguous = (len(identities) != len(set(identities)) or
+                     any(not isinstance(item, str) for item in identities))
+    observed_digest = observation.get("generation_digest")
+    normalized = tuple(sorted(services, key=lambda item: item.get("service", ""))) \
+        if not ambiguous else ()
+    exact_new = normalized == tuple(sorted(
+        projection.new_services, key=lambda item: item["service"]))
+    exact_prior = projection.prior_generation_digest is not None and normalized == tuple(sorted(
+        projection.prior_services, key=lambda item: item["service"]))
+    if ambiguous:
+        classification = "ambiguous"
+    elif observed_digest == projection.new_generation_digest and exact_new:
+        classification = "exact_new"
+    elif projection.prior_generation_digest is not None \
+            and observed_digest == projection.prior_generation_digest and exact_prior:
+        classification = "exact_prior"
+    elif isinstance(observed_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", observed_digest):
+        classification = "neither"
+    else:
+        classification = "ambiguous"
+    body = {"transaction_digest": projection.transaction_digest,
+            "expected_generation": projection.expected_generation,
+            "classification": classification,
+            "target_epoch_start": epochs[0], "target_epoch_end": epochs[1],
+            "runtime_epoch_start": epochs[2], "runtime_epoch_end": epochs[3]}
+    return ActivationRecoveryObservation(
+        **body, evidence_identity=canonical_digest({
+            "projection": projection.as_mapping(), "observation": observation,
+            "classification": classification}))

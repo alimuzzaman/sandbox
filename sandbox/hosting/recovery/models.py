@@ -30,6 +30,11 @@ class RecoveryAction(str, Enum):
     CONTINUE_EDGE = "continue_edge"
 
 
+ACTIVATION_OBSERVATION_CLASSES = frozenset({
+    "exact_new", "exact_prior", "neither", "ambiguous",
+})
+
+
 RESULT_CLASSES = frozenset({
     "observation_reconciled", "already_reconciled", "edge_only_completed",
     "legacy_evidence", "job_ineligible", "binding_mismatch", "dirty_source",
@@ -262,3 +267,108 @@ def validate_observation(value: object) -> dict:
     safe["evidence_id"] = canonical_digest({key: item for key, item in safe.items()
                                              if key != "evidence_id"})
     return safe
+
+
+@dataclass(frozen=True)
+class ActivationTransitionProjection:
+    """Bounded non-authorizing Feature 051 projection accepted by Feature 048."""
+
+    transaction_digest: str
+    request_digest: str
+    operation: str
+    phase: str
+    effect_entered: bool
+    expected_generation: int
+    new_generation_digest: str
+    prior_generation_digest: str | None
+    target: dict
+    new_services: tuple[dict, ...]
+    prior_services: tuple[dict, ...]
+
+    def __post_init__(self) -> None:
+        for value in (self.transaction_digest, self.request_digest,
+                      self.new_generation_digest):
+            _digest(value, "activation transition digest")
+        if self.prior_generation_digest is not None:
+            _digest(self.prior_generation_digest, "activation transition digest")
+        if self.operation not in {"activate", "rollback"} or not _SAFE_ID.fullmatch(self.phase) \
+                or type(self.effect_entered) is not bool \
+                or type(self.expected_generation) is not int or self.expected_generation < 0 \
+                or type(self.target) is not dict:
+            raise ValueError("activation transition projection is invalid")
+        required = {"service", "declared_image", "repository_digest", "local_image_id",
+                    "config_digest", "platform", "topology_identity", "healthy"}
+        for services in (self.new_services,):
+            if not 1 <= len(services) <= MAX_SERVICES or any(
+                    type(item) is not dict or set(item) != required or
+                    item.get("healthy") is not True for item in services):
+                raise ValueError("activation transition projection is invalid")
+            names = [item["service"] for item in services]
+            if len(names) != len(set(names)) or any(
+                    not isinstance(name, str) or not _SAFE_ID.fullmatch(name) for name in names):
+                raise ValueError("activation transition projection is invalid")
+        if self.prior_generation_digest is None:
+            if self.prior_services:
+                raise ValueError("activation transition projection is invalid")
+        else:
+            services = self.prior_services
+            if not 1 <= len(services) <= MAX_SERVICES or any(
+                    type(item) is not dict or set(item) != required or
+                    item.get("healthy") is not True for item in services):
+                raise ValueError("activation transition projection is invalid")
+            names = [item["service"] for item in services]
+            if len(names) != len(set(names)) or any(
+                    not isinstance(name, str) or not _SAFE_ID.fullmatch(name) for name in names):
+                raise ValueError("activation transition projection is invalid")
+        if len(json.dumps(self.as_mapping(), sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
+            raise ValueError("activation transition projection exceeds bound")
+
+    def as_mapping(self) -> dict:
+        return {"transaction_digest": self.transaction_digest,
+                "request_digest": self.request_digest, "operation": self.operation,
+                "phase": self.phase, "effect_entered": self.effect_entered,
+                "expected_generation": self.expected_generation,
+                "new_generation_digest": self.new_generation_digest,
+                "prior_generation_digest": self.prior_generation_digest,
+                "target": self.target, "new_services": list(self.new_services),
+                "prior_services": list(self.prior_services)}
+
+
+@dataclass(frozen=True)
+class ActivationRecoveryObservation:
+    """Read-only exact classification; never a receipt or effect authority."""
+
+    transaction_digest: str
+    expected_generation: int
+    classification: str
+    target_epoch_start: str
+    target_epoch_end: str
+    runtime_epoch_start: str
+    runtime_epoch_end: str
+    evidence_identity: str
+
+    def __post_init__(self) -> None:
+        _digest(self.transaction_digest, "activation transaction digest")
+        _digest(self.evidence_identity, "activation evidence identity")
+        if self.classification not in ACTIVATION_OBSERVATION_CLASSES \
+                or type(self.expected_generation) is not int or self.expected_generation < 0:
+            raise ValueError("activation observation is invalid")
+        for value in (self.target_epoch_start, self.target_epoch_end,
+                      self.runtime_epoch_start, self.runtime_epoch_end):
+            _safe_id(value, "activation observation epoch")
+        if (self.target_epoch_start != self.target_epoch_end \
+                or self.runtime_epoch_start != self.runtime_epoch_end) \
+                and self.classification != "ambiguous":
+            raise ValueError("activation observation epoch changed")
+
+    def body_mapping(self) -> dict:
+        return {"transaction_digest": self.transaction_digest,
+                "expected_generation": self.expected_generation,
+                "classification": self.classification,
+                "target_epoch_start": self.target_epoch_start,
+                "target_epoch_end": self.target_epoch_end,
+                "runtime_epoch_start": self.runtime_epoch_start,
+                "runtime_epoch_end": self.runtime_epoch_end}
+
+    def as_mapping(self) -> dict:
+        return {**self.body_mapping(), "evidence_identity": self.evidence_identity}

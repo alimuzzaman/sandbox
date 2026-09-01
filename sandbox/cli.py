@@ -859,8 +859,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p.add_argument("image_action", nargs="?",
+        choices=["activate", "adopt", "rollback", "recover"],
+        help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -885,6 +888,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",
         help="closed Feature 049 VerifiedImagePlan JSON for host stage")
+    host_p.add_argument("--staged-proof", default=None, metavar="PATH",
+        help="closed retained Feature 050 StagedImageProof JSON claim for host image actions")
+    host_p.add_argument("--admission-deadline", default=None, metavar="RFC3339",
+        help="finite proof-custody admission deadline for a new image activation acceptance")
+    host_p.add_argument("--activation-transaction", default=None, metavar="DIGEST",
+        help="exact active transaction digest for `host image recover`")
     host_p.add_argument("--stage-status", action="store_true",
         help="read the exact Feature 050 request status without helper or credential access")
     host_p.add_argument("--job-id", default=None,

@@ -426,6 +426,11 @@ class _LockedCustodyPort(ProofCustodyPort):
             raise StageRepositoryError("lease_conflict")
         return self._repository._load_unlocked(self._target)
 
+    def lookup(self, lease_id: str) -> StageProofActivationLease | None:
+        state = self._load()
+        raw = state["leases"].get(lease_id)
+        return None if raw is None else _lease_from(raw)
+
     def prepare(self, **binding: object) -> StageProofActivationLease:
         required = {"lease_id", "holder", "admission_deadline", "activation_request_id",
                     "activation_request_digest", "stage_request_id", "stage_request_digest",

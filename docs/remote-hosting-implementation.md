@@ -235,3 +235,114 @@ never read, parsed, or written by Feature 050.
 
 None of these layers is public production proof. Runtime health, edge readiness, and
 direct public behavior remain separate evidence gates.
+
+## Feature 051 immutable activation state
+
+Feature 049 alone decides trust and emits the closed delivery plan. Feature 050 alone
+owns registry credential use, pull, local-image proof, its stage ledger, and proof-custody
+pins. Feature 051 validates only the public 049 plan/projection and retained 050 proof,
+then performs init/runtime/edge effects and owns activation generations. Feature 048 adds
+one read-only activation observer; it does not deploy, pull, run init, update edge, or write
+activation state.
+
+`sandbox.hosting.images.activation.repository` is a nested codec and candidate validator.
+It never opens or writes `hosts.json`. `RecoveryRepository` remains the only outer parser,
+target/state locker, CAS owner, atomic replacer, and fsync owner. The optional
+`image_activation` host field contains current and previous generations, one active common
+activate/adopt/rollback transaction, bounded results/tombstones, and a non-authorizing
+image-recovery provisional. Unknown host fields remain untouched.
+
+Every registered target mutation uses the shared capability registry and target owner.
+The custody lock order is target mutation, host-state transaction, then Feature 050 stage
+lock. Feature 050 prepares and pins before proof validation; host acceptance is atomic;
+then the same durable holder promotes the pin before effects. A deadline forbids new
+acceptance but never auto-unpins. Exact crash replay may promote an already stored host
+acceptance or cancel only proven absence. Only a terminal accepted owner releases custody.
+
+Init is create-without-start, exact inspection, durable `effect_entered`, bounded start/wait,
+complete termination, and cleanup. Possible execution without a terminal receipt stays
+uncertain and is never replayed. Long-lived replacement accepts only repository-qualified
+digests and invokes Compose with `--no-build --pull never`; exact running image/config/
+platform/topology/health and edge evidence are required before the generation CAS.
+
+`sb host image recover` is separate from failed-apply `sb host recover`. Feature 051 writes
+one `authorizing: false` provisional after the first Feature 048 observation, immediately
+observes again under the same owner, requires exact evidence and unchanged epochs, then
+atomically stores a result plus only a legal promotion. `neither` and `ambiguous` never
+promote. `exact_prior` never advances generation. `exact_new` promotes only from a receipt-
+complete `runtime_proven` or `edge_pending` phase. Adoption is zero-init and effect-free.
+Rollback selects only the retained previous local generation and requires the machine
+pre-forward subject/grant referenced by the current generation.
+
+Source/fake acceptance is not live registered-host, edge, rollback, deployment, or
+production proof. Those gates remain open until separately authorized and observed.
+
+Admission also reserves bounded terminal-result storage before effects. Custody first
+reconciles exact host acceptance; expired prepared custody with proven absence is cancelled,
+while accepted custody replays from its durable phase. Every durable non-uncertain terminal
+releases its pin, and uncertain or incomplete authority stays pinned. Each initializer has
+an independent prepared/effect/receipt slot. Required edge work persists its exact prepared
+request and terminal receipt. Recovery compares a complete persisted service projection—
+unique selected services, health, platform, local image, topology, and unchanged epochs—and
+provisional crash replay performs only the post-write observation. Apply, sync, login URL,
+failed-apply recovery, edge continuation, staging, activation, adoption, rollback, and image
+recovery all use the same registered target-mutation owner.
+
+Terminal activation records retain a private, bounded, closed copy of the exact holder and
+proof pin beside the public result. This permits terminal-before-release replay to reconcile
+the accepted Feature 050 lease and release only that lease; the private pin is not added to
+the public result. Missing activation state is seeded from the locked outer host generation.
+Recovery results are capped and request identities cannot collide across active, terminal,
+tombstone, provisional, or recovery-result authority.
+
+The machine policy also binds the exact Compose service projection, edge-required bit, and
+canonical edge route plan/digest. Adoption renders the bound Compose projection and performs
+a fresh read-only exact edge observation; it never applies edge state. Init inspection ignores
+unrequested image-default environment variables, requires every declared variable to be
+present, and obtains target identity from the authenticated registered-target observer plus a
+fresh daemon epoch instead of copying the requested target into the observation.
+
+The third bounded review repair closes the terminal private-wrapper decoder by using the activation
+model's recursive safe-mapping and secret-field validator. A missing prior generation is represented
+as `null` plus an empty prior projection. Edge route evidence is normalized from the current manifest
+after the read-only verifier succeeds. Activation and recovery obtain registered-target identity from
+the authenticated host projection and daemon identity from Docker before and after observation; init
+architecture is obtained from separate image inspection. Adoption receives the same bound Compose
+files/project as activation. Recovery reserves its single provisional result slot before observation,
+stores only version-1 SHA-256-bound results with exact generation relations, and returns the same
+bounded `ok` semantics on fresh completion and terminal replay.
+
+The fourth bounded repair makes recovery a terminal operation on both identities: the recovery request
+gets its closed result, and the interrupted activation gets an immutable terminal result/private pin or
+tombstone authority before `active` is cleared. Replay therefore cannot repeat protected work and can
+finish releasing the exact accepted Feature 050 lease after a crash. Exact activation terminal lookup
+precedes current admission checks and does not touch custody. `recovery_no_effect` is deliberately
+`ok: false`; only exact-new promotion is recovery success. The init adapter obtains declared values
+from the rendered bound Compose service or a narrow opaque provider, passes them only in the closed
+synthetic Docker CLI environment, compares actual key/value pairs privately, and returns key-only
+inspection evidence. Running platform proof inspects the exact container image ID independently.
+Retained pins accept only canonical activation lease, activation owner, SHA-256 proof, and host
+acceptance receipt identities.
+
+The fifth bounded repair makes normal terminal replay reconcile the retained private pin before
+projecting the public immutable result. Custody lookup is read-before-release and an absent lease is
+not recreated. Init values are removed from SSH command serialization: a bounded JSON frame travels
+only through SSH stdin, a fixed remote launcher constructs the closed child environment, and output is
+redacted against private values before capture. Compose contributes only the declared initializer keys.
+The state codec also permits exactly one special active/result overlap: the same request may retain its
+active fence plus an exact uncertain result envelope with identical request digest, transaction, and
+pin. All other active/result collisions remain invalid.
+
+The sixth bounded repair moves Compose selection and inspect value comparison fully inside the fixed
+remote stdin launcher. Compose JSON is stripped of environment maps before stdout; container inspect
+JSON is stripped of `Config.Env` and returns only declared keys plus an exact-match boolean. The local
+transport never parses a raw value-bearing response. Once `docker create` returns an identity, the
+adapter caches only a private source descriptor/value frame and wraps all subsequent epoch/image/target
+work with stopped-container cleanup and cache erasure. The narrow uncertain overlap now additionally
+requires phase `uncertain` and exact equality of active and retained result envelopes.
+
+The seventh bounded repair binds the opaque Compose value source to the admitted sanitized render.
+The in-memory selector carries only Compose files, project, public synthetic image overrides, and the
+canonical sanitized render digest. The remote source rerun uses those exact overrides and rejects
+nonzero status, any stderr, malformed JSON, missing declared keys, or sanitized digest divergence before
+the values can enter the private child environment. The selector and activation state contain no values.

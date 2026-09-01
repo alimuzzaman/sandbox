@@ -5,12 +5,33 @@ from __future__ import annotations
 import time
 from contextlib import nullcontext
 
-from .models import RecoveryAction, RecoveryRequest, RecoveryResult
-from .policy import classify_observation, validate_edge_request, validate_job_binding
+from .models import (
+    ActivationTransitionProjection, RecoveryAction, RecoveryRequest, RecoveryResult,
+)
+from .policy import (
+    classify_activation_transition, classify_observation, validate_edge_request,
+    validate_job_binding,
+)
 
 
 class RecoveryAuthorityError(RuntimeError):
     """A current registered target cannot authorize the durable operation."""
+
+
+class ActivationTransitionObserver:
+    """Feature 048 read-only activation observer.
+
+    It owns no repository and receives only an injected bounded runtime reader.
+    """
+
+    def __init__(self, runtime_reader) -> None:
+        self.runtime_reader = runtime_reader
+
+    def observe(self, projection: ActivationTransitionProjection):
+        if type(projection) is not ActivationTransitionProjection:
+            raise ValueError("activation transition projection is invalid")
+        observed = self.runtime_reader(projection.as_mapping())
+        return classify_activation_transition(projection, observed)
 
 
 class RecoveryService:
@@ -63,7 +84,11 @@ class RecoveryService:
             # target or broker lock directories merely to record a refusal.
             return self._uncommitted(request, "refused", "legacy_evidence")
         try:
-            with self.repository.target_lock(request.target.key):
+            capability = ("edge-continue" if request.action is RecoveryAction.CONTINUE_EDGE
+                          else "failed-apply-recover")
+            with self.repository.target_mutation_port(
+                    capability).target_mutation_transaction(request.target.key), \
+                    self.repository.state_lock():
                 state = self.repository.load()
                 record = self.repository.target(state, request.target.key)
                 replay = self.repository.replay(record, request)

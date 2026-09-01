@@ -14,6 +14,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from sandbox.core._paths import RUNTIME_DIR
+from sandbox.core._hosting import target_mutation_capability
+from sandbox.hosting.images.staging_models import (
+    AtomicHostStateEvidence, DurableTerminalAuthorityEvidence, staging_digest,
+)
 
 from .models import (
     MAX_PHASES, MAX_RECEIPT_BYTES, RESULT_CLASSES, RESULT_FAMILIES,
@@ -629,6 +633,14 @@ class RecoveryRepository:
         self._write(state)
         return self._public_terminal(safe)
 
+    def target_mutation_port(self, capability: str, *, timeout_seconds: float = 30):
+        """Return the shared target owner for one registered capability."""
+        return _TargetMutationPort(self, capability, timeout_seconds=timeout_seconds)
+
+    def activation_host_state_port(self):
+        """Return the only Feature 051 outer hosts.json transaction port."""
+        return _ActivationHostStatePort(self)
+
     def _write(self, state: dict) -> None:
         self._ensure_state_parent(create=True)
         if self.state_path.exists() or self.state_path.is_symlink():
@@ -656,3 +668,309 @@ class RecoveryRepository:
             except OSError:
                 pass
             raise
+
+
+class _TargetMutationPort:
+    def __init__(self, repository: RecoveryRepository, capability: str,
+                 *, timeout_seconds: float = 30) -> None:
+        self.repository = repository
+        self.capability = capability
+        self.capability_revision = target_mutation_capability(capability)
+        self.timeout_seconds = timeout_seconds
+        self._owned_target = None
+        self._ownership_depth = 0
+
+    @contextmanager
+    def target_mutation_transaction(self, target_identity: str):
+        # Membership was checked before any lock or state path was opened.
+        target_mutation_capability(self.capability)
+        if self._ownership_depth:
+            if self._owned_target != target_identity:
+                raise ValueError("operation_busy")
+            self._ownership_depth += 1
+            try:
+                yield self
+            finally:
+                self._ownership_depth -= 1
+            return
+        with self.repository.effect_lock(target_identity, timeout_seconds=self.timeout_seconds):
+            self._owned_target = target_identity
+            self._ownership_depth = 1
+            try:
+                yield self
+            finally:
+                self._ownership_depth = 0
+                self._owned_target = None
+
+
+class _ActivationHostStatePort:
+    """Narrow nested read/CAS/atomic commit port held under state.lock.
+
+    The activation package provides only a validated nested candidate. This
+    object alone loads and writes the outer document and preserves every
+    unknown/legacy sibling field.
+    """
+
+    def __init__(self, repository: RecoveryRepository) -> None:
+        self.repository = repository
+        self._state = None
+        self._target = None
+
+    @contextmanager
+    def atomic_host_state_transaction(self, target_identity: str):
+        if self._state is not None:
+            raise ValueError("operation_busy")
+        with self.repository.state_lock():
+            self._state = self.repository.load()
+            self._target = target_identity
+            try:
+                yield self
+            finally:
+                self._state = None
+                self._target = None
+
+    def _record(self, target_identity: str) -> dict:
+        if self._state is None or self._target != target_identity:
+            raise ValueError("operation_busy")
+        hosts = self._state.setdefault("hosts", {})
+        record = hosts.setdefault(target_identity, {})
+        generation = record.setdefault("generation", 0)
+        if type(generation) is not int or generation < 0:
+            raise ValueError("generation_conflict")
+        return record
+
+    @staticmethod
+    def activation_acceptance_receipt(target_identity: str, *, holder: str,
+                                      request_id: str, request_digest: str,
+                                      proof_digest: str) -> str:
+        body = {"target_identity": target_identity, "holder": holder,
+                "request_id": request_id, "request_digest": request_digest,
+                "proof_digest": proof_digest}
+        return "host-acceptance/" + hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def read_activation_nested(self, target_identity: str) -> dict | None:
+        record = self._record(target_identity)
+        value = record.get("image_activation")
+        if value is None:
+            from sandbox.hosting.images.activation.repository import empty_activation_state
+            value = empty_activation_state()
+            value["generation"] = record["generation"]
+        return json.loads(json.dumps(value))
+
+    def compare_and_commit_activation(self, target_identity: str, *, expected_generation: int,
+                                      candidate: dict, holder: str, request_id: str,
+                                      request_digest: str, proof_digest: str,
+                                      acceptance_receipt: str) -> AtomicHostStateEvidence:
+        from sandbox.hosting.images.activation.repository import encode_activation_state
+        record = self._record(target_identity)
+        if record["generation"] != expected_generation:
+            raise ValueError("generation_conflict")
+        safe = encode_activation_state(candidate)
+        if safe["generation"] != expected_generation:
+            raise ValueError("generation_conflict")
+        active = safe.get("active")
+        pin = active.get("proof_pin") if isinstance(active, dict) else None
+        if (not isinstance(active, dict) or active.get("holder") != holder or
+                active.get("request_id") != request_id or
+                active.get("request_digest") != request_digest or
+                not isinstance(pin, dict) or pin.get("proof_digest") != proof_digest or
+                pin.get("host_acceptance_receipt") != acceptance_receipt):
+            raise ValueError("binding_mismatch")
+        record["image_activation"] = safe
+        self.repository._write(self._state)
+        return self._accepted_evidence(holder, request_id, request_digest, proof_digest,
+                                       acceptance_receipt)
+
+    def lookup_activation_acceptance(self, target_identity: str, *, holder: str,
+                                     request_id: str, request_digest: str,
+                                     proof_digest: str) -> AtomicHostStateEvidence:
+        record = self._record(target_identity)
+        nested = record.get("image_activation") or {}
+        active = nested.get("active")
+        result = (nested.get("results") or {}).get(request_id)
+        if isinstance(result, dict) and isinstance(result.get("result"), dict):
+            result = {**result["result"], "holder": result.get("holder"),
+                      "proof_pin": result.get("proof_pin")}
+        candidate = active if isinstance(active, dict) and active.get("request_id") == request_id else result
+        if not isinstance(candidate, dict) or candidate.get("request_digest") != request_digest:
+            return self._atomic_evidence(holder, request_id, request_digest, proof_digest,
+                                         "absent", None)
+        pin = candidate.get("proof_pin") or {}
+        receipt = pin.get("host_acceptance_receipt")
+        if candidate.get("holder", holder) != holder or pin.get("proof_digest") != proof_digest \
+                or not isinstance(receipt, str):
+            return self._atomic_evidence(holder, request_id, request_digest, proof_digest,
+                                         "ambiguous", None)
+        return self._accepted_evidence(holder, request_id, request_digest, proof_digest, receipt)
+
+    def absent_activation_evidence(self, target_identity: str, *, holder: str,
+                                   request_id: str, request_digest: str,
+                                   proof_digest: str) -> AtomicHostStateEvidence:
+        existing = self.lookup_activation_acceptance(
+            target_identity, holder=holder, request_id=request_id,
+            request_digest=request_digest, proof_digest=proof_digest)
+        if existing.state == "accepted":
+            return self._atomic_evidence(holder, request_id, request_digest, proof_digest,
+                                         "ambiguous", None)
+        return self._atomic_evidence(holder, request_id, request_digest, proof_digest,
+                                     "absent", None)
+
+    @staticmethod
+    def _accepted_evidence(holder, request_id, request_digest, proof_digest, receipt):
+        return _ActivationHostStatePort._atomic_evidence(
+            holder, request_id, request_digest, proof_digest, "accepted", receipt)
+
+    @staticmethod
+    def _atomic_evidence(holder, request_id, request_digest, proof_digest, state, receipt):
+        body = {"holder": holder, "activation_request_id": request_id,
+                "activation_request_digest": request_digest, "proof_digest": proof_digest,
+                "state": state, "acceptance_receipt": receipt}
+        return AtomicHostStateEvidence(
+            **body, evidence_digest=staging_digest(
+                "sandbox.hosting.images.atomic-host-state-evidence.v1", body))
+
+    def validate_atomic_host_state_evidence(self, evidence: object) -> bool:
+        if type(evidence) is not AtomicHostStateEvidence:
+            return False
+        expected = self._atomic_evidence(
+            evidence.holder, evidence.activation_request_id,
+            evidence.activation_request_digest, evidence.proof_digest,
+            evidence.state, evidence.acceptance_receipt)
+        return expected == evidence
+
+    def validate_durable_terminal_authority(self, evidence: object) -> bool:
+        if type(evidence) is not DurableTerminalAuthorityEvidence:
+            return False
+        target = self._target
+        if target is None:
+            return False
+        record = self._record(target)
+        try:
+            from sandbox.hosting.images.activation.repository import decode_activation_state
+            nested = decode_activation_state(record.get("image_activation"))
+        except (TypeError, ValueError):
+            return False
+        terminal = next((item for item in (nested.get("results") or {}).values()
+                         if isinstance(item, dict) and isinstance(item.get("result"), dict)
+                         and item["result"].get("transaction_digest") == evidence.terminal_receipt), None)
+        if terminal is None:
+            return False
+        pin = terminal.get("proof_pin")
+        return (isinstance(pin, dict) and terminal.get("holder") == evidence.holder
+                and terminal.get("proof_digest") == evidence.proof_digest
+                and pin.get("holder") == evidence.holder
+                and pin.get("proof_digest") == evidence.proof_digest
+                and pin.get("host_acceptance_receipt") == evidence.acceptance_receipt)
+
+    def durable_terminal_authority_evidence(self, lease: object, *,
+                                            terminal_receipt: str) -> DurableTerminalAuthorityEvidence:
+        body = {"holder": lease.holder, "proof_digest": lease.proof_digest,
+                "acceptance_receipt": lease.acceptance_receipt,
+                "terminal_receipt": terminal_receipt}
+        return DurableTerminalAuthorityEvidence(
+            **body, evidence_digest=staging_digest(
+                "sandbox.hosting.images.durable-terminal-authority.v1", body))
+
+    def update_activation_nested(self, target_identity: str, expected_generation: int, update):
+        record = self._record(target_identity)
+        if record["generation"] != expected_generation:
+            raise ValueError("generation_conflict")
+        candidate = update(record.get("image_activation"))
+        from sandbox.hosting.images.activation.repository import encode_activation_state
+        safe = encode_activation_state(candidate)
+        if safe["generation"] not in {expected_generation, expected_generation + 1}:
+            raise ValueError("generation_conflict")
+        record["image_activation"] = safe
+        record["generation"] = safe["generation"]
+        self.repository._write(self._state)
+        return json.loads(json.dumps(safe))
+
+    def store_activation_recovery_provisional(self, target_identity: str,
+                                              expected_generation: int,
+                                              provisional: dict) -> None:
+        from sandbox.hosting.images.activation.repository import decode_activation_state, encode_activation_state
+        record = self._record(target_identity)
+        if record["generation"] != expected_generation:
+            raise ValueError("generation_conflict")
+        nested = decode_activation_state(record.get("image_activation"))
+        existing = nested.get("recovery_provisional")
+        if existing is not None and existing != provisional:
+            raise ValueError("operation_busy")
+        nested["recovery_provisional"] = json.loads(json.dumps(provisional))
+        record["image_activation"] = encode_activation_state(nested)
+        self.repository._write(self._state)
+
+    def commit_activation_recovery_result(self, target_identity: str, expected_generation: int,
+                                          request_id: str, request_digest: str, *,
+                                          code: str, promote: bool, close_active: bool) -> dict:
+        from sandbox.hosting.images.activation.models import ActivationResult, MAX_RESULTS, MAX_TOMBSTONES
+        from sandbox.hosting.images.activation.repository import decode_activation_state, encode_activation_state
+        record = self._record(target_identity)
+        if record["generation"] != expected_generation:
+            raise ValueError("generation_conflict")
+        nested = decode_activation_state(record.get("image_activation"))
+        existing = nested["recovery_results"].get(request_id)
+        if existing is not None:
+            if existing.get("request_digest") != request_digest:
+                raise ValueError("binding_mismatch")
+            return json.loads(json.dumps(existing))
+        from sandbox.hosting.images.activation.models import MAX_RECOVERY_RESULTS
+        if len(nested["recovery_results"]) >= MAX_RECOVERY_RESULTS:
+            raise ValueError("retention_full")
+        provisional = nested.get("recovery_provisional")
+        if not isinstance(provisional, dict) or provisional.get("request_id") != request_id \
+                or provisional.get("request_digest") != request_digest \
+                or provisional.get("authorizing") is not False:
+            raise ValueError("operation_busy")
+        active = nested.get("active")
+        activation_request_id = active.get("request_id") if isinstance(active, dict) else None
+        if not isinstance(activation_request_id, str):
+            raise ValueError("operation_busy")
+        promoted = False
+        if promote:
+            candidate = active.get("candidate_generation") if isinstance(active, dict) else None
+            if not isinstance(candidate, dict):
+                code = "effect_unknown"
+                close_active = False
+            else:
+                nested["previous"] = nested["current"]
+                nested["current"] = candidate
+                nested["generation"] = expected_generation + 1
+                record["generation"] = expected_generation + 1
+                promoted = True
+        if code in {"committed", "recovery_no_effect"}:
+            terminal = ActivationResult(
+                1, code == "committed", "success" if code == "committed" else "refused",
+                code, active["operation"], active["request_id"], active["request_digest"],
+                active["starting_generation"], record["generation"], active["transaction_digest"],
+                (active.get("candidate_generation") or {}).get("generation_digest") if promoted else None,
+                (active.get("running_observation") or {}).get("observation_digest") if promoted else None)
+            nested["results"][activation_request_id] = {
+                "result": terminal.as_mapping(), "holder": active["holder"],
+                "proof_digest": active["proof_pin"]["proof_digest"],
+                "proof_pin": json.loads(json.dumps(active["proof_pin"]))}
+            while len(nested["results"]) > MAX_RESULTS:
+                compact_id = next(iter(nested["results"]))
+                if compact_id == activation_request_id and len(nested["results"]) > 1:
+                    compact_id = next(key for key in nested["results"] if key != activation_request_id)
+                compact = nested["results"].pop(compact_id)["result"]
+                if len(nested["tombstones"]) >= MAX_TOMBSTONES:
+                    raise ValueError("retention_full")
+                nested["tombstones"][compact_id] = {
+                    "request_id": compact_id, "request_digest": compact["request_digest"],
+                    "result_class": compact["result_class"], "code": compact["code"]}
+        result = {"schema_version": 1,
+                  "ok": code == "committed",
+                  "request_id": request_id,
+                  "activation_request_id": activation_request_id,
+                  "request_digest": request_digest, "code": code,
+                  "promoted": promoted, "starting_generation": expected_generation,
+                  "resulting_generation": record["generation"]}
+        nested["recovery_results"][request_id] = result
+        nested["recovery_provisional"] = None
+        if close_active or promoted:
+            nested["active"] = None
+        record["image_activation"] = encode_activation_state(nested)
+        self.repository._write(self._state)
+        return json.loads(json.dumps(result))

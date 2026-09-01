@@ -586,6 +586,7 @@ class DurableTerminalAuthorityEvidence:
 class ProofCustodyPort:
     """Narrow Feature 051 repository capability; implementations stay private."""
 
+    def lookup(self, lease_id: str) -> StageProofActivationLease | None: raise NotImplementedError
     def prepare(self, **_binding: object) -> StageProofActivationLease: raise NotImplementedError
     def promote(self, lease: StageProofActivationLease,
                 evidence: AtomicHostStateEvidence) -> StageProofActivationLease: raise NotImplementedError

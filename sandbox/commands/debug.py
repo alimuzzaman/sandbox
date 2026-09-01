@@ -47,7 +47,8 @@ def _local_test_entry(sc, root: str, args):
 
 def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
                                     workspaces: list[str], timeout: int | None,
-                                    output_profile: str) -> list:
+                                    output_profile: str,
+                                    config_file: str | None = None) -> list:
     """Turn selected WordPress test workspaces into isolated remote leaves."""
     from sandbox.jobs.models import JobSubmission
     from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
@@ -55,7 +56,10 @@ def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
 
     identity = _resolved_project_identity(target)
     source = _source_identity(target.project_root)
-    command = ["sb", "test", "--local", "--project-dir", ".", mode]
+    command = ["sb", "test", "--local", "--project-dir", "."]
+    if config_file is not None:
+        command += ["--config-file", config_file]
+    command.append(mode)
     if extra:
         command += ["--", *extra]
     submissions = []
@@ -305,8 +309,13 @@ def cmd_test(cfg, args) -> None:
         entry = _local_test_entry(sc, pconf["root"], args)
         if not entry:
             die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
+        arguments = {"argv": argv}
+        if config_file is not None:
+            arguments["config_file"] = config_file
+        from sandbox.application.context import runtime_service
+        from sandbox.runtimes.base import OperationError, OperationRequest
         result = runtime_service(cfg).invoke(OperationRequest(project_root=pconf["root"], operation="exec",
-            label=entry.get("label", "default"), arguments={"argv": argv}))
+            label=entry.get("label", "default"), arguments=arguments))
         if isinstance(result, OperationError):
             die(result.message)
         print(result.data.get("output", ""), end="")
@@ -354,10 +363,12 @@ def cmd_test(cfg, args) -> None:
         # so the nested invocation cannot accidentally resolve the deployed
         # project's remote-first default again.
         command = ["sb", "test", "--local", "--project-dir", "."]
+        selected_config_file = None
         if getattr(args, "config_file", None):
             from sandbox.config.descriptors import explicit_primary_config
             selected = explicit_primary_config(pconf["root"], args.config_file)
-            command.extend(["--config-file", str(selected.relative_to(Path(pconf["root"])))])
+            selected_config_file = str(selected.relative_to(Path(pconf["root"])))
+            command.extend(["--config-file", selected_config_file])
         command.append(mode)
         if extra:
             command += ["--", *extra]
@@ -365,7 +376,8 @@ def cmd_test(cfg, args) -> None:
         output_profile = getattr(args, "output_profile", None) or "smart"
         if len(requested_workspaces) > 1:
             submissions = _remote_test_matrix_submissions(
-                selected_target, mode, extra, requested_workspaces, timeout, output_profile)
+                selected_target, mode, extra, requested_workspaces, timeout, output_profile,
+                selected_config_file)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
@@ -426,11 +438,27 @@ def cmd_test(cfg, args) -> None:
         die("--provision-only is only valid for integration test mode")
 
     print(f"  mode:       {mode}")
-    # Any mode other than "unit" routes into _run_tests(), which requires the
-    # provisioned suite + polyfills. Keyed off "not unit" rather than
-    # "== integration" so a new mode can never reach _run_tests() with an
-    # unprovisioned tools dict (that mismatch was the KeyError: 'polyfills').
-    if mode != "unit":
+    from sandbox.application.context import managed_native_instance_selected
+    managed = ((managed_native_instance_selected(inst, config_file=config_file)
+                if config_file is not None else managed_native_instance_selected(inst))
+               is not None)
+    if managed and getattr(args, "provision_only", False):
+        die("--provision-only is unavailable for managed-native tests; "
+            "the adapter owns its test environment")
+    # Managed-native adapters own every test environment, including integration
+    # mode, so select that execution plane before any legacy harness effects.
+    # Other non-unit modes require the provisioned suite + polyfills.
+    if managed:
+        from sandbox.core._tests import (
+            MANAGED_NATIVE_COMPOSER, MANAGED_NATIVE_PHPUNIT,
+        )
+        tools = {"phpunit": MANAGED_NATIVE_PHPUNIT,
+                 "composer": MANAGED_NATIVE_COMPOSER}
+        suite = None
+        print(f"  instance:   {inst}")
+        print(f"  phpunit:    {tools['phpunit']}")
+        print(f"  composer:   {tools['composer']}")
+    elif mode != "unit":
         info("Provisioning test harness (cached)…")
         h = _provision_test_harness(inst, pconf)
         suite, tools, config = h["suite"], h["tools"], h["config"]
@@ -447,15 +475,7 @@ def cmd_test(cfg, args) -> None:
         if getattr(args, "provision_only", False):
             return
     else:
-        from sandbox.application.context import managed_native_instance_selected
-        if managed_native_instance_selected(inst) is not None:
-            from sandbox.core._tests import (
-                MANAGED_NATIVE_COMPOSER, MANAGED_NATIVE_PHPUNIT,
-            )
-            tools = {"phpunit": MANAGED_NATIVE_PHPUNIT,
-                     "composer": MANAGED_NATIVE_COMPOSER}
-        else:
-            tools = _ensure_test_runner_tools()
+        tools = _ensure_test_runner_tools()
         suite = None
         print(f"  instance:   {inst}")
         print(f"  phpunit:    {tools['phpunit']}")
@@ -463,14 +483,28 @@ def cmd_test(cfg, args) -> None:
 
     extra = [a for a in passthrough if a != "--"]
     print()
-    if mode == "unit" and entry.get("server") == "herd":
+    if managed:
+        code = (_run_tests_unit(
+            inst, pconf["root"], tools, extra, config_file=config_file,
+        ) if config_file is not None else _run_tests_unit(
+            inst, pconf["root"], tools, extra,
+        ))
+    elif mode == "unit" and entry.get("server") == "herd":
         code = _run_tests_unit_herd(inst, pconf["root"], tools, extra)
     elif mode == "unit":
-        code = _run_tests_unit(inst, pconf["root"], tools, extra)
+        code = (_run_tests_unit(
+            inst, pconf["root"], tools, extra, config_file=config_file,
+        ) if config_file is not None else _run_tests_unit(
+            inst, pconf["root"], tools, extra,
+        ))
     elif entry.get("server") == "herd":
         code = _run_tests_herd(inst, pconf["root"], suite, tools, extra)
     else:
-        code = _run_tests(inst, pconf["root"], suite, tools, extra)
+        code = (_run_tests(
+            inst, pconf["root"], suite, tools, extra, config_file=config_file,
+        ) if config_file is not None else _run_tests(
+            inst, pconf["root"], suite, tools, extra,
+        ))
     print()
     if code == 0:
         ok("tests passed")

@@ -1100,9 +1100,12 @@ def execute_project(cfg, execution):
         "exec": "exec", "composer": "exec", "plugin_activation": "exec",
         "phpunit": "test", "durable_job": "exec",
     }[execution.entry_path]
+    arguments = {"execution": execution}
+    if execution.config_file is not None:
+        arguments["config_file"] = execution.config_file
     result = runtime_service(cfg).invoke(OperationRequest(
         execution.project_root, operation, label=execution.label,
-        arguments={"execution": execution},
+        arguments=arguments,
     ))
     if isinstance(result, OperationError):
         return ExecutionResult(False, 126, "blocked", {
@@ -1133,13 +1136,19 @@ def managed_native_project_selected(project_root: str, *, label: str = "default"
     return runtime.get("mode", "compose") == "managed_native"
 
 
-def managed_native_instance_selected(instance: str) -> tuple[str, str] | None:
+def managed_native_instance_selected(instance: str, *,
+                                     config_file: str | None = None) -> tuple[str, str] | None:
     """Return a managed instance owner, or ``None`` for legacy runtimes."""
     import sandbox_core as sc
 
     owner = sc.registry_find_instance(instance) or {}
     root, label = owner.get("root"), owner.get("label", "default")
-    if not root or not managed_native_project_selected(str(root), label=label):
+    selected = (managed_native_project_selected(
+        str(root), label=label, config_file=config_file,
+    ) if config_file is not None else managed_native_project_selected(
+        str(root), label=label,
+    )) if root else False
+    if not selected:
         return None
     return str(root), label
 

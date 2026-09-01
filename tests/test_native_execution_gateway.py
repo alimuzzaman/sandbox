@@ -60,6 +60,80 @@ class TestNativeExecutionGateway(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExecutionRequest("/project", "default", "host_shell", ("sh",), 30)
 
+    def test_explicit_config_selector_reaches_managed_runtime_without_automatic_reload(self):
+        from sandbox.application.context import execute_project, managed_native_instance_selected
+        from sandbox.runtimes.base import ExecutionRequest, OperationResult
+        import sandbox_core as sc
+
+        calls = []
+
+        class Service:
+            def invoke(self, request):
+                calls.append(request)
+                return OperationResult(True, request.operation, request.project_root,
+                                       "wordpress", {"state": "ready", "exit_code": 0})
+
+        with mock.patch.object(sc, "registry_find_instance", return_value={
+                "root": "/project", "label": "qa"}), \
+                mock.patch.object(sc, "load_project_config", return_value={
+                    "wordpressRuntime": {"mode": "managed_native"}}) as load, \
+                mock.patch("sandbox.application.context.runtime_service", return_value=Service()):
+            self.assertEqual(managed_native_instance_selected(
+                "fixture", config_file="tooling/sandbox.config.json",
+            ), ("/project", "qa"))
+            result = execute_project({}, ExecutionRequest(
+                "/project", "qa", "phpunit", ("php", "phpunit"), 30,
+                "tooling/sandbox.config.json",
+            ))
+
+        self.assertTrue(result.ok)
+        load.assert_called_once_with(
+            "/project", label="qa", config_file="tooling/sandbox.config.json",
+        )
+        self.assertEqual(calls[0].arguments["config_file"],
+                         "tooling/sandbox.config.json")
+        self.assertEqual(calls[0].arguments["execution"].config_file,
+                         "tooling/sandbox.config.json")
+
+    def test_mcp_managed_execution_preserves_explicit_config_selector(self):
+        import importlib.util
+        from pathlib import Path
+        import sys
+        from sandbox.runtimes.base import ExecutionResult
+
+        root = Path(__file__).parent.parent / "mcp/wp-server"
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        spec = importlib.util.spec_from_file_location(
+            "managed_config_wp_tools_test", root / "tools/wp.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        previous_httpx = sys.modules.get("httpx")
+        sys.modules["httpx"] = mock.Mock()
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if previous_httpx is None:
+                sys.modules.pop("httpx", None)
+            else:
+                sys.modules["httpx"] = previous_httpx
+        captured = []
+        with mock.patch("sandbox.application.context.managed_native_project_selected",
+                        return_value=True) as selected, \
+                mock.patch("sandbox.application.context.execute_project",
+                           side_effect=lambda _cfg, request: captured.append(request) or
+                           ExecutionResult(True, 0, "ready", {})):
+            result = module._managed_execution_unavailable(
+                "/project", "qa", "wordpress_cli", ("wp", "core", "version"), 60,
+                "tooling/sandbox.config.json",
+            )
+
+        self.assertTrue(result["ok"])
+        selected.assert_called_once_with(
+            "/project", label="qa", config_file="tooling/sandbox.config.json",
+        )
+        self.assertEqual(captured[0].config_file, "tooling/sandbox.config.json")
+
     def test_managed_wpcli_is_blocked_before_compose_fallback(self):
         import sandbox.core._docker as docker
         import sandbox_core as sc

@@ -50,7 +50,8 @@ def _managed_execution_unavailable(project_dir: str, label: str | None, entry_pa
         ))
         if not selected:
             return None
-        request = ExecutionRequest(str(project_dir), label or "default", entry_path, argv, timeout)
+        request = ExecutionRequest(str(project_dir), label or "default", entry_path, argv,
+                                   timeout, config_file)
         execution = execute_project({}, request)
     except Exception:
         return {"ok": False, "error": "managed execution request is invalid"}
@@ -90,7 +91,8 @@ def _resolve_test_mode(project_dir: str, label: str | None, explicit: str | None
                              explicit=explicit)
 
 
-def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None) -> dict:
+def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None,
+           config_file: str | None = None) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
@@ -99,11 +101,16 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     project_dir: the plugin project to target (its instance must already exist —
     call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.cli", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.cli",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "wordpress_cli",
-                                             ("wp", *shlex.split(command)), timeout)
+                                             ("wp", *shlex.split(command)), timeout,
+                                             config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
@@ -111,7 +118,8 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     return _wpcli(shlex.split(command), instance=inst, timeout=timeout)
 
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120, *, project_dir: str, label: str | None = None) -> dict:
+            timeout: int = 120, *, project_dir: str, label: str | None = None,
+            config_file: str | None = None) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -121,11 +129,15 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.exec")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.exec", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.exec",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "exec",
-                                             ("sh", "-c", command), timeout)
+                                             ("sh", "-c", command), timeout, config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
@@ -331,7 +343,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     }
 
 
-def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
+def wp_cli_async(command: str, *, project_dir: str, label: str | None = None,
+                 config_file: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
     (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
@@ -339,11 +352,16 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.cli", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.cli",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "durable_job",
-                                             ("wp", *shlex.split(command)), 300)
+                                             ("wp", *shlex.split(command)), 300,
+                                             config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:

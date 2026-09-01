@@ -27,6 +27,24 @@ waiver; it is not evidence of an observed RED failure.
 These are local focused and compatibility results. They are not live registered-host,
 edge, rollback, deployment, or production evidence.
 
+## Post-merge validation
+
+After merging `origin/latest` into the feature branch without a rebase or force-push:
+
+- The same focused Feature 051 and architecture set: **70 tests OK in 10.682s**.
+- The same hosting and Feature 048 compatibility set: **282 tests OK in 12.757s**.
+- The synchronized per-repository config, CLI, and runtime-mode modules:
+  **132 tests OK in 176.275s**.
+- The hostile Git environment regression for repository descriptor selection:
+  **1 test OK in 0.288s**.
+- Targeted `compileall` and `git diff --check`: **passed**.
+- Automated Sol High merge review and the repository-identity repair review: **GO**.
+
+The merge review found and repaired inherited/global Git configuration influence on
+shared-descriptor selection. Repository identity now uses a closed subprocess
+environment plus a repository-local origin lookup. These remain local source and test
+results, not remote runtime or production evidence.
+
 ## Review evidence
 
 - Automated Sol High final source review: **GO**.

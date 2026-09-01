@@ -40,7 +40,9 @@ class TargetService:
                 "explicit --local/--remote, then the project target, then one configured remote",
             )
         try:
-            config = self._config_loader(request.project_dir)
+            config = self._config_loader(
+                request.project_dir, config_file=request.config_file,
+            ) if request.config_file is not None else self._config_loader(request.project_dir)
         except Exception as exc:
             raise TargetResolutionError("invalid_project", f"could not resolve project: {exc}") from exc
         if not isinstance(config, dict) or not config.get("root"):

@@ -51,11 +51,11 @@ def _normalize_node_store(compose: dict) -> bool:
 class ComposeSchemaProvider:
     """Normalize the small, explicit Compose project descriptor."""
 
-    def resolve(self, root: Path, *, label: str | None = None) -> dict:
+    def resolve(self, root: Path, *, label: str | None = None, config_file=None) -> dict:
         if label is not None and (not isinstance(label, str) or not _SAFE_LABEL.fullmatch(label)):
             raise ValueError("compose configuration label is invalid")
-        home = config_home(root)
-        config_path = primary_config(root)
+        home = config_home(root, config_file)
+        config_path = primary_config(root, config_file)
         if config_path is None:
             raise ValueError("generic Compose project requires sandbox.config.json or sandbox.config.yml")
         document = _load_mapping(config_path)

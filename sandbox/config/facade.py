@@ -137,10 +137,11 @@ def resolve_project_config(
     legacy_loader: Callable,
     schemas: SchemaRegistry | None = None,
     root_finder: Callable | None = None,
+    config_file: str | Path | None = None,
 ) -> dict:
     """Select a schema before invoking any kind-specific normalization."""
     root = root_finder(project_dir) if root_finder else Path(project_dir).expanduser()
-    kind = discover_project_kind(root)
+    kind = discover_project_kind(root, config_file)
     registry = schemas or SchemaRegistry()
     if registry.get("wordpress") is None:
         registry.register(
@@ -152,7 +153,10 @@ def resolve_project_config(
     spec = registry.get(kind)
     if spec is None:
         raise ValueError(f"unsupported project kind: {kind}")
-    result = spec.provider.resolve(root, label=label)
+    if config_file is None:
+        result = spec.provider.resolve(root, label=label)
+    else:
+        result = spec.provider.resolve(root, label=label, config_file=config_file)
     if not isinstance(result, dict):
         raise TypeError(f"schema {kind!r} returned {type(result).__name__}, expected dict")
     result.setdefault("kind", kind)

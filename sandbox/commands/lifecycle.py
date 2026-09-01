@@ -909,6 +909,7 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     try:
         target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=project_dir, local=bool(getattr(args, "local", False)), remote=remote_name,
+            config_file=getattr(args, "config_file", None),
             workspace=workspace, required_capability="job.exec",
             # Instance lifecycle never infers a remote: `sb ensure`/`status`/
             # `logs` with no selector boot and inspect the LOCAL instance, as
@@ -948,6 +949,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     # intentionally different: it creates the requested reusable inner label,
     # so retain its explicit `--label` + `--create` contract.
     command = [sb, action, "--local", "--project-dir", target_path]
+    if getattr(args, "config_file", None):
+        from sandbox.config.descriptors import explicit_primary_config
+        selected = explicit_primary_config(target.project_root, args.config_file)
+        command.extend([
+            "--config-file", str(selected.relative_to(Path(target.project_root))),
+        ])
     if action == "logs":
         command.extend(["--lines", str(_log_tail(args))])
         if getattr(args, "since", None):

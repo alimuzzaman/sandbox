@@ -12,6 +12,8 @@ for a directory (highest priority last):
     ~/.config/sandbox/config.json               (user-global, machine-wide)
     sandbox.config.json | sandbox.config.yml   (canonical, native)
       + sandbox.config.override.{json,yml}      (gitignored, deep-merged on top)
+    $SANDBOX_HOME/projects/<repo-key>/sandbox.config.*
+                                                (fallback when absent in-tree)
     .wp-env.json                                (import/fallback only)
 
 The user-global layer sits UNDER the project: the project wins scalar
@@ -596,7 +598,8 @@ def _from_wp_env(raw: dict) -> dict:
     }
 
 
-def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
+def _load_project_config_legacy(project_dir, label: str | None = None,
+                                config_file: str | Path | None = None) -> dict:
     """Resolve the effective config for a project directory.
 
     `label`: when given (and not "default"), also layers
@@ -614,8 +617,9 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     """
     root = find_project_root(project_dir)
 
-    config_home = _project_config_home(root)
-    native = _first_existing(config_home, CONFIG_BASENAMES)
+    from sandbox.config.descriptors import config_home as selected_config_home, primary_config
+    config_home = selected_config_home(root, config_file)
+    native = primary_config(root, config_file)
     if native:
         native_doc = _load_doc(native)
         source = native.name
@@ -713,7 +717,8 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     return merged
 
 
-def load_project_config(project_dir, label: str | None = None) -> dict:
+def load_project_config(project_dir, label: str | None = None,
+                        config_file: str | Path | None = None) -> dict:
     """Resolve through the kind-first schema facade while preserving WordPress output."""
     from sandbox.config.facade import resolve_project_config
 
@@ -722,6 +727,7 @@ def load_project_config(project_dir, label: str | None = None) -> dict:
         label=label,
         legacy_loader=_load_project_config_legacy,
         root_finder=find_project_root,
+        config_file=config_file,
     )
 
 

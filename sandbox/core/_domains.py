@@ -843,7 +843,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     auth = ""
     if activation_route is not None:
         auth = f'''    forward_auth host.docker.internal:8766 {{
-        uri /v1/activate
+        uri /v1/activate?
         header_up Authorization "Bearer {activation_route.token}"
         header_up X-Sandbox-Route-ID "{activation_route.route_id}"
     }}

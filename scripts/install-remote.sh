@@ -242,8 +242,9 @@ python3 - "$STAGING_HELPER_ROOT/staging_helper.py" <<'PY'
 import os
 import stat
 import sys
+owner_uid = os.geteuid()
 info = os.lstat(sys.argv[1])
-if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
+if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid \
         or stat.S_IMODE(info.st_mode) != 0o500 or info.st_nlink != 1:
     raise SystemExit("installed staging helper artifact identity is unsafe")
 PY

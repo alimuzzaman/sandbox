@@ -93,6 +93,16 @@ divergence is never adopted or overwritten automatically; `sync resolve
 --resolution keep-local --confirm` clears the conflict gate and leaves sync off
 so the next explicit request repeats normal ownership checks.
 
+Generation-aware jobs pin the newest accepted generation before durable launch.
+If a newer generation is pending, a stale-generation request is refused before
+job acceptance and must wait for that generation to become accepted. Parallel-
+safe jobs may share only the same accepted `managed_read_only` projection. A job
+that needs source writes must request `isolated_copy`, declare retained artifact
+paths, and receives no authority to change the managed generation. Job acceptance
+and status expose only the relationship ID, generation ID, and source-access
+policy. Out-of-band source change records bounded divergence and blocks another
+projection until the explicit sync resolution boundary runs.
+
 ## 1. What this is
 
 `./sb remote` + `./sb deploy` let you run a sandbox instance on a VPS you already own

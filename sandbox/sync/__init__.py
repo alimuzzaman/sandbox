@@ -25,6 +25,14 @@ from .models import (
     validate_sync_envelope,
 )
 from .policy import CredentialDetected, SyncPolicy
+from .projection import (
+    ProjectionDecision,
+    ProjectionRefused,
+    SyncJobGateway,
+    authorize_projection,
+    detect_divergence,
+    validate_isolated_outputs,
+)
 from .repository import (
     RelationshipConflict,
     RequestDigestConflict,
@@ -41,6 +49,9 @@ __all__ = [
     "ManifestLimitExceeded",
     "Participant",
     "PinnedJob",
+    "ProjectionDecision",
+    "ProjectionRefused",
+    "SyncJobGateway",
     "RelationshipConflict",
     "RequestDigestConflict",
     "RelationshipCoordinator",
@@ -51,7 +62,10 @@ __all__ = [
     "SynchronizationRelationship",
     "UnstableCapture",
     "capture_manifest",
+    "authorize_projection",
+    "detect_divergence",
     "failure_envelope",
     "success_envelope",
     "validate_sync_envelope",
+    "validate_isolated_outputs",
 ]

@@ -73,11 +73,15 @@ acceptance envelope. `queue.position` follows durable acceptance order, while
 `queue.blocking_jobs` contains bounded opaque job IDs and workspace labels.
 Terminal or expired leases are reaped on the next admission.
 
-Synchronized-generation job execution is not yet a supported runtime path.
-Submissions carrying synchronization metadata fail closed unless an authoritative
-sync gateway is composed; the CLI does not accept hidden relationship or source
-policy claims from callers. Jobs without sync fields keep the existing
-deploy-before-job path unchanged.
+Synchronized-generation job execution remains fail closed unless an authoritative
+sync gateway and controller adapter are composed. The local policy gate requires
+the newest accepted generation, rejects recorded divergence, exposes managed source
+as read-only, and allows source writes only in an isolated copy with declared
+artifact output. The remote transport accepts this path only from an injected
+generation authority and requires an exact generation/projection receipt; it never
+falls back to deploy-before-job for a synchronized request. The public CLI does not
+accept hidden relationship or source-policy claims from callers. Jobs without sync
+fields keep the existing deploy-before-job path unchanged.
 
 Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test

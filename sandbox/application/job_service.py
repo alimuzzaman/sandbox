@@ -366,6 +366,12 @@ class JobService:
             queue = self.scheduler.queue_details(snapshot)
             snapshot["queue"] = queue
             snapshot["queue_position"] = queue["position"]
+        if snapshot.get("sync_relationship_id") is not None:
+            snapshot["generation"] = {
+                "relationship_id": snapshot["sync_relationship_id"],
+                "generation_id": snapshot.get("sync_generation_id"),
+                "source_access": snapshot.get("source_access"),
+            }
         return snapshot
 
     def _finalize_terminal_workspace(self, job_id: str) -> dict:

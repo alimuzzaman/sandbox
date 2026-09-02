@@ -102,7 +102,7 @@ does not transfer edits or commits; stop leaves pending state visible.
 
 - [X] T030 [US2] Implement mode transitions, explicit checkpoint requests, stop behavior, and pending-state preservation in `sandbox/sync/service.py`.
 - [X] T031 [US2] Implement bounded live trigger/debounce ownership with one in-flight generation per relationship in `sandbox/sync/coordinator.py`.
-- [ ] T032 [US2] Add commit-trigger integration that never blocks, amends, creates, or pushes commits in `sandbox/sync/service.py` and the existing Git event seam.
+- [X] T032 [US2] Add commit-trigger integration that never blocks, amends, creates, or pushes commits in `sandbox/sync/service.py` and the existing Git event seam.
 - [X] T033 [US2] Register `sync start`, `sync stop`, and `sync once --checkpoint` in `sandbox/commands/sync.py` and expose the same operations through MCP.
 - [X] T034 [US2] Add documented off/checkpoint/live behavior and apply reset semantics to `docs/remote-hosting.md` and the relevant CLI guide.
 
@@ -146,7 +146,7 @@ job waits for B, and shared writes cannot alter A or a peer.
 
 - [ ] T043 [P] [US4] Add generation pin, newest-pending queue, parallel-safe sharing, and release tests in `tests/test_sync_state.py`.
 - [X] T044 [P] [US4] Add job submission/acceptance generation fields and read-only source-policy tests in `tests/test_remote_job_transport.py`.
-- [ ] T045 [P] [US4] Add shared-write rejection, isolated-copy output, and out-of-band divergence tests in `tests/test_sync_transport.py`.
+- [X] T045 [P] [US4] Add shared-write rejection, isolated-copy output, and out-of-band divergence tests in `tests/test_sync_transport.py`.
 
 ### Implementation for User Story 4
 
@@ -154,9 +154,9 @@ job waits for B, and shared writes cannot alter A or a peer.
 - [ ] T047 [US4] Add generation-aware workspace lease and newest-pending queue rules in `sandbox/jobs/scheduler.py` and `sandbox/application/job_service.py`.
 - [ ] T048 [US4] Integrate generation acceptance before remote job launch in `sandbox/transports/remote_jobs.py` without changing deploy-only callers.
 - [ ] T049 [US4] Add read-only managed-source projection and explicit isolated-copy policy to remote job execution preparation in `sandbox/transports/remote_jobs.py`.
-- [ ] T050 [US4] Add divergence detection, explicit resolution gating, and artifact-only isolated output handling in `sandbox/sync/projection.py`.
-- [ ] T051 [US4] Add generation fields and source-access policy to CLI/MCP job status and acceptance envelopes in `sandbox/sync/models.py` and `mcp/wp-server/tools/sync.py`.
-- [ ] T052 [US4] Document job generation pinning, source-write rejection, and isolated output in `docs/remote-hosting.md` and the job guide.
+- [X] T050 [US4] Add divergence detection, explicit resolution gating, and artifact-only isolated output handling in `sandbox/sync/projection.py`.
+- [X] T051 [US4] Add generation fields and source-access policy to CLI/MCP job status and acceptance envelopes in `sandbox/sync/models.py` and `mcp/wp-server/tools/sync.py`.
+- [X] T052 [US4] Document job generation pinning, source-write rejection, and isolated output in `docs/remote-hosting.md` and the job guide.
 
 **Checkpoint**: User Story 4 is complete only after disposable remote job
 acceptance verifies generation identity, queueing, read-only source, and
@@ -173,15 +173,15 @@ exercise each negative outcome without false acceptance or protected output.
 ### Tests for User Story 5
 
 - [ ] T053 [P] [US5] Add interruption, lost-response replay, retry-bound, and stop-during-transfer tests in `tests/test_sync_state.py`.
-- [ ] T054 [P] [US5] Add credential-refusal-before-mutation and remote-divergence tests in `tests/test_sync_transport.py`.
+- [X] T054 [P] [US5] Add credential-refusal-before-mutation and remote-divergence tests in `tests/test_sync_transport.py`.
 - [X] T055 [P] [US5] Add CLI/MCP status-field equivalence and redaction tests in `tests/test_sync_mcp.py`.
 
 ### Implementation for User Story 5
 
-- [ ] T056 [US5] Implement bounded reconciliation of accepted/pending/refused/unknown generations in `sandbox/sync/service.py` and `sandbox/sync/repository.py`.
+- [X] T056 [US5] Implement bounded reconciliation of accepted/pending/refused/unknown generations in `sandbox/sync/service.py` and `sandbox/sync/repository.py`.
 - [X] T057 [US5] Implement explicit divergence resolution command and confirmation boundary in `sandbox/commands/sync.py` and `sandbox/application/sync_service.py`.
 - [X] T058 [US5] Add typed recovery and unknown-acknowledgment envelopes to `sandbox/transports/remote_sync.py`.
-- [ ] T059 [US5] Add redaction and sensitive-path/process-argument assertions at every public sync and job boundary in `sandbox/services/redaction.py` and `sandbox/sync/models.py`.
+- [X] T059 [US5] Add redaction and sensitive-path/process-argument assertions at every public sync and job boundary in `sandbox/services/redaction.py` and `sandbox/sync/models.py`.
 - [X] T060 [US5] Add bounded metrics for aggregate counts/timestamps/bytes without source contents or filenames in `sandbox/sync/repository.py`.
 - [ ] T061 [US5] Run the full recovery, credential, divergence, parity, and cleanup acceptance in `specs/033-agent-aware-remote-sync/quickstart.md`.
 
@@ -194,8 +194,8 @@ result is explicit and no failed or refused generation is reported current.
 closure without claiming unverified remote behavior.
 
 - [X] T062 [P] Update `README.md`, `CLAUDE.md`, `AGENTS.md`, and `docs/remote-hosting.md` with the final CLI/MCP sync contract and safety boundaries.
-- [ ] T063 [P] Add command/MCP manifest coverage and package import checks in `tests/test_sync_cli.py` and `tests/test_mcp_composition.py`.
-- [ ] T064 [P] Add regression tests proving existing deploy, host apply, and off-mode job paths remain unchanged in `tests/test_remote.py`, `tests/test_remote_job_transport.py`, and `tests/test_cli.py`.
+- [X] T063 [P] Add command/MCP manifest coverage and package import checks in `tests/test_sync_cli.py` and `tests/test_mcp_composition.py`.
+- [X] T064 [P] Add regression tests proving existing deploy, host apply, and off-mode job paths remain unchanged in `tests/test_remote.py`, `tests/test_remote_job_transport.py`, and `tests/test_cli.py`.
 - [X] T065 Run focused sync tests, relevant existing remote/job tests, and `git diff --check` with bounded output.
 - [ ] T066 Run the disposable remote quickstart with finite timeouts and preserve job IDs, generation IDs, request IDs, timings, and cleanup evidence in `specs/033-agent-aware-remote-sync/`.
 - [ ] T067 Review the `fb17bb5c05c60ef78ce1e33e7a25685b` feedback record against the live evidence and mark it `verified` only if all stated success criteria pass; otherwise record the exact blocked condition.

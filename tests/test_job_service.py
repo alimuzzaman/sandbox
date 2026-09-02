@@ -9,6 +9,9 @@ from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
+from sandbox.sync.models import SynchronizationRelationship
+from sandbox.sync.projection import ProjectionRefused, SyncJobGateway
+from sandbox.sync.repository import SyncRepository
 
 
 class JobServiceTests(unittest.TestCase):
@@ -30,6 +33,97 @@ class JobServiceTests(unittest.TestCase):
                 service.submit(item)
             self.assertEqual(repository.list(), [])
             repository.close()
+
+    def test_synchronized_submission_pins_accepted_generation_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="request",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1, commit="1" * 40,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            projected = Path(temp) / "generation"
+            projected.mkdir()
+            gateway = SyncJobGateway(sync, materialize=lambda decision, _submission: {
+                "project_root": str(projected),
+                "source_identity": "sha256:" + "a" * 64,
+            })
+            launched = []
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launched.append, sync_gateway=gateway,
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=generation.generation_id,
+                source_access="managed_read_only",
+                parallel_safe=True,
+            ))
+            row = jobs.get(accepted["job_id"])
+            self.assertEqual(row["project_root"], str(projected))
+            self.assertEqual(accepted["generation"], {
+                "relationship_id": "relationship",
+                "generation_id": generation.generation_id,
+                "source_access": "managed_read_only",
+            })
+            self.assertEqual(service.get(accepted["job_id"], reconcile=False)["generation"],
+                             accepted["generation"])
+            self.assertEqual(len(launched), 1)
+            jobs.close()
+
+    def test_newest_pending_generation_blocks_stale_job_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="request",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: self.fail("pending generation must not launch"),
+                sync_gateway=SyncJobGateway(
+                    sync, materialize=lambda *_args: self.fail("must not materialize")),
+            )
+            with self.assertRaisesRegex(ProjectionRefused, "newest_generation_required"):
+                service.submit(JobSubmission(
+                    "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                    SourceIdentity("caller"), sync_relationship_id="relationship",
+                    sync_generation_id=generation.generation_id,
+                ))
+            self.assertEqual(jobs.list(), [])
+            jobs.close()
 
     def test_default_launcher_uses_package_root_when_cli_was_called_by_absolute_path(self):
         with tempfile.TemporaryDirectory() as temp, \

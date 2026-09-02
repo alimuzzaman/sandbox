@@ -3,6 +3,7 @@ import hashlib
 import json
 import subprocess
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -17,6 +18,40 @@ from sandbox.transports.remote_jobs import (
 
 
 class RemoteJobTransportTests(unittest.TestCase):
+    def test_deploy_only_submission_ignores_generation_authority(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda _remote, _root: {
+                "target_path": "/srv/project", "identity": "sha256:id",
+            },
+            ssh_run=lambda _remote, command, **_kwargs: SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "ok": True, "status": "accepted", "job_id": "j_" + "a" * 32,
+                    "kind": "test", "execution_policy": {
+                        "profile": "exec", "deadline_seconds": 60,
+                        "deadline_source": "explicit", "deadline_reminder": None,
+                        "stall_seconds": 300, "cancel_grace_seconds": 20,
+                        "cancel_on_stall": False, "cleanup_policy": "retain",
+                        "provenance": {},
+                    },
+                }), stderr="",
+            ),
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": ["job.exec", "job.execution-policy.v1"],
+            },
+            sync_submit=lambda *_args: calls.append("sync"),
+        )
+        with patch.object(
+                transport, "_prepare_workspace", return_value="/srv/project-unit"):
+            result = transport.submit(JobSubmission(
+                "test", "/project", "project:remote", "remote", "unit",
+                ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+            ))
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [])
+
     def test_synchronized_submission_fails_closed_without_runtime_authority(self):
         calls = []
         transport = RemoteJobTransport(
@@ -37,6 +72,110 @@ class RemoteJobTransportTests(unittest.TestCase):
                 RemoteJobTransportError, "synchronized job execution is unavailable"):
             transport.submit(submission)
         self.assertEqual(calls, [])
+
+    def test_synchronized_submission_uses_generation_authority_without_deploy(self):
+        calls = []
+
+        def sync_submit(_remote, submission):
+            calls.append((submission.sync_generation_id, submission.source_access))
+            return {
+                "ok": True, "status": "accepted", "job_id": "j_" + "a" * 32,
+                "generation": {
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                },
+                "projection": {
+                    "read_only": True, "isolated": False,
+                    "artifact_only_output": False,
+                },
+            }
+
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("deploy-only source must not run"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("free-form SSH must not run"),
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": [
+                    "job.exec", "job.execution-policy.v1", "job.sync-generation.v1",
+                ],
+            },
+            sync_submit=sync_submit,
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+            sync_relationship_id="rel_fixture", sync_generation_id="gen_fixture",
+            source_access="managed_read_only",
+        )
+        accepted = transport.submit(submission)
+        self.assertEqual(calls, [("gen_fixture", "managed_read_only")])
+        self.assertEqual(accepted["generation"]["generation_id"], "gen_fixture")
+
+    def test_synchronized_submission_rejects_missing_projection_proof(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("deploy must not run"),
+            ssh_run=lambda *_args, **_kwargs: None,
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": [
+                    "job.exec", "job.execution-policy.v1", "job.sync-generation.v1",
+                ],
+            },
+            sync_submit=lambda _remote, submission: {
+                "ok": True, "status": "accepted", "job_id": "j_" + "a" * 32,
+                "generation": {
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                },
+            },
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+            sync_relationship_id="rel_fixture", sync_generation_id="gen_fixture",
+        )
+        with self.assertRaisesRegex(
+                RemoteJobTransportError, "generation-pinned job acceptance is invalid"):
+            transport.submit(submission)
+
+    def test_synchronized_acceptance_omits_paths_arguments_and_private_values(self):
+        private = "sync-job-private-fixture"
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("deploy must not run"),
+            ssh_run=lambda *_args, **_kwargs: None,
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": [
+                    "job.exec", "job.execution-policy.v1", "job.sync-generation.v1",
+                ],
+            },
+            sync_submit=lambda _remote, submission: {
+                "ok": True, "status": "accepted", "job_id": "j_" + "a" * 32,
+                "generation": {
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                },
+                "projection": {
+                    "read_only": True, "isolated": False,
+                    "artifact_only_output": False,
+                },
+                "project_root": "/private/controller/source",
+                "argv": ["tool", "--token", private],
+                "diagnostic": private,
+            },
+        )
+        result = transport.submit(JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+            sync_relationship_id="rel_fixture", sync_generation_id="gen_fixture",
+        ))
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn(private, serialized)
+        self.assertNotIn("project_root", result)
+        self.assertNotIn("argv", result)
     def test_job_deadline_is_forwarded_to_deploy_push_when_supported(self):
         observed = {}
 

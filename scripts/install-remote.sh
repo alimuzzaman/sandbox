@@ -260,6 +260,8 @@ python3 - "$STAGING_HELPER_ROOT/manifest.json" "$STAGING_HELPER_DIGEST" "$STAGIN
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import sys
 import tempfile
 
@@ -274,11 +276,43 @@ payload = {
 encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 if path.exists():
     try:
+        info = path.lstat()
         existing = path.read_bytes()
-    except OSError as exc:
-        raise SystemExit(f"could not read installed staging helper manifest: {exc}")
-    if existing != encoded:
+        current = json.loads(existing)
+    except (OSError, ValueError, TypeError):
         raise SystemExit("installed staging helper manifest mismatch")
+    if (path.is_symlink() or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1 or not isinstance(current, dict)
+            or set(current) != set(payload)
+            or current.get("schema_version") != payload["schema_version"]
+            or current.get("artifact_digest") != payload["artifact_digest"]
+            or current.get("entry") != payload["entry"]
+            or current.get("capability_revision") != payload["capability_revision"]
+            or re.fullmatch(r"[0-9a-f]{40}", str(current.get("runtime_revision", ""))) is None):
+        raise SystemExit("installed staging helper manifest mismatch")
+    if existing == encoded:
+        raise SystemExit(0)
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-update.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY"))
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     raise SystemExit(0)
 fd, temporary = tempfile.mkstemp(prefix=".manifest.", dir=path.parent)
 try:
@@ -307,6 +341,8 @@ python3 - "$STAGING_HELPER_ROOT/manifest-v2.json" "$STAGING_HELPER_DIGEST" "$STA
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import sys
 import tempfile
 
@@ -321,11 +357,43 @@ payload = {
 encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 if path.exists():
     try:
+        info = path.lstat()
         existing = path.read_bytes()
-    except OSError as exc:
-        raise SystemExit(f"could not read installed v2 staging helper manifest: {exc}")
-    if existing != encoded:
+        current = json.loads(existing)
+    except (OSError, ValueError, TypeError):
         raise SystemExit("installed v2 staging helper manifest mismatch")
+    if (path.is_symlink() or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1 or not isinstance(current, dict)
+            or set(current) != set(payload)
+            or current.get("schema_version") != payload["schema_version"]
+            or current.get("artifact_digest") != payload["artifact_digest"]
+            or current.get("entry") != payload["entry"]
+            or current.get("capability_revision") != payload["capability_revision"]
+            or re.fullmatch(r"[0-9a-f]{40}", str(current.get("runtime_revision", ""))) is None):
+        raise SystemExit("installed v2 staging helper manifest mismatch")
+    if existing == encoded:
+        raise SystemExit(0)
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-update.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY"))
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     raise SystemExit(0)
 fd, temporary = tempfile.mkstemp(prefix=".manifest-v2.", dir=path.parent)
 try:

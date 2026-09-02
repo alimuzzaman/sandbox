@@ -1156,7 +1156,7 @@ those values.
 
 The broker first takes one safe source snapshot: its opaque revision and the one-use lease
 bytes come from that same snapshot, and consume never reopens the source. The transport then
-opens the root-owned, mode-constrained helper directories, artifact, and manifest without
+opens the owner-only, mode-constrained helper directories, artifact, and manifest without
 following symlinks. It hashes and executes the same already-open artifact inode through
 `/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
 helper or manifest evidence is never overwritten when it disagrees. The configured

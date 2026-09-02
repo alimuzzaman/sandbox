@@ -343,6 +343,7 @@ class TestValidation(unittest.TestCase):
         self.assertIn("index > len(home_parts)", script)
         self.assertIn("info.st_uid != owner_uid", script)
         self.assertNotIn("info.st_uid != 0", script)
+        self.assertIn('STAGING_RUNTIME_REVISION="${SANDBOX_RUNTIME_REVISION:-}"', script)
 
     def test_remote_install_upgrades_cloudflared_for_token_file_connectors(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()

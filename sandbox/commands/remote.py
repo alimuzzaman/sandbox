@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,30 @@ class RemoteRuntimeSourceTimeout(RuntimeError):
     """The bounded runtime-source package or upload did not finish."""
 
     code = "remote_runtime_source_timeout"
+
+
+def _local_git_revision() -> str:
+    """Resolve the controller checkout SHA before a remote bootstrap.
+
+    Runtime source archives intentionally exclude ``.git``. Pass the exact
+    controller identity to the bootstrap so helper manifests remain bound to
+    the uploaded source instead of assuming the remote archive is a checkout.
+    """
+    clean_env = {key: value for key, value in os.environ.items()
+                 if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"),
+            capture_output=True, text=True, timeout=10, check=False,
+            env=clean_env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not resolve the local Sandbox revision") from exc
+    raw = result.stdout
+    revision = raw.decode(errors="replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError("local Sandbox revision is unavailable or invalid")
+    return revision
 
 
 def _provision_log_root(name: str) -> Path:
@@ -668,6 +693,7 @@ def _cmd_provision(args, as_json: bool) -> None:
         upload_timeout = _runtime_source_upload_timeout_arg(args)
     except ValueError as exc:
         die(str(exc))
+    source_revision = _local_git_revision()
     journal = _new_provision_log(name, control_transport)
     try:
         _record_provision_event(journal, "runtime_staging")
@@ -679,7 +705,8 @@ def _cmd_provision(args, as_json: bool) -> None:
             f"{sr.redact_ssh_connection(str(e), entry)}")
     cmd = (
         f"echo {encoded} | base64 -d | "
-        f"SANDBOX_CONTROL_TRANSPORT={control_transport} bash -s"
+        f"SANDBOX_CONTROL_TRANSPORT={shlex.quote(control_transport)} "
+        f"SANDBOX_RUNTIME_REVISION={shlex.quote(source_revision)} bash -s"
     )
     try:
         _record_provision_event(journal, "bootstrap_running")

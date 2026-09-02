@@ -248,7 +248,14 @@ if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid !
         or stat.S_IMODE(info.st_mode) != 0o500 or info.st_nlink != 1:
     raise SystemExit("installed staging helper artifact identity is unsafe")
 PY
-STAGING_RUNTIME_REVISION="$(git -C "$SANDBOX_HOME/sb-src" rev-parse HEAD)"
+STAGING_RUNTIME_REVISION="${SANDBOX_RUNTIME_REVISION:-}"
+if [[ -z "$STAGING_RUNTIME_REVISION" && -d "$SANDBOX_HOME/sb-src/.git" ]]; then
+    STAGING_RUNTIME_REVISION="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        -u GIT_PREFIX git -C "$SANDBOX_HOME/sb-src" rev-parse --verify HEAD 2>/dev/null || true)"
+fi
+if [[ ! "$STAGING_RUNTIME_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    fail "Sandbox runtime revision is unavailable or invalid"
+fi
 python3 - "$STAGING_HELPER_ROOT/manifest.json" "$STAGING_HELPER_DIGEST" "$STAGING_RUNTIME_REVISION" <<'PY'
 import json
 import os

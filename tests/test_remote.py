@@ -1833,7 +1833,8 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control = "https"
                 args.control_host = "sandbox.example.com"
                 args.confirm = True
-                with patch("subprocess.run", return_value=_completed(returncode=0)), \
+                with patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
+                     patch("subprocess.run", return_value=_completed(returncode=0)), \
                      patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "configure_https_proxy"), \
                      patch.object(sr, "start_remote_mcp_server"), \
@@ -1863,7 +1864,8 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control = "tailscale"
                 args.control_host = None
                 args.confirm = True
-                with patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
+                with patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
+                     patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
                      patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
                      patch.object(sr, "start_remote_mcp_server"), \
@@ -1871,6 +1873,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                     remote_cmd._cmd_provision(args, as_json=True)
                 provision_ssh_cmd = mock_run.call_args_list[2][0][0][-1]
                 self.assertIn("SANDBOX_CONTROL_TRANSPORT=tailscale", provision_ssh_cmd)
+                self.assertIn("SANDBOX_RUNTIME_REVISION=" + "a" * 40, provision_ssh_cmd)
                 result = json.loads(mock_print.call_args[0][0])
                 self.assertEqual(result["control_transport"], "tailscale")
                 self.assertEqual(result["control_url"], "http://100.64.1.2:9174")
@@ -1914,6 +1917,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                                              control_host="sandbox.example.com", confirm=True,
                                              upload_timeout=611)
                 with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
                      patch.object(remote_cmd, "_upload_runtime_source",
                                   side_effect=RuntimeError("token=private-value staging failed")) as upload:
                     with self.assertRaises(SystemExit):

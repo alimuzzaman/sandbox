@@ -202,7 +202,7 @@ workspace, and returns one coherent daemon observation. Feature 050 emits a
 secret-free `StagedImageProof` and stops.
 
 The installed helper is content-addressed and rehashed on every install. Installer and
-transport require root-owned, non-symlink, mode-constrained directories, artifact, and
+transport require provisioning-owner-owned, non-symlink, mode-constrained directories, artifact, and
 manifest. Launch opens those components no-follow, hashes the artifact descriptor, and
 executes that same inode through `/proc/self/fd`; the closed manifest is checked in the same
 launch boundary. The GHCR adapter atomically derives the configured opaque revision and

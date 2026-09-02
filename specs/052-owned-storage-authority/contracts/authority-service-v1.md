@@ -1,12 +1,20 @@
 # Contract: Owned Storage Authority Service v1
 
+> **Draft and NOT READY.** The lifecycle transaction dependency is blocked on
+> the immutable Feature 051 public-port boundary. See
+> [../analysis.md](../analysis.md). Do not implement this contract.
+
 ## Status and adoption gate
 
 This contract defines a future implementation boundary. It does not install,
 enable, qualify, deploy, or migrate a service. Until an exact clean revision
-passes the live Linux matrix and independent human review, capability is
-`implemented_unproven`, `adoptable=false`, and mutation policy remains
-`legacy`.
+passes the live Linux matrix and protected review, capability is
+`implemented_unproven` or fail-closed and mutation policy remains `legacy`.
+An exact fixture-validation promotion plus active binding may open `future`
+only for the bound disposable fixture while tier remains
+`implemented_unproven`/non-adoptable. This validation authority has no
+qualification ancestry. Support outside that fixture remains unavailable until
+its post-promotion ordinary journey and protected finalization complete.
 
 Normative missing, extra, malformed, stale, contradictory, unbounded, or
 unverifiable data is a refusal or indeterminate result. It is never success.
@@ -21,13 +29,16 @@ system identity. It owns:
 - canonical operation/replay state;
 - physical immutable-generation publication and current selection;
 - CI materialization roots, writable-interior leases, and physical cleanup;
-- exact object identity, intent/outcome, and recovery evidence.
+- exact object identity, intent/outcome, and recovery evidence;
+- one internal non-authorizing lifecycle adoption binding in `prepared`,
+  `active`, or `revoked` phase.
 
 It does not own source-screening policy, job success, cleanup-policy selection,
 workspace identity policy, retention policy, resource-pressure policy, remote
 selection, resolver/DNS/ingress/network state, container lifecycle, credentials,
-packages, or general host mutation. Existing application services own those
-decisions and supply typed projections.
+packages, review, promotion, revocation, capability support policy, or general
+host mutation. Existing application services own those decisions and supply
+typed projections.
 
 The service accepts no arbitrary path, command, argv, environment, callback,
 module name, unit name, UID/GID, socket address, hostname/IP, resolver record,
@@ -44,7 +55,9 @@ install fixed runtime assets and static system identity (separate approval)
   -> observe exact service, policy-controller, mount-controller, socket, root, database, and filesystem mode
   -> reconcile incomplete operations and quarantines
   -> publish read-only capability/status
-  -> open normal mutation admission only when support is proven and policy permits
+  -> prepare one non-authorizing adoption binding on protected lifecycle request
+  -> activate it only after exact committed lifecycle promotion replay
+  -> open normal mutation admission only when promotion, active binding, and policy agree
   -> or open one bounded exact-fixture proof admission under separate approval
   -> close admission on stop, drift, expiry, repository/root error, or revision skew
   -> drain bounded operations
@@ -100,6 +113,9 @@ Every mutating request includes exactly:
     "caller_identity_digest": "sha256:...",
     "application_policy_digest": "sha256:...",
     "policy_generation": 7,
+    "promotion_id": "opaque-or-null",
+    "authority_binding_id": "opaque-or-null",
+    "binding_generation": 3,
     "expires_at": "2026-08-31T12:00:00Z"
   },
   "qualification": null,
@@ -115,13 +131,33 @@ must match its sealed inherited admission and cannot come from public input.
 
 The authority validates the authenticated controller connection/epoch/sequence,
 one-operation authorization identity, kernel peer, registered project/remote scope, operation
-permission, durable future policy or exact qualification admission, canonical
+permission, durable future policy plus exact current lifecycle promotion and
+active adoption binding, or exact qualification admission, canonical
 digest, expiry, and operation-specific evidence before mutation. Possession of
 any ID or digest is not authorization.
 
+The shared normal-admission predicate is:
+
+```text
+future policy
++ qualification:null
++ exact active authority binding
++ exact current promotion/scope/revisions
++ (
+     supported + proven + adoptable + acceptance complete
+     OR validation_pending + implemented_unproven + non-adoptable
+        + acceptance pending_ordinary + exact disposable fixture
+   )
+```
+
+The validation branch authorizes no other project, fixture, or support claim.
+Every normal `publish`, `materialize`, reference, and cleanup admission uses
+this predicate; finalization alone may change it to the supported branch.
+
 ## Proof-candidate admission
 
-Normal unproven mutation is refused. The only exception is a sealed,
+Unproven mutation outside the exact validation branch above is refused. The
+separate qualification exception is a sealed,
 short-lived qualification admission minted through the separately authorized
 supported lifecycle for one exact clean revision, installed service revision,
 authenticated controller, registered disposable remote/project/fixture,
@@ -137,14 +173,31 @@ Expiry, budget exhaustion, drift, conflict, or incomplete cleanup closes the
 admission and rejects the evidence candidate. Independent human review remains
 the only promotion authority.
 
-The separately protected `remote service owned-storage-review` lifecycle may
-submit one exact `review` operation through the same authenticated controller.
-Its input is the protected operator-authorization digest, review decision,
-closed evidence candidate/digest, exact revisions/scope, request identity, and
-freshness only. The authority rechecks those bindings and atomically persists
-the review decision, promotion/revocation receipt, and capability projection as
-defined by `capability-evidence-v1.md`. It cannot invent a review or accept this
-operation from ordinary project CLI/MCP schemas.
+## Adoption-binding handshake
+
+The authority exposes no `review`, `promote`, or `revoke` storage operation.
+The protected remote lifecycle is the sole semantic owner. Through the fixed
+authenticated controller it may request only this internal enforcement
+handshake:
+
+1. `prepare_adoption_binding` stores exact remote/project/platform/fixture,
+   candidate/digest, preallocated review-decision/promotion/binding IDs and
+   expected binding digest, source/service/controller/
+   contract revisions, lifecycle request/digest/generation, and expiry as
+   `prepared`. It grants no policy or mutation authority.
+2. `activate_adoption_binding` requires exact replay plus byte equality between
+   the committed lifecycle promotion receipt and every preallocated field. It changes only the matching binding to
+   `active`; any mismatch remains non-authorizing.
+3. `revoke_adoption_binding` requires the lifecycle's already committed
+   non-adoptable/revocation receipt and changes only the matching active or
+   prepared binding to `revoked`.
+
+These fixed controller-only messages are not canonical storage operations,
+cannot be called by CLI/MCP/workloads, consume no qualification budget, accept
+no path/command/support decision, and never write lifecycle state. No atomic
+transaction across repositories is claimed. Exact replay reconciles the
+original binding; unknown or mixed state closes normal mutation admission.
+Rejected review never calls `prepare_adoption_binding`.
 
 ## Operations
 
@@ -165,7 +218,11 @@ Input:
 }
 ```
 
-`future` requires current `proven`/adoptable capability and is future-only.
+`future` requires either a current supported promotion or an exact
+fixture-validation promotion for this disposable fixture, plus the exact
+active authority binding, and is future-only. The latter remains
+`implemented_unproven`/non-adoptable, accepts no qualification context, and
+cannot authorize another scope.
 `legacy` stops later authority creation but changes no existing object. Exact
 replay returns the original transition. No policy operation adopts, moves,
 copies back, or removes storage.
@@ -189,7 +246,7 @@ Input contains exactly:
 
 Preconditions:
 
-- future policy and proven capability are current, or the request is inside one
+- the shared normal-admission predicate is true, or the request is inside one
   exact active qualification admission;
 - Spec 033 application projection says the generation is screened and exact;
 - no existing request conflict, object conflict, or current-selection drift;
@@ -352,7 +409,10 @@ false refusal/success. Retryability never authorizes a new request identity.
 At minimum:
 
 `authority_unavailable`, `authority_unsupported`, `authority_unproven`,
-`authority_drifted`, `authority_revision_mismatch`, `caller_unauthorized`,
+`authority_drifted`, `authority_revision_mismatch`,
+`adoption_binding_missing`, `adoption_binding_prepared`,
+`adoption_binding_mismatch`, `adoption_binding_revoked`,
+`promotion_missing`, `promotion_mismatch`, `caller_unauthorized`,
 `caller_revoked`, `cross_project_refused`, `request_invalid`,
 `request_id_conflict`, `policy_not_future`, `policy_stale`, `object_unknown`,
 `object_not_owned`, `object_identity_drift`, `object_replaced`,
@@ -379,6 +439,11 @@ At minimum:
 - Database corruption, missing root, owner drift, unsupported filesystem,
   unreadable reference evidence, or revision skew closes mutation admission and
   retains objects.
+- A prepared adoption binding is never activated from local state alone. Exact
+  replay must prove the matching committed lifecycle promotion receipt.
+- Revocation, lifecycle non-adoptable state, or any lifecycle/binding generation
+  mismatch closes normal mutation before reconciliation; replay may only
+  deactivate the original binding, never infer a new promotion.
 - Service restart never changes an operation/request/object identity.
 
 ## No-secret/no-path evidence boundary

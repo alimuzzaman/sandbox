@@ -1,5 +1,9 @@
 # Feature Specification: Owned Storage Authority
 
+> **Planning status: NOT READY.** FR-058 cannot be implemented through the
+> current immutable Feature 051 public ports. See [analysis.md](./analysis.md).
+> This specification authorizes no source or live work.
+
 **Feature Branch**: `codex/owned-storage-authority` (spec directory `052-owned-storage-authority`)
 
 **Created**: 2026-08-31
@@ -375,8 +379,10 @@ decision while containing none of the prohibited data classes.
 #### Qualification, compatibility, and evidence
 
 - **FR-042**: Support MUST be reported separately for each platform and operating mode and only
-  after its ordinary product path proves separate ownership, caller non-mutation, all-or-nothing
-  publication, restart recovery, and identity-bound final removal.
+  after a post-promotion ordinary `future` journey creates a new synchronization generation and
+  CI materialization with no qualification context and proves separate ownership, caller
+  non-mutation, all-or-nothing publication, restart recovery, identity-bound final removal,
+  exact replay, and rollback.
 - **FR-043**: If any required ownership or final-removal guarantee is unavailable, authority
   publication, future-object opt-in, and final cleanup MUST return a stable unsupported or
   refused outcome before authority-dependent mutation, with no weaker fallback represented as
@@ -404,6 +410,30 @@ decision while containing none of the prohibited data classes.
 - **FR-052**: Production rollout, service installation, privilege grants, platform
   qualification, and remote state migration MUST remain separate human-reviewed activities and
   MUST NOT occur as a consequence of defining or inspecting this feature.
+- **FR-053**: The protected remote lifecycle MUST be the sole owner of evidence-candidate
+  closure, review, promotion, revocation, and capability support state; the storage authority
+  MUST NOT expose or persist review, promotion, or revocation operations.
+- **FR-054**: Review MUST bind one exact closed candidate generation/digest, cleanup digest,
+  source/service/contract revisions, controller and disposable scope identities, derived
+  reviewer authorization, decision, freshness, request identity, and canonical request digest.
+  Exact replay MUST return the same result, changed reuse MUST refuse before effect, review MUST
+  consume no qualification budget, and revocation MUST be a separate operation over one
+  promotion.
+- **FR-055**: Cross-repository promotion MUST use one lifecycle semantic owner plus an exact
+  non-authorizing prepared storage binding. Normal mutation MUST require both the current
+  lifecycle promotion and active matching binding; missing, mixed, stale, revoked, or unknown
+  state MUST be non-adoptable without claiming an atomic transaction across repositories.
+- **FR-056**: Protected review MUST preallocate and bind the exact decision, validation-promotion,
+  authority-binding identities and binding digest before preparing storage enforcement.
+  Rejected review MUST touch no authority binding, and activation MUST byte-compare the committed
+  lifecycle receipt to the reserved binding.
+- **FR-057**: A fixture-validation promotion MUST remain implemented-unproven and non-adoptable,
+  may authorize `future` only for its exact disposable fixture with no qualification ancestry,
+  and MUST require a separate replay-safe protected finalization that derives all ordinary-path
+  evidence through trusted read-only sources before reporting proven/adoptable support.
+- **FR-058**: Lifecycle review, promotion, finalization, and revocation state MUST remain a closed
+  nested value behind the existing shared hosting target transaction owner and generation;
+  Feature 052 MUST NOT create another hosting state file/database or bypass the shared lock/CAS.
 
 ### Scope Boundaries
 
@@ -509,10 +539,13 @@ decision while containing none of the prohibited data classes.
 - **SC-012**: At least 95% of read-only status and preview requests covering up to 10,000
   authority and legacy records complete within 30 seconds; every request outside that bound or
   unable to complete reports partial or timed-out evidence and never reports false success.
-- **SC-013**: One newly created disposable remote fixture proves the complete ordinary product
-  journey end to end: private ownership, immutable publication, caller mutation refusal,
-  bounded CI writes, terminal cleanup, measured reclamation, exact replay, restart recovery,
-  and preservation of unrelated state.
+- **SC-013**: One newly created disposable remote fixture first closes qualification, then after
+  protected promotion creates one new synchronization generation and CI materialization through
+  ordinary `future` commands outside the harness with `qualification:null`, exact
+  policy/promotion/binding ancestry, and no admission ancestry. That journey proves private
+  ownership, immutable publication, caller mutation refusal, bounded CI writes, terminal
+  cleanup, measured reclamation, exact replay/conflict, restart recovery, rollback to `legacy`,
+  and preservation of unrelated state; any failure revokes before support is claimed.
 - **SC-014**: In an acceptance review, 100% of operators and maintainers can correctly identify
   from bounded status evidence whether a sampled object is current, protected, eligible,
   accepted, reclaimed, refused, unsupported, or indeterminate and can state the recorded reason

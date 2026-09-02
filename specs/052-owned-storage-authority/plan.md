@@ -1,14 +1,22 @@
 # Implementation Plan: Owned Storage Authority
 
-**Branch**: `codex/owned-storage-authority` | **Date**: 2026-08-31 | **Spec**: [spec.md](./spec.md)
+**Branch**: `codex/owned-storage-authority-planning-repair` | **Date**: 2026-09-02 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from
 `specs/052-owned-storage-authority/spec.md` and the reviewed PRD in the same
 directory.
 
-**Planning Readiness**: **NOT READY**. A third independent review found the
-unresolved blockers listed in [Planning Blockers](#planning-blockers). Do not
-generate tasks or begin implementation from this plan.
+**Planning Readiness**: **NOT READY — PUBLIC PORT BLOCKED**. The bounded design
+text closes the three original semantic blockers, but two fresh independent
+post-edit analyses found that its lifecycle persistence boundary cannot be
+implemented through the immutable Feature 051 public ports. The fixed target
+mutation registry has no owned-storage lifecycle capability, while
+`activation_host_state_port()` reads and writes only the closed
+`image_activation` value. Implementing this plan would therefore require a
+forbidden hosting/schema change, a private repository bypass, or reinterpretation
+of an accepted capability. No tasks are published. See [analysis.md](./analysis.md).
+Implementation, service installation, privilege grants, live qualification,
+promotion, rollout, and production adoption are not authorized.
 
 ## Summary
 
@@ -54,9 +62,10 @@ and receive additive authority projections only.
 **Testing**: Standard-library `unittest` unit, contract, codec, repository,
 race, recovery, CLI, MCP, packaging, and architecture-boundary suites; at least
 100 interruption/restart publication trials and 100 cleanup replay/race trials;
-one newly created disposable Ubuntu 24.04 remote fixture exercising the
-ordinary product path; independent human review of the exact revision and live
-evidence before support or adoption is enabled.
+one newly created disposable Ubuntu 24.04 remote fixture exercising both the
+sealed qualification path and a post-promotion normal `future` policy path with
+`qualification:null`; independent human review of the exact revision and live
+evidence before support is claimed outside that fixture.
 
 **Target Platform**: Provisioned Linux remotes whose exact operating mode has
 passed the owned-storage capability probe and human-reviewed live acceptance.
@@ -108,7 +117,7 @@ No adoption, relocation, or cleanup of legacy/foreign storage.
 | I. Per-project instance model | PASS | Every request binds a registered remote, project identity, and relationship/workspace/job scope. No global or fallback instance exists. |
 | II. Registry source of truth | PASS | Application services resolve registered identities through existing repositories. The authority owns only its private object/operation repository and never reads registry JSON, legacy workspace JSON, or another service's SQLite directly. |
 | III. Single entry, modular package | PASS | `sb` remains one entry file. Domain, repository, protocol, Linux adapter, application port, command group, MCP group, and service executable register through explicit manifests/contracts. No new consumer of `sandbox_core.py`, `sandbox.registry.COMMANDS`, `sandbox.hermes.facade`, or MCP `app.py` helpers is introduced. |
-| IV. Live-stack proof | BLOCKED | The qualification harness does not yet prove a post-promotion ordinary `future` sync/CI journey without its hidden admission, so the current promotion contract could accept a broken normal-policy routing branch. |
+| IV. Live-stack proof | SATISFIED BY PLAN; LIVE GATE OPEN | A protected fixture-validation promotion remains `implemented_unproven`/non-adoptable and is limited to the exact disposable fixture until post-promotion acceptance completes. The normal `future` policy, `sync once`, and `ci run` commands carry `qualification:null` and use the same routing as later adoption. Protected finalization derives the evidence before `proven`/adoptable; failure revokes first. No live proof is claimed by this plan. |
 | V. Idempotency and docs-with-code | PASS | Canonical request digests, durable operation rows, relationship/object locks, intent-before-effect, recovery, exact replay, and matching contracts/operator docs are required. Packaging and lifecycle changes land with code. |
 | VI. Feature parity before removal | PASS | The feature is additive and future-only. Existing sync, job, workspace, cleanup, legacy replay, and non-authority storage remain rollback controls. Switching policy back to `legacy` changes only later object creation and never adopts, deletes, or rewrites existing objects. |
 | Additional boundaries and secrets | PASS | No `runtime/wp/` or `vendor/` changes. Public/durable evidence excludes source contents, credentials, unrestricted environment/host configuration, and sensitive paths. Spec Kit assets remain pruned from shipped releases. |
@@ -129,14 +138,14 @@ specs/052-owned-storage-authority/
 ├── data-model.md
 ├── quickstart.md
 ├── checklists/
-│   └── requirements.md
-└── contracts/
-    ├── authority-service-v1.md
-    ├── capability-evidence-v1.md
-    └── cli-mcp.md
+│   ├── requirements.md
+│   └── implementation.md
+├── contracts/
+│   ├── authority-service-v1.md
+│   ├── capability-evidence-v1.md
+│   └── cli-mcp.md
+└── analysis.md
 ```
-
-`tasks.md` is intentionally not created by this workflow.
 
 ### Source Code (repository root)
 
@@ -158,6 +167,11 @@ sandbox/
 │   ├── sync_service.py           # publication/current-policy integration only
 │   ├── job_service.py            # immutable job result + cleanup projection
 │   └── workspace_service.py      # materialization/reference/policy integration
+├── owned_storage_lifecycle/
+│   ├── models.py                 # candidate/review/promotion/revocation state
+│   ├── repository.py             # nested-value codec behind shared RecoveryRepository
+│   ├── service.py                # protected review/finalize/revoke reconciliation
+│   └── manifest.py               # explicit lifecycle component registration
 ├── sync/                         # existing relationship/capture policy remains owner
 ├── jobs/                         # existing job/result/lease policy remains owner
 ├── workspaces/                   # existing durable workspace/index policy remains owner
@@ -211,7 +225,13 @@ tests/
 **Structure Decision**: A feature-owned `sandbox/owned_storage/` package owns
 only storage mechanisms, its private journal, its codec, and exact Linux
 filesystem operations. Existing sync/job/workspace application services retain
-policy and call the authority through a narrow typed port. CLI/MCP and remote
+policy and call the authority through a narrow typed port. The separate
+`sandbox/owned_storage_lifecycle/` module is the sole owner of
+candidate/review/promotion/revocation semantics. It consumes the existing public
+Feature 051 `RecoveryRepository` target-mutation and host-state transaction ports
+without editing `sandbox/hosting/**`, owning outer persistence, or importing private
+repository helpers. It uses a prepared, non-authorizing authority binding instead
+of direct cross-repository writes. CLI/MCP and remote
 transport modules validate and project results only. The standalone service is
 packaged as a fixed executable with fixed lifecycle assets; no generic root
 helper, callback, path, or command channel is added.
@@ -228,17 +248,67 @@ helper, callback, path, or command channel is added.
 5. Integrate namespace-mounted CI materializations and exact final cleanup with
    job/workspace policy; unisolated host execution remains unsupported.
 6. Add read-only status/preview first, then confirmation- and request-ID-gated
-   policy/reclaim operations. Add the sealed, exact-fixture acceptance seam;
+   policy/reclaim operations. Add the sealed, exact-fixture qualification seam;
    it remains unavailable to normal policy and cannot mark support proven.
    Re-run CLI/MCP parity and no-path/no-secret scans.
-7. Run the complete quickstart on a new disposable Ubuntu fixture at the exact
-   accepted revision under one separately authorized proof-candidate admission.
-   Preserve a before/after unrelated-state inventory and close the admission.
-8. Require independent human review of source, contracts, live evidence,
-   packaging, service privileges, recovery, and cleanup. The protected remote
-   lifecycle records the decision and atomically issues or revokes the
-   revision/evidence-bound promotion receipt. Only a current accepted receipt
-   may promote support or allow future-object adoption.
+7. Run the sealed qualification matrix on a new disposable Ubuntu fixture at
+   the exact accepted revision. Preserve unrelated-state inventory, close the
+   admission, and freeze one evidence candidate. The remote lifecycle owns the
+   candidate; the storage authority owns only its object/operation receipts.
+8. Require a protected human review of the closed candidate. The remote
+   lifecycle reserves the exact replay-safe review and preallocates the
+   decision, promotion, binding IDs and binding digest, asks the storage authority
+   to prepare a non-authorizing adoption binding, then atomically commits its
+   own review decision, fixture-scoped validation promotion receipt, and
+   `acceptance_state=pending_ordinary` capability projection while the public
+   tier stays `implemented_unproven`/non-adoptable. Exact
+   replay may activate the prepared binding only after that lifecycle receipt
+   exists. Review/promotion consumes no qualification-admission budget.
+9. Prove the exact active fixture-validation promotion plus active authority binding,
+   then use the ordinary policy command to select `future`. Run new ordinary
+   `sync once` and `ci run` journeys outside the acceptance harness, with no
+   proof arguments and `qualification:null` at the storage-service boundary.
+   Record policy/promotion ancestry, replay/conflict behavior, normal cleanup,
+   preserved job truth and unrelated state, and rollback to `legacy` only after
+   the new owned objects exist.
+10. Any post-promotion failure requires the lifecycle to commit
+    non-adoptable/revoked first and then deactivate the authority binding.
+    Missing acknowledgement remains fail-closed and replay-reconcilable. Only
+    after the complete fixture journey passes and a protected replay-safe
+    acceptance-finalization operation derives the required evidence, commits
+    its immutable identity, and changes state to `complete`/`supported` may tier
+    become `proven`/adoptable. General rollout remains separately authorized.
+
+## Review and Adoption State Sequence
+
+```text
+lifecycle: reserve review and preallocate decision/promotion/binding IDs + digest
+    -> authority: prepare binding (non-authorizing)
+    -> lifecycle: commit review + fixture-validation promotion + capability generation
+    -> authority: activate exact binding on committed-receipt replay
+    -> public capability: implemented_unproven/non-adoptable, exact fixture only
+    -> post-promotion ordinary future sync/CI/cleanup/rollback on fixture
+    -> protected acceptance-finalize derives evidence through read-only ports
+    -> lifecycle: complete => supported/proven/adoptable
+
+revoke/failure:
+lifecycle: commit non-adoptable + revocation
+    -> authority: revoke exact binding
+    -> exact replay reconciles acknowledgement; mixed state stays closed
+```
+
+The existing shared hosting `RecoveryRepository` remains the sole outer target
+parser/writer/locker/fsync and generation-CAS owner. Feature 052 validates and
+serializes only a closed nested lifecycle value and proposes transitions
+through that shared transaction port; it creates no second hosting state file
+or database and performs no direct outer-state write. Lock order is shared
+target lock then authority-binding lock, released in reverse. The authority
+repository never receives reviewer identity as authority, never decides a
+support tier, and never reads lifecycle storage directly. The authenticated
+controller carries only the exact typed receipt/binding data. This preserves
+the prepared-custody pattern from Features 050–051 and does not reinterpret
+Feature 048 observation receipts, Feature 049 trust plans, Feature 050 proof
+custody, or Feature 051 activation/recovery as owned-storage authority.
 
 ## Compatibility and Rollback
 
@@ -259,27 +329,44 @@ helper, callback, path, or command channel is added.
 
 ## Complexity Tracking
 
-No constitution violation or complexity waiver is proposed. The unresolved
-design blockers below prevent tasks, implementation, or merge readiness.
+No constitution violation or complexity waiver is proposed. Cross-store state
+does not pretend to be one transaction: the remote lifecycle is the single
+semantic owner, while the storage authority holds only a non-authorizing
+prepared/active/revoked enforcement binding reconciled by exact replay.
 
-## Planning Blockers
+## Resolved Planning Decisions
 
-1. **Normal adoption proof is incomplete**: qualification exercises `sync once`
-   and `ci run` through a hidden sealed admission. After promotion, the
-   quickstart changes policy to `future` but does not create and verify one new
-   ordinary sync generation and CI materialization without that admission.
-   Therefore SC-013 and the normal-policy routing branch remain unproven.
-2. **Protected review binding is ambiguous**: `review` is a canonical operation,
-   but the operation model has only an admission/candidate pair defined for
-   active qualification. Review needs a closed evidence-candidate and decision
-   binding that consumes no admission budget, plus explicit replay uniqueness.
-3. **Review operation ownership is contradictory**: the capability contract
-   calls review/promotion non-authority operations, while the authority contract
-   defines an internal `review` operation persisted by the authority. The next
-   planning pass must choose and document one owner and public/internal boundary.
+1. **Normal adoption proof**: after protected promotion on the exact disposable
+   fixture, the quickstart sets the real `future` policy and creates a new sync
+   generation and CI materialization through ordinary commands outside the
+   acceptance harness. These operations have `qualification:null`, bind the
+   policy plus current promotion/evidence, and exercise the normal routing
+   branch. They prove replay/conflict, job-result preservation, cleanup,
+   unrelated-state preservation, and rollback before support is claimed.
+2. **Protected review binding**: the review binds the closed candidate identity,
+   candidate close generation and digest, cleanup digest, exact source/service
+   revisions, controller identities, remote/project/fixture scope, reviewer
+   authorization digest, decision, freshness, request ID, and canonical request
+   digest. Its replay key is unique in the lifecycle nested state behind the
+   shared target repository and one
+   candidate tuple has at most one accepted/rejected terminal review. Exact
+   replay returns the same result; changed input refuses. Rejection requires a
+   new candidate. Revocation is a separate operation over a promotion. Review,
+   promotion, and revocation never reserve a storage operation or decrement
+   qualification budget.
+3. **Single review owner**: the protected remote service lifecycle exclusively
+   owns evidence-candidate closure, review, promotion, revocation, and the
+   capability projection. The storage authority has no
+   `review`, `promote`, or `revoke` operation. It persists only storage
+   operations, exact object receipts, and an internal adoption binding whose
+   phases are `prepared`, `active`, or `revoked`. Preparation grants no mutation.
+   CLI/MCP project tools cannot call the protected lifecycle or construct or
+   activate the binding.
 
-The independent reviewer also reported that the protected-review test was
-absent from the quickstart. Current evidence disproves that item:
-`tests.test_owned_storage_review` is present in the focused command. No further
-correction was made because the two P1 blockers above require another explicit
-planning decision.
+The independent review gate for this repaired plan is recorded in
+`analysis.md`, not as self-authored proof. The retained source structure and
+delivery sequence are a conditional design record only. Task generation must
+not resume until a human chooses and authorizes a feasible public lifecycle
+state owner/transaction port without weakening the immutable Feature 048–051
+contracts. All live lifecycle, privilege, promotion, rollout, and production
+steps remain separate explicit human gates.

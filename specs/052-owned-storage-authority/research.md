@@ -1,5 +1,9 @@
 # Phase 0 Research: Owned Storage Authority
 
+> **Planning status: NOT READY.** The retained lifecycle design is conditional
+> on a public transaction port that does not currently exist. See
+> [analysis.md](./analysis.md).
+
 ## Sources and current constraints
 
 The design starts from the current contracts and code, not from a greenfield
@@ -263,7 +267,11 @@ scope. Reuse with a different digest is a stable conflict. State transitions
 record `reserved`, `receiving`, `verified`, `published`/`quarantined`, and a
 terminal outcome. Startup begins mutation-closed, checks service UID/root/db
 identity, reconciles incomplete staging and quarantine rows, and only then may
-open mutation admission on a proven platform or exact qualification admission.
+open mutation admission under one shared predicate: future policy,
+`qualification:null`, active binding, exact promotion/scope/revisions, and
+either supported/proven/complete or validation-pending/implemented-unproven/
+pending-ordinary exact disposable-fixture state; otherwise only an exact
+qualification admission may mutate.
 An absent object is `completed` only when a matching durable terminal receipt,
 or a matching flushed `final_remove_intent` for the exact empty private entry,
 proves its removal; otherwise it is `indeterminate` and retained as an
@@ -326,11 +334,11 @@ and the feature's explicit non-adoption scope.
 - Disable the service and copy objects to caller-owned paths on rollback:
   rejected because it destroys the immutability boundary.
 
-## Decision 11: Qualification is explicit, local proof is never adoption
+## Decision 11: Qualification, ordinary proof, and promotion are separate
 
 **Decision**: Capability reports distinguish `unavailable`, `unsupported`,
-`implemented_unproven`, `proven`, and `drifted`; only `proven` is adoptable by
-normal project policy. Initial proof uses one separately authorized,
+`implemented_unproven`, `proven`, and `drifted`; only `proven` is generally
+adoptable by normal project policy. Initial primitive proof uses one separately authorized,
 short-lived qualification admission on a new Ubuntu 24.04/systemd 255
 disposable remote. The admission is minted by the supported lifecycle for one
 exact clean source/installed revision, controller identity, remote, project,
@@ -344,17 +352,50 @@ Under that admission, proof requires private UID/root evidence, the
 caller/workload negative matrix, atomic publication, 100 interruption/restart
 trials, 100 cleanup replay/race trials, namespace write boundaries, measured
 reclamation, service/package lifecycle, restart recovery, and unrelated-state
-preservation. An independent human reviews the exact revision, evidence, and
-privilege surface before promotion. Only after promotion may a normal project
-set policy `future`.
+preservation. This closes one immutable evidence candidate but does not prove
+the normal `future` policy branch.
 
-Promotion is a protected remote-lifecycle operation, not a service self-report
-or MCP tool. The authorized operator records an accepted/rejected review over
-the exact closed evidence candidate. The lifecycle rechecks admission closure,
-cleanup, evidence/revision/controller identity, freshness, and operator
-authorization, then atomically stores the review decision, promotion receipt,
-and capability projection. Request replay is exact; conflicts refuse. Revoke,
-expiry, drift, or revision skew closes adoption while retaining objects.
+The protected remote lifecycle, not the storage authority, owns candidate
+closure, review, promotion, revocation, and capability projection. A human
+review binds the exact closed candidate/close generation/digest, cleanup
+digest, source and installed revisions, controller identities, disposable
+scope, reviewer authorization, decision, freshness, request ID, and canonical
+request digest. This review is unique and replay-safe in the lifecycle
+repository and consumes no storage operation or qualification-admission budget.
+Rejection terminates the candidate; revocation is a separate replay-safe
+operation over an existing promotion.
+
+The cross-store handoff follows the Feature 050 custody pattern rather than
+claiming a transaction across repositories. Under the existing Feature 051
+shared target transaction, the lifecycle durably reserves the review and
+preallocates the decision, promotion, authority-binding identities, and binding
+digest. The storage authority records that exact non-authorizing `prepared` adoption
+binding containing exact candidate, promotion, revision, scope,
+lifecycle-generation, expiry, and revocation identities. The lifecycle then
+atomically commits its review decision, promotion receipt, and capability
+projection as a closed nested value through the shared hosting
+`RecoveryRepository`. Exact replay activates the matching authority binding
+only after that receipt exists. `adoptable=true` requires both records;
+any mixed or unknown state remains non-adoptable. Revocation commits
+non-adoptable lifecycle state first, then deactivates the binding; a lost second
+acknowledgement stays fail-closed and replay-reconcilable.
+
+The validation promotion remains `implemented_unproven`/non-adoptable and may
+open `future` only for the exact disposable fixture. After promotion, that
+project sets real `future` policy.
+Ordinary `sync once` and `ci run` use normal public schemas and reach the storage
+service with `qualification:null`; objects bind the policy plus current
+promotion/evidence, never the closed qualification admission. The journey
+proves normal publication, materialization, cleanup, exact replay/conflict,
+job-result preservation, unrelated-state preservation, and rollback to
+`legacy`. A protected replay-safe acceptance-finalization operation accepts
+only promotion/request identity and confirmation, derives every evidence item
+through typed read-only ports, and under shared target CAS either commits the
+closed ordinary evidence plus `supported`/`proven`/adoptable or commits failure
+and non-adoptable before binding revocation. Any failure triggers protected revocation before support is claimed.
+Review/promotion/revocation are never authority-service or MCP operations.
+Expiry, revision skew, later drift, or revoke closes adoption while retaining
+objects.
 
 **Rationale**: Spec 045 explicitly distinguishes implementation from live
 kernel/systemd evidence. Storage ownership and final removal depend on the same
@@ -363,8 +404,17 @@ kind of live facts. A capability probe is evidence input, not self-promotion.
 **Alternatives considered**:
 
 - Promote after unit/contract tests: rejected by Constitution IV.
-- Require `proven` before running the live proof matrix: rejected because it
-  creates a circular gate and leaves no bounded way to collect proof.
+- Treat qualification as full ordinary-path proof: rejected because its hidden
+  admission does not exercise `future + qualification:null` routing.
+- Persist review as a storage-authority `review` operation: rejected because
+  storage mechanism ownership must not become support/promotion authority and
+  because review must not consume qualification budget.
+- Claim one atomic write across lifecycle and authority repositories: rejected;
+  one semantic owner plus a prepared non-authorizing binding is fail-closed and
+  replayable without hiding split durability.
+- Create a Feature 052 hosting state database/file: rejected; Feature 051's
+  shared `RecoveryRepository` remains the sole outer parser/writer/lock/fsync
+  owner, and Feature 052 only validates a closed nested value through its port.
 - Expose a force/unproven flag on ordinary policy or publication: rejected
   because it would be a reusable adoption bypass rather than a proof seam.
 - Allow an operator force flag on unsupported hosts: rejected because no
@@ -441,12 +491,38 @@ to verify, not merely a documentation claim.
 - Let storage cleanup remove resolver records for a deleted workspace: rejected;
   resolver cleanup remains its owning service's separately authorized action.
 
+## Decision 13: Current immutable public ports cannot carry the lifecycle value
+
+**Decision**: Planning remains NOT READY. Independent analysis inspected the
+actual Feature 051 interfaces after the semantic design was repaired.
+`target_mutation_port()` accepts only its existing fixed capability registry,
+which has no owned-storage lifecycle member. `activation_host_state_port()` is
+activation-specific and commits only the closed `image_activation` value. It
+cannot store the Decision 11 lifecycle value without an immutable hosting or
+schema edit, a private helper bypass, or reuse of an authority name with the
+wrong meaning.
+
+**Rationale**: A plausible state machine is not an executable plan when its
+only persistence seam rejects the required state. Treating an accepted
+capability as a generic lock would weaken the explicit capability boundary and
+hide the missing authority.
+
+**Alternatives considered**:
+
+- Reuse `sync` or `activate`: rejected because neither capability grants
+  lifecycle review/promotion authority.
+- Import private `RecoveryRepository` record/write helpers: rejected because it
+  bypasses the public owner and lock/CAS contract.
+- Store a Feature 052 hosting sidecar: rejected by FR-058 and the single-owner
+  requirement.
+- Silently extend Feature 051 or `sandbox/hosting/**`: rejected by the explicit
+  immutable-input instruction.
+
 ## Clarification status
 
-No clarification markers remain in the specification, but planning is **NOT
-READY** after the third independent review. The next authorized planning pass
-must resolve: post-promotion ordinary `future` sync/CI proof without the hidden
-qualification admission; review-specific candidate/decision/replay fields that
-do not consume admission budget; and the contradictory ownership of the
-protected review operation between the capability and authority contracts.
-These are design blockers, not implementation tasks.
+The three original semantic blockers have conditional design answers, but one
+material planning blocker remains: a human must authorize and specify a
+truthful public lifecycle transaction owner/port, or amend FR-058 to select a
+different durable owner. Until then no tasks may be generated and no source or
+live lifecycle, privilege, remote, promotion, rollout, or production action is
+authorized.

@@ -1,5 +1,9 @@
 # Quickstart Validation: Owned Storage Authority
 
+> **Blocked: do not execute.** Planning is NOT READY because the required
+> lifecycle transaction port does not exist. See [analysis.md](./analysis.md).
+> The commands below remain proposed acceptance design, not authorization.
+
 This is the Phase 1 validation guide for a future implementation. It does not
 authorize service installation, remote mutation, deployment, support promotion,
 legacy migration, cleanup, release, or production adoption. Use a newly created
@@ -107,6 +111,51 @@ python3 -m unittest \
 
 Expected: all prior legacy outcomes remain unchanged. No static result promotes
 the capability above `implemented_unproven`.
+
+Run the accepted Feature 048–051 and integration contracts with this exact,
+deterministic command. Do not replace it with broad discovery or omit a module:
+
+```bash
+python3 -m unittest \
+  tests.test_host_recovery_models \
+  tests.test_host_recovery_policy \
+  tests.test_host_recovery_repository \
+  tests.test_host_recovery_service \
+  tests.test_host_recovery_cli \
+  tests.test_hosting_image_trust \
+  tests.test_hosting_image_contracts \
+  tests.test_hosting_image_boundaries \
+  tests.test_hosting_image_staging_policy \
+  tests.test_hosting_image_staging_repository \
+  tests.test_hosting_image_staging_service \
+  tests.test_hosting_image_staging_secrets \
+  tests.test_hosting_image_staging_process \
+  tests.test_remote_hosting_images \
+  tests.test_hosting_image_activation_models \
+  tests.test_hosting_image_activation_policy \
+  tests.test_hosting_image_activation_repository \
+  tests.test_hosting_image_activation_service \
+  tests.test_hosting_image_activation_init \
+  tests.test_hosting_image_activation_recovery \
+  tests.test_hosting_image_activation_runtime \
+  tests.test_hosting_image_activation_races \
+  tests.test_hosting_image_activation_private_source \
+  tests.test_hosting_image_activation_cli \
+  tests.test_sync_service \
+  tests.test_sync_state \
+  tests.test_remote_ci_jobs \
+  tests.test_ci_workspace_cleanup \
+  tests.test_workspace_contracts \
+  tests.test_workspace_retention \
+  tests.test_workspace_resource_ownership \
+  tests.test_command_composition \
+  tests.test_mcp_composition \
+  tests.test_owned_storage_packaging
+```
+
+This is the T076 regression selector. Feature 052 implementation may add its
+new packaging test, but it must not edit the accepted Features 048–051 suites or
+any source below `sandbox/hosting/**`.
 
 ## 3. Closed default and unsupported platforms
 
@@ -410,10 +459,9 @@ An independent human reviewer must inspect:
 - bounded evidence and resolver separation;
 - exact clean source/installed revision.
 
-Only an explicit accepted review may set `support_tier=proven`, attach the
-evidence ID, or authorize policy `future` outside the disposable proof fixture.
-Any missing/contradictory result keeps `adoptable=false` and existing material
-retained.
+Only an explicit accepted review may prepare promotion for this exact
+disposable fixture. Any missing/contradictory result keeps `adoptable=false`
+and existing material retained.
 
 Record the independent decision through the protected lifecycle. This is the
 only promotion path:
@@ -424,17 +472,158 @@ only promotion path:
   --decision accepted --request-id authority-review-1 --confirm --json
 ```
 
-After the returned promotion receipt is current and `adoptable=true`, verify
-normal future-object policy and rollback:
+The protected lifecycle must prove the review replay binding and cross-store
+sequence before returning an adoptable projection:
+
+1. lifecycle review reservation is durable and binds candidate close
+   generation/digest, cleanup digest, exact revisions/scope, reviewer
+   authorization, decision, request ID/digest, and lifecycle generation;
+2. the authority adoption binding is `prepared` and non-authorizing;
+3. the lifecycle review decision, promotion receipt, and capability state are
+   committed as one closed nested value through the shared hosting target
+   transaction owner;
+4. exact replay activates only that authority binding;
+5. capability returns the exact promotion/binding generations with
+   `support_tier=implemented_unproven`, `adoptable=false`, and
+   `acceptance_state=pending_ordinary`; only the exact fixture-validation
+   promotion/binding may open `future` for this disposable scope.
+
+No authority `review` operation or cross-repository atomic transaction exists.
+Exact review replay returns the same receipt. Changed input refuses. Review
+consumes no qualification budget. Rejected candidate reuse refuses and requires
+new evidence.
+
+Now prove the missing post-promotion normal branch. These commands run outside
+the acceptance harness and accept no admission or fixture-proof argument:
 
 ```bash
 ./sb storage authority policy --remote "$REMOTE" --project-identity "$PROJECT_ID" \
   --mode future --request-id authority-policy-future-1 --confirm --json
+
+./sb sync once --project-dir "$PROJECT_DIR" --remote "$REMOTE" \
+  --workspace-id "$WORKSPACE_ID" --request-id authority-normal-publish-1 --json
+
+./sb ci run "$WORKFLOW" --project-dir "$PROJECT_DIR" --remote "$REMOTE" \
+  --request-id authority-normal-ci-1 --timeout 900 --json
+```
+
+For this durable remote run, `authority-normal-ci-1` is the parent submission
+replay identity. Each cell's materialization request identity is derived from
+that parent and the canonical workflow/cell/project/workspace/job/source
+binding. The result returns safe `materialization_request_id` values. Repeating
+the exact parent returns the original job/materialization lineage; changing any
+bound field under that parent refuses before effect. Existing CI calls without
+`--request-id` retain their current behavior.
+
+For both new objects, require:
+
+- internal storage requests contain `qualification:null` and no admission or
+  fixture ancestry;
+- status binds the exact future-policy ID/generation, evidence ID, promotion
+  ID, authority-binding ID/generation, and normal request identity;
+- exact replay returns one original receipt, while changed request reuse
+  conflicts before effect;
+- sync content remains immutable; the CI writable interior works while its
+  root, record, accepted source, and unrelated scopes remain protected.
+
+After the CI job is terminal, exercise ordinary public cleanup, not the sealed
+harness:
+
+```bash
+./sb storage authority preview --remote "$REMOTE" --project-identity "$PROJECT_ID" --json
+./sb storage authority reclaim --remote "$REMOTE" --project-identity "$PROJECT_ID" \
+  --preview-id "$PREVIEW_ID" --object-id "$CI_OBJECT_ID" \
+  --request-id authority-normal-cleanup-1 --confirm --json
+```
+
+Require full removal, measured known bytes, unchanged immutable job result,
+idempotent replay, replacement refusal, and unchanged unrelated-state digest.
+Replay the CI materialization through the returned
+`materialization_request_id` and the public reconcile port. Then repeat the
+exact parent `ci run` and require the original job/materialization lineage. A
+third call reuses the parent ID with a changed canonical workflow and must
+return `request_id_conflict` with zero effect:
+
+```bash
+./sb storage authority reconcile --remote "$REMOTE" --project-identity "$PROJECT_ID" \
+  --operation materialize --request-id "$MATERIALIZATION_REQUEST_ID" --json
+./sb ci run "$WORKFLOW" --project-dir "$PROJECT_DIR" --remote "$REMOTE" \
+  --request-id authority-normal-ci-1 --timeout 900 --json
+./sb ci run "$CHANGED_WORKFLOW" --project-dir "$PROJECT_DIR" --remote "$REMOTE" \
+  --request-id authority-normal-ci-1 --timeout 900 --json
+```
+
+The focused contract suite must also substitute each server-derived cell, job,
+workspace, and source binding under the same parent identity and prove conflict
+before any new job or materialization is reserved.
+
+Repeat the exact reclaim command and require the original terminal receipt;
+then reuse `authority-normal-cleanup-1` with a different object or preview and
+require conflict before effect.
+
+```bash
+./sb storage authority reclaim --remote "$REMOTE" --project-identity "$PROJECT_ID" \
+  --preview-id "$PREVIEW_ID" --object-id "$CI_OBJECT_ID" \
+  --request-id authority-normal-cleanup-1 --confirm --json
+./sb storage authority reclaim --remote "$REMOTE" --project-identity "$PROJECT_ID" \
+  --preview-id "$OTHER_PREVIEW_ID" --object-id "$OTHER_OBJECT_ID" \
+  --request-id authority-normal-cleanup-1 --confirm --json
+```
+Only after these new owned objects and evidence exist, test rollback:
+
+```bash
 ./sb storage authority policy --remote "$REMOTE" --project-identity "$PROJECT_ID" \
   --mode legacy --request-id authority-policy-legacy-1 --confirm --json
 ```
 
-Exact replay returns the same review/policy receipts. A changed review or policy
-under the same request ID refuses. Only post-promotion objects follow `future`;
-rollback affects later creation only and never adopts, copies, or deletes any
-legacy or authority-owned object.
+Create one later object and prove it remains legacy while existing owned objects
+remain untouched. Exact policy replay returns the same receipt; changed reuse
+refuses.
+
+On success, an independently authorized human invokes the protected finalizer:
+
+```bash
+./sb remote service owned-storage-acceptance-finalize "$REMOTE" \
+  --project-identity "$PROJECT_ID" --promotion-id "$PROMOTION_ID" \
+  --request-id authority-acceptance-finalize-1 --confirm --json
+```
+
+The command accepts no evidence or support-tier input. Through typed read-only
+ports it derives every normal sync/CI/cleanup/replay/ancestry/rollback,
+revision, and unrelated-state fact. It records one immutable ordinary-evidence
+identity, changes the validation promotion to `supported`, and projects
+`acceptance_state=complete`, `support_tier=proven`, and `adoptable=true` only
+when all facts match. Exact replay returns the same result; changed promotion
+under the same request ID conflicts. Crash recovery resumes the stored phase
+under the shared target generation.
+
+Any post-promotion failure means acceptance failed. Before support is claimed,
+the protected lifecycle must commit non-adoptable/revoked state and then
+deactivate the exact authority binding:
+
+```bash
+./sb remote service owned-storage-revoke "$REMOTE" \
+  --project-identity "$PROJECT_ID" --promotion-id "$PROMOTION_ID" \
+  --reason acceptance_failed --request-id authority-revoke-1 --confirm --json
+```
+
+A lost deactivation acknowledgement stays non-adoptable and exact replay
+reconciles the original binding. Support, another remote/project, release,
+rollout, and production remain unauthorized until separately approved.
+
+Before the final human adoption decision, run the SC-014 comprehension gate.
+Retain one bounded, path-free public status projection from the acceptance
+evidence for each class: `current`, `protected`, `eligible`, `accepted`,
+`reclaimed`, `refused`, `unsupported`, and `indeterminate`. Randomize the eight
+records without their class labels. Every operator and maintainer assigned to
+this acceptance must, using only those public projections:
+
+1. assign the correct class to all eight records; and
+2. state the exact recorded reason code for all eight records.
+
+Record the participant role, evidence-bundle digest, answer digest, and score in
+the acceptance evidence; do not retain names, host internals, source content, or
+paths. The gate passes only when every assigned participant scores 8/8 for both
+classification and reason. Any omission or wrong answer keeps
+`adoptable=false`, blocks the final adoption decision, and does not authorize a
+repeat live mutation merely to manufacture another sample.

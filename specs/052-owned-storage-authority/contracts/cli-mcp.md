@@ -1,11 +1,16 @@
 # CLI and MCP Contract: Owned Storage Authority
 
+> **Draft and NOT READY.** The lifecycle transaction dependency is blocked on
+> the immutable Feature 051 public-port boundary. See
+> [../analysis.md](../analysis.md). Do not implement this contract.
+
 The owned-storage CLI/MCP group consists of thin adapters over the same
 application service and safe projector. They never connect to the private
 repository, open authority paths, perform filesystem cleanup, interpret service
 internals, or change support tier. The separately protected `remote service`
-review lifecycle is defined in `capability-evidence-v1.md`; it is not an MCP or
-ordinary project operation. Every remote call verifies the installed
+review/promotion/revocation lifecycle is defined in
+`capability-evidence-v1.md`; it is not an MCP or ordinary project operation and
+never maps to an authority-service `review` operation. Every remote call verifies the installed
 protocol/revision before relying on new fields.
 
 ## CLI operations
@@ -40,7 +45,8 @@ deadline, and evidence candidate. The command accepts no path, test selector,
 policy mode, object, operation list, force flag, or admission override. It
 drives the fixed acceptance matrix through the ordinary application/storage
 path, closes the admission with cleanup evidence, and returns a bounded proof
-candidate.
+candidate. Qualification objects retain admission ancestry and cannot prove the
+post-promotion normal-policy branch.
 
 Possession of a fixture or request ID is not authorization. Missing, mismatched,
 expired, exhausted, replay-conflicting, drifted, or incompletely closed evidence
@@ -55,8 +61,12 @@ sb storage authority policy --remote NAME --project-identity ID
                             --confirm [--json]
 ```
 
-- `future` requires current proven/adoptable capability and affects later
-  objects only.
+- `future` requires an exact active authority adoption binding plus either a
+  supported promotion or a fixture-validation promotion for the same
+  disposable fixture, and affects later objects only.
+- `acceptance_state=pending_ordinary` remains
+  `implemented_unproven`/non-adoptable and permits `future` only for that exact
+  fixture; other scopes refuse until state is `complete` and tier is `proven`.
 - `legacy` is the rollback control for later creation. It does not adopt, move,
   copy back, rewrite, or delete an existing object.
 - Confirmation and a replay-safe request ID are mandatory.
@@ -103,9 +113,17 @@ The following existing operations keep their syntax and default outcomes:
 - `ci run`, job status/result/retry/cleanup, and workspace status/list;
 - resource status/preview and all legacy compatibility commands.
 
-When the exact remote/project policy is `future` and capability is currently
-proven, newly created sync generations and eligible new CI materializations use
-the authority automatically. Their existing envelopes gain this additive
+Normal authority routing uses one predicate: `future` policy,
+`qualification:null`, exact active authority binding, exact promotion/scope/
+revisions, and either (a) supported/proven/adoptable/acceptance-complete or (b)
+validation-pending/implemented-unproven/non-adoptable/pending-ordinary for the
+exact disposable fixture. The validation branch authorizes no other scope.
+
+When that predicate passes, newly created sync generations and eligible new CI materializations use
+the authority automatically. Post-promotion acceptance creates at least one of
+each outside the harness; internal authority requests carry
+`qualification:null` and bind the exact policy generation, promotion/evidence,
+and active authority binding. Their existing envelopes gain this additive
 block:
 
 ```json
@@ -114,8 +132,14 @@ block:
     "status": "accepted|active|retained|completed|unknown|indeterminate",
     "object_id": "object_opaque-or-null",
     "operation_id": "operation_opaque-or-null",
+    "evidence_id": "evidence_opaque-or-null",
     "evidence_digest": "sha256:...|null",
-    "support_tier": "proven",
+    "promotion_id": "promotion_opaque-or-null",
+    "authority_binding_id": "binding_opaque-or-null",
+    "binding_generation": 3,
+    "qualification_ancestry": "none|fixture",
+    "acceptance_state": "pending_ordinary|complete|failed|null",
+    "support_tier": "implemented_unproven|proven",
     "future_policy_generation": 7
   }
 }
@@ -126,11 +150,30 @@ Legacy objects omit the block or use the fixed path-free projection
 accepted generation, job result, cleanup policy, exit code, or legacy replay
 meaning changes.
 
-If policy is `future` but capability is unavailable, unproven, unsupported,
-drifted, or revision-skewed, creation is refused before authority-dependent
-mutation. It never silently falls back while claiming an immutable/owned
-object. Existing legacy operations remain available when they do not request or
-depend on future authority policy.
+If the predicate fails because capability is unavailable, unsupported,
+unrelated unproven, drifted, revision-skewed, or outside the exact validation
+fixture, creation is refused before authority-dependent mutation. It never
+silently falls back while claiming an immutable/owned object. Existing legacy
+operations remain available when they do not request or depend on future
+authority policy.
+
+### Durable remote CI request identity
+
+```text
+sb ci run WORKFLOW --project-dir DIR --remote NAME
+          [--request-id ID] [existing options]
+```
+
+For durable remote runs, optional `--request-id` is the parent submission replay
+identity. Each workflow-cell materialization request ID is deterministically
+derived from that parent plus the canonical workflow, cell, project, workspace,
+job, and source binding; callers cannot provide a separate materialization ID.
+Exact parent replay returns the original job and materialization lineage.
+Changed workflow, cell, project, workspace, job, or source binding under the
+same parent refuses before effect. The result exposes each safe
+`materialization_request_id` so the public `reconcile --operation materialize`
+path can return its exact receipt. Existing calls that omit `--request-id`
+retain their current behavior and envelope compatibility.
 
 ## MCP tool group
 
@@ -164,12 +207,17 @@ project authorization, confirmation, and replay-safe request identity.
   "status": "complete|partial",
   "remote_identity": "opaque",
   "project_identity": "opaque",
-  "policy": {"mode": "legacy|future", "generation": 7},
+  "policy": {"policy_id": "policy_opaque", "mode": "legacy|future", "generation": 7},
   "capability": {
     "support_tier": "implemented_unproven|proven|unsupported|unavailable|drifted",
     "adoptable": false,
     "service_revision": "opaque",
-    "evidence_id": null
+    "evidence_id": null,
+    "ordinary_evidence_id": null,
+    "promotion_id": "promotion_opaque-or-null",
+    "authority_binding_id": "binding_opaque-or-null",
+    "binding_generation": 3,
+    "acceptance_state": "pending_ordinary|complete|failed|null"
   },
   "objects": [
     {
@@ -181,6 +229,14 @@ project authorization, confirmation, and replay-safe request identity.
         "workspace_id": "opaque-or-null",
         "job_id": "opaque-or-null"
       },
+      "created_by_request_id": "request_opaque",
+      "policy_id": "policy_opaque-or-null",
+      "policy_generation": 7,
+      "promotion_id": "promotion_opaque-or-null",
+      "authority_binding_id": "binding_opaque-or-null",
+      "binding_generation": 3,
+      "qualification_ancestry": "none|fixture",
+      "evidence_id": "evidence_opaque-or-null",
       "evidence_digest": "sha256:...",
       "known_bytes": 12345,
       "reason_code": "current_generation"

@@ -1,5 +1,9 @@
 # Contract: Owned Storage Capability and Evidence v1
 
+> **Draft and NOT READY.** The lifecycle transaction dependency is blocked on
+> the immutable Feature 051 public-port boundary. See
+> [../analysis.md](../analysis.md). Do not implement this contract.
+
 ## Purpose
 
 Report whether one exact remote platform/mode can safely accept future
@@ -17,6 +21,11 @@ qualification, migration, repair, or promotion authority.
   "adoptable": false,
   "service_revision": "opaque-version-or-digest",
   "evidence_id": null,
+  "ordinary_evidence_id": null,
+  "acceptance_state": "pending_ordinary|complete|failed|null",
+  "promotion_id": null,
+  "authority_binding_id": null,
+  "binding_generation": null,
   "observed_at": "2026-08-31T12:00:00Z",
   "expires_at": "2026-08-31T12:15:00Z",
   "checks": {
@@ -52,15 +61,23 @@ qualification, migration, repair, or promotion authority.
 
 ## Rules
 
-- Only `support_tier=proven`, `adoptable=true`, a non-null current evidence ID,
-  and every required check `pass` permit policy `future`.
+- During the authorized acceptance run, only the exact fixture-validation
+  promotion plus active binding may use `future` while
+  `support_tier=implemented_unproven`, `adoptable=false`, and
+  `acceptance_state=pending_ordinary`. This is explicit validation authority,
+  not qualification ancestry or general support.
+- Support outside that fixture requires `support_tier=proven`, `adoptable=true`,
+  `acceptance_state=complete`, non-null current primitive and ordinary evidence
+  plus promotion IDs, an exact active authority binding/generation, and every
+  required check `pass`.
 - Code, unit files, config, a running service, successful connection, local
   tests, or a self-reported probe cannot promote support.
 - A separately authorized exact-fixture qualification admission may collect the
   live proof matrix while tier is `implemented_unproven`, but it cannot set
   `adoptable=true`, change normal policy, or survive its bounded acceptance run.
-- Any stale, missing, mixed-revision, failed, unknown, drifted, or unreviewed
-  check makes `adoptable=false` and closes mutation admission.
+- Any stale, missing, mixed-revision, failed, unknown, drifted, unreviewed, or
+  lifecycle/authority-binding mismatch makes `adoptable=false` and closes
+  mutation admission.
 - A client/service revision mismatch is `authority_revision_mismatch`; the
   caller must use the supported remote lifecycle, not raw SSH repair.
 - Safe read-only capability/status may remain available when mutation is
@@ -73,16 +90,19 @@ qualification, migration, repair, or promotion authority.
 - Storage proof never qualifies resolver/DNS/ingress/network mutation. The
   resolver block is always the explicit excluded value shown above.
 
-## Required live evidence bundle
+## Required final live evidence bundle
 
-The evidence ID must bind all of the following to one exact clean source and
-installed revision:
+The final accepted evidence identity combines the primitive candidate evidence
+used for protected promotion with the post-promotion ordinary evidence. It must
+bind all of the following to one exact clean source and installed revision:
 
 1. Newly created disposable Ubuntu 24.04/systemd 255 fixture identity and safe
    package/kernel/filesystem version summary.
 2. Static service UID, private root/database/object-parent ownership, unit
    sandboxing, and absence of caller mutation rights.
-3. Exact CLI-to-application-to-service ordinary product path. The service side
+3. Exact post-promotion CLI-to-application-to-service ordinary product path,
+   including one new normal `future` sync generation and CI materialization
+   with `qualification:null` and promotion/policy ancestry. The service side
    authenticates the sole supervised controller by exact UID/GID, PID/start,
    executable, unit/cgroup, config, and connection identity; same-UID and direct
    socket callers are refused.
@@ -102,40 +122,102 @@ installed revision:
 11. Stop/start/update/recovery behavior and package/revision verification.
 12. CLI/MCP parity and bounded no-secret/no-path evidence scan.
 13. Independent human review decision for the exact source, service privilege
-    surface, contracts, evidence, recovery, and support tier.
+    surface, contracts, evidence, recovery, and support tier, plus exact
+    lifecycle-promotion/authority-binding reconciliation.
 
 ## Protected review and promotion lifecycle
 
-Review and promotion are not authority-service or MCP operations. After the
-qualification admission is closed, an independently authorized human uses the
-protected remote lifecycle:
+Review, promotion, and revocation are owned only by the protected remote
+lifecycle application service. They are not authority-service or MCP
+operations. After the qualification admission is closed, an independently
+authorized human uses the protected lifecycle:
 
 ```text
 sb remote service owned-storage-review NAME --project-identity ID
                  --evidence-candidate-id ID
-                 --decision accepted|rejected|revoked
+                 --decision accepted|rejected
                  --request-id ID --confirm --json
+
+sb remote service owned-storage-revoke NAME --project-identity ID
+                 --promotion-id ID --reason SAFE_CODE
+                 --request-id ID --confirm --json
+
+sb remote service owned-storage-acceptance-finalize NAME --project-identity ID
+                 --promotion-id ID --request-id ID --confirm --json
 ```
 
 The lifecycle derives reviewer identity from its protected operator
 authorization; it accepts no caller-selected reviewer identity or support tier.
-It rechecks the exact closed admission, cleanup digest, complete evidence
-bundle digest, source/installed revisions, controller identities, fixture,
-freshness, and current non-drifted observations. `accepted` atomically writes
-the durable review decision, promotion receipt, evidence ID, `proven` tier, and
-`adoptable=true`. `rejected` keeps the candidate non-adoptable. `revoked`,
-expiry, revision skew, or later drift atomically sets `adoptable=false` and a
-non-proven tier without deleting owned objects.
+It rechecks the exact closed admission, candidate close generation, cleanup
+digest, complete evidence-bundle digest, source/installed/contract revisions,
+controller identities, fixture, freshness, and current non-drifted
+observations. At reservation it preallocates exact review-decision,
+validation-promotion, authority-binding IDs and the canonical binding digest;
+accepted review prepares only those exact values and byte-compares them on
+activation. Rejected review terminates without preparing a binding. Review is unique on `(remote, project, review, request_id)` and
+the canonical digest covers all of those fields plus the decision. Exact replay
+returns/resumes the same result; changed input refuses before effect. One closed
+candidate tuple has at most one terminal accepted/rejected review. Rejection
+requires a new candidate. Review consumes no qualification budget.
 
-The request ID and canonical digest are durable. Exact replay returns the same
-receipt; a changed decision/input under that ID is refused. No review can
-promote another remote, project, fixture, revision, or evidence candidate.
+Accepted review uses an explicit prepared-binding handshake:
+
+1. Through the existing shared hosting target transaction port, the lifecycle
+   durably reserves the review request and exact proposed IDs/digest.
+2. The authority records one exact `prepared` adoption binding. It grants no
+   policy or mutation authority.
+3. The lifecycle atomically commits review decision, fixture-validation
+   promotion receipt, primitive evidence ID, and
+   `acceptance_state=pending_ordinary` in the shared target record. Public tier
+   remains `implemented_unproven` and `adoptable=false`.
+4. Exact replay activates the matching authority binding only after proving the
+   committed lifecycle receipt.
+5. Only the exact disposable fixture may use the active validation binding;
+   general capability remains non-adoptable.
+
+No cross-repository atomic transaction is claimed. Missing acknowledgement or
+mixed state is non-adoptable and exact replay reconciles only the original
+binding. The lifecycle command never maps to an authority `review` operation.
+
+Revocation is a separate lifecycle operation referencing an existing promotion
+ID. It commits `adoptable=false` and a non-proven tier first, then marks the
+exact authority binding revoked. Lost deactivation acknowledgement remains
+fail-closed. Expiry, revision skew, or later drift follows the same order and
+never deletes owned objects.
+
+The lifecycle state is one closed nested value behind the existing shared
+hosting `RecoveryRepository`; Feature 052 owns no outer state parser/writer,
+lock, fsync, generation, file, or database. Every review, promotion,
+acceptance-finalize, and revocation transition uses the shared per-target lock
+and hosting generation CAS. Cross-store lock order is shared target lock then
+authority binding lock, released in reverse.
+
+After accepted promotion and binding activation, the exact disposable fixture
+must set ordinary policy `future`, create and replay one new normal sync
+generation, create/run/clean one new normal CI materialization, prove promotion
+and policy ancestry with no qualification ancestry, preserve unrelated state,
+then return policy to `legacy`.
+
+The protected `owned-storage-acceptance-finalize` input contains no evidence or
+support tier. After confirmation and derived operator authorization, the
+lifecycle reads exact sync, CI, workspace, cleanup, replay, ancestry, rollback,
+revision, and unrelated-state evidence through typed read-only ports. Its
+canonical request is unique on `(remote, project, acceptance_finalize,
+request_id)`, binds the promotion and starting target generation, and advances
+through `reserved`, `observing`, `evidence_closed`, `committed`, and `terminal`.
+Exact replay resumes/returns the same result; changed input conflicts. Success
+commits a lifecycle-owned immutable ordinary-evidence identity,
+`acceptance_state=complete`, validation promotion `supported`, and only then
+`proven`/adoptable. Failed or contradictory evidence atomically commits
+`failed`/non-adoptable and enters revocation-pending before the authority binding
+is revoked. Crash replay resumes only the recorded phase/generation.
 
 ## Support matrix baseline
 
 | Platform/mode | Initial tier | Mutation behavior |
 |---|---|---|
-| Qualified Ubuntu 24.04/systemd 255 private-root mode after reviewed proof | `proven` only after review | May permit future policy. |
+| Qualified Ubuntu 24.04/systemd 255 private-root mode after reviewed proof, active binding, and completed post-promotion ordinary fixture journey | `proven` | May permit future policy. |
+| Exact promoted disposable fixture while ordinary acceptance is pending | `implemented_unproven` | Only its fixture-validation promotion and active binding may permit `future`; no general adoption/support claim. |
 | Same mode before reviewed proof | `implemented_unproven` | Refuse normal authority mutation; permit only a separately authorized bounded qualification admission. |
 | Linux without required syscall/filesystem/private-mount proof | `unsupported` | Retain; no fallback claim. |
 | NFS/network/unknown filesystem | `unsupported` | Retain; separate qualification required. |

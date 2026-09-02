@@ -14,6 +14,37 @@ def production_python_files():
 
 
 class TestArchitectureBoundaries(unittest.TestCase):
+    def test_server_config_is_separate_from_host_oci_authority(self):
+        package = ROOT / "sandbox/server_config"
+        self.assertTrue(package.is_dir())
+        forbidden_imports = {
+            "sandbox_core",
+            "sandbox.hosting",
+            "sandbox.hosting.recovery",
+            "sandbox.hosting.images",
+            "sandbox.transports.remote_hosting_activation",
+            "sandbox.hermes.facade",
+        }
+        violations = []
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = {item.name for item in node.names}
+                elif isinstance(node, ast.ImportFrom):
+                    names = {node.module or ""}
+                else:
+                    continue
+                if any(
+                    name == blocked or name.startswith(blocked + ".")
+                    for name in names for blocked in forbidden_imports
+                ):
+                    violations.append(str(path.relative_to(ROOT)))
+            source = path.read_text()
+            if "runtime/registry.json" in source or "hosts.json" in source:
+                violations.append(str(path.relative_to(ROOT)))
+        self.assertEqual(violations, [])
+
     def test_activation_package_exports_only_narrow_closed_contract(self):
         import sandbox.hosting.images.activation as activation
         self.assertEqual(set(activation.__all__), {

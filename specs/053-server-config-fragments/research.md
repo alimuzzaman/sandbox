@@ -68,7 +68,9 @@ a new portable DSL (cannot consume plugin-emitted fragments).
 
 **Decision**: Sort fragments by normalized name, wrap each in adapter-owned provenance
 markers, and derive `set_digest` from the server type, authority versions, names, content
-digests, and renderer revision. Apply/revert validate and activate the complete set.
+digests, and policy revisions. Derive the rendered generation separately from that set,
+the renderer revision, canonical manifest, and exact rendered files/modes. Apply/revert
+validate and activate the complete set.
 Byte-identical same-name apply and healthy missing-name revert compare committed evidence
 and return before validation.
 

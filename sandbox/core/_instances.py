@@ -359,6 +359,38 @@ def resolve_registered_instance(project_dir: str | Path, label: str | None = Non
     )
 
 
+def _server_config_registry_identity_fields(
+        existing: Mapping | None, *, random_bytes=None) -> dict:
+    """Mint only for a truly new record; preserve existing and legacy records."""
+    from sandbox.server_config.models import InstanceIdentityProjection
+
+    if existing is None:
+        kwargs = {} if random_bytes is None else {"random_bytes": random_bytes}
+        projection = InstanceIdentityProjection.for_new_instance(**kwargs)
+        return {
+            "instance_incarnation_id": projection.instance_incarnation_id,
+            "server_config_mount_id": projection.server_config_mount_id,
+        }
+    projection = InstanceIdentityProjection.from_existing_record(existing)
+    if projection.is_legacy:
+        return {}
+    return {
+        "instance_incarnation_id": projection.instance_incarnation_id,
+        "server_config_mount_id": projection.server_config_mount_id,
+    }
+
+
+def _server_config_identity_snapshot(existing: Mapping | None) -> dict:
+    """Capture exact opaque fields, including the unattached legacy state."""
+    from sandbox.server_config.models import InstanceIdentityProjection
+
+    projection = InstanceIdentityProjection.from_existing_record(existing or {})
+    return {
+        "instance_incarnation_id": projection.instance_incarnation_id,
+        "server_config_mount_id": projection.server_config_mount_id,
+    }
+
+
 def _git_branch(root: str) -> str | None:
     """Current branch of `root`, or None when it isn't a git checkout, HEAD is
     detached, or git isn't installed. Used only to flavour derived names, so
@@ -1277,6 +1309,12 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 name = _derive_instance_name(root, taken, label=label)
                 ports = _pick_instance_ports(cfg)
 
+            # A truly new authoritative record receives one opaque incarnation.
+            # Existing records preserve their exact projection.  In particular,
+            # a legacy record without these fields is not silently adopted by an
+            # ordinary ensure/reconcile operation.
+            server_config_identity = _server_config_registry_identity_fields(existing)
+
             server = _valid_server(pconf.get("server") or "nginx")
             php_v = pconf.get("phpVersion")
             wp_v = pconf.get("wpVersion")
@@ -1308,7 +1346,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                             wordpress_port=ports["wordpress_port"],
                             db_port=ports["db_port"],
                             mailpit_port=ports["mailpit_port"],
-                            server=server)
+                            server=server, **server_config_identity)
 
             cfg = load_config()
             write_compose_files(cfg)
@@ -1395,6 +1433,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 wp_version=pconf.get("wpVersion"),
                 source=pconf.get("source"),
                 status="ready",
+                **server_config_identity,
             )
 
 
@@ -1634,6 +1673,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
             php_version=pconf.get("phpVersion"),
             wp_version=pconf.get("wpVersion"),
             source=pconf.get("source"),
+            **_server_config_registry_identity_fields(existing),
         )
         # Report the core reconcile alongside the record (the registry stores
         # the PIN; this is what the site actually runs after this apply).
@@ -1719,6 +1759,7 @@ def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
         "compose_bytes": compose_bytes,
         "runtime": copy.deepcopy(prior_runtime or prev_block or {}),
         "registry": copy.deepcopy(existing),
+        "server_config_identity": _server_config_identity_snapshot(existing),
         "runtime_running": runtime_running,
     }
 
@@ -1733,6 +1774,24 @@ def _restore_apply_rollback_state(snapshot: dict, name: str,
     distinguishes a complete rollback from a partial/failed one.
     """
     errors: list[str] = []
+    registry_snapshot = snapshot.get("registry") or {}
+    prior_identity = snapshot.get("server_config_identity")
+    if prior_identity is None and registry_snapshot:
+        try:
+            prior_identity = _server_config_identity_snapshot(registry_snapshot)
+        except (TypeError, ValueError):
+            prior_identity = None
+    if prior_identity is not None and registry_snapshot.get("root"):
+        try:
+            sc = _core()
+            root = registry_snapshot["root"]
+            label = registry_snapshot.get("label", "default")
+            current = sc.registry_get(root, label=label)
+            current_identity = _server_config_identity_snapshot(current)
+            if current_identity != prior_identity:
+                sc.registry_put(root, label=label, **prior_identity)
+        except Exception:
+            errors.append("server-config identity restore failed")
     try:
         _write_local_yaml(copy.deepcopy(snapshot["local"]))
     except Exception as exc:

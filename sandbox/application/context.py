@@ -94,6 +94,35 @@ def runtime_neutral_dependencies(
     )
 
 
+def server_config_dependencies(
+    *, registry: Any, server_config_root: str | Path,
+    project_identity_resolver, clock=None, repository_factory=None,
+    adapters=None,
+):
+    """Compose server-config mechanisms from explicit local dependencies.
+
+    Construction performs no registry, repository, runtime, or environment
+    reads.  The feature package therefore remains independent of the legacy
+    compatibility facade and all host/remote activation authorities.
+    """
+    from sandbox.server_config.context import ServerConfigDependencies, SystemClock
+    from sandbox.server_config.adapters.manifest import default_adapter_registry
+    from sandbox.server_config.repository import ServerConfigRepository
+
+    root = Path(server_config_root)
+    if repository_factory is None:
+        def repository_factory(incarnation):
+            return ServerConfigRepository(root, incarnation)
+    return ServerConfigDependencies(
+        registry=registry,
+        server_config_root=root,
+        project_identity_resolver=project_identity_resolver,
+        repository_factory=repository_factory,
+        adapters=adapters or default_adapter_registry(),
+        clock=clock or SystemClock(),
+    )
+
+
 def domain_service(cfg, **overrides):
     """Compose scoped naming policy without importing a compatibility facade."""
     import platform as host_platform

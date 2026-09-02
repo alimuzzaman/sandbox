@@ -16,7 +16,8 @@ git status --short --branch
 
 Required before acceptance:
 
-- branch is clean and contains Feature 047/048 integration;
+- branch is clean and contains the accepted Feature 048 observation recovery plus
+  Feature 049 trust, Feature 050 staging/proof custody, and Feature 051 activation source;
 - installed `sb` revision matches the tested Git/runtime revision mapping;
 - four disposable projects are registered: nginx target/control and OpenLiteSpeed
   target/control;
@@ -72,7 +73,8 @@ Required focused cases:
   one recovery activation maximum, and truthful recovery-needed timeout;
 - all current legacy `sb server` switch forms;
 - `list`/metadata `show` pre-dispatch causes zero persistent writes;
-- Feature 047/048 command/hosting/recovery tests after rebase.
+- Feature 048-051 command/hosting/recovery/trust/staging/activation compatibility tests
+  after integration, without treating their local/source results as live OCI proof.
 
 Use injected adapter faults for rollback tests. Invalid syntax is a separate
 pre-activation refusal and must not be mislabeled as rollback.
@@ -237,7 +239,7 @@ Verify:
 
 Do not call the feature done until all are true:
 
-- focused tests pass after Feature 047/048 rebase;
+- focused tests pass after current Feature 048-051 integration;
 - public docs and Sandbox CLI skill match all contracts and error meanings;
 - live nginx and OpenLiteSpeed target/control sequences pass on exact recorded images;
 - invalid and out-of-authority input proves zero activation/reload;

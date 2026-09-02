@@ -330,7 +330,7 @@ def classify_activation_transition(
         projection.new_services, key=lambda item: item["service"]))
     exact_prior = projection.prior_generation_digest is not None and normalized == tuple(sorted(
         projection.prior_services, key=lambda item: item["service"]))
-    if ambiguous:
+    if ambiguous or (exact_new and exact_prior):
         classification = "ambiguous"
     elif observed_digest == projection.new_generation_digest and exact_new:
         classification = "exact_new"

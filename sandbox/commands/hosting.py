@@ -3355,9 +3355,12 @@ def _cmd_host_image(validated: dict, entry: dict, args) -> None:
                     expected = tuple((generation or {}).get("service_projection") or ())
                     return bool(expected) and tuple(sorted(rows, key=lambda item: item.get("service", ""))) == \
                         tuple(sorted(expected, key=lambda item: item.get("service", "")))
-                generation_digest = (candidate.get("generation_digest") if exact(candidate)
-                                     else prior.get("generation_digest") if exact(prior)
-                                     else "sha256:" + "0" * 64)
+                candidate_exact = exact(candidate)
+                prior_exact = exact(prior)
+                generation_digest = (candidate.get("generation_digest")
+                                     if candidate_exact and not prior_exact
+                                     else prior.get("generation_digest")
+                                     if prior_exact and not candidate_exact else None)
                 return {"target_epoch_start": observed["target_epoch_start"],
                         "target_epoch_end": observed["target_epoch_end"],
                         "runtime_epoch_start": observed["runtime_epoch_start"],

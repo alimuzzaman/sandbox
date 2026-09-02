@@ -154,6 +154,7 @@ class FakeRuntime:
         return {"target_epoch_start": "machine-a", "target_epoch_end": "machine-a",
                 "runtime_epoch_start": "daemon-a", "runtime_epoch_end": "daemon-a",
                 "services": [{"service": name,
+                    "runtime_identity": f"container-{name}",
                     "declared_image": plan.image.repository_qualified_digest,
                     "repository_digest": plan.image.repository_qualified_digest,
                     "local_image_id": plan.image.config_digest,

@@ -483,10 +483,12 @@ class RunningObservation:
         if not self.services or len(self.services) > MAX_SERVICES or self.health_complete is not True:
             raise ActivationContractError("health_incomplete")
         names = []
-        required = frozenset({"service", "declared_image", "local_image_id", "repository_digest",
-                              "config_digest", "platform", "topology_identity", "healthy"})
+        required = frozenset({"service", "runtime_identity", "declared_image", "local_image_id",
+                              "repository_digest", "config_digest", "platform",
+                              "topology_identity", "healthy"})
         for service in self.services:
             raw = _closed(service, required); names.append(_text(raw["service"], identity=True))
+            _text(raw["runtime_identity"], identity=True)
             for key in ("local_image_id", "config_digest"): _digest(raw[key])
             _text(raw["declared_image"]); _text(raw["repository_digest"])
             if raw["healthy"] is not True or type(raw["platform"]) is not dict:

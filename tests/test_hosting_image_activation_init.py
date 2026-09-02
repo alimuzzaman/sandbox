@@ -50,6 +50,31 @@ class ActivationInitTests(unittest.TestCase):
                 target=staged_proof().target.as_mapping(), runtime_epoch="daemon-a")
         self.assertEqual(runtime.started, 0)
 
+    def test_pre_start_inspection_failure_stays_fenced_when_cleanup_is_unproven(self):
+        from sandbox.hosting.images.activation.init_runner import InitExecutionUncertain, InitRunner
+        from sandbox.hosting.images.activation.models import ActivationContractError
+        for inspection in (RuntimeError("inspect unavailable"),
+                           ActivationContractError("init_mismatch")):
+            for cleanup in (False, RuntimeError("remove unavailable")):
+                with self.subTest(inspection=type(inspection).__name__,
+                                  cleanup=type(cleanup).__name__):
+                    runtime = FakeRuntime()
+                    def inspect(_handle):
+                        raise inspection
+                    runtime.inspect_init = inspect
+                    def remove(_handle, **_kwargs):
+                        if isinstance(cleanup, Exception):
+                            raise cleanup
+                        return cleanup
+                    runtime.remove_init = remove
+                    with self.assertRaises(InitExecutionUncertain):
+                        InitRunner(runtime, persist_effect_entered=lambda *_: None).run(
+                            init_declaration(), exact_image=f"ghcr.io/acme/widget@{MANIFEST_DIGEST}",
+                            local_image_id=CONFIG_DIGEST,
+                            platform={"os": "linux", "architecture": "amd64"},
+                            target=staged_proof().target.as_mapping(), runtime_epoch="daemon-a")
+                    self.assertEqual(runtime.started, 0)
+
     def test_real_inspect_normalizes_declared_env_and_image_platform_independently(self):
         import json
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport

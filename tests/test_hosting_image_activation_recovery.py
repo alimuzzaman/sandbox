@@ -12,10 +12,12 @@ class ActivationRecoveryTests(unittest.TestCase):
         services = ({"service": "web", "declared_image": "repo/image@" + DIGEST_A,
             "repository_digest": "repo/image@" + DIGEST_A, "local_image_id": DIGEST_A,
             "config_digest": DIGEST_A, "platform": {"os": "linux", "architecture": "amd64"},
-            "topology_identity": "topology-a", "healthy": True},)
+            "runtime_identity": "container-new", "topology_identity": "topology-a",
+            "healthy": True},)
+        prior_services = ({**services[0], "runtime_identity": "container-prior"},)
         return ActivationTransitionProjection(DIGEST_A, DIGEST_B, operation, phase, entered, 3,
             DIGEST_A, DIGEST_B, {"remote": "a", "project": "b", "environment": "c"},
-            services, services)
+            services, prior_services)
 
     def observation(self, generation):
         return {"target_epoch_start": "target-a", "target_epoch_end": "target-a",
@@ -35,6 +37,17 @@ class ActivationRecoveryTests(unittest.TestCase):
         from sandbox.hosting.recovery.policy import classify_activation_transition
         result = classify_activation_transition(self.projection(), observed)
         self.assertEqual(result.classification, "ambiguous")
+
+    def test_identical_runtime_projections_are_ambiguous_even_with_candidate_digest(self):
+        from sandbox.hosting.recovery.policy import classify_activation_transition
+        projection = self.projection()
+        projection = ActivationTransitionProjection(
+            projection.transaction_digest, projection.request_digest, projection.operation,
+            projection.phase, projection.effect_entered, projection.expected_generation,
+            projection.new_generation_digest, projection.prior_generation_digest,
+            projection.target, projection.new_services, projection.new_services)
+        self.assertEqual(classify_activation_transition(
+            projection, self.observation(DIGEST_A)).classification, "ambiguous")
 
     def test_first_generation_has_no_prior_projection_but_exact_new_remains_safe(self):
         from sandbox.hosting.recovery.policy import classify_activation_transition

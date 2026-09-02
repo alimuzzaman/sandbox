@@ -9,6 +9,10 @@ transaction: exact request/transaction digests, expected generation, new/prior g
 identities, service/topology/image/health requirements, and phase/effect summary. Feature
 048 returns a closed `exact_new`, `exact_prior`, `neither`, or `ambiguous` value with exact
 evidence identity and target/runtime epoch boundaries and performs no repository/state write.
+Each service projection includes its runtime-owned container identity. That identity is retained
+inside the generation digest and must match the fresh running observation. If new and prior
+projections both match, recovery classifies the observation as `ambiguous`; projection order can
+never choose a generation.
 
 Feature 051 reacquires/holds the shared target owner, validates a first fresh coherent
 observer value and generation, then durably writes only a bounded 051-owned provisional:

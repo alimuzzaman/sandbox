@@ -22,6 +22,7 @@ class InitRunner:
             declaration=declaration, image=exact_image, platform=platform,
             target=target, start=False)
         started = False
+        prestart_cleanup_complete = False
         try:
             inspection = self.adapter.inspect_init(created)
             expected = {
@@ -37,6 +38,7 @@ class InitRunner:
                 removed = self.adapter.remove_init(created, force=False)
                 if removed is not True:
                     raise InitExecutionUncertain("pre-start cleanup is unproven")
+                prestart_cleanup_complete = True
                 raise ActivationContractError("init_mismatch")
             declaration_digest = activation_digest(
                 "sandbox.hosting.images.init-declaration.v1", declaration)
@@ -68,8 +70,6 @@ class InitRunner:
                     "cleanup_complete": True}
             return InitReceipt(**body, receipt_digest=activation_digest(
                 "sandbox.hosting.images.init-receipt.v1", body))
-        except ActivationContractError:
-            raise
         except Exception as exc:
             if started:
                 try:
@@ -82,8 +82,16 @@ class InitRunner:
                 if cancelled is not True or terminated is not True or removed is not True:
                     raise InitExecutionUncertain("possible init execution remains fenced") from None
                 raise InitExecutionUncertain("init entered without terminal receipt") from None
-            try: self.adapter.remove_init(created, force=False)
-            except Exception: pass
+            if prestart_cleanup_complete and isinstance(exc, ActivationContractError):
+                raise
+            try:
+                removed = self.adapter.remove_init(created, force=False)
+            except Exception:
+                removed = False
+            if removed is not True:
+                raise InitExecutionUncertain("pre-start cleanup is unproven") from None
             if isinstance(exc, InitExecutionUncertain):
+                raise
+            if isinstance(exc, ActivationContractError):
                 raise
             raise ActivationContractError("init_mismatch") from None

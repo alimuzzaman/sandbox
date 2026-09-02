@@ -65,7 +65,7 @@ class ActivationRuntimeTests(unittest.TestCase):
                 topology_digest=request.proof.observed_identity["topology_digest"],
                 edge_identity="edge-a")
 
-    def test_transport_running_platform_comes_from_image_inspect_without_defaults(self):
+    def test_transport_running_identity_and_platform_come_from_inspect_without_defaults(self):
         import json
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
         image_id = "sha256:" + "d" * 64
@@ -78,9 +78,9 @@ class ActivationRuntimeTests(unittest.TestCase):
                     "Labels": "com.docker.compose.service=web"}) + "\n"
             elif argv[:3] == ("docker", "image", "inspect"):
                 stdout = json.dumps([{"Id": image_id, "Os": "linux",
-                                      "Architecture": "arm64"}])
+                                      "Architecture": "arm64", "Variant": "v8"}])
             else:
-                stdout = json.dumps([{"Image": image_id,
+                stdout = json.dumps([{"Id": "container-runtime-a", "Image": image_id,
                     "Config": {"Image": "ghcr.io/acme/widget@" + "sha256:" + "a" * 64,
                                "Labels": {"org.sandbox.application-topology.v1": "topology-a"}},
                     "State": {"Health": {"Status": "healthy"}}}])
@@ -90,7 +90,27 @@ class ActivationRuntimeTests(unittest.TestCase):
                                                "target_identity": "target-a"})
         observed = transport.observe_running(target={}, services=("web",))
         self.assertEqual(observed["services"][0]["platform"],
-                         {"os": "linux", "architecture": "arm64"})
+                         {"os": "linux", "architecture": "arm64", "variant": "v8"})
+        self.assertEqual(observed["services"][0]["runtime_identity"], "container-runtime-a")
+
+    def test_transport_local_observation_preserves_arm64_variant(self):
+        import json
+        from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
+        manifest = "sha256:" + "a" * 64
+        config = "sha256:" + "d" * 64
+        image = "ghcr.io/acme/widget@" + manifest
+        def runner(*, argv, environment, private_environment, private_environment_source,
+                   redact_environment_keys, timeout_seconds, max_output_bytes):
+            stdout = "daemon-a\n" if argv[:2] == ("docker", "info") else json.dumps([{
+                "Id": config, "Os": "linux", "Architecture": "arm64", "Variant": "v8",
+                "RepoDigests": [image]}])
+            return {"returncode": 0, "stdout": stdout, "stderr": "", "terminated": True}
+        transport = RegisteredRemoteActivationTransport(argv_runner=runner,
+            target_identity_observer=lambda: {"machine_identity": "machine-a",
+                                               "target_identity": "target-a"})
+        observed = transport.observe_local_image(target={}, repository_digest=image)
+        self.assertEqual(observed["platform"],
+                         {"os": "linux", "architecture": "arm64", "variant": "v8"})
 
 
 if __name__ == "__main__": unittest.main()

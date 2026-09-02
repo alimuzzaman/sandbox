@@ -296,8 +296,9 @@ class ActivationTransitionProjection:
                 or type(self.expected_generation) is not int or self.expected_generation < 0 \
                 or type(self.target) is not dict:
             raise ValueError("activation transition projection is invalid")
-        required = {"service", "declared_image", "repository_digest", "local_image_id",
-                    "config_digest", "platform", "topology_identity", "healthy"}
+        required = {"service", "runtime_identity", "declared_image", "repository_digest",
+                    "local_image_id", "config_digest", "platform", "topology_identity",
+                    "healthy"}
         for services in (self.new_services,):
             if not 1 <= len(services) <= MAX_SERVICES or any(
                     type(item) is not dict or set(item) != required or

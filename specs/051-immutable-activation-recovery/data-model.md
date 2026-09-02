@@ -53,7 +53,7 @@
 ## RunningObservation
 
 - unchanged target/machine/daemon/runtime epoch
-- each selected container/service/topology identity
+- each selected container/service/topology identity, including the runtime-owned container ID
 - exact declared ref, local ID, repository/config digest, platform, health
 - edge-relevant endpoint identity and canonical observation digest
 
@@ -61,7 +61,7 @@
 
 - generation number; plan/proof/policy/request/transaction digests
 - target/daemon, exact image, topology, non-secret configuration identity
-- init receipt identities, running observation, edge terminal receipt
+- init receipt identities, running observation with runtime-owned container IDs, edge terminal receipt
 - committed time/identity and canonical digest
 - forward `rollback_subject_digest` and `rollback_grant_digest`
 

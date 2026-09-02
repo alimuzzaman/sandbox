@@ -202,9 +202,11 @@ class RegisteredRemoteActivationTransport:
             image_id = raw.get("Id"); repo_digests = raw.get("RepoDigests") or []
             end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             end_target = self._observed_target(end_epoch)
+            platform = {"os": raw.get("Os"), "architecture": raw.get("Architecture")}
+            if raw.get("Variant"): platform["variant"] = raw["Variant"]
             return {"repository": image.split("@", 1)[0].split("/", 1)[1],
                     "repo_digest": image, "config_digest": image_id,
-                    "platform": {"os": raw.get("Os"), "architecture": raw.get("Architecture")},
+                    "platform": platform,
                     "local_image_id": image_id,
                     "target_epoch_start": start_target["machine_identity"],
                     "target_epoch_end": end_target["machine_identity"],
@@ -239,7 +241,8 @@ class RegisteredRemoteActivationTransport:
                     platform = {"os": image_raw.get("Os"),
                                 "architecture": image_raw.get("Architecture")}
                     if image_raw.get("Variant"): platform["variant"] = image_raw["Variant"]
-                    rows.append({"service": label, "declared_image": config.get("Image"),
+                    rows.append({"service": label, "runtime_identity": raw.get("Id"),
+                                 "declared_image": config.get("Image"),
                                  "repository_digest": config.get("Image"),
                                  "local_image_id": image_id, "config_digest": image_id,
                                  "platform": platform,

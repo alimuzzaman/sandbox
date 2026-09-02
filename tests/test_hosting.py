@@ -1544,6 +1544,12 @@ class TestHostingManifest(unittest.TestCase):
              "State": "running", "Health": "healthy"}
             for index, service in enumerate(services)
         ]
+        rows.append({
+            "Service": "infrastructure-postgres",
+            "ID": "f" * 64,
+            "State": "running",
+            "Health": "healthy",
+        })
         secret = "must-not-enter-observer-receipt"
         inspections = {
             row["ID"]: {

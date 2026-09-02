@@ -179,7 +179,8 @@ data, second-oldest selection, and every registry/pull path.
   staging generation, stage-ledger authority/revision, target/machine/daemon, exact
   delivery projection, selected services, ordered init declarations, runtime/Compose
   capability, edge policy, shared mutation-owner revision, state revision, and accepted
-  049/050 schema revisions.
+  049/050 schema revisions. It MUST also bind the rollback-grant authority identity,
+  revision, and public-verification-key digest. The signing secret is outside Feature 051.
 - **FR-005**: Before proof verification, Feature 051 MUST use Feature 050's authenticated
   proof-custody operation to durably prepare a lease that immediately pins the retained
   terminal proof and binds the durable activation-owner/request holder identity, activation
@@ -216,13 +217,37 @@ data, second-oldest selection, and every registry/pull path.
   images, duplicates, missing services, unsafe dependencies, and unexpected orphans.
 - **FR-013**: Runtime replacement MUST use only the already-local repository-qualified
   exact manifest digest with build and pull disabled and no registry fallback.
+  The full private render MUST remain inside the remote helper, be passed unchanged on stdin
+  to the no-build/no-pull Compose effect, and be re-rendered afterward. Its raw hash MUST NOT
+  be returned or persisted. Machine/public state MUST bind the complete raw render with a
+  machine-keyed, target-scoped, domain-separated opaque HMAC. The target key MUST be
+  derived locally from the owner-only machine master and exact machine/target identities;
+  the master MUST NOT cross SSH. SSH output MUST contain only a closed
+  allowlisted projection with exact image/platform/topology identities, service/dependency/
+  environment-key names, and refusal flags; arbitrary commands, entrypoints, labels,
+  annotations, health checks, URLs, logging values, extensions, environment values, and
+  inline content MUST remain private. The selected Compose project, opaque render identity,
+  and each resulting container's Compose configuration hash MUST match through a
+  target-scoped protected identity. Every fresh running, post-edge, and recovery observation
+  MUST compare that protected identity under unchanged target/runtime epochs. Raw `ps`
+  labels, raw inspect environment/labels, and raw Compose hashes MUST remain remote. All
+  top-level Compose configs/secrets and external networks MUST refuse
+  unless a future contract snapshots their exact private bytes or immutable engine identity.
 - **FR-014**: Every init step MUST be ordered, bounded, and created without start before
   its exact container configuration is inspected.
 - **FR-015**: Pre-start init inspection MUST prove exact image reference/local identity,
   config/platform, command, mounts, networks, environment-key names, privilege,
   dependency scope, target, and runtime epoch; any mismatch MUST remove without start.
+  Cleanup MUST remove only a container whose deterministic name and owner label both bind
+  the exact target, image, and admitted initializer declaration. A foreign or unproved
+  name collision MUST remain fenced and MUST NOT be removed.
 - **FR-016**: Init environment secret values MUST NOT enter persisted state, receipts,
-  logs, diagnostics, public output, or inspection evidence.
+  logs, diagnostics, public output, inspection evidence, or an unkeyed digest that acts as
+  an offline verifier. Only the target-scoped derived binding key MUST travel in private
+  stdin; the machine master MUST remain local. The derived key MUST be removed before any
+  child process and never enter state, commands, output, or receipts. Helper redaction
+  MUST cover every observed rendered scalar key and value even when services
+  reuse the same environment key, and MUST remove top-level inline content.
 - **FR-017**: The state machine MUST durably record an init `effect_entered` boundary
   immediately before start and one bounded terminal exit/termination receipt afterward.
 - **FR-018**: Possible init start without an exact terminal receipt MUST be durable
@@ -231,11 +256,14 @@ data, second-oldest selection, and every registry/pull path.
   ownership/cancellation, and complete container/process termination evidence.
 - **FR-020**: Activation/rollback success MUST require one coherent fresh observation
   proving every selected container's exact declared image reference, local image identity,
-  repository/config digest, platform, topology, runtime generation, and required health.
+  repository/config digest, platform, topology, Compose project/configuration, registered
+  target identity, runtime generation, and required health.
 - **FR-021**: Missing, partial, duplicate, contradictory, stale, changing, mixed-epoch,
   oversized, or timed-out running evidence MUST be non-success.
 - **FR-022**: Edge readiness MUST be an immutable sub-request of the same 051 transaction
-  and MUST complete before activation/rollback success.
+  and MUST complete before activation/rollback success. A receipt MUST bind request,
+  route, target, prospective generation, runtime observation, and application deployment
+  identity. HTTP reachability alone is diagnostic and MUST return `edge_incomplete`.
 - **FR-023**: A proven-not-entered edge phase MAY resume only the exact request.
   Acceptance-unknown or interrupted edge delivery MUST first query existing replay
   authority; an exact terminal receipt MAY promote only after fresh unchanged runtime proof.
@@ -248,6 +276,8 @@ data, second-oldest selection, and every registry/pull path.
   050 proof-pin/host-acceptance binding, rollback-grant digest, and deterministic rollback
   subject. Recovery state MAY contain one bounded 051-owned non-authorizing provisional
   marker with exact request/transaction/generation and pre-observation identity/epoch.
+  Every accepted transaction MUST retain a closed recovery context containing the exact
+  target, Compose project, and selected services so recovery does not need a candidate.
 - **FR-026**: Durable state/public results MUST NOT store credentials, credential
   references, secret values, arbitrary child output, private temporary paths, or raw env.
 - **FR-027**: The existing shared `RecoveryRepository` MUST remain the sole outer
@@ -276,6 +306,10 @@ data, second-oldest selection, and every registry/pull path.
   stale, partial, unavailable, or mismatched post-evidence MUST atomically record a stable
   non-success recovery result and clear the provisional while leaving the activation
   transaction fenced and unpromoted. Persistence uncertainty leaves the provisional fenced.
+  Accepted, preflight, init-pending, and runtime-pending phases MAY have no candidate
+  generation. Recovery MUST then use only the persisted recovery context and prior
+  generation: exact prior or an empty generation-zero runtime closes as no-effect, while
+  other observations remain unpromoted uncertainty.
   Recovery classification MUST use the exhaustive matrix in
   `contracts/recovery-integration.md`: for both `activate` and `rollback`, `neither` and
   `ambiguous` MUST never promote; `exact_prior` MUST never advance generation and MAY only
@@ -298,6 +332,9 @@ data, second-oldest selection, and every registry/pull path.
   policy revision. It MUST NOT bind the not-yet-existing future generation digest.
   Forward acceptance persists grant/subject digests and the resulting terminal forward
   generation references them for later exact rollback validation.
+  The grant MUST carry a valid Ed25519 SSH signature from the public key whose digest and
+  authority identity/revision are in the binding. Policy bundles MUST be owner-only,
+  regular, single-link, no-follow, bounded, and stable across their read.
 - **FR-035**: Caller/project claims, post-hoc grants, stale/mismatched bindings, uncertain
   init/data state, missing local proof, or changed target/daemon MUST refuse rollback
   before effects.

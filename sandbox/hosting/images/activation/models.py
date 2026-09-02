@@ -259,15 +259,20 @@ class ActivationAuthorityBinding:
     target: dict[str, str]
     delivery_identity_projection: dict[str, Any]
     policy_digest: str
+    rollback_grant_authority_id: str
+    rollback_grant_authority_revision: str
+    rollback_grant_verification_digest: str
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ActivationContractError("authority_mismatch")
         for item in (self.binding_digest, self.plan_digest, self.proof_digest,
-                     self.stage_request_digest, self.staging_policy_digest, self.policy_digest):
+                     self.stage_request_digest, self.staging_policy_digest, self.policy_digest,
+                     self.rollback_grant_verification_digest):
             _digest(item)
         for item in (self.authority_id, self.authority_revision, self.stage_request_id,
-                     self.stage_ledger_authority): _text(item, identity=True)
+                     self.stage_ledger_authority, self.rollback_grant_authority_id,
+                     self.rollback_grant_authority_revision): _text(item, identity=True)
         _integer(self.staging_generation, minimum=1); _integer(self.stage_ledger_revision)
         for item in _closed(self.target, frozenset({"machine_identity", "target_identity", "daemon_identity"})).values():
             _text(item, identity=True)
@@ -299,16 +304,16 @@ class ActivationRequest:
     plan: VerifiedImagePlan
     proof: StagedImageProof
     authority_binding_digest: str
-    rollback_grant_digest: str | None
+    rollback_subject_digest: str
+    rollback_grant_digest: str
     confirmed: bool
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or self.operation not in OPERATIONS or self.confirmed is not True:
             raise ActivationContractError("confirmation_required")
         _text(self.request_id, identity=True); _integer(self.expected_generation)
-        for item in (self.request_digest, self.policy_digest, self.authority_binding_digest): _digest(item)
-        if self.operation == "rollback": _digest(self.rollback_grant_digest)
-        elif self.rollback_grant_digest is not None: raise ActivationContractError("request_conflict")
+        for item in (self.request_digest, self.policy_digest, self.authority_binding_digest,
+                     self.rollback_subject_digest, self.rollback_grant_digest): _digest(item)
         if type(self.plan) is not VerifiedImagePlan or type(self.proof) is not StagedImageProof:
             raise ActivationContractError()
         if self.request_digest != activation_digest(
@@ -321,6 +326,7 @@ class ActivationRequest:
                 "policy_digest": self.policy_digest, "plan": self.plan.as_mapping(),
                 "proof": self.proof.as_mapping(),
                 "authority_binding_digest": self.authority_binding_digest,
+                "rollback_subject_digest": self.rollback_subject_digest,
                 "rollback_grant_digest": self.rollback_grant_digest,
                 "confirmed": self.confirmed}
 
@@ -330,7 +336,8 @@ class ActivationRequest:
     @classmethod
     def create(cls, *, request_id: str, operation: str, expected_generation: int,
                policy_digest: str, plan: object, proof: object,
-               authority_binding_digest: str, rollback_grant_digest: str | None,
+               authority_binding_digest: str, rollback_subject_digest: str,
+               rollback_grant_digest: str,
                confirmed: bool) -> "ActivationRequest":
         try:
             verified = validate_verified_image_plan(plan)
@@ -341,10 +348,12 @@ class ActivationRequest:
                 "expected_generation": expected_generation, "policy_digest": policy_digest,
                 "plan": verified.as_mapping(), "proof": staged.as_mapping(),
                 "authority_binding_digest": authority_binding_digest,
+                "rollback_subject_digest": rollback_subject_digest,
                 "rollback_grant_digest": rollback_grant_digest, "confirmed": confirmed}
         digest = activation_digest("sandbox.hosting.images.activation-request.v1", base)
         return cls(1, request_id, digest, operation, expected_generation, policy_digest,
-                   verified, staged, authority_binding_digest, rollback_grant_digest, confirmed)
+                   verified, staged, authority_binding_digest, rollback_subject_digest,
+                   rollback_grant_digest, confirmed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,7 +394,9 @@ class ForwardRollbackSubject:
     subject_digest: str
 
     def __post_init__(self) -> None:
-        for item in self.target.values(): _text(item, identity=True)
+        for item in _closed(self.target, frozenset({
+                "machine_identity", "target_identity", "daemon_identity"})).values():
+            _text(item, identity=True)
         for item in (self.rollback_target_generation_digest, self.candidate_plan_digest,
                      self.candidate_proof_digest, self.activation_authority_digest,
                      self.configuration_digest, self.topology_digest,
@@ -407,6 +418,7 @@ class RollbackCompatibilityGrant:
     issued_at: int
     policy_revision: str
     subject: ForwardRollbackSubject
+    authority_proof: str
     grant_digest: str
     expires_at: int | None = None
     revoked: bool = False
@@ -417,15 +429,20 @@ class RollbackCompatibilityGrant:
         if self.expires_at is not None: _integer(self.expires_at)
         if type(self.revoked) is not bool or type(self.subject) is not ForwardRollbackSubject:
             raise ActivationContractError("rollback_grant_mismatch")
-        _digest(self.grant_digest)
+        _text(self.authority_proof); _digest(self.grant_digest)
         if self.grant_digest != activation_digest("sandbox.hosting.images.rollback-grant.v1", self.body_mapping()):
             raise ActivationContractError("rollback_grant_mismatch")
 
     def body_mapping(self) -> dict[str, Any]:
         return {"authority_id": self.authority_id, "authority_revision": self.authority_revision,
                 "issued_at": self.issued_at, "policy_revision": self.policy_revision,
-                "subject": self.subject.as_mapping(), "expires_at": self.expires_at,
+                "subject": self.subject.as_mapping(), "authority_proof": self.authority_proof,
+                "expires_at": self.expires_at,
                 "revoked": self.revoked}
+
+    def unsigned_mapping(self) -> dict[str, Any]:
+        return {key: value for key, value in self.body_mapping().items()
+                if key != "authority_proof"}
 
     def as_mapping(self) -> dict[str, Any]: return {**self.body_mapping(), "grant_digest": self.grant_digest}
 
@@ -474,7 +491,9 @@ class RunningObservation:
     observation_digest: str
 
     def __post_init__(self) -> None:
-        for item in self.target.values(): _text(item, identity=True)
+        for item in _closed(self.target, frozenset({
+                "machine_identity", "target_identity", "daemon_identity"})).values():
+            _text(item, identity=True)
         for item in (self.target_epoch_start, self.target_epoch_end,
                      self.runtime_epoch_start, self.runtime_epoch_end, self.edge_identity):
             _text(item, identity=True)
@@ -483,17 +502,20 @@ class RunningObservation:
         if not self.services or len(self.services) > MAX_SERVICES or self.health_complete is not True:
             raise ActivationContractError("health_incomplete")
         names = []
-        required = frozenset({"service", "runtime_identity", "declared_image", "local_image_id",
+        required = frozenset({"service", "compose_project", "runtime_identity", "declared_image", "local_image_id",
                               "repository_digest", "config_digest", "platform",
-                              "topology_identity", "healthy"})
+                              "topology_identity", "compose_config_hash", "healthy"})
         for service in self.services:
             raw = _closed(service, required); names.append(_text(raw["service"], identity=True))
+            _text(raw["compose_project"], identity=True)
             _text(raw["runtime_identity"], identity=True)
             for key in ("local_image_id", "config_digest"): _digest(raw[key])
             _text(raw["declared_image"]); _text(raw["repository_digest"])
             if raw["healthy"] is not True or type(raw["platform"]) is not dict:
                 raise ActivationContractError("health_incomplete")
             _text(raw["topology_identity"], identity=True)
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", raw["compose_config_hash"]) is None:
+                raise ActivationContractError("runtime_mismatch")
         if len(names) != len(set(names)):
             raise ActivationContractError("runtime_mismatch")
         _digest(self.topology_digest); _digest(self.observation_digest)
@@ -522,6 +544,7 @@ class VerifiedActivationGeneration:
     image: dict[str, Any]
     topology_digest: str
     configuration_digest: str
+    compose_project: str
     compose_projection: tuple[dict[str, Any], ...]
     init_receipt_digests: tuple[str, ...]
     running_observation_digest: str
@@ -544,13 +567,15 @@ class VerifiedActivationGeneration:
                 or not self.service_projection:
             raise ActivationContractError()
         _safe_mapping(self.image, forbidden=SECRET_FIELDS)
+        _text(self.compose_project, identity=True)
         exact_image = self.image.get("repository_qualified_digest")
         exact_platform = self.image.get("platform")
         if type(exact_image) is not str or "@sha256:" not in exact_image \
                 or type(exact_platform) is not dict:
             raise ActivationContractError()
         compose_fields = frozenset({"service", "image", "build", "pull_policy", "platform",
-                                    "dependencies", "topology_identity", "configuration_digest"})
+                                    "dependencies", "topology_identity", "compose_config_hash",
+                                    "configuration_digest"})
         compose_names = []
         if len(self.compose_projection) > MAX_SERVICES:
             raise ActivationContractError()
@@ -564,6 +589,8 @@ class VerifiedActivationGeneration:
                     or type(raw["dependencies"]) is not list:
                 raise ActivationContractError()
             _digest(raw["configuration_digest"])
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", raw["compose_config_hash"]) is None:
+                raise ActivationContractError()
             for dependency in raw["dependencies"]:
                 _text(dependency, identity=True)
         if len(compose_names) != len(set(compose_names)):
@@ -580,11 +607,15 @@ class VerifiedActivationGeneration:
                 "health_complete": True, "edge_identity": "projection"}))
         if {item["service"] for item in self.service_projection} != set(compose_names) \
                 or any(item["declared_image"] != exact_image
+                       or item["compose_project"] != self.compose_project
                        or item["repository_digest"] != exact_image
                        or item["local_image_id"] != self.image.get("config_digest")
                        or item["config_digest"] != self.image.get("config_digest")
                        or item["platform"] != exact_platform
                        or item["topology_identity"] != self.topology_digest
+                       or item["compose_config_hash"] != next(
+                           row["compose_config_hash"] for row in self.compose_projection
+                           if row["service"] == item["service"])
                        for item in self.service_projection):
             raise ActivationContractError()
         if self.generation_digest != activation_digest("sandbox.hosting.images.activation-generation.v1", self.body_mapping()):
@@ -624,6 +655,7 @@ class ActivationTransaction:
     init_receipts: tuple[dict[str, Any], ...]
     init_steps: tuple[dict[str, Any], ...]
     edge_required: bool
+    recovery_context: dict[str, Any]
     running_observation: dict[str, Any] | None
     edge_result: dict[str, Any] | None
     candidate_generation: dict[str, Any] | None
@@ -638,6 +670,19 @@ class ActivationTransaction:
         if type(self.effect_entered) is not bool or type(self.edge_required) is not bool \
                 or len(self.init_receipts) > MAX_INIT_STEPS or len(self.init_steps) > MAX_INIT_STEPS:
             raise ActivationContractError()
+        context = _closed(self.recovery_context, frozenset({
+            "target", "compose_project", "selected_services"}))
+        target = _closed(context["target"], frozenset({
+            "machine_identity", "target_identity", "daemon_identity"}))
+        for item in target.values():
+            _text(item, identity=True)
+        _text(context["compose_project"], identity=True)
+        services = context["selected_services"]
+        if type(services) is not list or not 1 <= len(services) <= MAX_SERVICES \
+                or len(services) != len(set(services)):
+            raise ActivationContractError()
+        for item in services:
+            _text(item, identity=True)
         for value in (self.proof_pin, self.running_observation, self.edge_result,
                       self.candidate_generation, self.result):
             if value is not None: _safe_mapping(value, forbidden=SECRET_FIELDS)
@@ -661,13 +706,30 @@ class ActivationTransaction:
         if self.result is not None: ActivationResult.from_mapping(self.result)
         if self.edge_result is not None:
             prepared = {"request_id", "request_digest", "phase", "terminal", "receipt_digest"}
-            terminal = {"request_id", "request_digest", "terminal", "receipt_digest"}
-            if set(self.edge_result) not in {frozenset(prepared), frozenset(terminal)} \
+            terminal = {"request_id", "request_digest", "terminal", "receipt_digest",
+                        "route_digest", "observation_digest", "target_identity",
+                        "generation", "deployment_identity"}
+            observed = {*terminal, "observed_only"}
+            fields = set(self.edge_result)
+            if fields not in {frozenset(prepared), frozenset(terminal), frozenset(observed)} \
                     or type(self.edge_result.get("terminal")) is not bool:
                 raise ActivationContractError("edge_uncertain")
             _text(self.edge_result["request_id"], identity=True)
             _digest(self.edge_result["request_digest"])
-            if self.edge_result["terminal"] is True: _digest(self.edge_result["receipt_digest"])
+            if self.edge_result["terminal"] is True:
+                for key in ("receipt_digest", "route_digest", "observation_digest",
+                            "deployment_identity"):
+                    _digest(self.edge_result[key])
+                _text(self.edge_result["target_identity"], identity=True)
+                _integer(self.edge_result["generation"], minimum=1)
+                if "observed_only" in self.edge_result \
+                        and self.edge_result["observed_only"] is not True:
+                    raise ActivationContractError("edge_uncertain")
+                receipt_body = {key: value for key, value in self.edge_result.items()
+                                if key != "receipt_digest"}
+                if self.edge_result["receipt_digest"] != activation_digest(
+                        "sandbox.hosting.images.activation-edge-receipt.v1", receipt_body):
+                    raise ActivationContractError("edge_uncertain")
             elif self.edge_result.get("receipt_digest") is not None:
                 raise ActivationContractError("edge_uncertain")
         for index, step in enumerate(self.init_steps):
@@ -695,12 +757,15 @@ class ActivationRecoveryProvisional:
     classification: str
     target_epoch_start: str
     target_epoch_end: str
+    target_identity_start: str
+    target_identity_end: str
     runtime_epoch_start: str
     runtime_epoch_end: str
     authorizing: bool = False
 
     def __post_init__(self) -> None:
         for item in (self.request_id, self.owner, self.target_epoch_start, self.target_epoch_end,
+                     self.target_identity_start, self.target_identity_end,
                      self.runtime_epoch_start, self.runtime_epoch_end): _text(item, identity=True)
         for item in (self.request_digest, self.transaction_digest, self.evidence_identity): _digest(item)
         _integer(self.expected_generation)

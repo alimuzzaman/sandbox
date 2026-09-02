@@ -99,6 +99,14 @@ not claim that an implementation-free RED run occurred.
 - [X] T042 Perform the user-required independent Sol High source/security review of credential, helper supply-chain, process-tree, replay, local-proof, lease/pin handoff, lock-order, finite-retention, and no-activation controls against `specs/050-secure-image-staging/spec.md`; this was automated review, not human review
 - [X] T043 Record source/local evidence and leave live secret/GHCR/remote/deployment gates explicit in `specs/050-secure-image-staging/quickstart.md`
 
+## Phase 8: Retained-Proof Custody Hardening
+
+- [X] T044 Fully decode and canonical-byte compare the retained staged proof under ordered custody before activation policy admission
+- [X] T045 Bind the fixed stage-ledger authority and exact committed proof-record revision into validation and the durable lease/pin
+- [X] T046 Enforce persisted record/proof/tombstone/pin maxima, nested retained-proof authority, and disjoint tombstone/retained authority on ledger load
+- [X] T047 Add negative custody, authority/revision, capacity, overlap, and in-lock admission regressions and synchronize the data model/quickstart
+- [X] T048 Rerun the complete synchronized gates and obtain a fresh independent post-hardening source-security review
+
 ## Dependencies & Execution Order
 
 - Feature 049 must be complete before Feature 050 implementation.

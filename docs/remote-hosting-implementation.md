@@ -262,8 +262,41 @@ acceptance or cancel only proven absence. Only a terminal accepted owner release
 Init is create-without-start, exact inspection, durable `effect_entered`, bounded start/wait,
 complete termination, and cleanup. Possible execution without a terminal receipt stays
 uncertain and is never replayed. Long-lived replacement accepts only repository-qualified
-digests and invokes Compose with `--no-build --pull never`; exact running image/config/
-platform/topology/health and edge evidence are required before the generation CAS.
+digests. The registered target and Compose project stay guarded from observation through
+commit. The full private render stays inside the remote helper, which feeds those same bytes
+on stdin to `up --no-build --pull never`, proves each resulting Compose configuration hash,
+and rerenders afterward. A machine-keyed, target-scoped, domain-separated HMAC over the complete private
+render is the only persisted configuration identity. Each raw service config hash also
+stays remote; only its target-scoped HMAC enters the closed projection and every later
+running/recovery observation must reproduce it. SSH output is a closed allowlist of
+safe image/platform/topology and service/dependency/environment-key identities plus refusal
+flags; arbitrary commands, labels, health checks, URLs, logging values, extensions,
+environment values, raw hashes, inline content, and rendered map keys are removed. The
+owner-only machine master remains local. Only its exact machine/target-derived binding key
+uses private stdin and is removed before Docker runs. All top-level configs/secrets
+and external networks refuse until their bytes or engine identity can be snapshotted. Exact
+running observation projects `ps` and inspect inside the helper, so complete labels,
+environment, arbitrary image/container labels, and raw Compose hashes do not cross SSH.
+
+Before Feature 051 policy admission, Feature 050 custody fully decodes and canonical-byte
+compares the retained proof and matches the fixed ledger authority plus committed record
+revision under target -> host -> stage locks. Those locks remain held through policy
+admission, lease preparation, durable host acceptance, and pin promotion. Ledger load
+rejects nested proof/pin corruption, overlapping tombstone/retained authority, and the
+64-record/proof, 4096-tombstone, or 64-pin maxima.
+running image/config/platform/topology/
+health evidence is required before the generation CAS. Initializer cleanup removes only a
+container whose deterministic name and owner label bind target, image, and declaration; a
+foreign or unproved name collision is never removed and returns `effect_unknown`. Output
+redaction retains every rendered scalar independently, including duplicate environment keys,
+and replaces longer values first so overlapping values cannot disclose suffixes.
+
+Rollback grants are Ed25519 SSH signatures verified with the public key whose digest and
+authority identity/revision are in the owner-only activation binding. Bundle reads are
+no-follow, regular-file, single-link, owner-only, bounded, and stable. The signing key never
+enters Feature 051. Public-route HTTP checks remain reachability diagnostics: required edge
+success needs a receipt bound to the request, route, target, prospective generation, runtime
+observation, and deployment identity, otherwise activation returns `edge_incomplete`.
 
 `sb host image recover` is separate from failed-apply `sb host recover`. Feature 051 writes
 one `authorizing: false` provisional after the first Feature 048 observation, immediately
@@ -273,6 +306,10 @@ promote. `exact_prior` never advances generation. `exact_new` promotes only from
 complete `runtime_proven` or `edge_pending` phase. Adoption is zero-init and effect-free.
 Rollback selects only the retained previous local generation and requires the machine
 pre-forward subject/grant referenced by the current generation.
+An accepted transaction also retains its closed target, Compose project, and selected
+services. Early phases with no candidate generation recover from that context: exact prior,
+including an empty generation-zero runtime, closes as no-effect; all other observations stay
+unpromoted. Rollback rejects a changed prior Compose project before its first effect.
 
 Source/fake acceptance is not live registered-host, edge, rollback, deployment, or
 production proof. Those gates remain open until separately authorized and observed.

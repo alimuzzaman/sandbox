@@ -25,6 +25,11 @@ holder/deadline behavior without auto-unpin, host-acceptance crash recovery, ide
 promote/cancel/release ownership, compaction exclusion, 4096-tombstone saturation, bounded
 ledger bytes, the strict tombstone-full new-unique-request refusal predicate, durable-holder deadline replay,
 and `retention_full` before effects.
+The later custody hardening validates the complete retained proof schema and canonical bytes,
+the fixed stage-ledger authority, and the exact committed record revision before policy
+admission. The stage lock stays held through admission, lease preparation, durable host
+acceptance, and pin promotion. Load rejects partial/corrupt proofs, overlapping tombstone and
+retained authority, or more than 64 records/proofs, 4096 tombstones, or 64 pins.
 The helper workspace parent must be a root-owned 0700 directory on the `/run` tmpfs,
 proved before READY. READY itself has a finite timeout and timeout kills the whole unit.
 The retained unit is stopped and its exact cgroup checked before explicit collection.
@@ -59,6 +64,16 @@ Observed final local evidence (2026-09-01):
 Earlier focused iterations exposed boundary and test-fixture defects. Those defects were
 repaired before the final combined result above; the final counts supersede the earlier
 iterations.
+
+Observed retained-proof custody hardening evidence (2026-09-02):
+
+- The complete Feature 050 synchronized selector, including credential resolution, ran
+  **73 tests in 12.322s: OK**.
+- The Feature 051 activation plus Feature 050 staging coordination selector ran
+  **120 tests in 29.062s: OK**.
+- `compileall` and `git diff --check` passed after the integrated hardening changes.
+- A fresh independent Sol High post-hardening source-security review returned **GO** for
+  source commit and merge into `latest`; it was automated, not human review.
 
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.

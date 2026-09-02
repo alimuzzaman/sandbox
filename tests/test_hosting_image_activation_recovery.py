@@ -13,14 +13,18 @@ class ActivationRecoveryTests(unittest.TestCase):
             "repository_digest": "repo/image@" + DIGEST_A, "local_image_id": DIGEST_A,
             "config_digest": DIGEST_A, "platform": {"os": "linux", "architecture": "amd64"},
             "runtime_identity": "container-new", "topology_identity": "topology-a",
+            "compose_project": "widget", "compose_config_hash": DIGEST_B,
             "healthy": True},)
         prior_services = ({**services[0], "runtime_identity": "container-prior"},)
         return ActivationTransitionProjection(DIGEST_A, DIGEST_B, operation, phase, entered, 3,
-            DIGEST_A, DIGEST_B, {"remote": "a", "project": "b", "environment": "c"},
+            DIGEST_A, DIGEST_B, {"machine_identity": "target-a",
+                "target_identity": "registered-a", "daemon_identity": "runtime-a"},
             services, prior_services)
 
     def observation(self, generation):
         return {"target_epoch_start": "target-a", "target_epoch_end": "target-a",
+                "target_identity_start": "registered-a",
+                "target_identity_end": "registered-a",
                 "runtime_epoch_start": "runtime-a", "runtime_epoch_end": "runtime-a",
                 "generation_digest": generation, "services": list(self.projection().new_services)}
 
@@ -37,6 +41,10 @@ class ActivationRecoveryTests(unittest.TestCase):
         from sandbox.hosting.recovery.policy import classify_activation_transition
         result = classify_activation_transition(self.projection(), observed)
         self.assertEqual(result.classification, "ambiguous")
+        observed = self.observation(DIGEST_A)
+        observed["target_identity_end"] = "registered-b"
+        self.assertEqual(classify_activation_transition(
+            self.projection(), observed).classification, "ambiguous")
 
     def test_identical_runtime_projections_are_ambiguous_even_with_candidate_digest(self):
         from sandbox.hosting.recovery.policy import classify_activation_transition
@@ -63,6 +71,38 @@ class ActivationRecoveryTests(unittest.TestCase):
         self.assertEqual(classify_activation_transition(
             projection, prior_shaped).classification, "neither")
 
+    def test_phase_aware_projection_allows_missing_candidate_without_promotion(self):
+        from sandbox.hosting.images.activation.repository import recovery_decision
+        from sandbox.hosting.recovery.policy import classify_activation_transition
+        base = self.projection(phase="accepted", entered=False)
+        early = ActivationTransitionProjection(
+            base.transaction_digest, base.request_digest, base.operation, base.phase,
+            base.effect_entered, base.expected_generation, None,
+            base.prior_generation_digest, base.target, (), base.prior_services)
+        observed = self.observation(base.prior_generation_digest)
+        observed["services"] = list(base.prior_services)
+        classified = classify_activation_transition(early, observed)
+        self.assertEqual(classified.classification, "exact_prior")
+        self.assertEqual(recovery_decision(
+            {"operation": "activate", "phase": "accepted", "effect_entered": False},
+            classified.classification), ("recovery_no_effect", False, True))
+
+        genesis = ActivationTransitionProjection(
+            base.transaction_digest, base.request_digest, base.operation, "preflight",
+            False, 0, None, None, base.target, (), ())
+        empty = {**observed, "generation_digest": None, "services": []}
+        self.assertEqual(classify_activation_transition(
+            genesis, empty).classification, "exact_prior")
+
+        pending = ActivationTransitionProjection(
+            base.transaction_digest, base.request_digest, base.operation,
+            "runtime_pending", True, 0, None, None, base.target, (), ())
+        unknown = {**empty, "services": list(base.new_services)}
+        self.assertEqual(recovery_decision(
+            {"operation": "activate", "phase": "runtime_pending", "effect_entered": True},
+            classify_activation_transition(pending, unknown).classification),
+            ("effect_unknown", False, False))
+
     def test_partial_or_substituted_service_projection_never_classifies_exact(self):
         from sandbox.hosting.recovery.policy import classify_activation_transition
         observed = self.observation(DIGEST_A)
@@ -72,6 +112,11 @@ class ActivationRecoveryTests(unittest.TestCase):
         observed = self.observation(DIGEST_A); observed["services"] = []
         self.assertEqual(classify_activation_transition(
             self.projection(), observed).classification, "ambiguous")
+        observed = self.observation(DIGEST_A)
+        observed["services"][0] = {
+            **observed["services"][0], "compose_project": "foreign"}
+        self.assertEqual(classify_activation_transition(
+            self.projection(), observed).classification, "neither")
 
     def test_full_operation_phase_class_matrix_has_only_receipt_complete_exact_new_promotion(self):
         from sandbox.hosting.images.activation.repository import recovery_decision

@@ -11,9 +11,10 @@ plan/proof/stage-request/staging-policy/staging-generation/stage-ledger identiti
 the unchanged delivery projection. Before proof validation, an authenticated Feature 050
 operation must durably prepare a proof-custody lease whose holder is the durable activation-
 owner/request identity and which binds exact request/proof/target/stage identities plus a
-finite admission deadline; preparation immediately pins that retained
+finite canonical UTC whole-second admission deadline ending in `Z`; preparation immediately pins that retained
 byte-identical terminal proof. Feature 051 holds the stage lock/pin through durable host-
-state acceptance, then promotes it to an accepted pin bound to that receipt. Missing,
+state acceptance, then promotes it to an accepted pin bound to an exact
+`host-acceptance/<64 lowercase hex>` receipt. Missing,
 compacted, tombstoned, mismatched, capacity-exhausted, or expired-before-acceptance custody
 refuses.
 No init, runtime, or edge effect may start until accepted-pin promotion is durable.

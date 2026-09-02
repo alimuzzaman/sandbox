@@ -46,3 +46,22 @@ python3 -m unittest \
 
 This gate is local acceptance only. Live registered-host, edge, deployment, rollback,
 and production proof remain open until separately authorized and observed.
+
+The built-in public-route check is reachability diagnostics only. Until an edge adapter
+returns a durable receipt bound to the exact target, generation, runtime observation,
+route plan, and deployment identity, required-edge activation refuses `edge_incomplete`.
+Machine policy bundles and their public rollback verification key are read no-follow from
+an owner-only single-link regular file; Feature 051 never receives the signing key.
+The private Compose render and its raw hash never cross SSH or enter state. The helper
+returns only a closed allowlisted projection and a machine-keyed, target-scoped opaque
+identity over the complete raw render. The owner-only machine master stays local. Only its
+machine/target-derived binding key uses private stdin, and it is removed before Docker runs.
+Arbitrary rendered values stay private. Top-level configs/secrets and external networks
+refuse until exact byte/object snapshot authority exists.
+Each service also retains only a target-scoped HMAC identity of its private Compose
+configuration hash. Fresh running, post-edge, and recovery observations reconstruct that
+identity inside the remote helper and require an exact match. Raw `docker ps` labels,
+inspect environment/arbitrary labels, and raw Compose hashes never cross SSH.
+Activation admission runs only after the stage ledger has decoded and canonical-byte
+compared the complete retained proof under the target -> host -> stage lock order and has
+matched its exact ledger authority and record revision.

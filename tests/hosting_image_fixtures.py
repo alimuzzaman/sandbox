@@ -279,7 +279,8 @@ class FakePreparedWorker:
     def deliver(self, credential):
         self.calls.append(len(credential))
         return local_observation(self.policy), {
-            "unit_name": self.frame["unit_name"], "cgroup": "/fake", "delegated": False,
+            "unit_name": self.frame["unit_name"],
+            "cgroup": "/system.slice/" + self.frame["unit_name"], "delegated": False,
             "escape_allowed": False, "unit_inactive": True, "cgroup_empty_or_removed": True,
         }, {"complete": True}
     def cancel(self):

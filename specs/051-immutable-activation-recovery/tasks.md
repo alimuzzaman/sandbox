@@ -178,7 +178,7 @@ Phase 2 tests exist and fail for the intended missing behavior.
 
 ## Phase 16: Seventh Independent Review Repair (Authored, Not Run)
 
-- [x] T107 Bind the private Compose value selector to exact admitted render inputs and sanitized digest
+- [x] T107 Bind the private Compose value selector to exact admitted render inputs and the opaque protected render identity
 - [x] T108 Add default-source success, source-failure, and divergent-render assertions without value exposure
 - [x] T109 Align operator docs and implementation evidence with the bound private source
 - [x] T110 Execute and independently review T107-T109 while preserving separate live gates
@@ -192,6 +192,53 @@ Phase 2 tests exist and fail for the intended missing behavior.
 
 - [x] T113 Assert real-helper stdout/stderr private-value redaction while preserving public success identity
 - [x] T114 Execute and independently review T113 while preserving separate live gates
+
+## Phase 19: T060 Source-Security Review Repairs
+
+- [x] T115 Bind local and running proof to the guarded registered target identity and exact Compose project
+- [x] T116 Execute replacement from the exact remote private render and prove post-effect Compose configuration hashes
+- [x] T117 Clean or prove absent every possible post-create initializer container before returning
+- [x] T118 Authenticate rollback grants with a machine-bound Ed25519 public verifier and owner-safe bundle reads
+- [x] T119 Require generation-bound edge receipts and keep reachability-only verification fail-closed
+- [x] T120 Add focused negative tests and synchronize the Feature 051 contracts and operator guidance
+- [x] T121 Run the complete local gates and obtain a new independent T060 source-security review
+
+## Phase 20: Post-Review Authority and Early-Recovery Repairs
+
+- [x] T122 Bind admission and running proof to the complete rendered Compose configuration digest and refuse unsnapshotted file-backed inputs
+- [x] T123 Bind initializer names and labels to target/image/declaration ownership and never remove an unproved collision
+- [x] T124 Refuse a changed prior Compose project before the first rollback effect
+- [x] T125 Persist a closed recovery context and support no-candidate recovery from early phases without promotion
+- [x] T126 Close persisted target and tombstone schemas and add direct command-path recovery coverage
+- [x] T127 Synchronize Feature 051 contracts, implementation guidance, and focused negative tests
+- [x] T128 Rerun complete local gates and obtain a new independent post-repair source-security review
+
+## Phase 21: Compose Resource and Private-Digest Repairs
+
+- [x] T129 Refuse top-level Compose configs/secrets and external networks without exact byte/object snapshots
+- [x] T130 Keep the raw private render and its raw hash remote-only and persist only an opaque machine-keyed configuration identity
+- [x] T131 Redact inline content and every duplicate-name/overlapping private value from remote helper output
+- [x] T132 Add external-resource, low-entropy oracle, inline-content, and duplicate-key regressions and synchronize docs
+- [x] T133 Rerun complete local gates and obtain a new independent post-repair source-security review
+
+## Phase 22: Closed Projection and Full-Render HMAC Repair
+
+- [x] T134 Replace the open-ended scrubbed Compose document with a closed allowlisted public projection
+- [x] T135 Derive a target-scoped HMAC key from the owner-only machine master and exact machine/target identities, then bind the complete private render through private stdin
+- [x] T136 Keep the machine master local, remove the derived key before Docker execution, and keep both keys/raw render/raw hash out of state, argv, and output
+- [x] T137 Redact every rendered scalar key and value and add command/entrypoint/label-key/label/annotation/health/URL/logging/extension canaries
+- [x] T138 Preserve managed network name/driver/IPAM/alias identity changes through the opaque full-render binding
+- [x] T139 Rerun complete local gates and obtain a new independent post-repair source-security review
+
+## Phase 23: Fresh Runtime Configuration and Retained-Proof Custody Repairs
+
+- [x] T140 Bind each private Compose service hash to a target-scoped HMAC identity and retain it in closed compose/running/generation projections
+- [x] T141 Move running `ps`/inspect/image observation into a closed remote projection so raw environment, arbitrary labels, and raw config hashes never cross SSH
+- [x] T142 Require exact protected service-hash equality in fresh running, post-edge, rollback, and two-observation recovery proof
+- [x] T143 Decode and canonical-byte compare the complete retained staged proof plus exact ledger authority/revision under target -> host -> stage custody before policy admission
+- [x] T144 Enforce persisted record/proof/tombstone/pin maxima, nested proof authority, and disjoint tombstone/retained authority at load time
+- [x] T145 Add stable-drift, remote non-disclosure, corrupt/partial/mismatched proof, wrong authority/revision, over-limit, overlap, and in-lock admission regressions and synchronize docs
+- [x] T146 Rerun complete local gates and obtain a new independent post-repair source-security review
 
 ## Dependencies and Execution Order
 

@@ -10,6 +10,56 @@ waiver; it is not evidence of an observed RED failure.
 
 ## Observed validation
 
+The T060 repair passes now bind registered target identity, Compose project, and a
+machine-keyed, target-scoped opaque HMAC over the complete private render; keep the raw
+render, raw hash, master key, and derived key out of state/output; return only a closed
+allowlisted projection; execute
+`compose up` from those exact private bytes; verify target-scoped protected per-service
+Compose configuration-hash identities during replacement and every fresh running/recovery
+observation; and refuse top-level configs/secrets and external networks
+without snapshot authority. Commands, entrypoints, arbitrary labels/annotations, health
+checks, URLs, logging values, extensions, inline content, rendered map keys, and all
+duplicate-name/overlapping private values stay out of remote output. The owner-only machine
+master remains local; only a machine/target-derived key crosses private stdin. Raw `ps`
+labels, inspect environment/arbitrary labels, and raw Compose hashes remain remote.
+Custody fully decodes and canonical-byte compares the retained proof, exact stage-ledger
+authority, and record revision under target -> host -> stage locks before policy admission.
+The stage ledger rejects malformed proofless or proved records, mismatched active ownership,
+invalid phase/effect/process/cleanup/result relationships, negative or over-limit counters,
+and overlapping record/proof/tombstone/pin authority.
+Initializer cleanup requires a target/image/declaration-bound name and owner label,
+rollback rejects a changed prior Compose project before effects, and early recovery uses a
+persisted closed target/project/service context even when no candidate exists. Rollback
+grants use a bound Ed25519 public key, machine bundles have owner/no-follow/single-link/
+stability checks, persisted target/tombstone schemas are closed, and reachability-only edge
+evidence refuses as `edge_incomplete`. The signing key remains outside Feature 051. The
+fresh independent source review is complete; live activation/rollback proof remains required.
+
+Observed after the final configuration-identity and retained-proof custody repair pass
+(2026-09-02):
+
+- Focused Feature 051, real private Compose helper, and architecture tests:
+  **103 tests OK in 21.239s**.
+- Feature 051 plus Feature 050 staging coordination: **120 tests OK in 29.062s**.
+- Complete Feature 050 synchronized selector: **73 tests OK in 12.322s**.
+- Existing hosting and Feature 048 compatibility tests: **282 tests OK in 14.202s**.
+- Synchronized config, CLI, and runtime-mode tests: **132 tests OK in 115.797s**.
+- Isolated MCP composition/resource/secret/redaction tests: **43 tests OK in 0.589s**.
+- Modularity inventory and architecture boundaries: **23 tests OK in 7.346s**.
+- Targeted `compileall` and `git diff --check`: **passed**.
+
+One concurrent config/CLI/runtime attempt timed out only
+`TestResolutionGate.test_no_main_in_help_command_list` after 90 seconds while other gates
+were running. The exact test passed alone in 56.725 seconds, and the complete 132-test gate
+then passed sequentially as recorded above. It is not counted as a green concurrent run.
+
+An additional repository-wide discovery run was not green: **4,834 tests ran with
+14 failures, 90 errors, and 21 skips**. Representative failures in untouched Hermes,
+migration, generic-init, remote-guidance, skill-mirror, and remote-pool tests reproduce
+on the unmodified `latest` checkout. They are recorded as existing repository baseline
+debt, not as passing Feature 051 evidence. The Feature 051 acceptance and compatibility
+gates above remain independently green.
+
 - Focused Feature 051 tests, the real private Compose helper tests, and the Feature 051
   architecture boundary tests: **70 tests OK in 10.367s**.
 - Narrow compatibility tests covering existing hosting, all Feature 048 host-recovery
@@ -49,6 +99,8 @@ results, not remote runtime or production evidence.
 
 - Automated Sol High final source review: **GO**.
 - Automated Sol High review of the post-failure production delta: **GO**.
+- Automated Sol High review after configuration-identity, retained-proof custody,
+  complete ledger decoding, bounded-counter, and exact lease-schema hardening: **GO**.
 
 Both are automated reviews. Neither is the human security review required by T060.
 
@@ -125,5 +177,6 @@ Both are automated reviews. Neither is the human security review required by T06
 
 The supplied focused, compatibility, compile, diff, import-scan, and automated-review
 results complete T032, T037, T043, T049, T052, T056, T059, T071, T078, T088, T096,
-T101, T106, T110, T112, and T114. T024 is complete solely as the RED-first waiver record.
+T101, T106, T110, T112, T114, T121, T128, T133, T139, and T146. T024 is complete solely
+as the RED-first waiver record.
 T061 is complete solely as the explicit live-gate record. T060 remains open.

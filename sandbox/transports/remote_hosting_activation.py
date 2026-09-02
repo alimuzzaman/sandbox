@@ -7,9 +7,11 @@ output/deadline contracts supplied by the registered-host runner.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import re
 from typing import Callable
 
@@ -18,6 +20,7 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _DIGEST_REF = re.compile(r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z")
 CLOSED_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 MAX_REMOTE_OUTPUT = 1024 * 1024
+_CONFIGURATION_HMAC_KEY = "SANDBOX_ACTIVATION_CONFIGURATION_HMAC_KEY"
 
 
 class RemoteActivationError(RuntimeError):
@@ -35,12 +38,18 @@ class RegisteredRemoteActivationTransport:
     def __init__(self, *, argv_runner: Callable, topology_renderer: Callable | None = None,
                  target_observer: Callable | None = None,
                  target_identity_observer: Callable | None = None,
-                 init_environment_provider: Callable | None = None) -> None:
+                 init_environment_provider: Callable | None = None,
+                 configuration_binding_key: bytes | None = None) -> None:
+        if configuration_binding_key is not None \
+                and (type(configuration_binding_key) is not bytes
+                     or len(configuration_binding_key) != 32):
+            raise RemoteActivationError("topology_mismatch")
         self._run = argv_runner
         self._render = topology_renderer or self._render_default
         self._observe = target_observer or self._observe_default
         self._target_identity = target_identity_observer
         self._init_environment_provider = init_environment_provider
+        self._configuration_binding_key = configuration_binding_key
         self._init_environment_sources: dict[str, dict] = {}
         self._compose_selector: dict[str, object] = {}
 
@@ -64,9 +73,19 @@ class RegisteredRemoteActivationTransport:
                 redact_environment_keys: tuple[str, ...] | None = None) -> dict:
         if type(timeout_seconds) is not int or timeout_seconds < 1 or timeout_seconds > 3600:
             raise RemoteActivationError("effect_unknown")
+        source = dict(private_environment_source or {})
+        private = dict(private_environment or {})
+        needs_configuration_binding = bool(source) or argv[:1] == (
+            "sandbox-activation-observe-running",) or (
+            len(argv) >= 2 and argv[:2] == ("docker", "compose") and "config" in argv)
+        if needs_configuration_binding:
+            if self._configuration_binding_key is None or _CONFIGURATION_HMAC_KEY in private:
+                raise RemoteActivationError("topology_mismatch")
+            private[_CONFIGURATION_HMAC_KEY] = base64.b64encode(
+                self._configuration_binding_key).decode()
         result = self._run(argv=argv, environment={**CLOSED_ENVIRONMENT, **(environment or {})},
-                           private_environment=dict(private_environment or {}),
-                           private_environment_source=dict(private_environment_source or {}),
+                           private_environment=private,
+                           private_environment_source=source,
                            redact_environment_keys=(None if redact_environment_keys is None
                                                     else tuple(redact_environment_keys)),
                            timeout_seconds=timeout_seconds,
@@ -95,7 +114,9 @@ class RegisteredRemoteActivationTransport:
         self._compose_selector = {}
         argv = ["docker", "compose"]
         for path in compose_files: argv.extend(("--file", path))
-        argv.extend(("--project-name", project_name, "config", "--format", "json"))
+        project_directory = os.path.dirname(os.path.abspath(compose_files[0]))
+        argv.extend(("--project-directory", project_directory,
+                     "--project-name", project_name, "config", "--format", "json"))
         environment = {
             f"SANDBOX_ACTIVATION_IMAGE_{name.upper().replace('-', '_')}": image
             for name, image in image_overrides.items()}
@@ -105,8 +126,22 @@ class RegisteredRemoteActivationTransport:
         services = rendered.get("services") if isinstance(rendered, dict) else None
         if result["returncode"] != 0 or not isinstance(services, dict):
             raise RemoteActivationError("topology_mismatch")
-        render_digest = "sha256:" + hashlib.sha256(json.dumps(
-            rendered, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        render_digest = rendered.pop("x-sandbox-configuration-digest", None)
+        if type(render_digest) is not str \
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", render_digest) is None:
+            raise RemoteActivationError("topology_mismatch")
+        compose_config_hashes = rendered.pop("x-sandbox-compose-config-hashes", None)
+        if type(compose_config_hashes) is not dict \
+                or set(compose_config_hashes) != set(services) \
+                or any(type(value) is not str or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+                       for value in compose_config_hashes.values()):
+            raise RemoteActivationError("topology_mismatch")
+        has_configs = rendered.pop("x-sandbox-has-configs", None)
+        has_secrets = rendered.pop("x-sandbox-has-secrets", None)
+        has_external_networks = rendered.pop("x-sandbox-has-external-networks", None)
+        if has_configs is not False or has_secrets is not False \
+                or has_external_networks is not False or set(rendered) != {"services"}:
+            raise RemoteActivationError("topology_mismatch")
         normalized = {}
         for name in selected_services:
             value = services.get(name)
@@ -122,17 +157,23 @@ class RegisteredRemoteActivationTransport:
                 "dependencies": sorted(depends),
                 "topology_identity": value.get("labels", {}).get(
                     "org.sandbox.application-topology.v1"),
+                "compose_config_hash": compose_config_hashes[name],
                 "configuration_digest": "sha256:" + hashlib.sha256(json.dumps(
                     value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
         epoch = self._observe_default(kind="epoch", target={})
         self._compose_selector = {"compose_files": tuple(compose_files),
-            "project_name": project_name, "environment": dict(environment),
-            "render_digest": render_digest}
+            "project_name": project_name,
+            "project_directory": project_directory,
+            "environment": dict(environment),
+            "render_digest": render_digest,
+            "runtime_epoch": epoch["runtime_epoch"]}
         return {"services": normalized, "orphans": sorted(set(services) - set(selected_services)),
-                "runtime_epoch": epoch["runtime_epoch"]}
+                "runtime_epoch": epoch["runtime_epoch"],
+                "configuration_digest": render_digest}
 
     def _observe_default(self, *, kind, **selectors):
-        if kind == "epoch":
+        observation_type = kind
+        if observation_type == "epoch":
             result = self._invoke(("docker", "info", "--format", "{{.ID}}"), timeout_seconds=30)
             identity = result["stdout"].strip()
             if result["returncode"] != 0 or not identity:
@@ -154,7 +195,7 @@ class RegisteredRemoteActivationTransport:
                 if image_raw.get("Variant"): platform["variant"] = image_raw["Variant"]
             return {"runtime_epoch": identity, "local_image_id": local_id,
                     "platform": platform}
-        if kind == "init_inspection":
+        if observation_type == "init_inspection":
             raw = selectors.get("raw") or {}; expected = selectors.get("expected") or {}
             if isinstance(raw, list) and len(raw) == 1: raw = raw[0]
             config = raw.get("Config") or {}; state = raw.get("State") or {}
@@ -191,7 +232,7 @@ class RegisteredRemoteActivationTransport:
                 "dependencies": dependencies, "target": observed_target,
                 "runtime_epoch": epoch.get("runtime_epoch")}
             return actual
-        if kind == "local":
+        if observation_type == "local":
             image = selectors["repository_digest"]
             start_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             start_target = self._observed_target(start_epoch)
@@ -210,49 +251,29 @@ class RegisteredRemoteActivationTransport:
                     "local_image_id": image_id,
                     "target_epoch_start": start_target["machine_identity"],
                     "target_epoch_end": end_target["machine_identity"],
+                    "target_identity_start": start_target["target_identity"],
+                    "target_identity_end": end_target["target_identity"],
                     "daemon_epoch_start": start_epoch,
                     "daemon_epoch_end": end_epoch,
                     "repo_digests": repo_digests}
-        if kind == "running":
-            services = selectors["services"]
+        if observation_type == "running":
+            services = tuple(self._service(value) for value in selectors["services"])
+            compose_project = self._service(selectors["compose_project"])
             start_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             start_target = self._observed_target(start_epoch)
-            result = self._invoke(("docker", "ps", "--format", "{{json .}}"), timeout_seconds=60)
-            rows = []
-            for line in result["stdout"].splitlines():
-                try: item = json.loads(line)
-                except json.JSONDecodeError: continue
-                service = (item.get("Labels") or "")
-                label = next((part.split("=", 1)[1] for part in service.split(",")
-                              if part.startswith("com.docker.compose.service=")), None)
-                if label in services:
-                    inspected = self._invoke(("docker", "inspect", item["ID"]), timeout_seconds=30)
-                    try: raw = json.loads(inspected["stdout"])[0]
-                    except (TypeError, IndexError, json.JSONDecodeError): continue
-                    config = raw.get("Config") or {}; image_id = raw.get("Image")
-                    labels = config.get("Labels") or {}
-                    image_inspect = self._invoke(("docker", "image", "inspect", image_id),
-                                                 timeout_seconds=30)
-                    try: image_raw = json.loads(image_inspect["stdout"])[0]
-                    except (TypeError, IndexError, json.JSONDecodeError):
-                        raise RemoteActivationError("runtime_mismatch") from None
-                    if image_inspect["returncode"] != 0 or image_raw.get("Id") != image_id:
-                        raise RemoteActivationError("runtime_mismatch")
-                    platform = {"os": image_raw.get("Os"),
-                                "architecture": image_raw.get("Architecture")}
-                    if image_raw.get("Variant"): platform["variant"] = image_raw["Variant"]
-                    rows.append({"service": label, "runtime_identity": raw.get("Id"),
-                                 "declared_image": config.get("Image"),
-                                 "repository_digest": config.get("Image"),
-                                 "local_image_id": image_id, "config_digest": image_id,
-                                 "platform": platform,
-                                 "topology_identity": labels.get(
-                                     "org.sandbox.application-topology.v1"),
-                                 "healthy": (raw.get("State") or {}).get("Health", {}).get("Status") == "healthy"})
+            result = self._invoke(("sandbox-activation-observe-running", compose_project,
+                                   *services), timeout_seconds=60)
+            try: rows = json.loads(result["stdout"])
+            except (TypeError, json.JSONDecodeError):
+                raise RemoteActivationError("runtime_mismatch") from None
+            if result["returncode"] != 0 or type(rows) is not list:
+                raise RemoteActivationError("runtime_mismatch")
             end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             end_target = self._observed_target(end_epoch)
             return {"target_epoch_start": start_target["machine_identity"],
                     "target_epoch_end": end_target["machine_identity"],
+                    "target_identity_start": start_target["target_identity"],
+                    "target_identity_end": end_target["target_identity"],
                     "runtime_epoch_start": start_epoch, "runtime_epoch_end": end_epoch,
                     "services": rows}
         raise RemoteActivationError("runtime_mismatch")
@@ -262,13 +283,19 @@ class RegisteredRemoteActivationTransport:
         if start is not False:
             raise RemoteActivationError("init_mismatch")
         image = self._image(image)
-        name = "sandbox-activation-init-" + declaration["configuration_digest"].split(":", 1)[1][:24]
+        owner_body = {"target": target, "image": image,
+                      "declaration_digest": declaration["configuration_digest"]}
+        owner_digest = "sha256:" + hashlib.sha256(json.dumps(
+            owner_body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        name = "sandbox-activation-init-" + owner_digest.split(":", 1)[1][:24]
         argv = ["docker", "create", "--name", name, "--pull=never"]
         if declaration["privileged"]:
             raise RemoteActivationError("init_mismatch")
         platform_text = "/".join(filter(None, (platform.get("os"), platform.get("architecture"),
                                                 platform.get("variant"))))
         argv.extend(("--platform", platform_text, "--label",
+                     "org.sandbox.activation.init-owner=" + owner_digest,
+                     "--label",
                      "org.sandbox.activation.dependencies=" + json.dumps(
                          declaration["dependencies"], separators=(",", ":"))))
         for network in declaration["networks"]: argv.extend(("--network", network))
@@ -291,14 +318,18 @@ class RegisteredRemoteActivationTransport:
             raise RemoteActivationError("init_mismatch")
         for key in declaration["environment_keys"]: argv.extend(("--env", key))
         argv.extend((image, *declaration["command"]))
-        result = self._invoke(tuple(argv), timeout_seconds=30,
-                              private_environment=environment_values,
-                              private_environment_source={} if provider_used else source)
-        if result["returncode"] != 0 or result["terminated"] is not True:
-            raise RemoteActivationError("init_mismatch")
-        identity = result["stdout"].strip()
-        if not identity or len(identity) > 128:
-            raise RemoteActivationError("init_mismatch")
+        try:
+            result = self._invoke(tuple(argv), timeout_seconds=30,
+                                  private_environment=environment_values,
+                                  private_environment_source={} if provider_used else source)
+            identity = result["stdout"].strip()
+            if result["returncode"] != 0 or result["terminated"] is not True \
+                    or not identity or len(identity) > 128:
+                raise RemoteActivationError("init_mismatch")
+        except Exception:
+            if not self._remove_or_prove_absent(name, owner_digest):
+                raise RemoteActivationError("effect_unknown") from None
+            raise
         self._init_environment_sources[identity] = {
             "values": dict(environment_values), "source": {} if provider_used else source}
         try:
@@ -373,6 +404,34 @@ class RegisteredRemoteActivationTransport:
         if removed: self._init_environment_sources.pop(handle.identity, None)
         return removed
 
+    def _remove_or_prove_absent(self, name: str, owner_digest: str) -> bool:
+        try:
+            observed = self._invoke(("docker", "container", "ls", "--all", "--quiet",
+                                     "--filter", f"name=^/{name}$"), timeout_seconds=30)
+            if observed["returncode"] != 0 or observed["terminated"] is not True:
+                return False
+            identities = observed["stdout"].split()
+            if not identities:
+                return True
+            if len(identities) != 1:
+                return False
+            identity = identities[0]
+            owner = self._invoke(("docker", "inspect", "--format",
+                '{{index .Config.Labels "org.sandbox.activation.init-owner"}}', identity),
+                timeout_seconds=30)
+            if owner["returncode"] != 0 or owner["terminated"] is not True \
+                    or owner["stdout"].strip() != owner_digest:
+                return False
+            removed = self._invoke(("docker", "rm", "--force", identity), timeout_seconds=30)
+            if removed["returncode"] != 0 or removed["terminated"] is not True:
+                return False
+            absent = self._invoke(("docker", "container", "ls", "--all", "--quiet",
+                                   "--filter", f"name=^/{name}$"), timeout_seconds=30)
+            return absent["returncode"] == 0 and absent["terminated"] is True \
+                and absent["stdout"].strip() == ""
+        except Exception:
+            return False
+
     def replace_services(self, *, compose_files: tuple[str, ...], project_name: str,
                          services: tuple[str, ...], exact_image: str,
                          environment_overrides: dict[str, str], timeout_seconds: int) -> None:
@@ -382,15 +441,26 @@ class RegisteredRemoteActivationTransport:
             raise RemoteActivationError("topology_mismatch")
         if any(value != exact_image for value in environment_overrides.values()):
             raise RemoteActivationError("topology_mismatch")
-        argv = ["docker", "compose"]
-        for path in compose_files: argv.extend(("--file", path))
+        if not self._compose_selector or tuple(compose_files) != self._compose_selector.get("compose_files") \
+                or project_name != self._compose_selector.get("project_name") \
+                or environment_overrides != self._compose_selector.get("environment"):
+            raise RemoteActivationError("topology_mismatch")
+        argv = ["docker", "compose", "--file", "-", "--project-directory",
+                str(self._compose_selector["project_directory"])]
         argv.extend(("--project-name", project_name, "up", "--detach", "--no-build",
                      "--pull", "never", "--no-deps", *map(self._service, services)))
-        result = self._run(argv=tuple(argv), environment={**CLOSED_ENVIRONMENT,
-                           **environment_overrides}, timeout_seconds=timeout_seconds,
-                           max_output_bytes=MAX_REMOTE_OUTPUT)
-        if type(result) is not dict or result.get("returncode") != 0 \
-                or result.get("terminated") is not True:
+        source = {**self._compose_selector, "kind": "compose_replace_v1",
+                  "services": tuple(services)}
+        result = self._invoke(tuple(argv), environment=environment_overrides,
+                              private_environment_source=source,
+                              timeout_seconds=timeout_seconds)
+        if result.get("returncode") != 0 or result.get("terminated") is not True:
+            raise RemoteActivationError("effect_unknown")
+        expected_digest = self._compose_selector["render_digest"]
+        self._render_default(compose_files=compose_files, project_name=project_name,
+                             selected_services=services,
+                             image_overrides={name: exact_image for name in services})
+        if self._compose_selector.get("render_digest") != expected_digest:
             raise RemoteActivationError("effect_unknown")
 
     def observe_local_image(self, **selectors) -> dict:

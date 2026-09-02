@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from contextlib import nullcontext
 import re
 from typing import Any
 from sandbox.hosting.recovery.models import ActivationRecoveryObservation
@@ -105,13 +106,16 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
         for request_id, tombstone in safe["tombstones"].items():
             if type(tombstone) is not dict or set(tombstone) != {
                     "request_id", "request_digest", "result_class", "code"} \
-                    or tombstone["request_id"] != request_id:
+                    or tombstone["request_id"] != request_id \
+                    or type(request_id) is not str \
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", request_id) is None:
                 raise ActivationContractError()
             if tombstone["result_class"] not in RESULT_CLASSES \
                     or tombstone["code"] not in RESULT_CODES:
                 raise ActivationContractError()
             if not isinstance(tombstone["request_digest"], str) \
-                    or not tombstone["request_digest"].startswith("sha256:"):
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                    tombstone["request_digest"]) is None:
                 raise ActivationContractError()
         for request_id, result in safe["recovery_results"].items():
             if type(result) is not dict or set(result) != {"schema_version", "ok", "request_id",
@@ -200,7 +204,8 @@ def ensure_recovery_capacity(state: object) -> dict[str, Any]:
 
 def _transaction(request: ActivationRequest, *, holder: str, authority_binding_digest: str,
                  rollback_subject_digest: str, rollback_grant_digest: str,
-                 proof_pin: dict[str, Any], edge_required: bool) -> dict[str, Any]:
+                 proof_pin: dict[str, Any], edge_required: bool,
+                 recovery_context: dict[str, Any]) -> dict[str, Any]:
     body = {"schema_version": 1, "request_id": request.request_id,
             "request_digest": request.request_digest, "operation": request.operation,
             "holder": holder, "starting_generation": request.expected_generation,
@@ -209,6 +214,7 @@ def _transaction(request: ActivationRequest, *, holder: str, authority_binding_d
             "rollback_subject_digest": rollback_subject_digest,
             "rollback_grant_digest": rollback_grant_digest, "init_receipts": [],
             "init_steps": [], "edge_required": edge_required,
+            "recovery_context": json.loads(canonical_bytes(recovery_context)),
             "running_observation": None, "edge_result": None,
             "candidate_generation": None, "result": None}
     body["transaction_digest"] = activation_digest(
@@ -219,8 +225,14 @@ def _transaction(request: ActivationRequest, *, holder: str, authority_binding_d
 def accept_candidate(state: object, request: ActivationRequest, *, holder: str,
                      authority_binding_digest: str, rollback_subject_digest: str,
                      rollback_grant_digest: str, proof_pin: dict[str, Any],
-                     edge_required: bool) -> tuple[str, dict[str, Any], dict | None]:
+                     edge_required: bool,
+                     recovery_context: dict[str, Any]) -> tuple[str, dict[str, Any], dict | None]:
     current = decode_activation_state(state)
+    if type(request) is not ActivationRequest \
+            or authority_binding_digest != request.authority_binding_digest \
+            or rollback_subject_digest != request.rollback_subject_digest \
+            or rollback_grant_digest != request.rollback_grant_digest:
+        return "conflict", current, None
     stored = current["results"].get(request.request_id)
     if stored is not None:
         result = stored.get("result") if isinstance(stored, dict) else None
@@ -243,7 +255,7 @@ def accept_candidate(state: object, request: ActivationRequest, *, holder: str,
         request, holder=holder, authority_binding_digest=authority_binding_digest,
         rollback_subject_digest=rollback_subject_digest,
         rollback_grant_digest=rollback_grant_digest, proof_pin=proof_pin,
-        edge_required=edge_required)
+        edge_required=edge_required, recovery_context=recovery_context)
     candidate["reserved_terminal_bytes"] = 16384
     return "accepted", encode_activation_state(candidate), None
 
@@ -396,14 +408,28 @@ class ActivationRepository:
         return json.loads(canonical_bytes(terminal["result"]))
 
     def accept(self, request: ActivationRequest, *, authority_binding_digest: str,
+               stage_ledger_authority: str, stage_ledger_revision: int,
+               admission_validator,
                rollback_subject_digest: str, rollback_grant_digest: str,
-               admission_deadline: str, edge_required: bool = True) -> tuple[str, dict | None, object | None]:
+               admission_deadline: str, recovery_context: dict[str, Any],
+               edge_required: bool = True) -> tuple[str, dict | None, object | None]:
         holder = f"activation-owner/{request.request_id}"
         target = request.proof.target.target_identity
         lease_id = "activation-lease/" + request.request_digest.split(":", 1)[1][:48]
         with self.stage_repository.proof_custody_transaction(
                 target, target_mutation_port=self.target_mutation,
                 host_state_port=self.host_state) as custody:
+            custody.validate_retained_proof(
+                stage_request_id=request.proof.request_id,
+                stage_request_digest=request.proof.request_digest,
+                proof_digest=request.proof.proof_digest,
+                stage_generation=request.proof.staging_generation,
+                ledger_authority=stage_ledger_authority,
+                ledger_revision=stage_ledger_revision,
+                supplied_proof=request.proof)
+            admission = admission_validator()
+            if getattr(admission, "ok", False) is not True:
+                return getattr(admission, "code", "artifact_invalid"), None, None
             preexisting = decode_activation_state(
                 self.host_state.read_activation_nested(target))
             same_active = isinstance(preexisting.get("active"), dict) \
@@ -428,7 +454,7 @@ class ActivationRepository:
                 authority_binding_digest=authority_binding_digest,
                 rollback_subject_digest=rollback_subject_digest,
                 rollback_grant_digest=rollback_grant_digest, proof_pin=pre_pin,
-                edge_required=edge_required)
+                edge_required=edge_required, recovery_context=recovery_context)
             if pre_status == "accepted":
                 try: canonical_bytes(reserved_candidate, maximum=MAX_ACTIVATION_BYTES - 16384)
                 except ActivationContractError:
@@ -437,19 +463,16 @@ class ActivationRepository:
                 target, holder=holder, request_id=request.request_id,
                 request_digest=request.request_digest, proof_digest=request.proof.proof_digest)
             existing_lease = custody.lookup(lease_id)
-            lease = existing_lease or custody.prepare(
+            lease = custody.prepare(
                 lease_id=lease_id, holder=holder, admission_deadline=admission_deadline,
                 activation_request_id=request.request_id,
                 activation_request_digest=request.request_digest,
                 stage_request_id=request.proof.request_id,
                 stage_request_digest=request.proof.request_digest,
                 proof_digest=request.proof.proof_digest,
-                stage_generation=request.proof.staging_generation)
-            if existing_lease is not None and (
-                    existing_lease.holder != holder or
-                    existing_lease.activation_request_digest != request.request_digest or
-                    existing_lease.proof_digest != request.proof.proof_digest):
-                return "conflict", None, None
+                stage_generation=request.proof.staging_generation,
+                ledger_authority=stage_ledger_authority,
+                ledger_revision=stage_ledger_revision)
             if prior_evidence.state == "absent" and lease.phase == "prepared" and lease.expired:
                 custody.cancel(lease, prior_evidence)
                 return "lease_expired", None, None
@@ -467,7 +490,7 @@ class ActivationRepository:
                 authority_binding_digest=authority_binding_digest,
                 rollback_subject_digest=rollback_subject_digest,
                 rollback_grant_digest=rollback_grant_digest, proof_pin=proof_pin,
-                edge_required=edge_required)
+                edge_required=edge_required, recovery_context=recovery_context)
             if status == "accepted":
                 evidence = self.host_state.compare_and_commit_activation(
                     target, expected_generation=request.expected_generation,
@@ -532,11 +555,12 @@ class ActivationRepository:
                     lambda current: commit_candidate(current, request, result, generation))
 
     def recover(self, target: str, *, request_id: str, request_digest: str,
-                expected_generation: int, observer) -> dict:
+                expected_generation: int, observer, ownership_held: bool = False) -> dict:
         """Two read-only observations around one non-authorizing provisional."""
         release_terminal = None
         outcome = None
-        with self.target_mutation.target_mutation_transaction(target):
+        owner = nullcontext() if ownership_held else self.target_mutation.target_mutation_transaction(target)
+        with owner:
             with self.host_state.atomic_host_state_transaction(target):
                 current = decode_activation_state(self.host_state.read_activation_nested(target))
                 stored = current["recovery_results"].get(request_id)
@@ -560,6 +584,8 @@ class ActivationRepository:
                         classification=existing["classification"],
                         target_epoch_start=existing["target_epoch_start"],
                         target_epoch_end=existing["target_epoch_end"],
+                        target_identity_start=existing["target_identity_start"],
+                        target_identity_end=existing["target_identity_end"],
                         runtime_epoch_start=existing["runtime_epoch_start"],
                         runtime_epoch_end=existing["runtime_epoch_end"],
                         evidence_identity=existing["evidence_identity"])
@@ -572,6 +598,8 @@ class ActivationRepository:
                         expected_generation=expected_generation, owner=f"activation-owner/{request_id}",
                         evidence_identity=first.evidence_identity, classification=first.classification,
                         target_epoch_start=first.target_epoch_start, target_epoch_end=first.target_epoch_end,
+                        target_identity_start=first.target_identity_start,
+                        target_identity_end=first.target_identity_end,
                         runtime_epoch_start=first.runtime_epoch_start, runtime_epoch_end=first.runtime_epoch_end)
                     self.host_state.store_activation_recovery_provisional(
                         target, expected_generation, provisional.as_mapping())

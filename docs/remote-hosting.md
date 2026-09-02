@@ -1219,13 +1219,13 @@ The static command group is:
 ```text
 ./sb host image activate --project-dir DIR --environment ENV --remote NAME \
   --request-id ID --expected-generation N --verified-plan PLAN.json \
-  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
 ./sb host image adopt --project-dir DIR --environment ENV --remote NAME \
   --request-id ID --expected-generation N --verified-plan PLAN.json \
-  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
 ./sb host image rollback --project-dir DIR --environment ENV --remote NAME \
   --request-id ID --expected-generation N --verified-plan PLAN.json \
-  --staged-proof PROOF.json --admission-deadline RFC3339 --confirm
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
 ./sb host image recover --project-dir DIR --environment ENV --remote NAME \
   --request-id ID --expected-generation N --activation-transaction sha256:... --confirm
 ```
@@ -1235,6 +1235,32 @@ binding, rollback grant/subject, runtime capability, and edge policy are owner-o
 the command cannot replace or widen them. Activation refuses aliases, tags, indexes,
 builds, pulls, platform substitutions, missing/duplicate services, unsafe dependencies,
 unexpected orphans, changed local identity, incomplete health, or uncertain edge delivery.
+The machine bundle is accepted only as an owner-only, no-follow, single-link regular file.
+Its rollback public key must match the binding and validate the grant's Ed25519 signature;
+the signing key is never an activation input. The target-wide owner is acquired before the
+registration guard and both remain held through the final host-state commit.
+Admission deadlines use canonical UTC whole seconds ending in `Z`, for example
+`2099-01-01T00:00:00Z`; offsets, fractional seconds, and timezone-free values refuse.
+
+Compose replacement keeps the full private render inside the registered-host helper, passes
+those bytes on stdin with the exact Compose project, and verifies post-up Compose config
+hashes plus a fresh render. Each raw service config hash stays remote and crosses only as a
+target-scoped HMAC that every fresh running, post-edge, and recovery observation must match.
+Only a machine-keyed, target-scoped opaque HMAC over the complete raw render is
+persisted. SSH returns a closed allowlisted projection; commands, entrypoints, arbitrary
+labels/annotations, health checks, URLs, logging values, extensions, environment values, raw
+private-render hashes, and inline content do not cross. The owner-only machine master stays
+local. Only its machine/target-derived HMAC key travels in private stdin, is removed before
+Docker runs, and never enters state, output, commands, or receipts. Redaction covers rendered
+map keys as well as values.
+Fresh running observation is also projected inside the helper. Complete `ps` labels, inspect
+environment/arbitrary labels, and raw Compose hashes never cross SSH.
+All top-level Compose configs/secrets and external networks refuse until a future contract
+can snapshot their exact private bytes or immutable engine identity.
+Public HTTP reachability does not identify a runtime
+generation. Required-edge operations therefore stay `edge_incomplete` until an adapter
+returns a durable receipt bound to the target, prospective generation, observation, route,
+and application deployment identity.
 
 `host image recover` never changes the existing failed-apply `host recover` contract. It
 performs two read-only observations around a Feature 051-owned non-authorizing provisional
@@ -1248,7 +1274,10 @@ Local fake/unit acceptance does not prove a registered remote, live edge, rollba
 deployment, or production. Do not use these commands against a live target without the
 separate authorization and validation gate for that environment.
 
-Activation admission refuses before effects when proof custody is expired or ambiguous, or
+Activation admission begins only after ordered custody has fully decoded and canonical-byte
+compared the retained staged proof and matched its fixed ledger authority and exact record
+revision. The stage lock stays held through policy admission and durable host acceptance.
+Activation refuses before effects when proof custody is expired or ambiguous, or
 when bounded terminal storage cannot be reserved. Recovery never accepts a caller digest or
 partial container list as runtime proof. It requires every persisted selected service with
 exact health, platform, local image, topology, and stable runtime identity, plus the exact
@@ -1299,7 +1328,17 @@ requires `active.phase == uncertain` and byte-exact equality between `active.res
 public result; absent, distinct, or promotable variants are invalid state.
 
 The private Compose selector is bound to the exact successful admitted render: Compose files, project,
-closed image-override environment, and the SHA-256 digest of the sanitized rendered configuration.
+closed image-override environment, and the machine-keyed, target-scoped opaque HMAC of the complete raw render.
 Remote declared-value selection reruns with those exact inputs, refuses nonzero status or any stderr,
-parses only bounded valid JSON, strips environment maps, and requires the same render digest before
-selecting declared keys. No value is returned or persisted.
+parses only bounded valid JSON, returns only a closed allowlisted projection, and requires the same
+opaque identity before selecting declared keys. No arbitrary rendered value is returned or persisted.
+
+Initializer names are target/image/declaration-bound and paired with an exact owner label.
+Cleanup removes only that proven owner; a foreign or unproved name collision is never deleted.
+Remote helper output redacts every observed rendered scalar independently, even when multiple
+services reuse one environment key, and replaces longer overlapping values first.
+Accepted transactions retain a closed recovery context with target, Compose project, and selected
+services. Therefore accepted/preflight/init-pending/runtime-pending recovery remains reachable before
+a candidate exists: exact prior, including an empty generation-zero runtime, closes as no-effect;
+anything else stays unpromoted. Rollback also compares the retained prior Compose project before its
+first runtime effect.

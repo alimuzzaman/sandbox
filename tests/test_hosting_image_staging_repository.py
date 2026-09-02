@@ -37,6 +37,18 @@ class TestImageStagingRepository(unittest.TestCase):
         from sandbox.hosting.images.staging_models import StageResult, StagedImageProof
         decision, generation, _ = repository.accept(request)
         self.assertEqual(decision, "accepted")
+        process = {"unit_name": "sandbox-image-stage-fixture.service",
+            "cgroup": "/system.slice/sandbox-image-stage-fixture.service",
+            "delegated": False, "escape_allowed": False,
+            "unit_inactive": True, "cgroup_empty_or_removed": True}
+        repository.transition(request, "credential_pending")
+        repository.transition(request, "helper_running", process={
+            "unit_name": process["unit_name"], "unit_inactive": False,
+            "cgroup_empty_or_removed": False})
+        repository.transition(request, "pulling")
+        repository.transition(request, "cleanup_pending", process=process,
+                              cleanup={"complete": True})
+        repository.transition(request, "observing")
         proof = StagedImageProof.create(request, policy, local_observation(policy), generation)
         return repository.commit(request, StageResult(
             1, True, "success", "staged", request.request_id, generation, proof))
@@ -73,7 +85,18 @@ class TestImageStagingRepository(unittest.TestCase):
             admission_deadline=deadline, activation_request_id="activation-a",
             activation_request_digest="sha256:" + "c" * 64,
             stage_request_id=request.request_id, stage_request_digest=request.request_digest,
-            proof_digest=result.proof.proof_digest, stage_generation=result.generation)
+            proof_digest=result.proof.proof_digest, stage_generation=result.generation,
+            ledger_authority="feature-050-stage-ledger-v2", ledger_revision=7)
+
+    def validate_retained(self, port, result, request, *, supplied_proof=None,
+                          authority="feature-050-stage-ledger-v2", revision=7):
+        return port.validate_retained_proof(
+            stage_request_id=request.request_id,
+            stage_request_digest=request.request_digest,
+            proof_digest=result.proof.proof_digest,
+            stage_generation=result.generation,
+            ledger_authority=authority, ledger_revision=revision,
+            supplied_proof=supplied_proof or result.proof)
 
     def test_replay_conflict_generation_and_single_flight_first_commit_authority(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +177,7 @@ class TestImageStagingRepository(unittest.TestCase):
                 repository._write_unlocked(policy.target.target_identity, state)
             lease = replace(lease, admission_deadline="2000-01-01T00:00:00Z")
             with self.custody(repository, policy.target.target_identity, events) as port:
-                receipt = "sha256:" + "d" * 64
+                receipt = "host-acceptance/" + "d" * 64
                 promoted = port.promote(lease, self.host_evidence(lease, "accepted", receipt))
                 port.release(promoted, self.terminal_evidence(promoted))
             expected_once = [("enter", "target", "target-a"),
@@ -216,9 +239,23 @@ class TestImageStagingRepository(unittest.TestCase):
                 self.assertIsNone(repository.lookup(request.target.target_identity, "unknown"))
                 repository.accept(request)
                 if phase is not None:
-                    repository.transition(request, phase,
-                        process={"unit_name": "exact", "unit_inactive": False},
-                        cleanup={"complete": False})
+                    if phase in {"credential_pending", "helper_running", "pulling",
+                                 "cleanup_pending", "observing"}:
+                        repository.transition(request, "credential_pending")
+                    if phase in {"helper_running", "pulling", "cleanup_pending", "observing"}:
+                        repository.transition(request, "helper_running", process={
+                            "unit_name": "exact", "unit_inactive": False,
+                            "cgroup_empty_or_removed": False})
+                    if phase in {"pulling", "cleanup_pending", "observing"}:
+                        repository.transition(request, "pulling")
+                    if phase in {"cleanup_pending", "observing"}:
+                        repository.transition(request, "cleanup_pending", process={
+                            "unit_name": "exact", "cgroup": "/system.slice/exact",
+                            "delegated": False, "escape_allowed": False,
+                            "unit_inactive": True, "cgroup_empty_or_removed": True},
+                            cleanup={"complete": True})
+                    if phase == "observing":
+                        repository.transition(request, "observing")
                 reopened = self.repository(directory)
                 record = reopened.record_status(request.target.target_identity, request.request_id)
                 self.assertEqual(record["phase"], phase or "accepted")
@@ -254,10 +291,10 @@ class TestImageStagingRepository(unittest.TestCase):
                 state["records"]["retained-padding"] = {
                     "opaque": "x" * (MAX_LEDGER_BYTES - TERMINAL_RESERVATION_BYTES // 2)}
                 repository._write_unlocked(request.target.target_identity, state)
-            with self.assertRaisesRegex(StageRepositoryError, "retention_full"):
+            with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
                 repository.accept(request)
-            self.assertIsNone(repository.record_status(
-                request.target.target_identity, request.request_id))
+            with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                repository.record_status(request.target.target_identity, request.request_id)
 
     def test_sixty_four_full_proofs_compact_only_unpinned_and_make_permanent_tombstone(self):
         from sandbox.hosting.images.staging_models import MAX_PROOFS
@@ -287,7 +324,9 @@ class TestImageStagingRepository(unittest.TestCase):
                 self.assertEqual(port.prepare(**{
                     key: value for key, value in lease.as_mapping().items()
                     if key not in {"phase", "target_identity", "ledger_revision",
-                                   "acceptance_receipt"}}).as_mapping(), lease.as_mapping())
+                                   "ledger_authority", "acceptance_receipt"}},
+                    ledger_authority=lease.ledger_authority,
+                    ledger_revision=lease.ledger_revision).as_mapping(), lease.as_mapping())
 
     def test_lease_binding_replay_expiry_stale_generation_and_holder_authority_matrix(self):
         from sandbox.hosting.images.staging_models import StagingContractError
@@ -306,7 +345,9 @@ class TestImageStagingRepository(unittest.TestCase):
                         stage_request_id=request.request_id,
                         stage_request_digest=request.request_digest,
                         proof_digest=result.proof.proof_digest,
-                        stage_generation=result.generation)
+                        stage_generation=result.generation,
+                        ledger_authority=lease.ledger_authority,
+                        ledger_revision=lease.ledger_revision)
                 with self.assertRaises(StageRepositoryError):
                     port.prepare(lease_id="stale-generation", holder=lease.holder,
                         admission_deadline=lease.admission_deadline,
@@ -315,7 +356,9 @@ class TestImageStagingRepository(unittest.TestCase):
                         stage_request_id=request.request_id,
                         stage_request_digest=request.request_digest,
                         proof_digest=result.proof.proof_digest,
-                        stage_generation=result.generation + 1)
+                        stage_generation=result.generation + 1,
+                        ledger_authority=lease.ledger_authority,
+                        ledger_revision=lease.ledger_revision)
                 for holder in ("process/123", "recovery/request-a"):
                     with self.assertRaises((StagingContractError, StageRepositoryError)):
                         port.prepare(lease_id="bad-" + holder.split("/")[0], holder=holder,
@@ -325,10 +368,112 @@ class TestImageStagingRepository(unittest.TestCase):
                             stage_request_id=request.request_id,
                             stage_request_digest=request.request_digest,
                             proof_digest=result.proof.proof_digest,
-                            stage_generation=result.generation)
+                            stage_generation=result.generation,
+                            ledger_authority=lease.ledger_authority,
+                            ledger_revision=lease.ledger_revision)
                 with self.assertRaises(StageRepositoryError):
                     self.prepare(port, result, request, lease_id="already-expired",
                                  deadline="2000-01-01T00:00:00Z")
+
+    def test_lease_model_rejects_oversized_or_boolean_counters(self):
+        from sandbox.hosting.images.staging_models import (
+            MAX_PERSISTED_LEDGER_COUNTER, StagingContractError,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory); policy = staging_policy()
+            request = stage_request(policy=policy); result = self.committed(repository, request, policy)
+            with self.custody(repository, policy.target.target_identity) as port:
+                lease = self.prepare(port, result, request)
+            for field, value in (
+                    ("stage_generation", MAX_PERSISTED_LEDGER_COUNTER + 1),
+                    ("ledger_revision", MAX_PERSISTED_LEDGER_COUNTER + 1),
+                    ("stage_generation", True), ("ledger_revision", False)):
+                with self.subTest(field=field, value=value), self.assertRaises(StagingContractError):
+                    replace(lease, **{field: value})
+
+    def test_lease_model_closes_phase_receipt_and_deadline_optionals(self):
+        from sandbox.hosting.images.staging_models import StagingContractError
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory); policy = staging_policy()
+            request = stage_request(policy=policy); result = self.committed(repository, request, policy)
+            with self.custody(repository, policy.target.target_identity) as port:
+                prepared = self.prepare(port, result, request)
+            valid_receipt = "host-acceptance/" + "d" * 64
+            accepted = replace(prepared, phase="accepted", acceptance_receipt=valid_receipt)
+            self.assertEqual(accepted.acceptance_receipt, valid_receipt)
+            cases = (
+                {"acceptance_receipt": valid_receipt},
+                {"phase": "accepted", "acceptance_receipt": None},
+                {"phase": "accepted", "acceptance_receipt": "sha256:" + "d" * 64},
+                {"admission_deadline": "2099-01-01T00:00:00"},
+                {"admission_deadline": "2099-01-01T00:00:00+00:00"},
+                {"admission_deadline": "2099-01-01T00:00:00.000000Z"},
+            )
+            for values in cases:
+                with self.subTest(values=values), self.assertRaises(StagingContractError):
+                    replace(prepared, **values)
+
+    def test_load_rejects_oversized_or_boolean_root_record_and_lease_counters(self):
+        from sandbox.hosting.images.staging_models import MAX_PERSISTED_LEDGER_COUNTER
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        mutations = {
+            "root_generation_large": lambda state, request, lease: state.update(
+                generation=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "root_revision_large": lambda state, request, lease: state.update(
+                ledger_revision=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "root_generation_bool": lambda state, request, lease: state.update(generation=True),
+            "root_revision_bool": lambda state, request, lease: state.update(ledger_revision=False),
+            "record_generation_large": lambda state, request, lease: state["records"][
+                request.request_id].update(generation=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "record_revision_large": lambda state, request, lease: state["records"][
+                request.request_id].update(ledger_revision=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "record_generation_bool": lambda state, request, lease: state["records"][
+                request.request_id].update(generation=True),
+            "record_revision_bool": lambda state, request, lease: state["records"][
+                request.request_id].update(ledger_revision=False),
+            "lease_generation_large": lambda state, request, lease: state["leases"][
+                lease.lease_id].update(stage_generation=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "lease_revision_large": lambda state, request, lease: state["leases"][
+                lease.lease_id].update(ledger_revision=MAX_PERSISTED_LEDGER_COUNTER + 1),
+            "lease_generation_bool": lambda state, request, lease: state["leases"][
+                lease.lease_id].update(stage_generation=True),
+            "lease_revision_bool": lambda state, request, lease: state["leases"][
+                lease.lease_id].update(ledger_revision=False),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); policy = staging_policy()
+                request = stage_request(policy=policy); result = self.committed(repository, request, policy)
+                with self.custody(repository, policy.target.target_identity) as port:
+                    lease = self.prepare(port, result, request)
+                with repository.target_lock(request.target.target_identity):
+                    state = repository._load_unlocked(request.target.target_identity)
+                    mutate(state, request, lease)
+                    repository._write_unlocked(request.target.target_identity, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(request.target.target_identity)
+
+    def test_counter_saturation_refuses_before_any_accept_increment_is_persisted(self):
+        from sandbox.hosting.images.staging_models import MAX_PERSISTED_LEDGER_COUNTER
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        for saturated in ("generation", "ledger_revision"):
+            with self.subTest(saturated=saturated), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); target = "target-a"
+                with repository.target_lock(target):
+                    state = repository._empty(target)
+                    state[saturated] = MAX_PERSISTED_LEDGER_COUNTER
+                    if saturated == "generation":
+                        state["ledger_revision"] = MAX_PERSISTED_LEDGER_COUNTER
+                    repository._write_unlocked(target, state)
+                request = stage_request(
+                    generation=state["generation"], policy=staging_policy())
+                with self.assertRaisesRegex(StageRepositoryError, "retention_full"):
+                    repository.accept(request)
+                with repository.target_lock(target):
+                    retained = repository._load_unlocked(target)
+                self.assertEqual(retained["generation"], state["generation"])
+                self.assertEqual(retained["ledger_revision"], state["ledger_revision"])
+                self.assertEqual(retained["records"], {})
 
     def test_accepted_replay_cancel_and_release_require_exact_owner_evidence(self):
         from sandbox.hosting.images.staging_repository import StageRepositoryError
@@ -337,8 +482,10 @@ class TestImageStagingRepository(unittest.TestCase):
             request = stage_request(policy=policy); result = self.committed(repository, request, policy)
             with self.custody(repository, policy.target.target_identity) as port:
                 lease = self.prepare(port, result, request)
-                receipt = "sha256:" + "d" * 64
+                receipt = "host-acceptance/" + "d" * 64
                 accepted = port.promote(lease, self.host_evidence(lease, "accepted", receipt))
+                self.assertEqual(
+                    self.prepare(port, result, request).as_mapping(), accepted.as_mapping())
                 self.assertEqual(port.promote(accepted,
                     self.host_evidence(accepted, "accepted", receipt)).as_mapping(),
                     accepted.as_mapping())
@@ -355,6 +502,256 @@ class TestImageStagingRepository(unittest.TestCase):
                 with self.assertRaises(StageRepositoryError):
                     port.release(accepted, wrong)
                 port.release(accepted, self.terminal_evidence(accepted))
+
+    def test_activation_policy_admission_runs_inside_ordered_custody_after_proof_validation(self):
+        from sandbox.hosting.images.activation.repository import ActivationRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from tests.fixtures.hosting_image_activation import activation_request
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); events = []
+            class LoggingStageRepository(StageRepository):
+                @contextmanager
+                def target_lock(self, target_identity, **kwargs):
+                    events.append("enter:stage")
+                    try:
+                        with super().target_lock(target_identity, **kwargs):
+                            yield
+                    finally:
+                        events.append("exit:stage")
+            stage = LoggingStageRepository(root / "stage")
+            policy = staging_policy(); stage_request_value = stage_request(policy=policy)
+            result = self.committed(stage, stage_request_value, policy)
+            events.clear()
+            outer = RecoveryRepository(root / "hosts.json", root / "locks")
+            real_target = outer.target_mutation_port("activate")
+            real_host = outer.activation_host_state_port()
+            class Target:
+                @contextmanager
+                def target_mutation_transaction(self, target_identity):
+                    events.append("enter:target")
+                    try:
+                        with real_target.target_mutation_transaction(target_identity):
+                            yield
+                    finally:
+                        events.append("exit:target")
+            class Host:
+                @contextmanager
+                def atomic_host_state_transaction(self, target_identity):
+                    events.append("enter:host")
+                    try:
+                        with real_host.atomic_host_state_transaction(target_identity):
+                            yield
+                    finally:
+                        events.append("exit:host")
+                def __getattr__(self, name):
+                    return getattr(real_host, name)
+            request = activation_request()
+            repository = ActivationRepository(
+                host_state_port=Host(), stage_repository=stage,
+                target_mutation_port=Target())
+            class Admission:
+                ok = True
+                code = "accepted"
+            def admit():
+                self.assertEqual(events[-3:], ["enter:target", "enter:host", "enter:stage"])
+                events.append("admit")
+                return Admission()
+            status, _replay, lease = repository.accept(
+                request, authority_binding_digest=request.authority_binding_digest,
+                stage_ledger_authority="feature-050-stage-ledger-v2",
+                stage_ledger_revision=7, admission_validator=admit,
+                rollback_subject_digest=request.rollback_subject_digest,
+                rollback_grant_digest=request.rollback_grant_digest,
+                admission_deadline="2099-01-01T00:00:00Z", edge_required=True,
+                recovery_context={"target": request.proof.target.as_mapping(),
+                    "compose_project": "widget", "selected_services": ["web", "worker"]})
+            self.assertEqual(status, "accepted")
+            self.assertEqual(lease.ledger_revision, 7)
+            self.assertEqual(events, ["enter:target", "enter:host", "enter:stage", "admit",
+                                      "exit:stage", "exit:host", "exit:target"])
+
+    def test_custody_rejects_partial_or_corrupt_retained_proof_on_load(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        for field, value in (("observed_identity", None),
+                             ("proof_digest", "sha256:" + "0" * 64)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); policy = staging_policy()
+                request = stage_request(policy=policy)
+                self.committed(repository, request, policy)
+                with repository.target_lock(policy.target.target_identity):
+                    state = repository._load_unlocked(policy.target.target_identity)
+                    if value is None:
+                        state["proofs"][request.request_id].pop(field)
+                    else:
+                        state["proofs"][request.request_id][field] = value
+                    repository._write_unlocked(policy.target.target_identity, state)
+                with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                    with self.custody(repository, policy.target.target_identity) as port:
+                        port.lookup("missing")
+
+    def test_load_refuses_tombstone_overlapping_retained_proof_authority(self):
+        from sandbox.hosting.images.staging_models import StageProofTombstone
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory); policy = staging_policy()
+            request = stage_request(policy=policy)
+            result = self.committed(repository, request, policy)
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["tombstones"][request.request_id] = StageProofTombstone(
+                    request.request_id, request.request_digest,
+                    result.proof.proof_digest).as_mapping()
+                repository._write_unlocked(policy.target.target_identity, state)
+                with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                    repository._load_unlocked(policy.target.target_identity)
+
+    def test_custody_rejects_valid_but_different_caller_proof(self):
+        from sandbox.hosting.images.staging_models import StagedImageProof
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory); policy = staging_policy()
+            request = stage_request(policy=policy)
+            result = self.committed(repository, request, policy)
+            other_request = stage_request(request_id="stage-request-b", policy=policy)
+            other = StagedImageProof.create(
+                other_request, policy, local_observation(policy), result.generation)
+            with self.custody(repository, policy.target.target_identity) as port:
+                with self.assertRaisesRegex(StageRepositoryError, "proof_invalid"):
+                    self.validate_retained(
+                        port, result, request, supplied_proof=other)
+
+    def test_custody_rejects_wrong_ledger_authority_or_record_revision(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory); policy = staging_policy()
+            request = stage_request(policy=policy)
+            result = self.committed(repository, request, policy)
+            with self.custody(repository, policy.target.target_identity) as port:
+                for overrides in ({"authority": "feature-050-stage-ledger-v1"},
+                                  {"revision": 1}):
+                    with self.subTest(**overrides), self.assertRaises(StageRepositoryError):
+                        self.validate_retained(port, result, request, **overrides)
+
+    def test_load_refuses_over_limit_records_tombstones_and_pins(self):
+        from sandbox.hosting.images.staging_models import (
+            MAX_LIVE_PROOF_LEASES, MAX_PROOFS, MAX_TOMBSTONES,
+        )
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        cases = (("records", MAX_PROOFS), ("tombstones", MAX_TOMBSTONES),
+                 ("leases", MAX_LIVE_PROOF_LEASES))
+        for collection, maximum in cases:
+            with self.subTest(collection=collection), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); target = "target-a"
+                with repository.target_lock(target):
+                    state = repository._empty(target)
+                    state[collection] = {f"item-{index}": {} for index in range(maximum + 1)}
+                    repository._write_unlocked(target, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(target)
+
+    def test_load_rejects_unknown_or_missing_fields_on_record_without_proof(self):
+        import copy
+        from sandbox.hosting.images.staging_models import StageResult
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        for mutation in ("unknown", "missing"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); request = stage_request()
+                repository.accept(request)
+                process = {"unit_inactive": True, "cgroup_empty_or_removed": True,
+                           "not_launched": True}
+                repository.transition(request, "failed", process=process,
+                                      cleanup={"complete": True})
+                repository.commit(request, StageResult(
+                    1, False, "failed", "broker_unavailable",
+                    request.request_id, 1))
+                with repository.target_lock(request.target.target_identity):
+                    state = repository._load_unlocked(request.target.target_identity)
+                    record = state["records"][request.request_id]
+                    if mutation == "unknown":
+                        record["foreign"] = copy.deepcopy(record["result"])
+                    else:
+                        record.pop("process")
+                    repository._write_unlocked(request.target.target_identity, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(request.target.target_identity)
+
+    def test_load_rejects_invalid_nested_process_cleanup_and_result(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        mutations = {
+            "process": lambda record: record.update(process={
+                "unit_inactive": "yes", "cgroup_empty_or_removed": True}),
+            "cleanup": lambda record: record.update(cleanup={"complete": True, "extra": False}),
+            "result": lambda record: record["result"].update(extra="unknown"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); policy = staging_policy()
+                request = stage_request(policy=policy)
+                self.committed(repository, request, policy)
+                with repository.target_lock(request.target.target_identity):
+                    state = repository._load_unlocked(request.target.target_identity)
+                    mutate(state["records"][request.request_id])
+                    repository._write_unlocked(request.target.target_identity, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(request.target.target_identity)
+
+    def test_load_rejects_negative_counters_illegal_phase_and_owner_mismatch(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        mutations = {
+            "generation": lambda state, record: state.update(generation=-1),
+            "ledger_revision": lambda state, record: state.update(ledger_revision=-1),
+            "record_generation": lambda state, record: record.update(generation=-1),
+            "record_revision": lambda state, record: record.update(ledger_revision=-1),
+            "effect_flag": lambda state, record: (
+                record.update(effect_entered=True),
+                state["active_owner"].update(effect_entered=True)),
+            "phase": lambda state, record: (
+                record.update(phase="unknown"), state["active_owner"].update(phase="unknown")),
+            "owner": lambda state, record: state["active_owner"].update(
+                request_digest="sha256:" + "f" * 64),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); request = stage_request()
+                repository.accept(request)
+                with repository.target_lock(request.target.target_identity):
+                    state = repository._load_unlocked(request.target.target_identity)
+                    mutate(state, state["records"][request.request_id])
+                    repository._write_unlocked(request.target.target_identity, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(request.target.target_identity)
+
+    def test_load_rejects_every_proof_result_consistency_gap(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        mutations = {
+            "missing_proof": lambda state, request: state["proofs"].pop(request.request_id),
+            "missing_result": lambda state, request: state["records"][request.request_id].update(
+                result=None),
+            "result_generation": lambda state, request: state["records"][
+                request.request_id]["result"].update(generation=2),
+            "result_generation_bool": lambda state, request: state["records"][
+                request.request_id]["result"].update(generation=True),
+            "result_schema_bool": lambda state, request: state["records"][
+                request.request_id]["result"].update(schema_version=True),
+            "proof_generation_bool": lambda state, request: state["proofs"][
+                request.request_id].update(staging_generation=True),
+            "proof_schema_bool": lambda state, request: state["proofs"][
+                request.request_id].update(schema_version=True),
+            "proof_key": lambda state, request: state["proofs"].update({
+                "other-request": state["proofs"].pop(request.request_id)}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                repository = self.repository(directory); policy = staging_policy()
+                request = stage_request(policy=policy)
+                self.committed(repository, request, policy)
+                with repository.target_lock(request.target.target_identity):
+                    state = repository._load_unlocked(request.target.target_identity)
+                    mutate(state, request)
+                    repository._write_unlocked(request.target.target_identity, state)
+                    with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                        repository._load_unlocked(request.target.target_identity)
 
     def test_legacy_ledger_schema_is_rejected(self):
         from sandbox.hosting.images.staging_repository import StageRepositoryError

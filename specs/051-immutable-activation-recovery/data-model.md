@@ -15,13 +15,15 @@
 - authenticated Feature 050 stage-ledger authority/revision
 - exact target/machine/daemon and unchanged `DeliveryIdentityProjection`
 - accepted runtime/edge/shared-owner/state revisions
+- rollback-grant authority identity/revision and Ed25519 public-key digest; no signing secret
 
 ## StageProofCustodyBinding
 
 - Feature 050 prepared lease/accepted pin identity; distinct from broker/effect leases
 - durable activation-owner/request holder identity, activation request/digest, stage
-  request/digest, proof digest, target, stage generation/revision, finite admission
-  deadline, and host acceptance receipt when accepted
+  request/digest, proof digest, target, stage generation/revision, finite canonical UTC
+  whole-second admission deadline ending in `Z`, and exact
+  `host-acceptance/<64 lowercase hex>` receipt when accepted
 - expiry forbids new host acceptance; same-holder replay promotes an already committed exact
   acceptance after expiry or cancels only proven absence; no process/recovery identity adopts
 - preparing pins before proof validation; expiry never auto-unpins and forbids new acceptance
@@ -52,16 +54,21 @@
 
 ## RunningObservation
 
-- unchanged target/machine/daemon/runtime epoch
+- unchanged registered target identity and target/machine/daemon/runtime epoch
 - each selected container/service/topology identity, including the runtime-owned container ID
-- exact declared ref, local ID, repository/config digest, platform, health
+- exact Compose project, declared ref, local ID, repository/config digest, platform, health
 - edge-relevant endpoint identity and canonical observation digest
 
 ## VerifiedActivationGeneration
 
 - generation number; plan/proof/policy/request/transaction digests
-- target/daemon, exact image, topology, non-secret configuration identity
+- target/daemon, exact image, topology, and a machine-keyed, target-scoped opaque HMAC over
+  the complete private render; the master/derived keys, raw hash/render, and arbitrary
+  values are never retained
 - exact retained rendered-Compose projection for pre-effect rollback validation
+- per-service target-scoped protected Compose configuration-hash identity, repeated in every
+  fresh running/recovery service projection without exposing the raw Compose hash
+- exact Compose project retained with every service projection
 - init receipt identities, fresh running observation with runtime-owned container IDs, edge terminal receipt
 - committed time/identity and canonical digest
 - forward `rollback_subject_digest` and `rollback_grant_digest`
@@ -72,6 +79,7 @@
 - deterministic `ForwardRollbackSubject`: current rollback-target generation plus
   forward candidate plan/proof/activation-authority/config/topology/init-data identities
 - expiry/revocation/policy revision and canonical digest
+- bounded Ed25519 SSH signature verified against the binding's public-key digest
 
 It never contains the future terminal generation digest. Forward acceptance stores both
 subject/grant digests; the resulting terminal generation references them.

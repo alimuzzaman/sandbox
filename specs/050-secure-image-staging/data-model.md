@@ -20,6 +20,8 @@
 
 - request/plan/policy/target/helper/broker/capability identities
 - generation and single-flight owner
+- persisted generation/revision counters are exact integers bounded to `0..2^53-1` at
+  the ledger root and `1..2^53-1` within retained records
 - phase and effect-entry boundary
 - process ownership/termination summary
 - cleanup summary
@@ -73,8 +75,15 @@
 - lease ID, exact durable activation-owner/request holder identity, finite admission
   deadline, and phase `prepared|accepted`
 - exact activation request ID/digest, stage request ID/digest, proof digest, target,
-  stage generation, and ledger revision
+  stage generation, fixed ledger authority, and exact proof-record ledger revision
+- persisted stage generation is an exact integer in `1..2^53-1`; persisted ledger
+  revision is an exact integer in `0..2^53-1`
+- locked preparation first fully decodes and canonical-byte compares the retained proof to
+  the supplied proof; policy admission and host acceptance remain inside the same ordered
+  target -> host -> stage custody transaction
 - accepted phase binds the exact durable host acceptance receipt/generation
+- the deadline is canonical timezone-aware UTC ending in `Z`; prepared has no acceptance
+  receipt, while accepted has exactly one `host-acceptance/<64 lowercase hex>` receipt
 - preparing immediately pins the full proof; compaction cannot select it
 - exact replay returns the same record; changed binding conflicts
 - expiry never auto-unpins; before acceptance it forbids new host acceptance and exact-holder

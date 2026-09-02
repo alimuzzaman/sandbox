@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 
 from .init_runner import InitExecutionUncertain, InitRunner
 from .models import (
@@ -15,17 +16,19 @@ from .runtime_observer import validate_rendered_topology
 
 class ActivationService:
     def __init__(self, *, repository, runtime_adapter, runtime_observer,
-                 edge_adapter, clock=None) -> None:
+                 edge_adapter, rollback_grant_verifier, clock=None) -> None:
         self.repository = repository
         self.runtime_adapter = runtime_adapter
         self.runtime_observer = runtime_observer
         self.edge_adapter = edge_adapter
+        self.rollback_grant_verifier = rollback_grant_verifier
         self.clock = clock or time.time
 
     def execute(self, request, policy, binding, *, rollback_subject, rollback_grant,
                 admission_deadline: str, compose_files: tuple[str, ...],
                 compose_project: str, configuration_digest: str,
-                init_data_contract_digest: str, edge_required: bool = True) -> dict:
+                init_data_contract_digest: str, edge_required: bool = True,
+                ownership_held: bool = False) -> dict:
         target = request.proof.target.target_identity
         try:
             terminal = self.repository.lookup_terminal(
@@ -34,22 +37,19 @@ class ActivationService:
             return self._unaccepted(request, "request_conflict")
         if terminal is not None:
             return terminal
-        admission = admit_activation(request, policy, binding, capability=request.operation)
-        if not admission.ok:
-            return self._unaccepted(request, admission.code)
-        if edge_required is not policy.edge_required:
-            return self._unaccepted(request, "authority_mismatch")
         accepted_at = int(self.clock())
         try:
-            if request.operation == "rollback" \
-                    and request.rollback_grant_digest != rollback_grant.grant_digest:
+            if request.rollback_subject_digest != rollback_subject.subject_digest \
+                    or request.rollback_grant_digest != rollback_grant.grant_digest:
                 raise ActivationContractError("rollback_grant_mismatch")
             validate_rollback_grant(
                 rollback_grant, rollback_subject, accepted_at=accepted_at,
-                policy_revision=policy.authority_revision, now=accepted_at)
+                policy_revision=policy.authority_revision, authority_binding=binding,
+                verifier=self.rollback_grant_verifier, now=accepted_at)
         except ActivationContractError as exc:
             return self._unaccepted(request, exc.code)
-        with self.repository.operation_transaction(target):
+        owner = nullcontext() if ownership_held else self.repository.operation_transaction(target)
+        with owner:
             return self._execute_owned(
                 request, policy, binding, rollback_subject, rollback_grant,
                 admission_deadline=admission_deadline, compose_files=compose_files,
@@ -85,11 +85,23 @@ class ActivationService:
                 or rollback_subject.init_data_contract_digest != init_data_contract_digest \
                 or rollback_subject.policy_revision != policy.authority_revision:
             return self._unaccepted(request, "rollback_grant_mismatch")
+        def validate_locked_admission():
+            admission = admit_activation(
+                request, policy, binding, capability=request.operation)
+            if admission.ok and edge_required is not policy.edge_required:
+                return type(admission)(False, "authority_mismatch")
+            return admission
         status, replay, lease = self.repository.accept(
             request, authority_binding_digest=binding.binding_digest,
+            stage_ledger_authority=binding.stage_ledger_authority,
+            stage_ledger_revision=binding.stage_ledger_revision,
+            admission_validator=validate_locked_admission,
             rollback_subject_digest=rollback_subject.subject_digest,
             rollback_grant_digest=rollback_grant.grant_digest,
-            admission_deadline=admission_deadline, edge_required=edge_required)
+            admission_deadline=admission_deadline, edge_required=edge_required,
+            recovery_context={"target": request.proof.target.as_mapping(),
+                              "compose_project": compose_project,
+                              "selected_services": list(policy.selected_services)})
         if status == "replay" and replay is not None:
             if replay.get("result_class") != "uncertain" and lease is not None:
                 self.repository.release_terminal_pin(
@@ -98,7 +110,12 @@ class ActivationService:
         if status not in {"accepted", "resume"} or lease is None:
             return self._unaccepted(request, {
                 "generation_conflict": "generation_conflict", "busy": "target_busy",
-                "conflict": "request_conflict"}.get(status, "lease_conflict"))
+                "conflict": "request_conflict", "artifact_invalid": "artifact_invalid",
+                "authority_mismatch": "authority_mismatch",
+                "policy_mismatch": "policy_mismatch",
+                "topology_mismatch": "topology_mismatch",
+                "adoption_requires_zero_init": "adoption_requires_zero_init"}.get(
+                    status, "lease_conflict"))
         if status == "resume":
             active = self.repository.snapshot(target).get("active")
             if not isinstance(active, dict) or active.get("request_digest") != request.request_digest:
@@ -147,7 +164,8 @@ class ActivationService:
             exact_image=image, exact_platform=request.plan.image.platform.as_mapping(),
             exact_topology_digest=request.proof.observed_identity["topology_digest"],
             exact_service_projection=policy.compose_projection,
-            exact_runtime_epoch=target["daemon_identity"])
+            exact_runtime_epoch=target["daemon_identity"],
+            exact_configuration_digest=configuration_digest)
         return target, image, rendered
 
     def _activate(self, request, policy, subject, grant, lease, compose_files,
@@ -194,10 +212,13 @@ class ActivationService:
             environment_overrides={
                 f"SANDBOX_ACTIVATION_IMAGE_{service.upper().replace('-', '_')}": image
                 for service in policy.selected_services}, timeout_seconds=300)
-        observation = self._observe(request, policy, target, image, rendered)
+        observation = self._observe(request, policy, target, image, rendered, compose_project)
+        compose_projection = tuple({"service": name, **rendered["services"][name]}
+                                   for name in sorted(rendered["services"]))
         generation = self._generation(
             request, policy, subject, grant, observation, receipts,
-            configuration_digest, edge_receipt_digest=None)
+            configuration_digest, edge_receipt_digest=None,
+            compose_project=compose_project, compose_projection=compose_projection)
         self.repository.transition(
             target_key, request, "runtime_proven",
             running_observation=observation.as_mapping(),
@@ -206,9 +227,15 @@ class ActivationService:
             self._persist_edge_pending(request, policy, target_key, observation)
         edge = self._edge(request, policy, observation, required=edge_required, allow_effect=True)
         if edge is not None:
+            post_edge = self._observe(
+                request, policy, target, image, rendered, compose_project)
+            if post_edge.as_mapping() != observation.as_mapping():
+                raise ActivationContractError("runtime_mismatch")
+            observation = post_edge
             generation = self._generation(
                 request, policy, subject, grant, observation, receipts,
-                configuration_digest, edge_receipt_digest=edge["receipt_digest"])
+                configuration_digest, edge_receipt_digest=edge["receipt_digest"],
+                compose_project=compose_project, compose_projection=compose_projection)
             self.repository.transition(
                 target_key, request, "edge_pending", edge_result=edge,
                 candidate_generation=generation.as_mapping())
@@ -224,11 +251,20 @@ class ActivationService:
         target, image, rendered = self._preflight(
             request, policy, compose_files=compose_files, compose_project=compose_project,
             configuration_digest=configuration_digest)
-        observation = self._observe(request, policy, target, image, rendered)
+        observation = self._observe(request, policy, target, image, rendered, compose_project)
         edge = self._edge(request, policy, observation, required=edge_required, allow_effect=False)
+        if edge is not None:
+            post_edge = self._observe(
+                request, policy, target, image, rendered, compose_project)
+            if post_edge.as_mapping() != observation.as_mapping():
+                raise ActivationContractError("runtime_mismatch")
+            observation = post_edge
         generation = self._generation(
             request, policy, subject, grant, observation, (), configuration_digest,
-            edge_receipt_digest=(edge or {}).get("receipt_digest"))
+            edge_receipt_digest=(edge or {}).get("receipt_digest"),
+            compose_project=compose_project,
+            compose_projection=tuple({"service": name, **rendered["services"][name]}
+                                     for name in sorted(rendered["services"])))
         self.repository.transition(
             target_key, request, "runtime_proven",
             running_observation=observation.as_mapping(),
@@ -250,6 +286,8 @@ class ActivationService:
         if previous.get("configuration_digest") != configuration_digest:
             raise ActivationContractError("rollback_grant_mismatch")
         previous_generation = VerifiedActivationGeneration.from_mapping(previous)
+        if previous_generation.compose_project != compose_project:
+            raise ActivationContractError("rollback_grant_mismatch")
         self.repository.transition(target_key, request, "preflight")
         target = request.proof.target.as_mapping()
         exact_image = previous_generation.image["repository_qualified_digest"]
@@ -262,7 +300,8 @@ class ActivationService:
             exact_image=exact_image, exact_platform=previous_generation.image["platform"],
             exact_topology_digest=previous_generation.topology_digest,
             exact_service_projection=previous_generation.compose_projection,
-            exact_runtime_epoch=target["daemon_identity"])
+            exact_runtime_epoch=target["daemon_identity"],
+            exact_configuration_digest=configuration_digest)
         self.runtime_observer.prove_generation_local(
             target=target, generation=previous_generation)
         self.repository.transition(target_key, request, "runtime_pending", effect_entered=True)
@@ -278,7 +317,9 @@ class ActivationService:
             config_digest=previous_generation.image["config_digest"],
             platform=previous_generation.image["platform"],
             topology_digest=previous_generation.topology_digest,
-            edge_identity=policy.edge_policy_digest)
+            edge_identity=policy.edge_policy_digest, compose_project=compose_project,
+            compose_config_hashes={item["service"]: item["compose_config_hash"]
+                                   for item in previous_generation.compose_projection})
         generation = self._generation_from_previous(
             request, previous_generation, observation, grant, subject)
         self.repository.transition(
@@ -289,6 +330,19 @@ class ActivationService:
             self._persist_edge_pending(request, policy, target_key, observation)
         edge = self._edge(request, policy, observation, required=edge_required, allow_effect=True)
         if edge is not None:
+            post_edge = self.runtime_observer.observe(
+                target=target, selected_services=policy.selected_services,
+                exact_image=previous_generation.image["repository_qualified_digest"],
+                local_image_id=previous_generation.image["config_digest"],
+                config_digest=previous_generation.image["config_digest"],
+                platform=previous_generation.image["platform"],
+                topology_digest=previous_generation.topology_digest,
+                edge_identity=policy.edge_policy_digest, compose_project=compose_project,
+                compose_config_hashes={item["service"]: item["compose_config_hash"]
+                                       for item in previous_generation.compose_projection})
+            if post_edge.as_mapping() != observation.as_mapping():
+                raise ActivationContractError("runtime_mismatch")
+            observation = post_edge
             mapping = generation.body_mapping(); mapping["edge_receipt_digest"] = edge["receipt_digest"]
             mapping["init_receipt_digests"] = tuple(mapping["init_receipt_digests"])
             mapping["compose_projection"] = tuple(mapping["compose_projection"])
@@ -300,14 +354,16 @@ class ActivationService:
                                        candidate_generation=generation.as_mapping())
         return self._commit_success(request, target_key, generation, observation, lease)
 
-    def _observe(self, request, policy, target, image, rendered):
+    def _observe(self, request, policy, target, image, rendered, compose_project):
         return self.runtime_observer.observe(
             target=target, selected_services=policy.selected_services,
             exact_image=image, local_image_id=request.plan.image.config_digest,
             config_digest=request.plan.image.config_digest,
             platform=request.plan.image.platform.as_mapping(),
             topology_digest=request.proof.observed_identity["topology_digest"],
-            edge_identity=policy.edge_policy_digest)
+            edge_identity=policy.edge_policy_digest, compose_project=compose_project,
+            compose_config_hashes={name: rendered["services"][name]["compose_config_hash"]
+                                   for name in policy.selected_services})
 
     def _edge(self, request, policy, observation, *, required, allow_effect):
         if not required:
@@ -321,22 +377,37 @@ class ActivationService:
             "request_id": edge_request_id, "transaction_request": request.request_digest,
             "observation": observation.observation_digest,
             "route_digest": policy.edge_route_digest})
+        evidence = {"route_digest": policy.edge_route_digest,
+                    "observation_digest": observation.observation_digest,
+                    "target_identity": request.proof.target.target_identity,
+                    "generation": request.expected_generation + 1,
+                    "deployment_identity": activation_digest(
+                        "sandbox.hosting.images.activation-deployment.v1",
+                        {"services": list(observation.services),
+                         "topology_digest": observation.topology_digest})}
         existing = self.edge_adapter.lookup(edge_request_id, edge_digest)
         if isinstance(existing, dict) and existing.get("terminal") is True \
-                and existing.get("request_digest") == edge_digest:
+                and existing.get("request_digest") == edge_digest \
+                and all(existing.get(key) == value for key, value in evidence.items()):
             return existing
         if existing is not None and existing != "not_entered":
             raise ActivationContractError("edge_uncertain")
         if not allow_effect:
-            body = {"request_id": edge_request_id, "request_digest": edge_digest,
-                    "terminal": True, "observed_only": True,
-                    "route_digest": policy.edge_route_digest}
-            return {**body, "receipt_digest": activation_digest(
-                "sandbox.hosting.images.activation-edge-observation.v1", body)}
-        result = self.edge_adapter.apply(edge_request_id, edge_digest)
+            observe = getattr(self.edge_adapter, "observe_generation", None)
+            if not callable(observe):
+                raise ActivationContractError("edge_incomplete")
+            result = observe(edge_request_id, edge_digest, **evidence)
+        else:
+            result = self.edge_adapter.apply(edge_request_id, edge_digest, **evidence)
         if type(result) is not dict or result.get("terminal") is not True \
-                or result.get("request_digest") != edge_digest:
-            raise ActivationContractError("edge_uncertain")
+                or result.get("request_digest") != edge_digest \
+                or any(result.get(key) != value for key, value in evidence.items()):
+            raise ActivationContractError("edge_incomplete")
+        receipt_body = {key: value for key, value in result.items()
+                        if key != "receipt_digest"}
+        if result.get("receipt_digest") != activation_digest(
+                "sandbox.hosting.images.activation-edge-receipt.v1", receipt_body):
+            raise ActivationContractError("edge_incomplete")
         return result
 
     def _persist_edge_pending(self, request, policy, target, observation):
@@ -350,7 +421,8 @@ class ActivationService:
             "phase": "prepared", "terminal": False, "receipt_digest": None})
 
     def _generation(self, request, policy, subject, grant, observation, receipts,
-                    configuration_digest, edge_receipt_digest):
+                    configuration_digest, edge_receipt_digest, compose_project,
+                    compose_projection):
         state = self.repository.snapshot(request.proof.target.target_identity)
         active = state["active"]
         body = {"generation": request.expected_generation + 1,
@@ -364,7 +436,8 @@ class ActivationService:
                           "repository_qualified_digest": request.plan.image.repository_qualified_digest},
                 "topology_digest": request.proof.observed_identity["topology_digest"],
                 "configuration_digest": configuration_digest,
-                "compose_projection": policy.compose_projection,
+                "compose_project": compose_project,
+                "compose_projection": compose_projection,
                 "init_receipt_digests": tuple(item.receipt_digest for item in receipts),
                 "running_observation_digest": observation.observation_digest,
                 "service_projection": observation.services,

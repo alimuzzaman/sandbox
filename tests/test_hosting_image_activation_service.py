@@ -7,6 +7,7 @@ from sandbox.hosting.images.activation.service import ActivationService
 from tests.fixtures.hosting_image_activation import (
     DIGEST_B, FakeActivationRepository, FakeEdge, FakeRuntime, activation_policy,
     activation_request, authority_binding, rollback_grant, rollback_subject,
+    FakeRollbackGrantVerifier,
 )
 
 
@@ -14,13 +15,14 @@ def service(repository, runtime=None, edge=None):
     runtime = runtime or FakeRuntime()
     return ActivationService(repository=repository, runtime_adapter=runtime,
                              runtime_observer=RuntimeObserver(runtime),
-                             edge_adapter=edge or FakeEdge()), runtime
+                             edge_adapter=edge or FakeEdge(),
+                             rollback_grant_verifier=FakeRollbackGrantVerifier()), runtime
 
 
 def execute(instance, request, policy, binding, subject, grant):
     return instance.execute(
         request, policy, binding, rollback_subject=subject, rollback_grant=grant,
-        admission_deadline="2999-01-01T00:00:00+00:00",
+        admission_deadline="2999-01-01T00:00:00Z",
         compose_files=("compose.yml",), compose_project="widget",
         configuration_digest=DIGEST_B, init_data_contract_digest=DIGEST_B)
 
@@ -31,28 +33,74 @@ def prepared_rollback():
     first = activation_request(policy=policy)
     first_subject = rollback_subject(policy); first_grant = rollback_grant(first_subject)
     assert execute(instance, first, policy, binding, first_subject, first_grant)["ok"]
-    second = activation_request(generation=1, request_id="activation-b", policy=policy)
+    second_base = activation_request(generation=1, request_id="activation-b", policy=policy)
     subject = create_forward_rollback_subject(
-        target=second.proof.target.as_mapping(),
+        target=second_base.proof.target.as_mapping(),
         rollback_target_generation_digest=repository.state["current"]["generation_digest"],
-        candidate_plan_digest=second.plan.plan_digest,
-        candidate_proof_digest=second.proof.proof_digest,
+        candidate_plan_digest=second_base.plan.plan_digest,
+        candidate_proof_digest=second_base.proof.proof_digest,
         activation_authority_digest=binding.binding_digest,
         configuration_digest=DIGEST_B,
-        topology_digest=second.proof.observed_identity["topology_digest"],
+        topology_digest=second_base.proof.observed_identity["topology_digest"],
         init_data_contract_digest=DIGEST_B,
         policy_revision=policy.authority_revision)
     grant = rollback_grant(subject)
+    second = activation_request(
+        generation=1, request_id="activation-b", policy=policy,
+        subject=subject, grant=grant)
     assert execute(instance, second, policy, binding, subject, grant)["ok"]
     request = ActivationRequest.create(
         request_id="rollback-a", operation="rollback", expected_generation=2,
         policy_digest=policy.policy_digest, plan=second.plan, proof=second.proof,
         authority_binding_digest=binding.binding_digest,
+        rollback_subject_digest=subject.subject_digest,
         rollback_grant_digest=grant.grant_digest, confirmed=True)
     return repository, instance, runtime, policy, binding, subject, grant, request
 
 
 class ActivationServiceTests(unittest.TestCase):
+    def test_runtime_is_reobserved_after_edge_receipt_before_commit(self):
+        class ChangedAfterEdge(FakeRuntime):
+            def __init__(self):
+                super().__init__(); self.observations = 0
+            def observe_running(self, **kwargs):
+                value = super().observe_running(**kwargs)
+                self.observations += 1
+                if self.observations == 2:
+                    value["services"][0]["runtime_identity"] = "container-replaced"
+                return value
+        repository = FakeActivationRepository(); runtime = ChangedAfterEdge()
+        instance, _ = service(repository, runtime=runtime)
+        policy = activation_policy(); binding = authority_binding(policy=policy)
+        request = activation_request(policy=policy)
+        subject = rollback_subject(policy); grant = rollback_grant(subject)
+        result = execute(instance, request, policy, binding, subject, grant)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "runtime_mismatch")
+        self.assertEqual(runtime.observations, 2)
+        self.assertEqual(repository.state["generation"], 0)
+
+    def test_self_issued_rollback_grant_is_not_machine_authority(self):
+        from dataclasses import replace
+        repository = FakeActivationRepository(); instance, runtime = service(repository)
+        policy = activation_policy(); binding = authority_binding(policy=policy)
+        subject = rollback_subject(policy); legitimate = rollback_grant(subject)
+        forged_body = {**legitimate.body_mapping(), "authority_proof": "attacker-proof"}
+        from sandbox.hosting.images.activation.models import (
+            RollbackCompatibilityGrant, activation_digest,
+        )
+        forged = RollbackCompatibilityGrant(
+            authority_id=forged_body["authority_id"],
+            authority_revision=forged_body["authority_revision"],
+            issued_at=forged_body["issued_at"], policy_revision=forged_body["policy_revision"],
+            subject=subject, authority_proof=forged_body["authority_proof"],
+            expires_at=forged_body["expires_at"], revoked=forged_body["revoked"],
+            grant_digest=activation_digest(
+                "sandbox.hosting.images.rollback-grant.v1", forged_body))
+        result = execute(instance, activation_request(policy=policy), policy, binding,
+                         subject, forged)
+        self.assertEqual(result["code"], "rollback_grant_mismatch")
+        self.assertEqual(runtime.calls, [])
     def test_exact_terminal_replay_precedes_changed_policy_grant_and_custody(self):
         repository = FakeActivationRepository(); instance, runtime = service(repository)
         request = activation_request(); terminal = {
@@ -83,7 +131,7 @@ class ActivationServiceTests(unittest.TestCase):
         instance, runtime = service(repository)
         request = activation_request(); policy = activation_policy(); binding = authority_binding(policy=policy)
         result = instance.execute(request, policy, binding, rollback_subject=subject,
-            rollback_grant=grant, admission_deadline="2999-01-01T00:00:00+00:00",
+            rollback_grant=grant, admission_deadline="2999-01-01T00:00:00Z",
             compose_files=("compose.yml",), compose_project="widget",
             configuration_digest=DIGEST_B, init_data_contract_digest=DIGEST_B)
         self.assertTrue(result["ok"], result)
@@ -104,7 +152,7 @@ class ActivationServiceTests(unittest.TestCase):
         binding = authority_binding(policy=narrowed); request = activation_request(policy=narrowed)
         subject = rollback_subject(narrowed)
         result = instance.execute(request, narrowed, binding, rollback_subject=subject,
-            rollback_grant=rollback_grant(subject), admission_deadline="2999-01-01T00:00:00+00:00",
+            rollback_grant=rollback_grant(subject), admission_deadline="2999-01-01T00:00:00Z",
             compose_files=("compose.yml",), compose_project="widget",
             configuration_digest=DIGEST_B, init_data_contract_digest=DIGEST_B)
         self.assertTrue(result["ok"])
@@ -117,7 +165,7 @@ class ActivationServiceTests(unittest.TestCase):
         request = activation_request(operation="adopt", zero_init=True, policy=policy)
         subject = rollback_subject(policy); grant = rollback_grant(subject)
         result = instance.execute(request, policy, binding, rollback_subject=subject,
-            rollback_grant=grant, admission_deadline="2999-01-01T00:00:00+00:00",
+            rollback_grant=grant, admission_deadline="2999-01-01T00:00:00Z",
             compose_files=("machine-bound.compose.yml",), compose_project="widget",
             configuration_digest=DIGEST_B,
             init_data_contract_digest=DIGEST_B, edge_required=True)
@@ -135,7 +183,7 @@ class ActivationServiceTests(unittest.TestCase):
                 policy = activation_policy(zero_init=zero_init); binding = authority_binding(policy=policy)
                 result = instance.execute(request, policy, binding,
                     rollback_subject=rollback_subject(), rollback_grant=rollback_grant(),
-                    admission_deadline="2999-01-01T00:00:00+00:00", compose_files=(),
+                    admission_deadline="2999-01-01T00:00:00Z", compose_files=(),
                     compose_project="widget", configuration_digest=DIGEST_B,
                     init_data_contract_digest=DIGEST_B)
                 self.assertFalse(result["ok"]); self.assertEqual(runtime.replacements, 0)
@@ -174,6 +222,19 @@ class ActivationServiceTests(unittest.TestCase):
         self.assertFalse(result["ok"]); self.assertEqual(result["code"], "topology_mismatch")
         self.assertEqual(runtime.replacements, 2)
         self.assertEqual(len(runtime.render_selectors), renders_before + 1)
+        self.assertNotIn("runtime_pending", repository.events[-3:])
+
+    def test_rollback_refuses_changed_compose_project_before_runtime_effect(self):
+        repository, instance, runtime, policy, binding, subject, grant, request = prepared_rollback()
+        replacements_before = runtime.replacements
+        result = instance.execute(
+            request, policy, binding, rollback_subject=subject, rollback_grant=grant,
+            admission_deadline="2999-01-01T00:00:00Z",
+            compose_files=("compose.yml",), compose_project="foreign-project",
+            configuration_digest=DIGEST_B, init_data_contract_digest=DIGEST_B)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "rollback_grant_mismatch")
+        self.assertEqual(runtime.replacements, replacements_before)
         self.assertNotIn("runtime_pending", repository.events[-3:])
 
     def test_rollback_commits_fresh_runtime_projection_from_exact_previous_generation(self):

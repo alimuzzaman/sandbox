@@ -3,6 +3,11 @@ import unittest
 from tests.fixtures.hosting_image_activation import activation_request
 
 
+def recovery_context(request):
+    return {"target": request.proof.target.as_mapping(), "compose_project": "widget",
+            "selected_services": ["web", "worker"]}
+
+
 class ActivationRepositoryCodecTests(unittest.TestCase):
     def test_nested_accept_replay_conflict_generation_and_tombstone_mechanisms(self):
         from sandbox.hosting.images.activation.repository import accept_candidate, empty_activation_state
@@ -12,16 +17,16 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
         status, state, _ = accept_candidate(
             empty_activation_state(), request, holder="activation-owner/a",
             authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "a" * 64,
-            rollback_grant_digest="sha256:" + "b" * 64, proof_pin=pin,
-            edge_required=True)
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))
         self.assertEqual(status, "accepted")
         self.assertEqual(accept_candidate(
             state, request, holder="activation-owner/a",
             authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "a" * 64,
-            rollback_grant_digest="sha256:" + "b" * 64, proof_pin=pin,
-            edge_required=True)[0], "replay")
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))[0], "replay")
 
     def test_common_transaction_transition_table_rejects_illegal_commit(self):
         from sandbox.hosting.images.activation.models import validate_transition
@@ -54,8 +59,9 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
             for index in range(MAX_TOMBSTONES)}
         status, _, _ = accept_candidate(state, request, holder="activation-owner/a",
             authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "a" * 64,
-            rollback_grant_digest="sha256:" + "b" * 64, proof_pin={}, edge_required=True)
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin={}, edge_required=True,
+            recovery_context=recovery_context(request))
         self.assertEqual(status, "retention_full")
 
     def test_codec_rejects_recursive_secret_and_unbounded_authority(self):
@@ -67,6 +73,24 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
             "code": "recovery_conflict", "promoted": False, "starting_generation": 0,
             "resulting_generation": 0, "secret": "forbidden"}
         with self.assertRaises(ActivationRepositoryError): decode_activation_state(state)
+
+    def test_codec_rejects_malformed_tombstone_digest_and_request_identity(self):
+        import copy
+        from sandbox.hosting.images.activation.repository import (
+            ActivationRepositoryError, decode_activation_state, empty_activation_state,
+        )
+        base = empty_activation_state()
+        base["tombstones"]["request-a"] = {
+            "request_id": "request-a", "request_digest": "sha256:" + "a" * 64,
+            "result_class": "refused", "code": "request_conflict"}
+        for mutate in (
+                lambda value: value["tombstones"]["request-a"].update(
+                    request_digest="sha256:" + "a" * 64 + "-suffix"),
+                lambda value: value["tombstones"].update({"bad request":
+                    value["tombstones"].pop("request-a")})):
+            candidate = copy.deepcopy(base); mutate(candidate)
+            with self.assertRaises(ActivationRepositoryError):
+                decode_activation_state(candidate)
 
     def test_recovery_result_schema_is_closed_and_success_is_exact(self):
         from sandbox.hosting.images.activation.repository import (
@@ -130,9 +154,9 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
                "host_acceptance_receipt": "host-acceptance/" + "b" * 64}
         status, state, _ = accept_candidate(empty_activation_state(), request,
             holder=pin["holder"], authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "c" * 64,
-            rollback_grant_digest="sha256:" + "d" * 64, proof_pin=pin,
-            edge_required=True)
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))
         self.assertEqual(status, "accepted")
         active = state["active"]
         terminal = ActivationResult(1, False, "refused", "recovery_no_effect",
@@ -143,9 +167,9 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
         state["active"] = None; state["reserved_terminal_bytes"] = 0
         self.assertEqual(accept_candidate(state, request, holder=pin["holder"],
             authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "c" * 64,
-            rollback_grant_digest="sha256:" + "d" * 64, proof_pin=pin,
-            edge_required=True)[0], "replay")
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))[0], "replay")
 
     def test_same_request_uncertain_terminal_keeps_active_fence_and_replays_uncertainty(self):
         from sandbox.hosting.images.activation.models import ActivationResult
@@ -159,9 +183,9 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
                "host_acceptance_receipt": "host-acceptance/" + "b" * 64}
         _, state, _ = accept_candidate(empty_activation_state(), request,
             holder=pin["holder"], authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "c" * 64,
-            rollback_grant_digest="sha256:" + "d" * 64, proof_pin=pin,
-            edge_required=True)
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))
         active = state["active"]
         uncertain = ActivationResult(1, False, "uncertain", "effect_unknown",
             request.operation, request.request_id, request.request_digest, 0, 0,
@@ -170,9 +194,9 @@ class ActivationRepositoryCodecTests(unittest.TestCase):
         self.assertIsNotNone(fenced["active"])
         status, _, replay = accept_candidate(fenced, request, holder=pin["holder"],
             authority_binding_digest=request.authority_binding_digest,
-            rollback_subject_digest="sha256:" + "c" * 64,
-            rollback_grant_digest="sha256:" + "d" * 64, proof_pin=pin,
-            edge_required=True)
+            rollback_subject_digest=request.rollback_subject_digest,
+            rollback_grant_digest=request.rollback_grant_digest, proof_pin=pin,
+            edge_required=True, recovery_context=recovery_context(request))
         self.assertEqual(status, "replay")
         self.assertEqual(replay["result_class"], "uncertain")
         import copy

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import time
@@ -21,7 +22,8 @@ from typing import Any, Iterator
 from sandbox.core._paths import RUNTIME_DIR
 from .staging_models import (
     AtomicHostStateEvidence, DurableTerminalAuthorityEvidence, MAX_LEDGER_BYTES,
-    MAX_LIVE_PROOF_LEASES, MAX_PROOFS, MAX_STAGE_FRAME_BYTES, MAX_TOMBSTONES,
+    MAX_LIVE_PROOF_LEASES, MAX_PERSISTED_LEDGER_COUNTER, MAX_PROOFS,
+    MAX_STAGE_FRAME_BYTES, MAX_TOMBSTONES,
     ProofCustodyPort, StageProofActivationLease, StageProofTombstone, StageRequest,
     StageResult, StagedImageProof, StagingContractError, canonical_bytes,
 )
@@ -29,6 +31,101 @@ from .staging_models import (
 TERMINAL_PHASES = frozenset({"succeeded", "refused", "failed", "cancelled", "uncertain"})
 EFFECT_PHASES = frozenset({"pulling", "cleanup_pending", "observing", "succeeded"})
 TERMINAL_RESERVATION_BYTES = MAX_STAGE_FRAME_BYTES + 4096
+STAGE_LEDGER_AUTHORITY = "feature-050-stage-ledger-v2"
+_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_RECORD_PHASES = frozenset({
+    "accepted", "credential_pending", "helper_running", "pulling",
+    "cleanup_pending", "observing", *TERMINAL_PHASES,
+})
+_RECORD_FIELDS = frozenset({
+    "request_id", "request_digest", "generation", "phase", "effect_entered",
+    "process", "cleanup", "ledger_revision", "result",
+})
+_OWNER_FIELDS = _RECORD_FIELDS - {"ledger_revision", "result"}
+_PROCESS_FIELDS = frozenset({"unit_inactive", "cgroup_empty_or_removed"})
+_PROCESS_VARIANTS = frozenset({
+    _PROCESS_FIELDS,
+    _PROCESS_FIELDS | {"not_launched"},
+    _PROCESS_FIELDS | {"cleanup_complete"},
+    _PROCESS_FIELDS | {"unit_name"},
+    _PROCESS_FIELDS | {"unit_name", "cgroup", "delegated", "escape_allowed"},
+})
+
+
+def _bounded_text(value: object) -> bool:
+    return type(value) is str and 0 < len(value) <= 512 \
+        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _validate_process(value: object) -> None:
+    if value is None:
+        return
+    if type(value) is not dict or frozenset(value) not in _PROCESS_VARIANTS \
+            or any(type(value[name]) is not bool for name in _PROCESS_FIELDS):
+        raise ValueError
+    if "unit_name" in value and not _bounded_text(value["unit_name"]):
+        raise ValueError
+    if "cgroup" in value and (not _bounded_text(value["cgroup"])
+                              or value["unit_name"] not in value["cgroup"]):
+        raise ValueError
+    if "delegated" in value and (value["delegated"] is not False
+                                 or value["escape_allowed"] is not False):
+        raise ValueError
+    if "not_launched" in value and value["not_launched"] is not True:
+        raise ValueError
+    if "cleanup_complete" in value and type(value["cleanup_complete"]) is not bool:
+        raise ValueError
+
+
+def _validate_cleanup(value: object) -> None:
+    if value is not None and (type(value) is not dict or set(value) != {"complete"}
+                              or type(value["complete"]) is not bool):
+        raise ValueError
+
+
+def _validate_record_shape(request_id: str, record: object, *, generation: int,
+                           ledger_revision: int) -> None:
+    if type(record) is not dict or set(record) != _RECORD_FIELDS \
+            or request_id != record["request_id"] \
+            or _IDENTITY.fullmatch(request_id) is None \
+            or type(record["request_digest"]) is not str \
+            or _DIGEST.fullmatch(record["request_digest"]) is None \
+            or type(record["generation"]) is not int \
+            or not 1 <= record["generation"] <= MAX_PERSISTED_LEDGER_COUNTER \
+            or record["generation"] > generation \
+            or type(record["ledger_revision"]) is not int \
+            or not 1 <= record["ledger_revision"] <= MAX_PERSISTED_LEDGER_COUNTER \
+            or record["ledger_revision"] > ledger_revision \
+            or record["phase"] not in _RECORD_PHASES \
+            or type(record["effect_entered"]) is not bool:
+        raise ValueError
+    _validate_process(record["process"])
+    _validate_cleanup(record["cleanup"])
+    if record["cleanup"] is not None and record["process"] is None:
+        raise ValueError
+    if record["phase"] in {"accepted", "credential_pending"} \
+            and (record["effect_entered"] or record["process"] is not None
+                 or record["cleanup"] is not None):
+        raise ValueError
+    if record["phase"] == "helper_running" \
+            and (record["effect_entered"] or record["process"] is None
+                 or record["cleanup"] is not None):
+        raise ValueError
+    if record["phase"] in {"helper_running", "pulling"} \
+            and (record["process"] is None or record["cleanup"] is not None):
+        raise ValueError
+    if record["phase"] in {"pulling", "cleanup_pending", "observing", "succeeded"} \
+            and record["effect_entered"] is not True:
+        raise ValueError
+    if record["phase"] in {"cleanup_pending", "observing", "succeeded"} \
+            and (record["process"] is None or record["cleanup"] is None):
+        raise ValueError
+    if record["phase"] in {"observing", "succeeded"} \
+            and (record["process"].get("unit_inactive") is not True
+                 or record["process"].get("cgroup_empty_or_removed") is not True
+                 or record["cleanup"] != {"complete": True}):
+        raise ValueError
 
 
 class StageRepositoryError(RuntimeError):
@@ -127,6 +224,22 @@ class StageRepository:
                 "ledger_revision": 0, "active_owner": None, "reserved_terminal_bytes": 0,
                 "records": {}, "proofs": {}, "tombstones": {}, "leases": {}}
 
+    @staticmethod
+    def _advance_counter(state: dict[str, Any], name: str) -> int:
+        current = state[name]
+        if type(current) is not int or not 0 <= current < MAX_PERSISTED_LEDGER_COUNTER:
+            raise StageRepositoryError("retention_full")
+        state[name] = current + 1
+        return state[name]
+
+    @classmethod
+    def _advance_counters(cls, state: dict[str, Any], *names: str) -> tuple[int, ...]:
+        for name in names:
+            current = state[name]
+            if type(current) is not int or not 0 <= current < MAX_PERSISTED_LEDGER_COUNTER:
+                raise StageRepositoryError("retention_full")
+        return tuple(cls._advance_counter(state, name) for name in names)
+
     def _load_unlocked(self, target_identity: str) -> dict[str, Any]:
         ledger, _lock = self._paths(target_identity)
         self._ensure_owned_dir(self.ledger_dir)
@@ -161,12 +274,98 @@ class StageRepository:
         if type(raw) is not dict or set(raw) != required or raw["schema_version"] != 2 \
                 or raw["target_identity"] != target_identity \
                 or type(raw["generation"]) is not int or type(raw["ledger_revision"]) is not int \
+                or not 0 <= raw["generation"] <= MAX_PERSISTED_LEDGER_COUNTER \
+                or not 0 <= raw["ledger_revision"] <= MAX_PERSISTED_LEDGER_COUNTER \
+                or raw["ledger_revision"] < raw["generation"] \
                 or type(raw["reserved_terminal_bytes"]) is not int \
                 or raw["reserved_terminal_bytes"] not in {0, TERMINAL_RESERVATION_BYTES} \
                 or (raw["active_owner"] is None) != (raw["reserved_terminal_bytes"] == 0) \
                 or any(type(raw[key]) is not dict
-                       for key in ("records", "proofs", "tombstones", "leases")):
+                       for key in ("records", "proofs", "tombstones", "leases")) \
+                or len(raw["records"]) > MAX_PROOFS or len(raw["proofs"]) > MAX_PROOFS \
+                or len(raw["tombstones"]) > MAX_TOMBSTONES \
+                or len(raw["leases"]) > MAX_LIVE_PROOF_LEASES \
+                or set(raw["tombstones"]) & (set(raw["records"]) | set(raw["proofs"])):
             raise StageRepositoryError("ledger_invalid")
+        try:
+            decoded_proofs = {
+                request_id: StagedImageProof.from_mapping(proof_raw)
+                for request_id, proof_raw in raw["proofs"].items()
+            }
+            for request_id, record in raw["records"].items():
+                _validate_record_shape(
+                    request_id, record, generation=raw["generation"],
+                    ledger_revision=raw["ledger_revision"])
+                proof = decoded_proofs.get(request_id)
+                result = record["result"]
+                if result is None:
+                    if proof is not None or record["phase"] == "succeeded":
+                        raise ValueError
+                    continue
+                if type(result) is not dict or set(result) != {
+                        "schema_version", "ok", "result_class", "code",
+                        "request_id", "generation"}:
+                    raise ValueError
+                parsed_result = StageResult(
+                    result["schema_version"], result["ok"], result["result_class"],
+                    result["code"], result["request_id"], result["generation"], proof)
+                if result != self._stored_result(parsed_result) \
+                        or parsed_result.request_id != request_id \
+                        or parsed_result.generation != record["generation"] \
+                        or (parsed_result.ok and record["phase"] != "succeeded") \
+                        or (not parsed_result.ok and record["phase"] != parsed_result.result_class):
+                    raise ValueError
+            for request_id, proof_raw in raw["proofs"].items():
+                proof = decoded_proofs[request_id]
+                record = raw["records"].get(request_id)
+                if request_id != proof.request_id or type(record) is not dict \
+                        or record.get("request_digest") != proof.request_digest \
+                        or record.get("generation") != proof.staging_generation \
+                        or record.get("phase") != "succeeded":
+                    raise ValueError
+            for request_id, tombstone in raw["tombstones"].items():
+                if type(tombstone) is not dict or set(tombstone) != {
+                        "request_id", "request_digest", "proof_digest", "result_code"} \
+                        or request_id != tombstone["request_id"] \
+                        or _IDENTITY.fullmatch(request_id) is None \
+                        or type(tombstone["request_digest"]) is not str \
+                        or _DIGEST.fullmatch(tombstone["request_digest"]) is None \
+                        or type(tombstone["proof_digest"]) is not str \
+                        or _DIGEST.fullmatch(tombstone["proof_digest"]) is None \
+                        or tombstone["result_code"] != "proof_expired":
+                    raise ValueError
+            for lease_id, lease_raw in raw["leases"].items():
+                lease = _lease_from(lease_raw)
+                proof_raw = raw["proofs"].get(lease.stage_request_id)
+                record = raw["records"].get(lease.stage_request_id)
+                if lease_id != lease.lease_id or lease.target_identity != target_identity \
+                        or lease.ledger_authority != STAGE_LEDGER_AUTHORITY \
+                        or type(proof_raw) is not dict or type(record) is not dict \
+                        or proof_raw.get("proof_digest") != lease.proof_digest \
+                        or proof_raw.get("staging_generation") != lease.stage_generation \
+                        or record.get("ledger_revision") != lease.ledger_revision:
+                    raise ValueError
+            owner = raw["active_owner"]
+            active_records = [record for record in raw["records"].values()
+                              if record["phase"] not in TERMINAL_PHASES
+                              or record["result"] is None
+                              or record["phase"] == "uncertain"]
+            if owner is None:
+                if active_records:
+                    raise ValueError
+            else:
+                if type(owner) is not dict or set(owner) != _OWNER_FIELDS:
+                    raise ValueError
+                _validate_process(owner["process"])
+                _validate_cleanup(owner["cleanup"])
+                record = raw["records"].get(owner["request_id"])
+                if type(record) is not dict \
+                        or owner != {key: record[key] for key in _OWNER_FIELDS} \
+                        or len(active_records) != 1 or active_records[0] is not record \
+                        or owner["generation"] != raw["generation"]:
+                    raise ValueError
+        except (KeyError, TypeError, ValueError, StagingContractError, StageRepositoryError):
+            raise StageRepositoryError("ledger_invalid") from None
         return raw
 
     def _write_unlocked(self, target_identity: str, state: dict[str, Any]) -> None:
@@ -216,7 +415,7 @@ class StageRepository:
 
     def _compact_for_reservation(self, state: dict[str, Any]) -> None:
         pinned = self._pinned_proofs(state)
-        while len(state["proofs"]) >= MAX_PROOFS:
+        while len(state["records"]) >= MAX_PROOFS or len(state["proofs"]) >= MAX_PROOFS:
             candidate = next((request_id for request_id, proof in state["proofs"].items()
                               if proof.get("proof_digest") not in pinned), None)
             if candidate is None or len(state["tombstones"]) >= MAX_TOMBSTONES - 1:
@@ -225,9 +424,7 @@ class StageRepository:
             record = state["records"][candidate]
             state["tombstones"][candidate] = StageProofTombstone(
                 candidate, record["request_digest"], proof["proof_digest"]).as_mapping()
-            record["phase"] = "refused"
-            record["result"] = self._stored_result(StageResult(
-                1, False, "refused", "proof_expired", candidate, record["generation"]))
+            del state["records"][candidate]
 
     @staticmethod
     def _assert_reserved_bound(state: dict[str, Any]) -> None:
@@ -296,8 +493,8 @@ class StageRepository:
                     1, False, "refused", "generation_conflict", request.request_id,
                     state["generation"])
             self._compact_for_reservation(state)
-            next_generation = state["generation"] + 1
-            next_revision = state["ledger_revision"] + 1
+            next_generation, next_revision = self._advance_counters(
+                state, "generation", "ledger_revision")
             owner = {"request_id": request.request_id, "request_digest": request.request_digest,
                      "generation": next_generation, "phase": "accepted",
                      "effect_entered": False, "process": None, "cleanup": None}
@@ -305,8 +502,6 @@ class StageRepository:
                                                      "result": None}
             state["active_owner"] = dict(owner)
             state["reserved_terminal_bytes"] = TERMINAL_RESERVATION_BYTES
-            state["generation"] = next_generation
-            state["ledger_revision"] = next_revision
             self._assert_reserved_bound(state)
             self._write_unlocked(target, state)
             return "accepted", next_generation, None
@@ -336,7 +531,7 @@ class StageRepository:
             if cleanup is not None:
                 record["cleanup"] = cleanup
                 owner["cleanup"] = cleanup
-            state["ledger_revision"] += 1
+            self._advance_counter(state, "ledger_revision")
             self._assert_reserved_bound(state)
             self._write_unlocked(target, state)
             return state["generation"]
@@ -362,7 +557,7 @@ class StageRepository:
                 raise StageRepositoryError("generation_conflict")
             record["phase"] = "succeeded" if result.ok else result.result_class
             record["result"] = self._stored_result(result)
-            state["ledger_revision"] += 1
+            self._advance_counter(state, "ledger_revision")
             record["ledger_revision"] = state["ledger_revision"]
             if result.proof is not None:
                 state["proofs"][request.request_id] = result.proof.as_mapping()
@@ -431,26 +626,63 @@ class _LockedCustodyPort(ProofCustodyPort):
         raw = state["leases"].get(lease_id)
         return None if raw is None else _lease_from(raw)
 
+    def validate_retained_proof(self, **binding: object) -> StagedImageProof:
+        required = {"stage_request_id", "stage_request_digest", "proof_digest",
+                    "stage_generation", "ledger_authority", "ledger_revision",
+                    "supplied_proof"}
+        if set(binding) != required:
+            raise StageRepositoryError("lease_conflict")
+        state = self._load()
+        if binding["ledger_authority"] != STAGE_LEDGER_AUTHORITY:
+            raise StageRepositoryError("lease_conflict")
+        proof_raw = state["proofs"].get(binding["stage_request_id"])
+        record = state["records"].get(binding["stage_request_id"])
+        try:
+            retained = StagedImageProof.from_mapping(proof_raw)
+            supplied_raw = (binding["supplied_proof"].as_mapping()
+                            if type(binding["supplied_proof"]) is StagedImageProof
+                            else binding["supplied_proof"])
+            supplied = StagedImageProof.from_mapping(supplied_raw)
+        except (KeyError, TypeError, ValueError, StagingContractError):
+            raise StageRepositoryError("proof_invalid") from None
+        if type(record) is not dict \
+                or record.get("request_id") != retained.request_id \
+                or record.get("request_digest") != retained.request_digest \
+                or record.get("generation") != retained.staging_generation \
+                or record.get("ledger_revision") != binding["ledger_revision"] \
+                or retained.request_id != binding["stage_request_id"] \
+                or retained.request_digest != binding["stage_request_digest"] \
+                or retained.proof_digest != binding["proof_digest"] \
+                or retained.staging_generation != binding["stage_generation"]:
+            raise StageRepositoryError("proof_expired")
+        if canonical_bytes(retained.as_mapping()) != canonical_bytes(supplied.as_mapping()):
+            raise StageRepositoryError("proof_invalid")
+        return retained
+
     def prepare(self, **binding: object) -> StageProofActivationLease:
         required = {"lease_id", "holder", "admission_deadline", "activation_request_id",
                     "activation_request_digest", "stage_request_id", "stage_request_digest",
-                    "proof_digest", "stage_generation"}
+                    "proof_digest", "stage_generation", "ledger_authority",
+                    "ledger_revision"}
         if set(binding) != required:
             raise StageRepositoryError("lease_conflict")
         state = self._load()
         proof = state["proofs"].get(binding["stage_request_id"])
         record = state["records"].get(binding["stage_request_id"])
         if not proof or not record or record["request_digest"] != binding["stage_request_digest"] \
+                or record["ledger_revision"] != binding["ledger_revision"] \
+                or binding["ledger_authority"] != STAGE_LEDGER_AUTHORITY \
                 or proof["proof_digest"] != binding["proof_digest"] \
                 or proof["staging_generation"] != binding["stage_generation"]:
             raise StageRepositoryError("proof_expired")
         candidate = StageProofActivationLease(
             phase="prepared", target_identity=self._target,
-            ledger_revision=record["ledger_revision"], **binding)
+            **binding)
         existing = state["leases"].get(candidate.lease_id)
         if existing is not None:
             parsed = _lease_from(existing)
-            if parsed.as_mapping() != candidate.as_mapping():
+            if replace(parsed, phase="prepared", acceptance_receipt=None).as_mapping() \
+                    != candidate.as_mapping():
                 raise StageRepositoryError("lease_conflict")
             return parsed
         if candidate.expired:
@@ -458,7 +690,7 @@ class _LockedCustodyPort(ProofCustodyPort):
         if len(state["leases"]) >= MAX_LIVE_PROOF_LEASES:
             raise StageRepositoryError("lease_capacity")
         state["leases"][candidate.lease_id] = candidate.as_mapping()
-        state["ledger_revision"] += 1
+        self._repository._advance_counter(state, "ledger_revision")
         self._repository._write_unlocked(self._target, state)
         return candidate
 
@@ -492,7 +724,7 @@ class _LockedCustodyPort(ProofCustodyPort):
         promoted = replace(current, phase="accepted",
                            acceptance_receipt=evidence.acceptance_receipt)
         state["leases"][current.lease_id] = promoted.as_mapping()
-        state["ledger_revision"] += 1
+        self._repository._advance_counter(state, "ledger_revision")
         self._repository._write_unlocked(self._target, state)
         return promoted
 
@@ -513,7 +745,7 @@ class _LockedCustodyPort(ProofCustodyPort):
         if not current.expired:
             raise StageRepositoryError("lease_conflict")
         del state["leases"][current.lease_id]
-        state["ledger_revision"] += 1
+        self._repository._advance_counter(state, "ledger_revision")
         self._repository._write_unlocked(self._target, state)
 
     def release(self, lease: StageProofActivationLease,
@@ -529,5 +761,5 @@ class _LockedCustodyPort(ProofCustodyPort):
                 or evidence.acceptance_receipt != current.acceptance_receipt:
             raise StageRepositoryError("terminal_not_durable")
         del state["leases"][current.lease_id]
-        state["ledger_revision"] += 1
+        self._repository._advance_counter(state, "ledger_revision")
         self._repository._write_unlocked(self._target, state)

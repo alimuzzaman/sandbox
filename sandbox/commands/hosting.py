@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import base64
 import shlex
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -3159,28 +3160,69 @@ class _HostImageEdgeAdapter:
         if current is None: return "not_entered"
         return current if current.get("request_digest") == request_digest else "ambiguous"
 
-    def apply(self, request_id: str, request_digest: str) -> dict:
-        _verify_edge(self.validated["routes"],
-                     healthcheck_path=self.validated["healthcheck"]["path"],
-                     basic_auth_enabled=bool(self.validated.get("basic_auth")))
-        body = {"request_id": request_id, "request_digest": request_digest, "terminal": True}
-        result = {**body, "receipt_digest": canonical_digest(body)}
-        self.results[request_id] = result
-        return result
+    def apply(self, request_id: str, request_digest: str, **_evidence) -> dict:
+        from sandbox.hosting.images.activation.models import ActivationContractError
+        # The route verifier proves reachability only. It cannot identify the
+        # activated runtime generation, so it is never activation authority.
+        raise ActivationContractError("edge_incomplete")
 
 
 def _host_image_machine_bundle(args, plan) -> dict:
     scope = plan.delivery_identity_projection.target_scope
     identity = hashlib.sha256(
         f"{args.remote}\0{scope.project}\0{args.environment}".encode()).hexdigest()
-    path = RUNTIME_DIR / "hosting" / "image-activation" / "policies" / f"{identity}.json"
-    raw = json.loads(path.read_text())
+    policy_root = Path(RUNTIME_DIR)
+    for component in ("hosting", "image-activation", "policies"):
+        policy_root = policy_root / component
+        directory = policy_root.lstat()
+        if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid() \
+                or stat.S_IMODE(directory.st_mode) & 0o077:
+            raise ValueError("machine activation policy directory is unsafe")
+    path = policy_root / f"{identity}.json"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() \
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o077 \
+                or before.st_size < 2 or before.st_size > 1024 * 1024:
+            raise ValueError("machine activation policy is unsafe")
+        data = bytearray()
+        while len(data) <= 1024 * 1024:
+            chunk = os.read(descriptor, min(65536, 1024 * 1024 + 1 - len(data)))
+            if not chunk: break
+            data.extend(chunk)
+        after = os.fstat(descriptor)
+        if len(data) > 1024 * 1024 or (before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns, before.st_ctime_ns, before.st_mode, before.st_uid,
+                before.st_nlink) != (after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns, after.st_mode, after.st_uid,
+                after.st_nlink):
+            raise ValueError("machine activation policy changed during read")
+    finally:
+        os.close(descriptor)
+    raw = json.loads(bytes(data))
     required = {"policy", "binding", "rollback_subject", "rollback_grant",
                 "compose_files", "compose_project", "configuration_digest",
-                "init_data_contract_digest", "edge_required"}
+                "init_data_contract_digest", "edge_required",
+                "rollback_grant_public_key"}
     if type(raw) is not dict or set(raw) != required:
         raise ValueError("machine activation policy is invalid")
     return raw
+
+
+def _host_image_target_configuration_key(
+        master_key: bytes, machine_identity: str, target_identity: str) -> bytes:
+    if type(master_key) is not bytes or len(master_key) != 32 \
+            or type(machine_identity) is not str or not machine_identity \
+            or type(target_identity) is not str or not target_identity:
+        raise ValueError("activation configuration binding key is invalid")
+    scope = json.dumps({"machine_identity": machine_identity,
+                        "target_identity": target_identity},
+                       sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(master_key,
+                    b"sandbox-feature-051-target-configuration-key-v1\0" + scope,
+                    hashlib.sha256).digest()
 
 
 def _host_image_argv_runner(entry):
@@ -3200,15 +3242,29 @@ def _host_image_argv_runner(entry):
                 or (redact_environment_keys is not None and type(redact_environment_keys) is not tuple):
             raise ValueError("activation private source is invalid")
         if private_environment_source:
-            source_fields = {"compose_files", "project_name", "environment",
-                             "render_digest", "service", "keys"}
-            if set(private_environment_source) != source_fields \
+            init_fields = {"compose_files", "project_name", "project_directory", "environment",
+                           "render_digest", "runtime_epoch", "service", "keys"}
+            effect_fields = {"kind", "compose_files", "project_name", "project_directory",
+                             "environment", "render_digest", "runtime_epoch", "services"}
+            if set(private_environment_source) not in {frozenset(init_fields), frozenset(effect_fields)} \
                     or type(private_environment_source["compose_files"]) not in {list, tuple} \
                     or type(private_environment_source["project_name"]) is not str \
+                    or type(private_environment_source["project_directory"]) is not str \
                     or type(private_environment_source["environment"]) is not dict \
                     or re.fullmatch(r"sha256:[0-9a-f]{64}",
-                                    private_environment_source["render_digest"]) is None \
-                    or type(private_environment_source["service"]) is not str \
+                                    private_environment_source["render_digest"]) is None:
+                raise ValueError("activation private source is invalid")
+            if type(private_environment_source["runtime_epoch"]) is not str \
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}",
+                                    private_environment_source["runtime_epoch"]) is None:
+                raise ValueError("activation private source is invalid")
+            if set(private_environment_source) == effect_fields:
+                private_source_type = private_environment_source["kind"]
+                if private_source_type != "compose_replace_v1" \
+                        or type(private_environment_source["services"]) not in {list, tuple} \
+                        or not private_environment_source["services"]:
+                    raise ValueError("activation private source is invalid")
+            elif type(private_environment_source["service"]) is not str \
                     or type(private_environment_source["keys"]) not in {list, tuple}:
                 raise ValueError("activation private source is invalid")
         frame = json.dumps({"environment": {**environment, **private_environment},
@@ -3220,31 +3276,115 @@ def _host_image_argv_runner(entry):
         if len(frame.encode()) > 1024 * 1024:
             raise ValueError("activation private input exceeds bound")
         program = "\n".join((
-            "import json,subprocess,sys",
+            "import base64,hashlib,hmac,json,re,subprocess,sys",
+            "def public_projection(c):",
+            " out={'services':{}};services=c.get('services',{})",
+            " if not isinstance(services,dict):services={}",
+            " for name,svc in services.items():",
+            "  if not isinstance(svc,dict):out['services'][name]={'invalid':True};continue",
+            "  env=svc.get('environment');deps=svc.get('depends_on');labels=svc.get('labels')",
+            "  image=svc.get('image');image=image if isinstance(image,str) and re.fullmatch(r'[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}',image) else None",
+            "  pull=svc.get('pull_policy');pull=pull if pull in ('never','missing-refused') else None",
+            "  platform=svc.get('platform');platform=platform if isinstance(platform,str) and re.fullmatch(r'[a-z0-9]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?',platform) else None",
+            "  topology=labels.get('org.sandbox.application-topology.v1') if isinstance(labels,dict) else None;topology=topology if isinstance(topology,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',topology) else None",
+            "  out['services'][name]={'image':image,'build':None if svc.get('build') is None else {'present':True},'pull_policy':pull,'platform':platform,'depends_on':{key:{} for key in deps} if isinstance(deps,dict) else {'__invalid__':{}},'labels':{'org.sandbox.application-topology.v1':topology},'x-sandbox-environment-keys':sorted(env) if isinstance(env,dict) else []}",
+            " out['x-sandbox-has-configs']=bool(c.get('configs'))",
+            " out['x-sandbox-has-secrets']=bool(c.get('secrets'))",
+            " networks=c.get('networks',{})",
+            " out['x-sandbox-has-external-networks']=not isinstance(networks,dict) or any(not isinstance(item,dict) or item.get('external') not in (None,False) for item in networks.values())",
+            " return out",
+            "def strings(v):",
+            " if isinstance(v,str):return [v]",
+            " if isinstance(v,dict):return [item for key,value in v.items() for item in (([key] if isinstance(key,str) else [])+strings(value))]",
+            " if isinstance(v,list):return [item for value in v for item in strings(value)]",
+            " return []",
             "p=json.load(sys.stdin);e=p['environment'];s=p['source']",
-            "vals={}",
+            "encoded_key=e.pop('SANDBOX_ACTIVATION_CONFIGURATION_HMAC_KEY',None)",
+            "try:configuration_key=base64.b64decode(encoded_key,validate=True) if encoded_key else None",
+            "except Exception:configuration_key=None",
+            "if configuration_key is not None and len(configuration_key)!=32:configuration_key=None",
+            "def configuration_identity(raw):return 'sha256:'+hmac.new(configuration_key,b'sandbox-feature-051-compose-v1\\0'+raw,hashlib.sha256).hexdigest()",
+            "def config_hash_identity(name,value):",
+            " if not isinstance(name,str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',name) is None or not isinstance(value,str) or re.fullmatch(r'[0-9a-f]{64}',value) is None:raise ValueError('compose_config_hash_unavailable')",
+            " return 'sha256:'+hmac.new(configuration_key,b'sandbox-feature-051-compose-config-hash-v1\\0'+name.encode()+b'\\0'+value.encode(),hashlib.sha256).hexdigest()",
+            "def compose_hashes(raw,c):",
+            " a=sys.argv[2:];directory=a[a.index('--project-directory')+1];project=a[a.index('--project-name')+1]",
+            " base=['docker','compose','--file','-','--project-directory',directory,'--project-name',project]",
+            " out={}",
+            " for name in sorted(c.get('services',{})):",
+            "  h=subprocess.run(base+['config','--hash',name],env=e,input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  parts=h.stdout.decode().strip().split()",
+            "  if h.returncode!=0 or h.stderr or len(parts)!=2 or parts[0]!=name or re.fullmatch(r'[0-9a-f]{64}',parts[1]) is None:raise ValueError('compose_config_hash_unavailable')",
+            "  out[name]=config_hash_identity(name,parts[1])",
+            " return out",
+            "def observe_running(project,names):",
+            " if configuration_key is None:raise ValueError('configuration_binding_unavailable')",
+            " p=subprocess.run(['docker','ps','--filter','label=com.docker.compose.project='+project,'--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            " if p.returncode!=0 or p.stderr:raise ValueError('runtime_mismatch')",
+            " out=[]",
+            " container_ids=p.stdout.decode().split()",
+            " if len(container_ids)>len(names):raise ValueError('runtime_mismatch')",
+            " for container_id in container_ids:",
+            "  x=subprocess.run(['docker','inspect',container_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  try:raw=json.loads(x.stdout)[0]",
+            "  except Exception:raise ValueError('runtime_mismatch')",
+            "  cfg=raw.get('Config') or {};labels=cfg.get('Labels') or {};name=labels.get('com.docker.compose.service')",
+            "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:continue",
+            "  image_id=raw.get('Image');ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  try:ir=json.loads(ii.stdout)[0]",
+            "  except Exception:raise ValueError('runtime_mismatch')",
+            "  if ii.returncode!=0 or ii.stderr or ir.get('Id')!=image_id:raise ValueError('runtime_mismatch')",
+            "  platform={'os':ir.get('Os'),'architecture':ir.get('Architecture')}",
+            "  if ir.get('Variant'):platform['variant']=ir['Variant']",
+            "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':image_id,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
+            " return out",
+            "vals=[];render=None",
             "if s:",
+            " if configuration_key is None:sys.stderr.write('configuration_binding_unavailable');sys.exit(91)",
             " e.update(s['environment'])",
+            " before=subprocess.run(['docker','info','--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            " if before.returncode!=0 or before.stderr or before.stdout.decode().strip()!=s['runtime_epoch']:sys.stderr.write('compose_daemon_mismatch');sys.exit(91)",
             " a=['docker','compose']",
             " for f in s['compose_files']:a+=['--file',f]",
-            " a+=['--project-name',s['project_name'],'config','--format','json']",
+            " a+=['--project-directory',s['project_directory'],'--project-name',s['project_name'],'config','--format','json']",
             " q=subprocess.run(a,env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
             " if q.returncode!=0 or q.stderr:sys.stderr.write('compose_source_refused');sys.exit(91)",
             " try:c=json.loads(q.stdout)",
             " except Exception:sys.stderr.write('compose_source_malformed');sys.exit(91)",
-            " clean=json.loads(json.dumps(c))",
-            " for x in clean.get('services',{}).values():x.pop('environment',None)",
-            " import hashlib",
-            " got='sha256:'+hashlib.sha256(json.dumps(clean,sort_keys=True,separators=(',',':')).encode()).hexdigest()",
+            " vals.extend(strings(c))",
+            " got=configuration_identity(q.stdout)",
             " if got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
-            " env=(c['services'][s['service']].get('environment') or {})",
-            " vals={k:env[k] for k in s['keys']};e.update(vals)",
-            "r=subprocess.run(sys.argv[2:],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            " if s.get('kind')=='compose_replace_v1':",
+            "  for svc in c.get('services',{}).values():vals.extend((svc.get('environment') or {}).values())",
+            "  render=q.stdout",
+            " else:",
+            "  env=(c['services'][s['service']].get('environment') or {})",
+            "  selected={k:env[k] for k in s['keys']};e.update(selected);vals.extend(selected.values())",
+            "if sys.argv[2:3]==['sandbox-activation-observe-running']:",
+            " try:r=subprocess.CompletedProcess([],0,json.dumps(observe_running(sys.argv[3],set(sys.argv[4:])),separators=(',',':')).encode(),b'')",
+            " except Exception:r=subprocess.CompletedProcess([],91,b'',b'runtime_projection_failed')",
+            "else:r=subprocess.run(sys.argv[2:],env=e,input=render,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "if s and s.get('kind')=='compose_replace_v1' and r.returncode==0:",
+            " base=['docker','compose','--file','-','--project-directory',s['project_directory'],'--project-name',s['project_name']]",
+            " for svc in s['services']:",
+            "  h=subprocess.run(base+['config','--hash',svc],env=e,input=q.stdout,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  ids=subprocess.run(base+['ps','--quiet',svc],env=e,input=q.stdout,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  rows=ids.stdout.split()",
+            "  if h.returncode!=0 or ids.returncode!=0 or len(rows)!=1:r=subprocess.CompletedProcess([],92,b'',b'compose_runtime_config_unproven');break",
+            "  actual=subprocess.run(['docker','inspect','--format','{{index .Config.Labels \"com.docker.compose.config-hash\"}}',rows[0]],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            "  expected=h.stdout.strip().split()[-1:]",
+            "  if actual.returncode!=0 or len(expected)!=1 or actual.stdout.strip()!=expected[0]:r=subprocess.CompletedProcess([],92,b'',b'compose_runtime_config_mismatch');break",
+            "if s and r.returncode==0:",
+            " after=subprocess.run(['docker','info','--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)",
+            " if after.returncode!=0 or after.stderr or after.stdout.decode().strip()!=s['runtime_epoch']:r=subprocess.CompletedProcess([],92,b'',b'compose_daemon_changed')",
             "o=r.stdout;d=r.stderr",
             "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode==0:",
-            " c=json.loads(o)",
-            " for x in c.get('services',{}).values():x.pop('environment',None)",
-            " o=json.dumps(c,separators=(',',':')).encode()",
+            " raw=o",
+            " if configuration_key is None:r=subprocess.CompletedProcess([],91,b'',b'configuration_binding_unavailable');o=b'';d=r.stderr",
+            " else:",
+            "  try:parsed=json.loads(raw);hashes=compose_hashes(raw,parsed);c=public_projection(parsed)",
+            "  except Exception:r=subprocess.CompletedProcess([],91,b'',b'compose_config_hash_unavailable');o=b'';d=r.stderr",
+            "  else:c['x-sandbox-configuration-digest']=configuration_identity(raw);c['x-sandbox-compose-config-hashes']=hashes;o=json.dumps(c,separators=(',',':')).encode()",
             "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode!=0:o=b'';d=b'compose_config_failed'",
             "if p['redact_keys'] is not None and r.returncode==0:",
             " z=json.loads(o);z=[z] if isinstance(z,dict) else z",
@@ -3254,7 +3394,7 @@ def _host_image_argv_runner(entry):
             "  x.get('Config',{}).pop('Env',None)",
             " o=json.dumps(z[0] if len(z)==1 else z,separators=(',',':')).encode()",
             "if p['redact_keys'] is not None and r.returncode!=0:o=b'';d=b'inspect_failed'",
-            "for x in [v.encode() for v in list(p['redact'])+list(vals.values()) if v]:o=o.replace(x,b'[redacted]');d=d.replace(x,b'[redacted]')",
+            "for x in sorted({v.encode() for v in list(p['redact'])+vals if v},key=len,reverse=True):o=o.replace(x,b'[redacted]');d=d.replace(x,b'[redacted]')",
             "sys.stdout.buffer.write(o);sys.stderr.buffer.write(d);sys.exit(r.returncode)",
         ))
         command = ["python3", "-c", program, "--", *argv]
@@ -3268,7 +3408,7 @@ def _host_image_argv_runner(entry):
     return invoke
 
 
-def _cmd_host_image(validated: dict, entry: dict, args) -> None:
+def _cmd_host_image(validated: dict, args) -> None:
     action = getattr(args, "image_action", None)
     common = {"--project-dir": getattr(args, "project_dir", None),
               "--environment": getattr(args, "environment", None),
@@ -3292,6 +3432,7 @@ def _cmd_host_image(validated: dict, entry: dict, args) -> None:
         from sandbox.hosting.images.activation.repository import ActivationRepository
         from sandbox.hosting.images.activation.runtime_observer import RuntimeObserver
         from sandbox.hosting.images.activation.service import ActivationService
+        from sandbox.hosting.images.activation.policy import SshRollbackGrantVerifier
         from sandbox.hosting.images.staging_models import validate_staged_image_proof
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.recovery.models import ActivationTransitionProjection
@@ -3311,66 +3452,93 @@ def _cmd_host_image(validated: dict, entry: dict, args) -> None:
                     r"sha256:[0-9a-f]{64}", transaction_digest):
                 raise ValueError("activation transaction digest is required")
             target_key = hosting.state_key(args.remote, validated)
-            state = activation_repository.snapshot(target_key)
             request_digest = canonical_digest({"schema_version": 1, "action": "image_recover",
                 "request_id": args.request_id, "transaction_digest": transaction_digest,
                 "expected_generation": args.expected_generation, "confirmed": True})
-            replay = state.get("recovery_results", {}).get(args.request_id)
-            if isinstance(replay, dict):
-                if replay.get("request_digest") != request_digest:
-                    raise ValueError("recovery request conflicts with stored result")
-                print(json.dumps(replay, sort_keys=True, separators=(",", ":")))
-                if replay.get("ok") is not True:
-                    raise SystemExit(1)
-                return
-            active = state.get("active")
-            if not isinstance(active, dict) or active.get("transaction_digest") != transaction_digest:
-                raise ValueError("activation transaction is unavailable")
-            candidate = active.get("candidate_generation") or {}
-            prior = state.get("current") or {}
-            projection = ActivationTransitionProjection(
-                transaction_digest=transaction_digest,
-                request_digest=active["request_digest"], operation=active["operation"],
-                phase=active["phase"], effect_entered=active["effect_entered"],
-                expected_generation=args.expected_generation,
-                new_generation_digest=candidate.get("generation_digest"),
-                prior_generation_digest=prior.get("generation_digest"),
-                target={"remote": args.remote, "project": validated["project"],
-                        "environment": validated["environment"]},
-                new_services=tuple(candidate.get("service_projection") or ()),
-                prior_services=tuple(prior.get("service_projection") or ()))
-            transport = RegisteredRemoteActivationTransport(
-                argv_runner=_host_image_argv_runner(entry),
-                target_identity_observer=lambda: {
-                    "machine_identity": _authenticated_machine_identity(args.remote),
-                    "target_identity": target_key})
-            services = tuple(validated["compose"].get("background_services", ())) + (
-                validated["compose"]["service"],)
-            target = {"machine_identity": _authenticated_machine_identity(args.remote),
-                      "target_identity": target_key, "daemon_identity": "observed-only"}
-            def reader(_projection):
-                observed = transport.observe_running(target=target, services=services)
-                rows = observed.get("services") or []
-                def exact(generation):
-                    expected = tuple((generation or {}).get("service_projection") or ())
-                    return bool(expected) and tuple(sorted(rows, key=lambda item: item.get("service", ""))) == \
-                        tuple(sorted(expected, key=lambda item: item.get("service", "")))
-                candidate_exact = exact(candidate)
-                prior_exact = exact(prior)
-                generation_digest = (candidate.get("generation_digest")
-                                     if candidate_exact and not prior_exact
-                                     else prior.get("generation_digest")
-                                     if prior_exact and not candidate_exact else None)
-                return {"target_epoch_start": observed["target_epoch_start"],
-                        "target_epoch_end": observed["target_epoch_end"],
-                        "runtime_epoch_start": observed["runtime_epoch_start"],
-                        "runtime_epoch_end": observed["runtime_epoch_end"],
-                        "generation_digest": generation_digest, "services": rows}
-            observer = ActivationTransitionObserver(reader)
-            payload = activation_repository.recover(
-                target_key, request_id=args.request_id, request_digest=request_digest,
-                expected_generation=args.expected_generation,
-                observer=lambda: observer.observe(projection))
+            with activation_repository.operation_transaction(target_key), \
+                    remote.registered_remote_lock():
+                entry = remote.get_remote(args.remote)
+                if not entry:
+                    raise ValueError("registered remote is unavailable")
+                if target_key != hosting.state_key(args.remote, validated):
+                    raise ValueError("registered target identity changed")
+                state = activation_repository.snapshot(target_key)
+                replay = state.get("recovery_results", {}).get(args.request_id)
+                if isinstance(replay, dict):
+                    if replay.get("request_digest") != request_digest:
+                        raise ValueError("recovery request conflicts with stored result")
+                    print(json.dumps(replay, sort_keys=True, separators=(",", ":")))
+                    if replay.get("ok") is not True:
+                        raise SystemExit(1)
+                    return
+                active = state.get("active")
+                if not isinstance(active, dict) or active.get("transaction_digest") != transaction_digest:
+                    raise ValueError("activation transaction is unavailable")
+                candidate = active.get("candidate_generation") or {}
+                prior = state.get("current") or {}
+                context = active.get("recovery_context") or {}
+                authority_target = context.get("target")
+                compose_project = context.get("compose_project")
+                selected_services = context.get("selected_services")
+                if not isinstance(authority_target, dict) \
+                        or authority_target.get("target_identity") != target_key \
+                        or not isinstance(compose_project, str) or not compose_project \
+                        or not isinstance(selected_services, list) or not selected_services \
+                        or (candidate and (candidate.get("target") != authority_target \
+                            or candidate.get("compose_project") != compose_project)) \
+                        or (prior and (prior.get("target") != authority_target \
+                            or prior.get("compose_project") != compose_project)):
+                    raise ValueError("activation generation authority is unavailable")
+                projection = ActivationTransitionProjection(
+                    transaction_digest=transaction_digest,
+                    request_digest=active["request_digest"], operation=active["operation"],
+                    phase=active["phase"], effect_entered=active["effect_entered"],
+                    expected_generation=args.expected_generation,
+                    new_generation_digest=candidate.get("generation_digest"),
+                    prior_generation_digest=prior.get("generation_digest"),
+                    target=authority_target,
+                    new_services=tuple(candidate.get("service_projection") or ()),
+                    prior_services=tuple(prior.get("service_projection") or ()))
+                configuration_binding_master, _configuration_binding_key_version = \
+                    personal_secrets.hosting_binding_key(create=False)
+                configuration_binding_key = _host_image_target_configuration_key(
+                    configuration_binding_master, authority_target["machine_identity"],
+                    authority_target["target_identity"])
+                transport = RegisteredRemoteActivationTransport(
+                    argv_runner=_host_image_argv_runner(entry),
+                    target_identity_observer=lambda: {
+                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "target_identity": target_key},
+                    configuration_binding_key=configuration_binding_key)
+                services = tuple(selected_services)
+                target = authority_target
+                def reader(_projection):
+                    observed = transport.observe_running(
+                        target=target, services=services,
+                        compose_project=compose_project)
+                    rows = observed.get("services") or []
+                    def exact(generation):
+                        expected = tuple((generation or {}).get("service_projection") or ())
+                        return bool(generation) and tuple(sorted(rows, key=lambda item: item.get("service", ""))) == \
+                            tuple(sorted(expected, key=lambda item: item.get("service", "")))
+                    candidate_exact = exact(candidate) if candidate else False
+                    prior_exact = exact(prior) if prior else not rows
+                    generation_digest = (candidate.get("generation_digest")
+                                         if candidate_exact and not prior_exact
+                                         else prior.get("generation_digest")
+                                         if prior_exact and not candidate_exact else None)
+                    return {"target_epoch_start": observed["target_epoch_start"],
+                            "target_epoch_end": observed["target_epoch_end"],
+                            "target_identity_start": observed["target_identity_start"],
+                            "target_identity_end": observed["target_identity_end"],
+                            "runtime_epoch_start": observed["runtime_epoch_start"],
+                            "runtime_epoch_end": observed["runtime_epoch_end"],
+                            "generation_digest": generation_digest, "services": rows}
+                observer = ActivationTransitionObserver(reader)
+                payload = activation_repository.recover(
+                    target_key, request_id=args.request_id, request_digest=request_digest,
+                    expected_generation=args.expected_generation,
+                    observer=lambda: observer.observe(projection), ownership_held=True)
         else:
             for name in ("verified_plan", "staged_proof", "admission_deadline"):
                 if not isinstance(getattr(args, name, None), str) or not getattr(args, name).strip():
@@ -3390,27 +3558,43 @@ def _cmd_host_image(validated: dict, entry: dict, args) -> None:
                 expected_generation=args.expected_generation,
                 policy_digest=policy.policy_digest, plan=plan, proof=proof,
                 authority_binding_digest=binding.binding_digest,
-                rollback_grant_digest=(grant.grant_digest if action == "rollback" else None),
+                rollback_subject_digest=subject.subject_digest,
+                rollback_grant_digest=grant.grant_digest,
                 confirmed=True)
-            transport = RegisteredRemoteActivationTransport(
-                argv_runner=_host_image_argv_runner(entry),
-                target_identity_observer=lambda: {
-                    "machine_identity": _authenticated_machine_identity(args.remote),
-                    "target_identity": hosting.state_key(args.remote, validated)})
-            service = ActivationService(
-                repository=activation_repository, runtime_adapter=transport,
-                runtime_observer=RuntimeObserver(transport),
-                edge_adapter=_HostImageEdgeAdapter(
-                    validated, activation_repository=activation_repository,
-                    target_identity=proof.target.target_identity))
-            payload = service.execute(
-                request, policy, binding, rollback_subject=subject,
-                rollback_grant=grant, admission_deadline=args.admission_deadline,
-                compose_files=tuple(bundle["compose_files"]),
-                compose_project=bundle["compose_project"],
-                configuration_digest=bundle["configuration_digest"],
-                init_data_contract_digest=bundle["init_data_contract_digest"],
-                edge_required=bundle["edge_required"])
+            with activation_repository.operation_transaction(proof.target.target_identity), \
+                    remote.registered_remote_lock():
+                entry = remote.get_remote(args.remote)
+                if not entry or proof.target.target_identity != hosting.state_key(args.remote, validated) \
+                        or proof.target.machine_identity != _authenticated_machine_identity(args.remote):
+                    raise ValueError("registered target identity changed")
+                configuration_binding_master, _configuration_binding_key_version = \
+                    personal_secrets.hosting_binding_key(create=False)
+                configuration_binding_key = _host_image_target_configuration_key(
+                    configuration_binding_master, proof.target.machine_identity,
+                    proof.target.target_identity)
+                transport = RegisteredRemoteActivationTransport(
+                    argv_runner=_host_image_argv_runner(entry),
+                    target_identity_observer=lambda: {
+                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "target_identity": hosting.state_key(args.remote, validated)},
+                    configuration_binding_key=configuration_binding_key)
+                service = ActivationService(
+                    repository=activation_repository, runtime_adapter=transport,
+                    runtime_observer=RuntimeObserver(transport),
+                    edge_adapter=_HostImageEdgeAdapter(
+                        validated, activation_repository=activation_repository,
+                        target_identity=proof.target.target_identity),
+                    rollback_grant_verifier=SshRollbackGrantVerifier(
+                        bundle["rollback_grant_public_key"],
+                        binding.rollback_grant_authority_id))
+                payload = service.execute(
+                    request, policy, binding, rollback_subject=subject,
+                    rollback_grant=grant, admission_deadline=args.admission_deadline,
+                    compose_files=tuple(bundle["compose_files"]),
+                    compose_project=bundle["compose_project"],
+                    configuration_digest=bundle["configuration_digest"],
+                    init_data_contract_digest=bundle["init_data_contract_digest"],
+                    edge_required=bundle["edge_required"], ownership_held=True)
     except (OSError, json.JSONDecodeError, TypeError, ValueError, RuntimeError):
         payload = {"schema_version": 1, "ok": False, "result_class": "refused",
                    "code": "policy_mismatch", "operation": action,
@@ -3487,10 +3671,7 @@ def cmd_host(cfg, args) -> None:
     if args.action == "image":
         if not args.remote:
             die("--remote is required for host image actions")
-        entry = remote.get_remote(args.remote)
-        if not entry:
-            die(f"no remote named '{args.remote}'")
-        _cmd_host_image(validated, entry, args)
+        _cmd_host_image(validated, args)
         return
     if args.action == "validate":
         _emit({"ok": True, **validated}, args.json)

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
 import time
 
 from .models import (
@@ -18,6 +24,42 @@ class ActivationAdmission:
     code: str
     plan: object | None = None
     proof: object | None = None
+
+
+class SshRollbackGrantVerifier:
+    """Verify machine-authorized grants with a bound public Ed25519 key."""
+
+    def __init__(self, public_key: str, authority_id: str) -> None:
+        pieces = public_key.split()
+        if len(pieces) != 2 or pieces[0] != "ssh-ed25519" \
+                or type(authority_id) is not str or not authority_id:
+            raise ActivationContractError("rollback_grant_mismatch")
+        self._public_key = public_key
+        self._authority_id = authority_id
+        self.verification_digest = "sha256:" + hashlib.sha256(public_key.encode()).hexdigest()
+
+    def verify(self, grant: RollbackCompatibilityGrant) -> bool:
+        message = json.dumps(grant.unsigned_mapping(), sort_keys=True,
+                             separators=(",", ":")).encode()
+        try:
+            signature = base64.b64decode(grant.authority_proof, validate=True)
+            if len(signature) > 4096:
+                return False
+            with tempfile.TemporaryDirectory(prefix="sandbox-rollback-verify-") as directory:
+                root = Path(directory)
+                allowed = root / "allowed_signers"
+                proof = root / "grant.sig"
+                allowed.write_text(f"{self._authority_id} {self._public_key}\n")
+                proof.write_bytes(signature)
+                result = subprocess.run(
+                    ("/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                     "-I", self._authority_id, "-n", "sandbox-feature-051-rollback",
+                     "-s", str(proof)), input=message, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=10, check=False,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+            return result.returncode == 0
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
 
 
 def admit_activation(request: object, policy: object, binding: object,
@@ -80,12 +122,19 @@ def create_forward_rollback_subject(*, target: dict[str, str],
 
 
 def validate_rollback_grant(grant: object, subject: object, *, accepted_at: int,
-                            policy_revision: str, now: int | None = None) -> None:
+                            policy_revision: str, authority_binding: ActivationAuthorityBinding,
+                            verifier: object,
+                            now: int | None = None) -> None:
     if type(grant) is not RollbackCompatibilityGrant \
             or type(subject) is not ForwardRollbackSubject \
             or grant.subject.as_mapping() != subject.as_mapping() \
             or grant.subject.subject_digest != subject.subject_digest \
             or grant.policy_revision != policy_revision \
+            or grant.authority_id != authority_binding.rollback_grant_authority_id \
+            or grant.authority_revision != authority_binding.rollback_grant_authority_revision \
+            or getattr(verifier, "verification_digest", None) != authority_binding.rollback_grant_verification_digest \
+            or not callable(getattr(verifier, "verify", None)) \
+            or verifier.verify(grant) is not True \
             or grant.issued_at >= accepted_at or grant.revoked:
         raise ActivationContractError("rollback_grant_mismatch")
     checked_at = int(time.time()) if now is None else now

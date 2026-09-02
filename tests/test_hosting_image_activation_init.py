@@ -7,6 +7,67 @@ from tests.hosting_image_fixtures import CONFIG_DIGEST, MANIFEST_DIGEST
 
 
 class ActivationInitTests(unittest.TestCase):
+    def test_successful_create_with_empty_identity_cleans_deterministic_name(self):
+        from sandbox.transports.remote_hosting_activation import (
+            RegisteredRemoteActivationTransport, RemoteActivationError,
+        )
+        calls = []
+        owner = {"value": None}; listed = {"count": 0}
+        def runner(*, argv, **_kwargs):
+            calls.append(argv)
+            if argv[:2] == ("docker", "create"):
+                owner["value"] = next(item.split("=", 1)[1] for item in argv
+                                      if item.startswith("org.sandbox.activation.init-owner="))
+                return {"returncode": 0, "stdout": "", "stderr": "", "terminated": True}
+            if argv[:4] == ("docker", "container", "ls", "--all"):
+                listed["count"] += 1
+                stdout = "container-a\n" if listed["count"] == 1 else ""
+                return {"returncode": 0, "stdout": stdout, "stderr": "", "terminated": True}
+            if argv[:3] == ("docker", "inspect", "--format"):
+                return {"returncode": 0, "stdout": owner["value"] + "\n",
+                        "stderr": "", "terminated": True}
+            if argv[:3] == ("docker", "rm", "--force"):
+                return {"returncode": 0, "stdout": argv[-1], "stderr": "", "terminated": True}
+            raise AssertionError(argv)
+        transport = RegisteredRemoteActivationTransport(argv_runner=runner,
+            target_identity_observer=lambda: {"machine_identity": "machine-a",
+                                               "target_identity": "target-a"},
+            init_environment_provider=lambda _service, _keys: {"DATABASE_URL": "private"})
+        with self.assertRaisesRegex(RemoteActivationError, "init_mismatch"):
+            transport.create_init(declaration=init_declaration(),
+                image="ghcr.io/acme/widget@" + MANIFEST_DIGEST,
+                platform={"os": "linux", "architecture": "amd64"},
+                target=staged_proof().target.as_mapping(), start=False)
+        self.assertTrue(any(argv[:3] == ("docker", "rm", "--force") and
+                            argv[-1] == "container-a" for argv in calls))
+
+    def test_create_name_conflict_never_removes_unproven_container(self):
+        from sandbox.transports.remote_hosting_activation import (
+            RegisteredRemoteActivationTransport, RemoteActivationError,
+        )
+        calls = []
+        def runner(*, argv, **_kwargs):
+            calls.append(argv)
+            if argv[:2] == ("docker", "create"):
+                return {"returncode": 1, "stdout": "", "stderr": "conflict",
+                        "terminated": True}
+            if argv[:4] == ("docker", "container", "ls", "--all"):
+                return {"returncode": 0, "stdout": "foreign-container\n", "stderr": "",
+                        "terminated": True}
+            if argv[:3] == ("docker", "inspect", "--format"):
+                return {"returncode": 0, "stdout": "sha256:" + "f" * 64 + "\n",
+                        "stderr": "", "terminated": True}
+            raise AssertionError(argv)
+        transport = RegisteredRemoteActivationTransport(argv_runner=runner,
+            target_identity_observer=lambda: {"machine_identity": "machine-a",
+                                               "target_identity": "target-a"},
+            init_environment_provider=lambda _service, _keys: {"DATABASE_URL": "private"})
+        with self.assertRaisesRegex(RemoteActivationError, "effect_unknown"):
+            transport.create_init(declaration=init_declaration(),
+                image="ghcr.io/acme/widget@" + MANIFEST_DIGEST,
+                platform={"os": "linux", "architecture": "amd64"},
+                target=staged_proof().target.as_mapping(), start=False)
+        self.assertFalse(any(argv[:3] == ("docker", "rm", "--force") for argv in calls))
     def test_create_inspect_effect_start_wait_cleanup_order_and_receipt(self):
         from sandbox.hosting.images.activation.init_runner import InitRunner
         runtime = FakeRuntime(); durable = []
@@ -178,7 +239,13 @@ class ActivationInitTests(unittest.TestCase):
                 return {"returncode": 0, "stdout": "container-default\n", "stderr": "",
                         "terminated": True}
             if argv[:3] == ("docker", "compose", "--file"):
-                return {"returncode": 0, "stdout": json.dumps(rendered), "stderr": "",
+                return {"returncode": 0, "stdout": json.dumps({**rendered,
+                        "x-sandbox-configuration-digest": expected_digest,
+                        "x-sandbox-compose-config-hashes": {
+                            "web": CONFIG_DIGEST, "migrate": CONFIG_DIGEST},
+                        "x-sandbox-has-configs": False,
+                        "x-sandbox-has-secrets": False,
+                        "x-sandbox-has-external-networks": False}), "stderr": "",
                         "terminated": True}
             if argv[:2] == ("docker", "info"):
                 return {"returncode": 0, "stdout": "daemon-a\n", "stderr": "",
@@ -189,7 +256,8 @@ class ActivationInitTests(unittest.TestCase):
         target = staged_proof().target.as_mapping()
         transport = RegisteredRemoteActivationTransport(argv_runner=runner,
             target_identity_observer=lambda: {"machine_identity": target["machine_identity"],
-                                               "target_identity": target["target_identity"]})
+                                               "target_identity": target["target_identity"]},
+            configuration_binding_key=b"k" * 32)
         transport.render_topology(compose_files=("compose.yml",), project_name="widget",
             selected_services=("web",), image_overrides={"web": image})
         handle = transport.create_init(declaration=init_declaration(), image=image,

@@ -25,9 +25,12 @@ MAX_TOMBSTONES = 4096
 MAX_LIVE_PROOF_LEASES = 64
 MAX_LEDGER_BYTES = 16 * 1024 * 1024
 MAX_STAGE_FRAME_BYTES = 1024 * 1024
+MAX_PERSISTED_LEDGER_COUNTER = 9007199254740991
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_UTC_DEADLINE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+_HOST_ACCEPTANCE_RECEIPT = re.compile(r"host-acceptance/[0-9a-f]{64}\Z")
 _RESULT_CLASSES = frozenset({"success", "in_progress", "refused", "failed", "cancelled", "uncertain"})
 _RESULT_CODES = frozenset({
     "staged", "plan_invalid", "policy_mismatch", "target_mismatch", "helper_mismatch",
@@ -139,7 +142,8 @@ class StagingPolicy:
     projection: DeliveryIdentityProjection
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or type(self.target) is not StagingTarget \
+        if type(self.schema_version) is not int or self.schema_version != 1 \
+                or type(self.target) is not StagingTarget \
                 or type(self.helper) is not HelperIdentity \
                 or type(self.projection) is not DeliveryIdentityProjection:
             raise StagingContractError("policy_mismatch")
@@ -209,13 +213,15 @@ class StageRequest:
     confirmed: bool
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or type(self.plan) is not VerifiedImagePlan \
+        if type(self.schema_version) is not int or self.schema_version != 1 \
+                or type(self.plan) is not VerifiedImagePlan \
                 or type(self.target) is not StagingTarget or self.confirmed is not True:
             raise StagingContractError("plan_invalid")
         _text(self.request_id, identity=True)
         _digest(self.request_digest)
         _digest(self.staging_policy_digest)
-        if type(self.expected_generation) is not int or self.expected_generation < 0:
+        if type(self.expected_generation) is not int \
+                or not 0 <= self.expected_generation <= MAX_PERSISTED_LEDGER_COUNTER:
             raise StagingContractError("generation_conflict")
         if self.request_digest != staging_digest(
                 "sandbox.hosting.images.stage-request.v1", self.identity_mapping()):
@@ -357,9 +363,10 @@ class StagedImageProof:
         return {**self.body_mapping(), "proof_digest": self.proof_digest}
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or type(self.target) is not StagingTarget \
+        if type(self.schema_version) is not int or self.schema_version != 1 \
+                or type(self.target) is not StagingTarget \
                 or type(self.helper) is not HelperIdentity or type(self.staging_generation) is not int \
-                or self.staging_generation < 1:
+                or not 1 <= self.staging_generation <= MAX_PERSISTED_LEDGER_COUNTER:
             raise StagingContractError()
         for value in (self.request_digest, self.plan_digest, self.staging_policy_digest,
                       self.observation_id, self.proof_digest): _digest(value)
@@ -459,11 +466,13 @@ class StageResult:
     proof: StagedImageProof | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or type(self.ok) is not bool \
+        if type(self.schema_version) is not int or self.schema_version != 1 \
+                or type(self.ok) is not bool \
                 or self.result_class not in _RESULT_CLASSES or self.code not in _RESULT_CODES:
             raise StagingContractError()
         _text(self.request_id, identity=True)
-        if type(self.generation) is not int or self.generation < 0:
+        if type(self.generation) is not int \
+                or not 0 <= self.generation <= MAX_PERSISTED_LEDGER_COUNTER:
             raise StagingContractError()
         if self.ok != (self.result_class == "success") \
                 or (self.ok and type(self.proof) is not StagedImageProof) \
@@ -503,22 +512,40 @@ class StageProofActivationLease:
     proof_digest: str
     target_identity: str
     stage_generation: int
+    ledger_authority: str
     ledger_revision: int
     acceptance_receipt: str | None = None
 
     def __post_init__(self) -> None:
         for value in (self.lease_id, self.holder, self.activation_request_id,
-                      self.stage_request_id, self.target_identity): _text(value, identity=True)
+                      self.stage_request_id, self.target_identity,
+                      self.ledger_authority): _text(value, identity=True)
         if not self.holder.startswith("activation-owner/"):
             raise StagingContractError("holder_mismatch")
         for value in (self.activation_request_digest, self.stage_request_digest,
                       self.proof_digest): _digest(value)
-        if self.phase not in {"prepared", "accepted"} or self.stage_generation < 1 \
-                or self.ledger_revision < 0:
+        if self.phase not in {"prepared", "accepted"} \
+                or type(self.stage_generation) is not int \
+                or not 1 <= self.stage_generation <= MAX_PERSISTED_LEDGER_COUNTER \
+                or type(self.ledger_revision) is not int \
+                or not 0 <= self.ledger_revision <= MAX_PERSISTED_LEDGER_COUNTER:
             raise StagingContractError("lease_conflict")
-        try: datetime.fromisoformat(self.admission_deadline.replace("Z", "+00:00"))
-        except (TypeError, ValueError): raise StagingContractError("lease_conflict") from None
-        if self.phase == "accepted" and not self.acceptance_receipt:
+        try:
+            if type(self.admission_deadline) is not str \
+                    or _UTC_DEADLINE.fullmatch(self.admission_deadline) is None:
+                raise ValueError
+            deadline = datetime.fromisoformat(
+                self.admission_deadline[:-1] + "+00:00")
+            if deadline.tzinfo != timezone.utc \
+                    or deadline.isoformat(timespec="seconds").replace("+00:00", "Z") \
+                    != self.admission_deadline:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise StagingContractError("lease_conflict") from None
+        if (self.phase == "prepared" and self.acceptance_receipt is not None) \
+                or (self.phase == "accepted" and (
+                    type(self.acceptance_receipt) is not str
+                    or _HOST_ACCEPTANCE_RECEIPT.fullmatch(self.acceptance_receipt) is None)):
             raise StagingContractError("lease_conflict")
 
     @property
@@ -587,6 +614,7 @@ class ProofCustodyPort:
     """Narrow Feature 051 repository capability; implementations stay private."""
 
     def lookup(self, lease_id: str) -> StageProofActivationLease | None: raise NotImplementedError
+    def validate_retained_proof(self, **_binding: object) -> StagedImageProof: raise NotImplementedError
     def prepare(self, **_binding: object) -> StageProofActivationLease: raise NotImplementedError
     def promote(self, lease: StageProofActivationLease,
                 evidence: AtomicHostStateEvidence) -> StageProofActivationLease: raise NotImplementedError

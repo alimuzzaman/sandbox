@@ -279,27 +279,31 @@ class ActivationTransitionProjection:
     phase: str
     effect_entered: bool
     expected_generation: int
-    new_generation_digest: str
+    new_generation_digest: str | None
     prior_generation_digest: str | None
     target: dict
     new_services: tuple[dict, ...]
     prior_services: tuple[dict, ...]
 
     def __post_init__(self) -> None:
-        for value in (self.transaction_digest, self.request_digest,
-                      self.new_generation_digest):
+        for value in (self.transaction_digest, self.request_digest):
             _digest(value, "activation transition digest")
+        if self.new_generation_digest is not None:
+            _digest(self.new_generation_digest, "activation transition digest")
         if self.prior_generation_digest is not None:
             _digest(self.prior_generation_digest, "activation transition digest")
         if self.operation not in {"activate", "rollback"} or not _SAFE_ID.fullmatch(self.phase) \
                 or type(self.effect_entered) is not bool \
                 or type(self.expected_generation) is not int or self.expected_generation < 0 \
-                or type(self.target) is not dict:
+                or type(self.target) is not dict \
+                or set(self.target) != {"machine_identity", "target_identity", "daemon_identity"} \
+                or any(not isinstance(value, str) or not _SAFE_ID.fullmatch(value)
+                       for value in self.target.values()):
             raise ValueError("activation transition projection is invalid")
         required = {"service", "runtime_identity", "declared_image", "repository_digest",
                     "local_image_id", "config_digest", "platform", "topology_identity",
-                    "healthy"}
-        for services in (self.new_services,):
+                    "compose_project", "compose_config_hash", "healthy"}
+        def validate_services(services):
             if not 1 <= len(services) <= MAX_SERVICES or any(
                     type(item) is not dict or set(item) != required or
                     item.get("healthy") is not True for item in services):
@@ -308,18 +312,29 @@ class ActivationTransitionProjection:
             if len(names) != len(set(names)) or any(
                     not isinstance(name, str) or not _SAFE_ID.fullmatch(name) for name in names):
                 raise ValueError("activation transition projection is invalid")
+            projects = {item["compose_project"] for item in services}
+            if len(projects) != 1 or any(
+                    not isinstance(project, str) or not _SAFE_ID.fullmatch(project)
+                    for project in projects):
+                raise ValueError("activation transition projection is invalid")
+            if any(not isinstance(item["compose_config_hash"], str) or
+                   _DIGEST.fullmatch(item["compose_config_hash"]) is None
+                   for item in services):
+                raise ValueError("activation transition projection is invalid")
+            return projects
+        if self.new_generation_digest is None:
+            if self.new_services or self.phase not in {
+                    "accepted", "preflight", "init_pending", "runtime_pending"}:
+                raise ValueError("activation transition projection is invalid")
+            new_projects = set()
+        else:
+            new_projects = validate_services(self.new_services)
         if self.prior_generation_digest is None:
             if self.prior_services:
                 raise ValueError("activation transition projection is invalid")
         else:
-            services = self.prior_services
-            if not 1 <= len(services) <= MAX_SERVICES or any(
-                    type(item) is not dict or set(item) != required or
-                    item.get("healthy") is not True for item in services):
-                raise ValueError("activation transition projection is invalid")
-            names = [item["service"] for item in services]
-            if len(names) != len(set(names)) or any(
-                    not isinstance(name, str) or not _SAFE_ID.fullmatch(name) for name in names):
+            prior_projects = validate_services(self.prior_services)
+            if new_projects and prior_projects != new_projects:
                 raise ValueError("activation transition projection is invalid")
         if len(json.dumps(self.as_mapping(), sort_keys=True, separators=(",", ":")).encode()) > MAX_RECEIPT_BYTES:
             raise ValueError("activation transition projection exceeds bound")
@@ -344,6 +359,8 @@ class ActivationRecoveryObservation:
     classification: str
     target_epoch_start: str
     target_epoch_end: str
+    target_identity_start: str
+    target_identity_end: str
     runtime_epoch_start: str
     runtime_epoch_end: str
     evidence_identity: str
@@ -355,9 +372,11 @@ class ActivationRecoveryObservation:
                 or type(self.expected_generation) is not int or self.expected_generation < 0:
             raise ValueError("activation observation is invalid")
         for value in (self.target_epoch_start, self.target_epoch_end,
+                      self.target_identity_start, self.target_identity_end,
                       self.runtime_epoch_start, self.runtime_epoch_end):
             _safe_id(value, "activation observation epoch")
         if (self.target_epoch_start != self.target_epoch_end \
+                or self.target_identity_start != self.target_identity_end \
                 or self.runtime_epoch_start != self.runtime_epoch_end) \
                 and self.classification != "ambiguous":
             raise ValueError("activation observation epoch changed")
@@ -368,6 +387,8 @@ class ActivationRecoveryObservation:
                 "classification": self.classification,
                 "target_epoch_start": self.target_epoch_start,
                 "target_epoch_end": self.target_epoch_end,
+                "target_identity_start": self.target_identity_start,
+                "target_identity_end": self.target_identity_end,
                 "runtime_epoch_start": self.runtime_epoch_start,
                 "runtime_epoch_end": self.runtime_epoch_end}
 

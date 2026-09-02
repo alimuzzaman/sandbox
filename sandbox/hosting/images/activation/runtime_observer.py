@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .models import (
     ActivationContractError, RunningObservation, VerifiedActivationGeneration,
     activation_digest,
@@ -13,10 +15,13 @@ def validate_rendered_topology(rendered: object, *, selected_services: tuple[str
                                exact_topology_digest: str,
                                exact_service_projection: tuple[dict, ...],
                                exact_runtime_epoch: str,
+                               exact_configuration_digest: str,
                                allowed_dependencies: tuple[str, ...] = ()) -> dict:
-    if type(rendered) is not dict or set(rendered) != {"services", "orphans", "runtime_epoch"} \
+    if type(rendered) is not dict or set(rendered) != {
+            "services", "orphans", "runtime_epoch", "configuration_digest"} \
             or type(rendered["services"]) is not dict or rendered["orphans"] != [] \
-            or rendered["runtime_epoch"] != exact_runtime_epoch:
+            or rendered["runtime_epoch"] != exact_runtime_epoch \
+            or rendered["configuration_digest"] != exact_configuration_digest:
         raise ActivationContractError("topology_mismatch")
     if set(rendered["services"]) != set(selected_services):
         raise ActivationContractError("topology_mismatch")
@@ -27,13 +32,17 @@ def validate_rendered_topology(rendered: object, *, selected_services: tuple[str
         raise ActivationContractError("topology_mismatch")
     for name, service in rendered["services"].items():
         required = {"image", "build", "pull_policy", "platform", "dependencies",
-                    "topology_identity", "configuration_digest"}
+                    "topology_identity", "compose_config_hash", "configuration_digest"}
+        expected = expected_projection.get(name)
+        comparable = service if isinstance(expected, dict) and "compose_config_hash" in expected \
+            else {key: value for key, value in service.items() if key != "compose_config_hash"}
         if type(service) is not dict or set(service) != required \
                 or service["image"] != exact_image or service["build"] is not None \
                 or service["pull_policy"] not in {"never", "missing-refused"} \
                 or service["platform"] != exact_platform \
                 or service["topology_identity"] != exact_topology_digest \
-                or service != expected_projection.get(name) \
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", service["compose_config_hash"]) is None \
+                or comparable != expected \
                 or not set(service["dependencies"]) <= set(allowed_dependencies):
             raise ActivationContractError("topology_mismatch")
         image_name, separator, _digest = service["image"].partition("@")
@@ -50,7 +59,9 @@ class RuntimeObserver:
     def prove_local(self, *, target: dict, proof) -> dict:
         observed = self.adapter.observe_local_image(
             target=target, repository_digest=proof.observed_identity["repo_digest"])
-        expected = proof.observed_identity
+        expected = {**proof.observed_identity,
+                    "target_identity_start": target.get("target_identity"),
+                    "target_identity_end": target.get("target_identity")}
         return self._validate_local(observed, expected)
 
     def prove_generation_local(self, *, target: dict,
@@ -69,6 +80,8 @@ class RuntimeObserver:
             "local_image_id": image.get("config_digest"),
             "target_epoch_start": target.get("machine_identity"),
             "target_epoch_end": target.get("machine_identity"),
+            "target_identity_start": target.get("target_identity"),
+            "target_identity_end": target.get("target_identity"),
             "daemon_epoch_start": target.get("daemon_identity"),
             "daemon_epoch_end": target.get("daemon_identity"),
         }
@@ -77,26 +90,34 @@ class RuntimeObserver:
     @staticmethod
     def _validate_local(observed: object, expected: dict) -> dict:
         fields = ("repository", "repo_digest", "config_digest", "platform", "local_image_id",
-                  "target_epoch_start", "target_epoch_end", "daemon_epoch_start", "daemon_epoch_end")
+                  "target_epoch_start", "target_epoch_end", "target_identity_start",
+                  "target_identity_end", "daemon_epoch_start", "daemon_epoch_end")
         if type(observed) is not dict or any(observed.get(name) != expected.get(name) for name in fields):
             raise ActivationContractError("local_image_mismatch")
         return observed
 
     def observe(self, *, target: dict, selected_services: tuple[str, ...],
                 exact_image: str, local_image_id: str, config_digest: str,
-                platform: dict, topology_digest: str, edge_identity: str) -> RunningObservation:
-        raw = self.adapter.observe_running(target=target, services=selected_services)
+                platform: dict, topology_digest: str, edge_identity: str,
+                compose_project: str, compose_config_hashes: dict[str, str]) -> RunningObservation:
+        raw = self.adapter.observe_running(target=target, services=selected_services,
+                                           compose_project=compose_project)
         if type(raw) is not dict or set(raw) != {
                 "target_epoch_start", "target_epoch_end", "runtime_epoch_start",
-                "runtime_epoch_end", "services"}:
+                "runtime_epoch_end", "target_identity_start", "target_identity_end",
+                "services"}:
             raise ActivationContractError("runtime_mismatch")
         if raw["target_epoch_start"] != raw["target_epoch_end"] \
                 or raw["runtime_epoch_start"] != raw["runtime_epoch_end"] \
                 or raw["target_epoch_start"] != target.get("machine_identity") \
+                or raw["target_identity_start"] != raw["target_identity_end"] \
+                or raw["target_identity_start"] != target.get("target_identity") \
                 or raw["runtime_epoch_start"] != target.get("daemon_identity"):
             raise ActivationContractError("runtime_mismatch")
         services = raw["services"]
-        if type(services) is not list or len(services) != len(selected_services):
+        if type(services) is not list or len(services) != len(selected_services) \
+                or type(compose_config_hashes) is not dict \
+                or set(compose_config_hashes) != set(selected_services):
             raise ActivationContractError("runtime_mismatch")
         normalized = []
         for service in services:
@@ -107,6 +128,9 @@ class RuntimeObserver:
                     or service.get("config_digest") != config_digest \
                     or service.get("platform") != platform \
                     or service.get("topology_identity") != topology_digest \
+                    or service.get("compose_config_hash") != compose_config_hashes.get(
+                        service.get("service")) \
+                    or service.get("compose_project") != compose_project \
                     or service.get("healthy") is not True:
                 raise ActivationContractError("health_incomplete")
             normalized.append(service)

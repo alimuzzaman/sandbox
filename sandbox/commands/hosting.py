@@ -55,6 +55,10 @@ _HOST_OBSERVATION_MAX_CONFIG_DIGESTS = 64
 _HOST_OBSERVATION_MAX_PHASES = 6 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
+_HOST_POST_COMPOSE_OBSERVATION_DEADLINE_SECONDS = 30.0
+_HOST_POST_COMPOSE_OBSERVATION_ATTEMPT_SECONDS = 10
+_HOST_POST_COMPOSE_OBSERVATION_INITIAL_BACKOFF_SECONDS = 1.0
+_HOST_POST_COMPOSE_OBSERVATION_MAX_BACKOFF_SECONDS = 4.0
 _HOST_NO_BUILD_CONFIG_MAX_BYTES = 1_048_576
 _HOST_SOURCE_SNAPSHOT_MAX_FILES = 4096
 _HOST_SOURCE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
@@ -1175,10 +1179,15 @@ def _host_observation_command(prefix: str, services: list[str],
 
 
 def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
-                          runtime_dir: str, *, deadline_seconds: int = 60) -> dict:
+                          runtime_dir: str, *, deadline_seconds: int = 60,
+                          transport_grace_seconds: int = 5) -> dict:
     if not isinstance(deadline_seconds, int) or isinstance(deadline_seconds, bool) \
             or not 1 <= deadline_seconds <= 300:
         raise ValueError("host observation deadline must be between 1 and 300 seconds")
+    if (not isinstance(transport_grace_seconds, int)
+            or isinstance(transport_grace_seconds, bool)
+            or not 0 <= transport_grace_seconds <= 5):
+        raise ValueError("host observation transport grace must be between 0 and 5 seconds")
     services = [validated["compose"]["service"],
                 *validated["compose"].get("background_services", [])]
     revision_keys = sorted(
@@ -1201,7 +1210,7 @@ def _observe_host_runtime(validated: dict, entry: dict, source_dir: str,
                           f"{runtime_dir}/recovery-phases.json"),
             source_dir=source_dir,
         ),
-        timeout=deadline_seconds + 5,
+        timeout=deadline_seconds + transport_grace_seconds,
     )
     if len((raw or "").encode("utf-8", "replace")) > _HOST_OBSERVATION_MAX_RECEIPT_BYTES:
         return {"schema_version": 1, "complete": False, "bounded": True,
@@ -1312,6 +1321,127 @@ def _classify_host_observation(validated: dict, observation: dict,
                                 else "degraded", "checks": checks},
             "observed_runtime_revision": expected_revision if source_ready else None,
             "phases": phase_values[:_HOST_OBSERVATION_MAX_PHASES]}
+
+
+class _HostRuntimeObservationNotReady(RuntimeError):
+    """Bounded post-Compose observation failure with safe last evidence."""
+
+    def __init__(self, message: str, *, observation: dict, classified: dict,
+                 stable: bool = False) -> None:
+        super().__init__(message)
+        self.observation = observation
+        self.classified = classified
+        self.stable = stable
+
+
+def _unavailable_host_observation() -> dict:
+    return {
+        "schema_version": 1,
+        "complete": False,
+        "bounded": True,
+        "configured_services": [],
+        "rows": [],
+        "revision_checks": [],
+        "images": [],
+        "config_digests": [],
+        "phases": [{"phase": "observation", "state": "unavailable"}],
+    }
+
+
+def _host_observation_is_exact_ready(validated: dict, classified: dict,
+                                     expected_revision: str) -> bool:
+    source_required = bool(validated["deploy"].get("derived_environment"))
+    return (
+        classified.get("complete") is True
+        and classified["topology"]["state"] == "ready"
+        and classified["health"]["state"] == "ready"
+        and (
+            not source_required
+            or _source_revision_evidence_ready(validated, classified, expected_revision)
+        )
+    )
+
+
+def _host_observation_has_stable_contradiction(classified: dict) -> bool:
+    source_checks = classified.get("source_revision", {}).get("checks", [])
+    if any(item.get("state") == "mismatch" for item in source_checks
+           if isinstance(item, dict)):
+        return True
+    topology = classified.get("topology", {})
+    return (
+        classified.get("complete") is True
+        and bool(topology.get("missing_from_compose"))
+    )
+
+
+def _poll_post_compose_host_observation(
+        validated: dict, entry: dict, source_dir: str, runtime_dir: str,
+        expected_revision: str, *,
+        deadline_seconds: float = _HOST_POST_COMPOSE_OBSERVATION_DEADLINE_SECONDS,
+        initial_backoff_seconds: float =
+        _HOST_POST_COMPOSE_OBSERVATION_INITIAL_BACKOFF_SECONDS,
+        max_backoff_seconds: float =
+        _HOST_POST_COMPOSE_OBSERVATION_MAX_BACKOFF_SECONDS) -> tuple[dict, dict]:
+    """Poll only read-only whole-runtime evidence after Compose has completed."""
+    if (not isinstance(deadline_seconds, (int, float))
+            or isinstance(deadline_seconds, bool)
+            or not 0 < deadline_seconds <= 120):
+        raise ValueError("post-Compose observation deadline must be between 0 and 120 seconds")
+    if (not isinstance(initial_backoff_seconds, (int, float))
+            or isinstance(initial_backoff_seconds, bool)
+            or not 0 < initial_backoff_seconds <= 10):
+        raise ValueError("post-Compose observation backoff must be between 0 and 10 seconds")
+    if (not isinstance(max_backoff_seconds, (int, float))
+            or isinstance(max_backoff_seconds, bool)
+            or not initial_backoff_seconds <= max_backoff_seconds <= 10):
+        raise ValueError("post-Compose maximum backoff must be between initial backoff and 10 seconds")
+
+    end = time.monotonic() + float(deadline_seconds)
+    backoff = float(initial_backoff_seconds)
+    last_observation = _unavailable_host_observation()
+    last_classified = _classify_host_observation(
+        validated, last_observation, expected_revision)
+    while True:
+        remaining = end - time.monotonic()
+        if remaining < 1:
+            break
+        attempt_deadline = max(
+            1,
+            min(_HOST_POST_COMPOSE_OBSERVATION_ATTEMPT_SECONDS,
+                int(remaining) if remaining >= 1 else 1),
+        )
+        try:
+            last_observation = _observe_host_runtime(
+                validated, entry, source_dir, runtime_dir,
+                deadline_seconds=attempt_deadline,
+                transport_grace_seconds=0,
+            )
+            last_classified = _classify_host_observation(
+                validated, last_observation, expected_revision)
+        except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
+            # A read-only transport/parse failure may be transient. Retain the
+            # last successful evidence, or the bounded unavailable receipt.
+            pass
+        else:
+            if _host_observation_is_exact_ready(
+                    validated, last_classified, expected_revision):
+                return last_observation, last_classified
+            if _host_observation_has_stable_contradiction(last_classified):
+                raise _HostRuntimeObservationNotReady(
+                    "remote runtime observation contains stable contradictory evidence",
+                    observation=last_observation, classified=last_classified,
+                    stable=True,
+                )
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(backoff, remaining))
+        backoff = min(float(max_backoff_seconds), backoff * 2)
+
+    raise _HostRuntimeObservationNotReady(
+        "remote runtime source/topology/health did not become fully ready before deadline",
+        observation=last_observation, classified=last_classified,
+    )
 
 
 def _host_config_digest(validated: dict, runtime: dict, *, binding_key: bytes | None = None) -> str:
@@ -2898,41 +3028,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 save_state=durable_save)
             health_receipt = _verify_remote_health(entry, runtime, stream_progress)
             try:
-                observation = _observe_host_runtime(validated, entry, target, runtime_dir)
-            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-                observation = {
-                    "schema_version": 1,
-                    "complete": False,
-                    "bounded": True,
-                    "configured_services": [],
-                    "rows": [],
-                    "revision_checks": [],
-                    "phases": [{"phase": "observation", "state": "unavailable"}],
-                }
-                classified = _classify_host_observation(validated, observation, sha)
+                observation, classified = _poll_post_compose_host_observation(
+                    validated, entry, target, runtime_dir, sha,
+                )
+            except _HostRuntimeObservationNotReady as exc:
+                observation = exc.observation
+                classified = exc.classified
                 _persist_runtime_observation(
                     state, key, classified, runtime_state="unverified",
                     save_state=durable_save,
                 )
-                raise RuntimeError(f"runtime observation failed: {exc}") from exc
-            classified = _classify_host_observation(validated, observation, sha)
-            runtime_ready = (
-                classified["topology"]["state"] == "ready"
-                and classified["health"]["state"] == "ready"
-            )
-            source_required = bool(validated["deploy"].get("derived_environment"))
-            source_ready = (
-                not source_required
-                or _source_revision_evidence_ready(validated, classified, sha)
-            )
-            if not runtime_ready or not source_ready:
-                _persist_runtime_observation(
-                    state, key, classified, runtime_state="unverified",
-                    save_state=durable_save,
-                )
-                raise RuntimeError(
-                    "remote runtime source/topology/health is not fully proven ready"
-                )
+                raise RuntimeError(str(exc)) from exc
             _persist_runtime_observation(
                 state, key, classified, runtime_state="ready",
                 save_state=durable_save)

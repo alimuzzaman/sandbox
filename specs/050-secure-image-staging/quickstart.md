@@ -114,3 +114,12 @@ The user-required independent Sol High source/security review was automated, not
 the repair rounds its final verdict reported no critical, high, or medium findings. Live secret
 use, live GHCR access, live remote mutation, deployment, and production evidence were explicitly
 unattempted and remain separately authorized gates.
+
+## Provision the v2 staging bundle
+
+Run `./sb host image provision --provision-phase stage-bundle --project-dir PROJECT
+--environment ENV --remote REMOTE --verified-plan PLAN_SET --expected-generation GENERATION
+--credential-source-reference SOURCE/KEY --credential-expires-at RFC3339 --confirm --json`.
+Output is limited to target identity, exact stage generation/ledger revision, plan/policy
+digests, disposition, and installed path. Existing protected `host stage` remains the
+sole staging effect.

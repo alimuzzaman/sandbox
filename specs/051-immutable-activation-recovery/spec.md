@@ -420,3 +420,11 @@ data, second-oldest selection, and every registry/pull path.
 - Feature 048 observation/reconciliation contracts and safe recovery invariants.
 - Existing hosting state, target mutation owner, Compose/runtime, edge, and durable
   request mechanisms.
+
+## First-activation provisioning requirement
+
+- **FR-051**: After successful v2 stage custody, protected activation preparation MUST
+  read exact retained proof/record/revision through the stage repository, prove current
+  activation generation, identify private Compose input through target-scoped HMAC, mint
+  a 60-3600 second snapshot, obtain and immediately verify a bounded rollback signature
+  through ssh-agent using only command-installed public identity, and install owner-only.

@@ -638,6 +638,12 @@ class StageRepository:
             record = state["records"].get(request_id)
             return dict(record) if type(record) is dict else None
 
+    def target_revision(self, target_identity: str) -> tuple[int, int]:
+        """Return the exact generation and ledger revision through repository custody."""
+        with self.target_lock(target_identity):
+            state = self._load_unlocked(target_identity)
+            return state["generation"], state["ledger_revision"]
+
     def fence_possible_effect(self, request, *, code: str = "unknown_effect"):
         generation = self.transition(request, "uncertain")
         return self.commit(request, _failure_for(request, "uncertain", code, generation))

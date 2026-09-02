@@ -69,6 +69,10 @@ observation bounds, status/diagnose compatibility, and active-owner writer fenci
 The generated remote observer Python program compiled. Changed Python compiled with
 `compileall`. `git diff --check` passed.
 
+The source-revision observer now maps all declared persistent containers through one
+bounded Docker inspect phase; focused fixtures cover 16 services, exact mapping, the
+single total deadline, fail-closed container ambiguity, and no unrelated environment output.
+
 ## Direct security review
 
 - Auth/binding: environment context is transport only; canonical durable snapshot,

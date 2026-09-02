@@ -130,3 +130,6 @@ RED checkpoint is claimed.
 The MVP is Phase 1, Phase 2, and US1. Do not proceed to Feature 050 staging until
 the complete Feature 049 suite, security review, and plan contract pass. No task in
 this feature accesses a live credential, registry, Docker daemon, remote, or production.
+
+- [X] T034 Add the protected target-locked v2 machine-policy minter, paired owner-only
+  installer, replay/conflict refusal tests, and operator contract.

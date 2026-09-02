@@ -65,3 +65,13 @@ inspect environment/arbitrary labels, and raw Compose hashes never cross SSH.
 Activation admission runs only after the stage ledger has decoded and canonical-byte
 compared the complete retained proof under the target -> host -> stage lock order and has
 matched its exact ledger authority and record revision.
+
+## Provision the v2 activation bundle
+
+With its public key loaded in ssh-agent, run `./sb host image provision
+--provision-phase activation-bundle --project-dir PROJECT --environment ENV --remote REMOTE
+--verified-plan PLAN_SET --staged-proof PROOF_SET --expected-generation GENERATION
+--snapshot-expires-at UNIX_EPOCH --grant-ttl-seconds 900 --confirm --json`. Output is
+limited to target IDs, exact stage/activation generations and ledger revision,
+plan/proof/snapshot/grant digests, disposition, and installed path. Existing protected
+`host image activate` remains the sole activation effect.

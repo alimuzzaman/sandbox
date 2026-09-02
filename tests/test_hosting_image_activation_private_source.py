@@ -29,6 +29,52 @@ def private_config_hash_identity(service, raw_hash):
 
 
 class ActivationPrivateComposeSourceTests(unittest.TestCase):
+    def test_v2_prepare_identifies_private_render_without_exposing_it(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+        from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
+        image = "ghcr.io/acme/widget@sha256:" + "a" * 64
+        canary = "private-prepare-canary-never-output"
+        target = {"machine_identity": "machine-a", "target_identity": "target-a",
+                  "daemon_identity": "daemon-a"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); environment_file = root / "environment.env"
+            environment_file.write_text(f"DATABASE_URL={canary}\n"); environment_file.chmod(0o600)
+            docker = root / "docker"
+            rendered = {"services": {"web": {"image": image, "build": None,
+                "pull_policy": "never", "platform": "linux/amd64", "depends_on": {},
+                "environment": {"DATABASE_URL": canary}}}}
+            docker.write_text("\n".join((
+                "#!/usr/bin/env python3", "import json,sys", "a=sys.argv[1:]",
+                "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
+                "if a and a[0]=='compose' and '--hash' in a: print('web '+'b'*64); sys.exit(0)",
+                "if a and a[0]=='compose': print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
+                "sys.exit(8)")))
+            docker.chmod(0o700); results = []
+            def ssh_run(_entry, command, **kwargs):
+                result = run_test_process(shlex.split(command),
+                    env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
+                    input=kwargs.get("input_data"), text=True, capture_output=True)
+                results.append(result); return result
+            provider = {"snapshot_id": "compose-snapshot/test-a",
+                "provider_revision": "provider-v2", "target": target,
+                "compose_files": ("/synthetic/compose.yml",), "project_name": "widget",
+                "project_directory": "/synthetic", "environment_file": str(environment_file)}
+            closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+            with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run), \
+                    patch("sandbox.transports.remote_hosting_activation.CLOSED_ENVIRONMENT", closed):
+                transport = RegisteredRemoteActivationTransport(
+                    argv_runner=_host_image_argv_runner(
+                        {"name": "synthetic"}, compose_snapshot_provider=provider),
+                    configuration_binding_key=CONFIGURATION_KEY)
+                digest = transport.prepare_compose_snapshot_v2(
+                    compose_files=provider["compose_files"], project_name="widget",
+                    selected_services=("web",), service_image_bindings={"web": image},
+                    environment_bindings={"WEB_IMAGE": image}, target=target,
+                    snapshot_id=provider["snapshot_id"], provider_revision="provider-v2")
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn(canary, "".join(
+            (item.stdout or "") + (item.stderr or "") for item in results))
+
     def test_running_projection_keeps_env_labels_and_raw_config_hash_remote(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from sandbox.transports.remote_hosting_activation import (

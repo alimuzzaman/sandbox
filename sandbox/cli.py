@@ -872,7 +872,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["verify", "activate", "adopt", "rollback", "recover"],
+        choices=["provision", "verify", "activate", "adopt", "rollback", "recover"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -900,6 +900,24 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="closed VerifiedImagePlan v1 or VerifiedImagePlanSet v2 JSON for host stage")
     host_p.add_argument("--machine-plan-set-policy", default=None, metavar="PATH",
         help="closed machine-owned v2 multi-image policy for `host image verify`")
+    host_p.add_argument("--provision-phase", choices=[
+        "machine-policy", "stage-bundle", "activation-bundle"], default=None,
+        help="dependency-ordered v2 first-activation artifact to prepare")
+    host_p.add_argument("--policy-authority-id", default=None)
+    host_p.add_argument("--policy-revision", type=int, default=None)
+    host_p.add_argument("--service-image-binding", action="append", default=None,
+        metavar="SERVICE=queue|web|worker")
+    host_p.add_argument("--activation-environment-binding", action="append", default=None,
+        metavar="queue|web|worker=ENVIRONMENT_VARIABLE")
+    host_p.add_argument("--credential-source-reference", default=None,
+        metavar="SOURCE/KEY")
+    host_p.add_argument("--credential-expires-at", default=None, metavar="RFC3339")
+    host_p.add_argument("--rollback-public-key", default=None, metavar="PATH")
+    host_p.add_argument("--rollback-authority-id", default=None)
+    host_p.add_argument("--rollback-authority-revision", default=None)
+    host_p.add_argument("--compose-provider-revision", default=None)
+    host_p.add_argument("--snapshot-expires-at", type=int, default=None)
+    host_p.add_argument("--grant-ttl-seconds", type=int, default=900)
     host_p.add_argument("--signed-receipt-directory", default=None, metavar="PATH",
         help="closed receipt, payload, and offline Sigstore bundle directory")
     host_p.add_argument("--staged-proof", default=None, metavar="PATH",

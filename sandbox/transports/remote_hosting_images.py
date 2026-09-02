@@ -96,6 +96,47 @@ class RegisteredRemoteImageTransport:
         self._observe_unit = unit_observer
         self._resolve_home = resolve_home
 
+    def observe_authority(self, remote_name: str, helper: object) -> dict:
+        """Return one closed daemon/helper projection without starting staging."""
+        if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None:
+            raise RemoteImageStageError("remote_unavailable")
+        remote = self._lookup(remote_name)
+        if type(remote) is not dict or remote.get("provisioned") is not True:
+            raise RemoteImageStageError("remote_unavailable")
+        raw = helper.as_mapping() if callable(getattr(helper, "as_mapping", None)) else None
+        if type(raw) is not dict or set(raw) != {"artifact_digest", "entry",
+                "runtime_revision", "capability_revision"} \
+                or raw["entry"] != FIXED_HELPER_ENTRY_V2 \
+                or raw["capability_revision"] != "systemd-cgroup-v2-batch-stage-v2" \
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", raw["artifact_digest"] or "") is None \
+                or re.fullmatch(r"[0-9a-f]{40}", raw["runtime_revision"] or "") is None:
+            raise RemoteImageStageError("protocol_invalid")
+        home = self._resolve_home(remote)
+        if type(home) is not str or not home.startswith("/"):
+            raise RemoteImageStageError("remote_unavailable")
+        digest = raw["artifact_digest"].split(":", 1)[1]
+        root = f"{home}/runtime/helpers/image-stage/sha256-{digest}"
+        measured = self._observe_unit(remote,
+            "sha256sum -- " + shlex.quote(f"{root}/staging_helper.py"), timeout=15)
+        manifest = self._observe_unit(remote,
+            "test -f " + shlex.quote(f"{root}/manifest-v2.json") + " && cat -- "
+            + shlex.quote(f"{root}/manifest-v2.json"), timeout=15)
+        daemon = self._observe_unit(remote,
+            "docker info --format '{{.ID}}'", timeout=15)
+        try:
+            manifest_value = json.loads(str(getattr(manifest, "stdout", "")))
+        except json.JSONDecodeError:
+            raise RemoteImageStageError("helper_failed") from None
+        daemon_value = str(getattr(daemon, "stdout", "")).strip()
+        if (getattr(measured, "returncode", 1) != 0
+                or str(getattr(measured, "stdout", "")).split(maxsplit=1)[0] != digest
+                or getattr(manifest, "returncode", 1) != 0
+                or manifest_value != {"schema_version": 2, **raw}
+                or getattr(daemon, "returncode", 1) != 0
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", daemon_value) is None):
+            raise RemoteImageStageError("helper_failed")
+        return {"daemon_identity": daemon_value, "helper": raw}
+
     def prepare(self, remote_name: str, plan_frame: dict, *, timeout_seconds: int):
         if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None:
             raise RemoteImageStageError("remote_unavailable")

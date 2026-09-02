@@ -128,3 +128,7 @@ not claim that an implementation-free RED run occurred.
 MVP is Setup + the waived RED-gate record + US1. Do not begin Feature 051 activation until
 separately authorized live acceptance and human credential/process review pass. Local checks
 and the independent automated Sol High review do not supply those gates.
+
+- [X] T049 Add protected v2 stage-bundle preparation with registered source ownership,
+  opaque source revision, exact repository generation, owner-only replay/conflict rules,
+  and focused redaction/refusal tests.

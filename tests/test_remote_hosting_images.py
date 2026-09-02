@@ -1,9 +1,31 @@
+import json
 import unittest
 
 from tests.hosting_image_fixtures import local_observation, stage_request, staging_policy
 
 
 class TestRemoteHostingImages(unittest.TestCase):
+    def test_v2_authority_observer_is_closed_and_exact(self):
+        from types import SimpleNamespace
+        from sandbox.hosting.images.staging_models import HelperIdentity
+        from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+        helper = HelperIdentity("sha256:" + "a" * 64,
+            "sandbox-image-stage-helper-v2", "b" * 40,
+            "systemd-cgroup-v2-batch-stage-v2")
+        manifest = json.dumps({"schema_version": 2, **helper.as_mapping()})
+        def observe(_remote, command, timeout):
+            if command.startswith("sha256sum"):
+                return SimpleNamespace(returncode=0, stdout="a" * 64 + "  helper\n")
+            if command.startswith("test -f"):
+                return SimpleNamespace(returncode=0, stdout=manifest)
+            return SimpleNamespace(returncode=0, stdout="daemon-a\n")
+        transport = RegisteredRemoteImageTransport(
+            remote_lookup=lambda _name: {"provisioned": True},
+            ssh_private_frame=lambda *a, **k: None, unit_observer=observe,
+            resolve_home=lambda _remote: "/srv/sandbox")
+        self.assertEqual(transport.observe_authority("remote-a", helper),
+            {"daemon_identity": "daemon-a", "helper": helper.as_mapping()})
+
     def test_result_parser_is_closed_and_bounded(self):
         from sandbox.transports.remote_hosting_images import RemoteImageStageError, parse_stage_response
         value = {"schema_version": 1, "ok": True, "code": "staged", "payload": {}}

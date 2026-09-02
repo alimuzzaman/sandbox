@@ -289,3 +289,10 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - Supported targets expose a measurable immutable helper and coherent Docker observation.
 - Feature 051 consumes plan/proof plus the narrow authenticated proof-custody repository
   port; it does not access stage policy, broker, credential, helper, pull, or effects.
+
+## First-activation provisioning requirement
+
+- **FR-050**: After exact v2 verification, protected stage preparation MUST authenticate
+  machine/target, observe the exact daemon and measured v2 helper, derive binding ownership
+  from the registered secret source, retain only its opaque revision, prove current stage
+  generation/revision, and install the closed bundle owner-only.

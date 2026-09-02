@@ -1064,22 +1064,19 @@ def _host_observation_command(prefix: str, services: list[str],
         raise ValueError("host observation exceeds the declared service limit")
     if len(revision_keys) > _HOST_OBSERVATION_MAX_KEYS:
         raise ValueError("host observation exceeds the revision-key limit")
-    revision_commands = []
-    for service in services:
-        script = "; ".join(
-            f"printf '%s=%s\\n' {shlex.quote(key)} \"${{{key}-}}\""
-            for key in revision_keys
+    revision_format = (
+        '{{json .Id}}{{printf "\\t"}}'
+        '{{json (index .Config.Labels "com.docker.compose.service")}}'
+    )
+    for key in revision_keys:
+        revision_format += (
+            '{{range .Config.Env}}{{if eq (index (split . "=") 0) '
+            + json.dumps(key) + '}}{{printf "\\t"}}{{json .}}{{end}}{{end}}'
         )
-        revision_commands.append({
-            "service": service,
-            "command": (
-                f"{prefix} exec -T {shlex.quote(service)} sh -c {shlex.quote(script)}"
-            ),
-        })
     payload = base64.b64encode(json.dumps({
         "prefix": prefix, "services": services,
         "revision_keys": revision_keys, "deadline_seconds": deadline_seconds,
-        "revision_commands": revision_commands,
+        "revision_format": revision_format,
         "config_paths": list(config_paths),
         "source_dir": source_dir,
     }, separators=(",", ":")).encode()).decode()
@@ -1172,15 +1169,38 @@ def _host_observation_command(prefix: str, services: list[str],
         "  for index,line in enumerate(digests.splitlines()[:len(p['config_paths'])]):",
         "   value=line.split()[0] if line.split() else ''",
         "   if len(value)==64:r['config_digests'].append({'name':str(index),'digest':'sha256:'+value})",
-        "for probe in p['revision_commands']:",
-        " if expired or not p['revision_keys']:break",
-        " service=probe['service'];output=run('source_revision:'+service,probe['command'])",
-        " values={}",
-        " if output is not None:",
+        "if p['revision_keys']:",
+        " values={};expected={};valid=not expired;ids=[];row_services=set()",
+        " for row in r['rows']:",
+        "  ident=row.get('ID') or row.get('Id');service=row.get('Service')",
+        "  if not isinstance(ident,str) or not 12<=len(ident)<=64 or any(c not in '0123456789abcdef' for c in ident) or ident in ids or service not in p['services'] or service in row_services:valid=False",
+        "  else:ids.append(ident);expected[ident]=service;row_services.add(service)",
+        " valid=valid and len(ids)==len(p['services']) and len(set(p['services']))==len(p['services'])",
+        " output=None",
+        " if valid:",
+        "  command='docker inspect --format '+__import__('shlex').quote(p['revision_format'])+' '+' '.join(__import__('shlex').quote(x) for x in ids)",
+        "  output=run('source_revisions',command)",
+        "  valid=output is not None and r['phases'][-1]['state']=='complete'",
+        " if valid:",
         "  for line in output.splitlines():",
-        "   key,sep,value=line.partition('=')",
-        "   if sep and key in p['revision_keys']:values[key]=value",
-        " for key in p['revision_keys']:r['revision_checks'].append({'service':service,'key':key,'observed':values.get(key)})",
+        "   fields=line.split('\\t')",
+        "   try:ident=json.loads(fields[0]);service=json.loads(fields[1]);environment=[json.loads(x) for x in fields[2:]]",
+        "   except Exception:valid=False;break",
+        "   matches=[short for short in ids if isinstance(ident,str) and ident.startswith(short)]",
+        "   if len(matches)!=1 or expected[matches[0]]!=service or service in values:valid=False;break",
+        "   selected={}",
+        "   for item in environment:",
+        "    if not isinstance(item,str):valid=False;break",
+        "    key,equals,value=item.partition('=')",
+        "    if equals and key in p['revision_keys']:",
+        "     if key in selected or len(value) not in (40,64) or any(c not in '0123456789abcdef' for c in value):valid=False;break",
+        "     selected[key]=value",
+        "   if not valid:break",
+        "   values[service]=selected",
+        "  valid=valid and set(values)==set(p['services']) and len(values)==len(p['services'])",
+        " for service in p['services']:",
+        "  for key in p['revision_keys']:",
+        "   r['revision_checks'].append({'service':service,'key':key,'observed':values.get(service,{}).get(key) if valid else None})",
         "marker=None if expired else run('epoch_end',epoch_command)",
         "if marker is not None:r['epoch_end']='sha256:'+hashlib.sha256(marker.encode()).hexdigest()",
         "r['complete']=bool(r['phases']) and not expired and all(x['state']=='complete' for x in r['phases'])",
@@ -3456,6 +3476,19 @@ def _host_image_v2_runtime_selector(validated: dict, entry: dict, snapshot) -> d
             "render_digest": snapshot.configuration_digest}
 
 
+def _host_image_v2_prepare_selector(validated: dict, entry: dict, target: dict,
+        snapshot_id: str, provider_revision: str) -> dict:
+    """Resolve registered private inputs before their HMAC snapshot exists."""
+    from types import SimpleNamespace
+    placeholder = SimpleNamespace(
+        snapshot_id=snapshot_id, snapshot_digest=None,
+        provider_revision=provider_revision, target=target,
+        configuration_digest=None)
+    selector = _host_image_v2_runtime_selector(validated, entry, placeholder)
+    selector.pop("snapshot_digest"); selector.pop("render_digest")
+    return selector
+
+
 def _host_image_target_configuration_key(
         master_key: bytes, machine_identity: str, target_identity: str) -> bytes:
     if type(master_key) is not bytes or len(master_key) != 32 \
@@ -3468,6 +3501,272 @@ def _host_image_target_configuration_key(
     return hmac.new(master_key,
                     b"sandbox-feature-051-target-configuration-key-v1\0" + scope,
                     hashlib.sha256).digest()
+
+
+def _provision_pairs(values, label: str) -> dict[str, str]:
+    result = {}
+    for value in values or ():
+        if type(value) is not str or value.count("=") != 1:
+            raise ValueError(f"{label} is invalid")
+        key, item = value.split("=", 1)
+        if not key or not item or key in result:
+            raise ValueError(f"{label} is invalid")
+        result[key] = item
+    return result
+
+
+def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
+    """Prepare one dependency-ordered, target-locked v2 machine artifact."""
+    phase = getattr(args, "provision_phase", None)
+    if phase not in {"machine-policy", "stage-bundle", "activation-bundle"}:
+        die("host image provision requires --provision-phase; no authority was opened")
+    if not getattr(args, "confirm", False):
+        die("host image provision is protected; pass --confirm after reviewing the exact target")
+    selector = hashlib.sha256(
+        f"{args.remote}\0{validated['project']}\0{args.environment}".encode()).hexdigest()
+    response = {"schema_version": 2, "ok": False, "result_class": "refused",
+                "phase": phase, "target_id": hosting.state_key(args.remote, validated),
+                "code": "artifact_invalid"}
+    try:
+        from sandbox.hosting.images.activation.repository import ActivationRepository
+        from sandbox.hosting.images.plan_set import (
+            MAX_V2_DOCUMENT_BYTES, VerifiedImagePlanSet, _load_json_bytes,
+            read_stable_file,
+        )
+        from sandbox.hosting.images.provisioning import (
+            SshAgentRollbackSigner, install_owner_only_json,
+            install_owner_only_json_pair,
+            prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
+        )
+        from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2 import StagedImageProofSet
+        from sandbox.core._paths import ENV_LOCAL
+        from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
+        from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+
+        target_id = hosting.state_key(args.remote, validated)
+        root = RUNTIME_DIR / "hosting"
+        if phase == "machine-policy" and not all((args.signed_receipt_directory,
+                args.policy_authority_id, args.policy_revision, args.rollback_public_key,
+                args.rollback_authority_id, args.rollback_authority_revision,
+                args.compose_provider_revision, args.service_image_binding,
+                args.activation_environment_binding)):
+            raise ValueError("machine policy authority is incomplete")
+        if phase == "stage-bundle" and (not all((args.verified_plan,
+                args.credential_source_reference, args.credential_expires_at))
+                or args.expected_generation is None):
+            raise ValueError("broker authority is incomplete")
+        if phase == "activation-bundle" and (not all((args.verified_plan,
+                args.staged_proof)) or args.expected_generation is None
+                or args.snapshot_expires_at is None):
+            raise ValueError("activation authority is incomplete")
+        recovery = RecoveryRepository()
+        with recovery.target_mutation_port("image-provision").target_mutation_transaction(target_id):
+            if phase == "machine-policy":
+                receipt_path = Path(args.signed_receipt_directory).expanduser() / "receipt.json"
+                receipt = read_stable_file(receipt_path, MAX_V2_DOCUMENT_BYTES)
+                checksum = read_stable_file(receipt_path.with_name("receipt.sha256"), 256)
+                if checksum != (hashlib.sha256(receipt).hexdigest()
+                        + "  receipt.json\n").encode():
+                    raise ValueError("release receipt checksum mismatch")
+                compose = validated["compose"]
+                persistent = tuple(sorted((compose["service"],
+                                           *compose.get("background_services", ()))))
+                one_shot = tuple(sorted(compose.get("init_services", ())))
+                policy = prepare_machine_policy(
+                    receipt_bytes=receipt, authority_id=args.policy_authority_id,
+                    policy_revision=args.policy_revision,
+                    target_scope={"remote": args.remote, "project": validated["project"],
+                                  "environment": args.environment},
+                    persistent_services=persistent, one_shot_services=one_shot,
+                    service_image_bindings=_provision_pairs(
+                        args.service_image_binding, "service image binding"),
+                    activation_environment_bindings=_provision_pairs(
+                        args.activation_environment_binding,
+                        "activation environment binding"))
+                signer = SshAgentRollbackSigner(
+                    Path(args.rollback_public_key).expanduser(),
+                    args.rollback_authority_id)
+                authority = {"schema_version": 2,
+                    "rollback_authority_id": args.rollback_authority_id,
+                    "rollback_authority_revision": args.rollback_authority_revision,
+                    "rollback_public_key_path": str(signer.path),
+                    "rollback_public_key": signer.public_key,
+                    "compose_provider_revision": args.compose_provider_revision}
+                authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
+                path = root / "image-verification" / "policies" / f"{selector}.json"
+                authority_disposition, disposition = install_owner_only_json_pair((
+                    (authority_path, authority), (path, policy.as_mapping())))
+                response.update(ok=True, result_class=disposition, code="prepared",
+                    receipt_digest=policy.approved_receipt_digest,
+                    policy_digest=policy.policy_digest, installed_path=str(path),
+                    authority_path=str(authority_path),
+                    authority_result_class=authority_disposition)
+            else:
+                if not args.verified_plan:
+                    raise ValueError("verified plan is required")
+                plan = VerifiedImagePlanSet.from_mapping(_load_json_bytes(read_stable_file(
+                    Path(args.verified_plan).expanduser(), MAX_V2_DOCUMENT_BYTES)))
+                scope = plan.policy.target_scope
+                if (scope.remote, scope.project, scope.environment) != (
+                        args.remote, validated["project"], args.environment):
+                    raise ValueError("verified plan target changed")
+                helper_path = Path(__file__).parents[1] / "hosting" / "images" / "staging_helper.py"
+                helper_digest = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
+                revision = subprocess.run(("git", "rev-parse", "HEAD"), cwd=Path(__file__).parents[2],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True,
+                    env={"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C"}).stdout.strip()
+                helper = HelperIdentity(helper_digest, "sandbox-image-stage-helper-v2", revision,
+                    "systemd-cgroup-v2-batch-stage-v2")
+                machine = _authenticated_machine_identity(args.remote)
+                observed = RegisteredRemoteImageTransport().observe_authority(args.remote, helper)
+                target = StagingTarget(machine, target_id, observed["daemon_identity"])
+                response["target"] = target.as_mapping()
+                if phase == "stage-bundle":
+                    stage_generation, stage_ledger_revision = \
+                        StageRepository().target_revision(target_id)
+                    if args.expected_generation != stage_generation:
+                        raise ValueError("stage generation changed")
+                    from sandbox.isolation.credential_binding import CredentialBinding
+                    from sandbox.isolation.credential_resolver import SecretReferenceResolver
+                    from sandbox.config.secrets import normalize_secret_config
+                    from sandbox.secrets.sources import SourceRegistry
+                    from sandbox.secrets.writer import load_revision_key
+                    secrets = normalize_secret_config({"root": validated["project_root"],
+                        "secrets": cfg.get("secrets", {})})["sources"]
+                    registry = SourceRegistry(validated["project_root"], secrets,
+                        personal_path=ENV_LOCAL, project_scope=validated["project_root"])
+                    source_alias = args.credential_source_reference.split("/", 1)[0]
+                    source_descriptor = secrets.get(source_alias)
+                    owner = (source_descriptor.get("owner")
+                        if isinstance(source_descriptor, dict)
+                        and isinstance(source_descriptor.get("owner"), str)
+                        else registry.policy(source_alias).scope)
+                    binding_seed = json.dumps({"target": target.as_mapping(),
+                        "plan_set_digest": plan.plan_set_digest,
+                        "source_reference": args.credential_source_reference,
+                        "expires_at": args.credential_expires_at},
+                        sort_keys=True, separators=(",", ":")).encode()
+                    binding_hex = hashlib.sha256(
+                        b"sandbox-hosting-stage-binding-v2\0" + binding_seed).hexdigest()
+                    binding = CredentialBinding(
+                        binding_id="image-stage-" + binding_hex[:32],
+                        instance_id="host-" + hashlib.sha256(machine.encode()).hexdigest()[:32],
+                        source_reference=args.credential_source_reference,
+                        policy_digest=hashlib.sha256(b"policy\0" + binding_seed).hexdigest(),
+                        egress_digest=hashlib.sha256(b"egress\0" + binding_seed).hexdigest(),
+                        broker_digest=hashlib.sha256(b"broker\0" + binding_seed).hexdigest(),
+                        scheme="https", host="ghcr.io", port=443, method="GET",
+                        path="/token", auth_form="authorization_bearer",
+                        expires_at=args.credential_expires_at, owner=owner,
+                        version=1, state="ready")
+                    resolver = SecretReferenceResolver(registry, owner=owner)
+                    revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
+                    credential_revision = resolver.observe_reference_revision(
+                        binding, revision_key=revision_key)
+                    bundle = prepare_stage_bundle(plan=plan, target=target, helper=helper,
+                        binding=binding, credential_reference_revision=credential_revision,
+                        secret_sources=secrets)
+                    path = root / "image-staging" / "policies" / f"{selector}.json"
+                    disposition = install_owner_only_json(path, bundle)
+                    response.update(ok=True, result_class=disposition, code="prepared",
+                        plan_set_digest=plan.plan_set_digest,
+                        staging_policy_digest=bundle["policy"]["policy_digest"],
+                        stage_generation=stage_generation,
+                        stage_ledger_revision=stage_ledger_revision,
+                        installed_path=str(path))
+                else:
+                    proof = StagedImageProofSet.from_mapping(_load_json_bytes(read_stable_file(
+                        Path(args.staged_proof).expanduser(), MAX_V2_DOCUMENT_BYTES)))
+                    if proof.target != target:
+                        raise ValueError("staged target changed")
+                    stage = StageRepository(); record = stage.record_status(target_id, proof.request_id)
+                    if type(record) is not dict:
+                        raise ValueError("stage ledger evidence is unavailable")
+                    retained = stage.lookup(target_id, proof.request_id)
+                    if (getattr(retained, "ok", None) is not True
+                            or getattr(retained, "proof", None) != proof):
+                        raise ValueError("retained stage proof changed")
+                    activation = ActivationRepository(
+                        host_state_port=recovery.activation_host_state_port(),
+                        stage_repository=stage,
+                        target_mutation_port=recovery.target_mutation_port("activate"))
+                    state = activation.snapshot(target_id)
+                    generation = state["generation"]
+                    if args.expected_generation != generation:
+                        raise ValueError("activation generation changed")
+                    current = state.get("current")
+                    current_digest = (current.get("generation_digest")
+                                      if type(current) is dict else "sha256:" + "0" * 64)
+                    authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
+                    signer_config = _load_json_bytes(read_stable_file(
+                        authority_path, MAX_V2_DOCUMENT_BYTES, owner_only=True))
+                    if type(signer_config) is not dict or set(signer_config) != {
+                            "schema_version", "rollback_authority_id",
+                            "rollback_authority_revision", "rollback_public_key_path",
+                            "rollback_public_key", "compose_provider_revision"} \
+                            or signer_config["schema_version"] != 2:
+                        raise ValueError("machine provisioning authority is unavailable")
+                    snapshot_id = "compose-snapshot/" + hashlib.sha256(
+                        f"{target_id}\0{plan.plan_set_digest}\0{proof.proof_digest}\0{generation}".encode()
+                    ).hexdigest()
+                    provider_revision = signer_config["compose_provider_revision"]
+                    prepare_selector = _host_image_v2_prepare_selector(
+                        validated, remote.get_remote(args.remote), target.as_mapping(),
+                        snapshot_id, provider_revision)
+                    key, _version = personal_secrets.hosting_binding_key(create=False)
+                    scoped_key = _host_image_target_configuration_key(key, machine, target_id)
+                    transport = RegisteredRemoteActivationTransport(
+                        argv_runner=_host_image_argv_runner(
+                            remote.get_remote(args.remote),
+                            compose_snapshot_provider=prepare_selector),
+                        target_identity_observer=lambda: {
+                            "machine_identity": machine, "target_identity": target_id},
+                        configuration_binding_key=scoped_key)
+                    images = {row["service"]: row["image_ref"]
+                              for row in plan.as_mapping()["service_image_bindings"]
+                              if row["kind"] == "persistent"}
+                    by_image = {row["image"]: row["environment_variable"]
+                                for row in plan.as_mapping()["activation_environment_bindings"]}
+                    env_bindings = {by_image[row["image"]]: row["image_ref"]
+                        for row in plan.as_mapping()["service_image_bindings"]
+                        if row["kind"] == "persistent"}
+                    configuration_digest = transport.prepare_compose_snapshot_v2(
+                        compose_files=prepare_selector["compose_files"],
+                        project_name=prepare_selector["project_name"],
+                        selected_services=plan.policy.persistent_services,
+                        service_image_bindings=images, environment_bindings=env_bindings,
+                        target=target.as_mapping(), snapshot_id=snapshot_id,
+                        provider_revision=provider_revision)
+                    signer = SshAgentRollbackSigner(
+                        Path(signer_config["rollback_public_key_path"]).expanduser(),
+                        signer_config["rollback_authority_id"])
+                    if signer.public_key != signer_config["rollback_public_key"]:
+                        raise ValueError("rollback public key changed")
+                    bundle = prepare_activation_bundle(plan=plan, proof=proof,
+                        stage_record=record, stage_ledger_revision=record["ledger_revision"],
+                        current_generation=generation,
+                        current_generation_digest=current_digest, target=target.as_mapping(),
+                        configuration_digest=configuration_digest, snapshot_id=snapshot_id,
+                        provider_revision=provider_revision,
+                        snapshot_expires_at=args.snapshot_expires_at,
+                        authority_revision=signer_config["rollback_authority_revision"],
+                        signer=signer, grant_ttl_seconds=args.grant_ttl_seconds)
+                    path = root / "image-activation" / "policies" / f"{selector}.json"
+                    disposition = install_owner_only_json(path, bundle)
+                    response.update(ok=True, result_class=disposition, code="prepared",
+                        plan_set_digest=plan.plan_set_digest,
+                        proof_set_digest=proof.proof_digest,
+                        compose_snapshot_digest=bundle["compose_snapshot"]["snapshot_digest"],
+                        rollback_grant_digest=bundle["rollback_grant"]["grant_digest"],
+                        stage_generation=proof.staging_generation,
+                        stage_ledger_revision=record["ledger_revision"],
+                        activation_generation=generation, installed_path=str(path))
+    except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        response["code"] = getattr(exc, "code", "artifact_invalid")
+    print(json.dumps(response, sort_keys=True, separators=(",", ":")))
+    if response["ok"] is not True: raise SystemExit(1)
 
 
 def _host_image_v2_recovery_observation(state: dict, transport, intent: dict):
@@ -3528,14 +3827,17 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                              "environment", "render_digest", "runtime_epoch", "services"}
             v2_common = {"kind", "snapshot_id", "snapshot_digest",
                          "provider_revision", "target"}
+            v2_prepare = v2_common - {"snapshot_digest"}
             v2_effect = v2_common | {"services", "render_digest", "topology_digest"}
             v2_observe = v2_effect | {"compose_config_hashes"}
             source_fields = set(private_environment_source)
             is_v2 = frozenset(source_fields) in {
-                frozenset(v2_common), frozenset(v2_effect), frozenset(v2_observe)}
+                frozenset(v2_prepare), frozenset(v2_common),
+                frozenset(v2_effect), frozenset(v2_observe)}
             if is_v2:
                 kind = private_environment_source.get("kind")
-                expected_fields = ({"compose_snapshot_v2": v2_common,
+                expected_fields = ({"compose_prepare_v2": v2_prepare,
+                                    "compose_snapshot_v2": v2_common,
                                     "compose_replace_v2": v2_effect,
                                     "compose_observe_v2": v2_observe}).get(kind)
                 provider = compose_snapshot_provider
@@ -3548,13 +3850,14 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                         or not private_environment_source["snapshot_id"].startswith(
                             "compose-snapshot/")
                         or type(private_environment_source["provider_revision"]) is not str
-                        or re.fullmatch(r"sha256:[0-9a-f]{64}",
-                                        private_environment_source["snapshot_digest"] or "") is None
+                        or (kind != "compose_prepare_v2" and re.fullmatch(
+                            r"sha256:[0-9a-f]{64}",
+                            private_environment_source["snapshot_digest"] or "") is None)
                         or type(private_environment_source["target"]) is not dict
                         or set(private_environment_source["target"]) != {
                             "machine_identity", "target_identity", "daemon_identity"}):
                     raise ValueError("activation private source is invalid")
-                if kind != "compose_snapshot_v2" and (
+                if kind not in {"compose_prepare_v2", "compose_snapshot_v2"} and (
                         type(private_environment_source["services"]) not in {list, tuple}
                         or not private_environment_source["services"]
                         or re.fullmatch(r"sha256:[0-9a-f]{64}",
@@ -3564,7 +3867,9 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                     raise ValueError("activation private source is invalid")
                 trusted = {"compose_files", "project_name", "project_directory",
                            "environment_file", "render_digest"}
-                if set(provider) != (v2_common - {"kind"}) | trusted \
+                provider_fields = ((v2_prepare - {"kind"}) | (trusted - {"render_digest"})
+                    if kind == "compose_prepare_v2" else (v2_common - {"kind"}) | trusted)
+                if set(provider) != provider_fields \
                         or type(provider["compose_files"]) is not tuple \
                         or not provider["compose_files"] \
                         or any(type(path) is not str or not path.startswith("/")
@@ -3576,11 +3881,14 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                         or not provider["environment_file"].startswith("/") \
                         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
                                         provider["project_name"] or "") is None \
-                        or re.fullmatch(r"sha256:[0-9a-f]{64}",
-                                        provider["render_digest"] or "") is None:
+                        or (kind != "compose_prepare_v2" and re.fullmatch(
+                            r"sha256:[0-9a-f]{64}",
+                            provider["render_digest"] or "") is None):
                     raise ValueError("activation private source is invalid")
+                selected_trusted = (trusted - {"render_digest"}
+                                    if kind == "compose_prepare_v2" else trusted)
                 private_environment_source = {**private_environment_source,
-                    **{name: provider[name] for name in trusted},
+                    **{name: provider[name] for name in selected_trusted},
                     "environment": dict(environment)}
             elif set(private_environment_source) not in {frozenset(init_fields), frozenset(effect_fields)} \
                     or type(private_environment_source["compose_files"]) not in {list, tuple} \
@@ -3681,7 +3989,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "if s:",
             " if configuration_key is None:sys.stderr.write('configuration_binding_unavailable');sys.exit(91)",
             " e.update(s['environment'])",
-            " v2=s.get('kind') in ('compose_snapshot_v2','compose_replace_v2','compose_observe_v2')",
+            " v2=s.get('kind') in ('compose_prepare_v2','compose_snapshot_v2','compose_replace_v2','compose_observe_v2')",
             " if v2:",
             "  flags=os.O_RDONLY|getattr(os,'O_CLOEXEC',0)|getattr(os,'O_NOFOLLOW',0)",
             "  try:environment_fd=os.open(s['environment_file'],flags)",
@@ -3712,7 +4020,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  for svc in c.get('services',{}).values():",
             "   if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
             " got=configuration_identity(q.stdout,v2)",
-            " if got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
+            " if s.get('kind')!='compose_prepare_v2' and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
             " if s.get('kind') in ('compose_replace_v1','compose_replace_v2'):",
             "  for svc in c.get('services',{}).values():vals.extend((svc.get('environment') or {}).values())",
             "  render=q.stdout",
@@ -3728,7 +4036,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  for row in rows:row.pop('topology_identity',None);row.pop('compose_config_hash',None)",
             "  r=subprocess.CompletedProcess([],0,json.dumps(rows,separators=(',',':')).encode(),b'')",
             " except Exception:r=subprocess.CompletedProcess([],91,b'',b'runtime_projection_failed')",
-            "elif s and s.get('kind')=='compose_snapshot_v2':r=q",
+            "elif s and s.get('kind') in ('compose_prepare_v2','compose_snapshot_v2'):r=q",
             "else:r=subprocess.run(sys.argv[2:],env=e,input=render,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=((environment_fd,) if environment_fd is not None else ()),timeout=command_timeout)",
             "if s and s.get('kind') in ('compose_replace_v1','compose_replace_v2') and r.returncode==0:",
             " base=['docker','compose','--file','-','--project-directory',s['project_directory'],'--project-name',s['project_name']]",
@@ -3754,7 +4062,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " else:",
             "  try:parsed=json.loads(raw);hashes=compose_hashes(raw,parsed);c=public_projection(parsed)",
             "  except Exception:r=subprocess.CompletedProcess([],91,b'',b'compose_config_hash_unavailable');o=b'';d=r.stderr",
-            "  else:c['x-sandbox-configuration-digest']=configuration_identity(raw,bool(s and s.get('kind') in ('compose_snapshot_v2','compose_replace_v2','compose_observe_v2')));c['x-sandbox-compose-config-hashes']=hashes;o=json.dumps(c,separators=(',',':')).encode()",
+            "  else:c['x-sandbox-configuration-digest']=configuration_identity(raw,bool(s and s.get('kind') in ('compose_prepare_v2','compose_snapshot_v2','compose_replace_v2','compose_observe_v2')));c['x-sandbox-compose-config-hashes']=hashes;o=json.dumps(c,separators=(',',':')).encode()",
             "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode!=0:o=b'';d=b'compose_config_failed'",
             "if p['redact_keys'] is not None and r.returncode==0:",
             " z=json.loads(o);z=[z] if isinstance(z,dict) else z",
@@ -3764,7 +4072,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  x.get('Config',{}).pop('Env',None)",
             " o=json.dumps(z[0] if len(z)==1 else z,separators=(',',':')).encode()",
             "if p['redact_keys'] is not None and r.returncode!=0:o=b'';d=b'inspect_failed'",
-            "public_v2=bool(s and s.get('kind') in ('compose_snapshot_v2','compose_observe_v2') and r.returncode==0)",
+            "public_v2=bool(s and s.get('kind') in ('compose_prepare_v2','compose_snapshot_v2','compose_observe_v2') and r.returncode==0)",
             "for x in sorted({str(v).encode() for v in list(p['redact'])+vals if v not in (None,'')},key=len,reverse=True):",
             " if not public_v2:o=o.replace(x,b'[redacted]')",
             " d=d.replace(x,b'[redacted]')",
@@ -4125,14 +4433,16 @@ def cmd_host(cfg, args) -> None:
             "--project-dir": getattr(args, "project_dir", None),
             "--environment": getattr(args, "environment", None),
             "--remote": getattr(args, "remote", None),
-            "--request-id": getattr(args, "request_id", None),
         }
+        if getattr(args, "image_action", None) != "provision":
+            required["--request-id"] = getattr(args, "request_id", None)
         missing = [name for name, value in required.items()
                    if not isinstance(value, str) or not value.strip()]
         if getattr(args, "image_action", None) not in {
-                "activate", "adopt", "rollback", "recover"}:
+                "provision", "activate", "adopt", "rollback", "recover"}:
             missing.append("image action")
-        if getattr(args, "expected_generation", None) is None:
+        if getattr(args, "image_action", None) != "provision" \
+                and getattr(args, "expected_generation", None) is None:
             missing.append("--expected-generation")
         if missing:
             die("host image requires explicit " + ", ".join(missing) +
@@ -4182,6 +4492,9 @@ def cmd_host(cfg, args) -> None:
     if args.action == "image":
         if not args.remote:
             die("--remote is required for host image actions")
+        if getattr(args, "image_action", None) == "provision":
+            _cmd_host_image_provision(cfg, validated, args)
+            return
         _cmd_host_image(validated, args)
         return
     if args.action == "validate":

@@ -193,6 +193,55 @@ class RegisteredRemoteActivationTransport:
                 "runtime_epoch": epoch["runtime_epoch"],
                 "configuration_digest": render_digest}
 
+    def prepare_compose_snapshot_v2(self, *, compose_files: tuple[str, ...],
+            project_name: str, selected_services: tuple[str, ...],
+            service_image_bindings: dict[str, str],
+            environment_bindings: dict[str, str], target: dict[str, str],
+            snapshot_id: str, provider_revision: str) -> str:
+        """Identify one registered private render through the target HMAC path."""
+        if (type(target) is not dict or set(target) != {
+                "machine_identity", "target_identity", "daemon_identity"}
+                or type(snapshot_id) is not str or not snapshot_id.startswith("compose-snapshot/")
+                or type(provider_revision) is not str or not provider_revision):
+            raise RemoteActivationError("topology_mismatch")
+        images = {self._service(name): self._image(image)
+                  for name, image in service_image_bindings.items()}
+        if set(images) != set(selected_services):
+            raise RemoteActivationError("topology_mismatch")
+        environment = {}
+        for variable, image in environment_bindings.items():
+            if type(variable) is not str or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", variable) is None \
+                    or image not in images.values():
+                raise RemoteActivationError("topology_mismatch")
+            environment[variable] = image
+        argv = ["docker", "compose"]
+        for path in compose_files: argv.extend(("--file", path))
+        directory = os.path.dirname(os.path.abspath(compose_files[0]))
+        argv.extend(("--project-directory", directory, "--project-name",
+                     self._service(project_name), "config", "--format", "json"))
+        source = {"kind": "compose_prepare_v2", "snapshot_id": snapshot_id,
+                  "provider_revision": provider_revision, "target": target}
+        result = self._invoke(tuple(argv), timeout_seconds=60, environment=environment,
+                              private_environment_source=source)
+        try: rendered = json.loads(result["stdout"])
+        except (TypeError, json.JSONDecodeError):
+            raise RemoteActivationError("topology_mismatch") from None
+        services = rendered.get("services") if isinstance(rendered, dict) else None
+        digest = rendered.get("x-sandbox-configuration-digest") \
+            if isinstance(rendered, dict) else None
+        if (result["returncode"] != 0 or result["terminated"] is not True
+                or type(services) is not dict or set(services) != set(selected_services)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest or "") is None):
+            raise RemoteActivationError("topology_mismatch")
+        for name in selected_services:
+            row = services.get(name)
+            if type(row) is not dict or row.get("image") != images[name] \
+                    or row.get("build") is not None \
+                    or row.get("pull_policy") not in {None, "never"} \
+                    or row.get("platform") not in {None, "linux/amd64"}:
+                raise RemoteActivationError("topology_mismatch")
+        return digest
+
     def _observed_target(self, runtime_epoch: str) -> dict:
         if not callable(self._target_identity):
             raise RemoteActivationError("runtime_mismatch")

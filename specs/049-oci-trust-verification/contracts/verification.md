@@ -57,3 +57,11 @@ Stable classes include `input_invalid`, `input_too_large`, `authority_substituti
 Verification has no credential, filesystem, network, Docker, subprocess, remote,
 clock, randomness, or persistence interface. Success and refusal both perform zero
 effects.
+
+## Supported policy provisioning
+
+`host image provision --provision-phase machine-policy --confirm` derives selector
+`sha256(remote NUL project NUL environment)`, pins receipt workflow/source/platform and
+all image digests, and requires complete topology/binding inputs. It installs owner-only
+`runtime/hosting/image-verification/policies/<selector>.json` plus the command-generated
+public activation companion. Handwritten authority and private signing-key paths refuse.

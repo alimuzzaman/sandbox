@@ -16,3 +16,11 @@ Machine-owned closed policy binds:
 
 Project/caller values may not supply or widen these fields. Any mismatch refuses before
 credential resolution/helper launch.
+
+## Supported bundle provisioning
+
+`host image provision --provision-phase stage-bundle --confirm` accepts an exact verified
+plan, expected stage generation, registered `SOURCE/KEY`, and finite expiry. It performs
+authenticated identity/helper/daemon observation, derives owner from registered policy,
+and installs `runtime/hosting/image-staging/policies/<selector>.json` mode `0600`. It does
+not contact the registry or return source bytes, resolved credentials, or config.

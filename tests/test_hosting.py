@@ -101,6 +101,70 @@ def _clean_source_identity():
     return "sha256:" + digest.hexdigest()
 
 
+def _run_host_observer_fixture(services, rows, inspections, *, deadline=10,
+                               inspect_delay=0):
+    """Run the generated observer against bounded fake Compose/Docker CLIs."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        fixture = root / "fixture.json"
+        counter = root / "inspect-count"
+        fixture.write_text(json.dumps({
+            "services": services, "rows": rows, "inspections": inspections,
+            "inspect_delay": inspect_delay, "counter": str(counter),
+        }))
+        compose = root / "compose.py"
+        compose.write_text(
+            "import json,sys\n"
+            "data=json.load(open(sys.argv[1]))\n"
+            "args=sys.argv[2:]\n"
+            "if 'config' in args and '--services' in args:\n"
+            " print('\\n'.join(data['services']))\n"
+            "elif 'ps' in args:\n"
+            " print(json.dumps(data['rows'],separators=(',',':')))\n"
+            "elif 'images' not in args:\n"
+            " raise SystemExit(2)\n"
+        )
+        docker = root / "docker"
+        docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,pathlib,sys,time\n"
+            f"data=json.load(open({str(fixture)!r}))\n"
+            "if sys.argv[1]=='info': print('test-engine');raise SystemExit\n"
+            "if sys.argv[1]!='inspect': raise SystemExit(2)\n"
+            "counter=pathlib.Path(data['counter'])\n"
+            "counter.write_text(str(int(counter.read_text() or '0')+1) "
+            "if counter.exists() else '1')\n"
+            "time.sleep(data['inspect_delay'])\n"
+            "for ident in sys.argv[4:]:\n"
+            " item=data['inspections'].get(ident)\n"
+            " if isinstance(item,str): print(item)\n"
+            " elif isinstance(item,dict):\n"
+            "  selected=[value for value in item.get('environment',[]) "
+            "if isinstance(value,str) and value.partition('=')[0] "
+            "== 'LENZORA_SOURCE_REVISION']\n"
+            "  print(json.dumps(ident)+'\\t'+json.dumps(item.get('service'))+"
+            "''.join('\\t'+json.dumps(value) "
+            "for value in selected))\n"
+            " else: print('null')\n"
+        )
+        docker.chmod(0o755)
+        prefix = shlex.join([sys.executable, str(compose), str(fixture)])
+        command = hosting_cmd._host_observation_command(
+            prefix, services, ["LENZORA_SOURCE_REVISION"], deadline,
+            source_dir=str(ROOT),
+        )
+        environment = dict(os.environ)
+        environment["PATH"] = str(root) + os.pathsep + environment.get("PATH", os.defpath)
+        started = time.monotonic()
+        result = subprocess.run(
+            shlex.split(command), capture_output=True, text=True,
+            check=False, env=environment, timeout=deadline + 3,
+        )
+        elapsed = time.monotonic() - started
+        return json.loads(result.stdout), (
+            int(counter.read_text()) if counter.exists() else 0), elapsed
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -1471,6 +1535,137 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("remaining<=0", program)
         self.assertIn("subprocess.Popen", program)
         self.assertNotIn("capture_output=True", program)
+
+    def test_observer_batches_many_service_revisions_in_one_inspect_phase(self):
+        revision = "a" * 40
+        services = [f"service-{index}" for index in range(16)]
+        rows = [
+            {"Service": service, "ID": f"{index + 1:064x}",
+             "State": "running", "Health": "healthy"}
+            for index, service in enumerate(services)
+        ]
+        secret = "must-not-enter-observer-receipt"
+        inspections = {
+            row["ID"]: {
+                "service": row["Service"],
+                "environment": [
+                    f"UNRELATED_SECRET={secret}",
+                    f"LENZORA_SOURCE_REVISION={revision}",
+                ],
+            }
+            for row in reversed(rows)
+        }
+
+        receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+            services, rows, inspections,
+        )
+
+        self.assertTrue(receipt["complete"])
+        self.assertEqual(inspect_count, 1)
+        self.assertEqual(
+            receipt["revision_checks"],
+            [{"service": service, "key": "LENZORA_SOURCE_REVISION",
+              "observed": revision} for service in services],
+        )
+        revision_phases = [
+            phase for phase in receipt["phases"]
+            if phase["phase"] == "source_revisions"
+        ]
+        self.assertEqual(len(revision_phases), 1)
+        self.assertNotIn(secret, json.dumps(receipt))
+        self.assertNotIn("UNRELATED_SECRET", json.dumps(receipt))
+
+    def test_observer_revision_batch_obeys_the_single_total_deadline(self):
+        service = "web"
+        ident = "1" * 64
+        receipt, inspect_count, elapsed = _run_host_observer_fixture(
+            [service],
+            [{"Service": service, "ID": ident,
+              "State": "running", "Health": "healthy"}],
+            {ident: {"service": service,
+                     "environment": ["LENZORA_SOURCE_REVISION=" + "a" * 40]}},
+            deadline=2, inspect_delay=5,
+        )
+
+        self.assertFalse(receipt["complete"])
+        self.assertEqual(inspect_count, 1)
+        self.assertLess(elapsed, 4)
+        self.assertEqual(receipt["revision_checks"], [{
+            "service": service, "key": "LENZORA_SOURCE_REVISION",
+            "observed": None,
+        }])
+        self.assertEqual(
+            [phase["state"] for phase in receipt["phases"]
+             if phase["phase"] == "source_revisions"],
+            ["timeout"],
+        )
+
+    def test_observer_revision_batch_refuses_inexact_container_evidence(self):
+        revision = "b" * 40
+        cases = {
+            "missing": (
+                [{"Service": "web", "ID": "1" * 64,
+                  "State": "running", "Health": "healthy"}],
+                {"1" * 64: {"service": "web", "environment": []}},
+            ),
+            "duplicate": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "web", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "unexpected": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "intruder", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "intruder", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "swapped_identity": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "worker", "ID": "2" * 64}],
+                {"1" * 64: {"service": "worker", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "malformed": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "worker", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: "not-json"},
+            ),
+        }
+        expected = [
+            {"service": service, "key": "LENZORA_SOURCE_REVISION",
+             "observed": None}
+            for service in ("web", "worker")
+        ]
+        for label, (rows, inspections) in cases.items():
+            with self.subTest(label=label):
+                receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+                    ["web", "worker"], rows, inspections,
+                )
+                self.assertEqual(receipt["revision_checks"], expected)
+                self.assertNotIn(revision, json.dumps(receipt))
+                self.assertLessEqual(inspect_count, 1)
+
+    def test_observer_revision_batch_drops_malformed_value_without_leaking_it(self):
+        secret = "token-like-value-that-must-not-survive"
+        ident = "1" * 64
+        receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+            ["web"], [{"Service": "web", "ID": ident}],
+            {ident: {"service": "web", "environment": [
+                "LENZORA_SOURCE_REVISION=" + secret]}},
+        )
+
+        self.assertEqual(inspect_count, 1)
+        self.assertEqual(receipt["revision_checks"][0]["observed"], None)
+        self.assertNotIn(secret, json.dumps(receipt))
 
     def test_observer_binds_remote_git_and_every_declared_compose_file_in_epoch(self):
         paths = ("/src/compose.yml", "/src/worker.yml", "/run/override.yml")

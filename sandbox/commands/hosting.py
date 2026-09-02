@@ -44,7 +44,10 @@ _HOST_SYNC_WATCH_EXCLUDES = frozenset({
     "storage", "__pycache__", ".venv", "venv",
 })
 
-_HOST_OBSERVATION_MAX_SERVICES = 16
+# Hosted applications may declare a primary service plus a larger worker set.
+# Keep the observer bounded, but allow the current production topology to be
+# inspected instead of failing before any read-only evidence is collected.
+_HOST_OBSERVATION_MAX_SERVICES = 32
 _HOST_OBSERVATION_MAX_KEYS = 16
 _HOST_OBSERVATION_MAX_ROWS = 64
 _HOST_OBSERVATION_MAX_CONFIGURED_SERVICES = 64

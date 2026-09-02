@@ -1647,6 +1647,13 @@ class TestHostingManifest(unittest.TestCase):
         )
 
     def test_observer_rejects_service_and_key_fanout_above_bounds(self):
+        command = hosting_cmd._host_observation_command(
+            "true",
+            [f"service-{index}" for index in range(17)],
+            [], 60,
+        )
+        self.assertTrue(command.startswith("python3 -c "))
+
         with self.assertRaisesRegex(ValueError, "service limit"):
             hosting_cmd._host_observation_command(
                 "docker compose",

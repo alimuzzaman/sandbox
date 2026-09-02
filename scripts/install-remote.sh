@@ -214,7 +214,11 @@ try:
             os.fsync(fd)
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         info = os.fstat(child)
-        if owned and (info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) & 0o022):
+        # The pre-existing runtime directory may retain the user's legacy
+        # 0775 mode.  The helper namespace itself is the isolation boundary:
+        # every directory below `runtime/helpers` must be owner-only.
+        protected = owned and index > len(home_parts)
+        if owned and (info.st_uid != owner_uid or (protected and stat.S_IMODE(info.st_mode) & 0o077)):
             raise SystemExit("staging helper directory ownership or mode is unsafe")
         os.close(fd); fd = child
 finally:

@@ -340,6 +340,7 @@ class TestValidation(unittest.TestCase):
     def test_remote_install_staging_helper_uses_provisioning_owner(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()
         self.assertIn("owner_uid = os.geteuid()", script)
+        self.assertIn("index > len(home_parts)", script)
         self.assertIn("info.st_uid != owner_uid", script)
 
     def test_remote_install_upgrades_cloudflared_for_token_file_connectors(self):

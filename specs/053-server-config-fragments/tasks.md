@@ -1,6 +1,6 @@
 # Tasks: Instance-Scoped Server Configuration Fragments
 
-**Input**: Design documents from `/specs/049-server-config-fragments/`
+**Input**: Design documents from `/specs/053-server-config-fragments/`
 
 **Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`,
 `contracts/`, and `quickstart.md`
@@ -30,9 +30,9 @@ by checking off a source task alone.
 **Purpose**: Start from the current accepted source and prevent Feature 047/048 CLI,
 hosting, and recovery work from being overwritten.
 
-- [ ] T001 Integrate the current non-force `origin/latest` only after approved Features 047 and 048 are present, record exact base/feature SHAs and a clean status in `specs/049-server-config-fragments/implementation-evidence.md`, and stop on unresolved overlap rather than implementing on stale `sandbox/cli.py`
-- [ ] T002 Audit the post-integration ownership of `sandbox/cli.py`, `sandbox/commands/manifest.py`, `sandbox/commands/net.py`, `sandbox/hosting/`, `tests/test_cli.py`, `tests/test_modularity.py`, and `tests/test_hosting.py`, then record the conflict-resolution map in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T003 Run the read-only Spec Kit consistency analysis across `specs/049-server-config-fragments/spec.md`, `specs/049-server-config-fragments/plan.md`, and `specs/049-server-config-fragments/tasks.md`, resolving any blocking artifact defect before source work and recording the verdict in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T001 Integrate the current non-force `origin/latest` only after approved Features 047 and 048 are present, record exact base/feature SHAs and a clean status in `specs/053-server-config-fragments/implementation-evidence.md`, and stop on unresolved overlap rather than implementing on stale `sandbox/cli.py`
+- [ ] T002 Audit the post-integration ownership of `sandbox/cli.py`, `sandbox/commands/manifest.py`, `sandbox/commands/net.py`, `sandbox/hosting/`, `tests/test_cli.py`, `tests/test_modularity.py`, and `tests/test_hosting.py`, then record the conflict-resolution map in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T003 Run the read-only Spec Kit consistency analysis across `specs/053-server-config-fragments/spec.md`, `specs/053-server-config-fragments/plan.md`, and `specs/053-server-config-fragments/tasks.md`, resolving any blocking artifact defect before source work and recording the verdict in `specs/053-server-config-fragments/implementation-evidence.md`
 - [ ] T004 [P] Create non-secret nginx/OpenLiteSpeed valid, invalid, combined-conflict, oversized-boundary, and marker fixtures under `tests/fixtures/server_config/README.md` and `tests/fixtures/server_config/` without copying production credentials, runtime files, or plugin state
 
 **Checkpoint**: Exact integration base is known, Features 047/048 are preserved, and
@@ -54,7 +54,7 @@ these foundations pass.
 - [ ] T007 [P] Write failing owner-only repository, safe-open, atomic generation/receipt/journal, immutable-generation, corruption, and no-cross-incarnation tests in `tests/test_server_config_repository.py`
 - [ ] T008 [P] Write failing duplicate-free nginx/litespeed adapter-manifest and unsupported apache/herd registry tests in `tests/test_server_config_adapters.py`
 - [ ] T009 [P] Write failing module-boundary tests forbidding new `sandbox_core.py`, raw `COMMANDS`, Hermes facade, MCP helper, registry-JSON, and state-JSON consumers in `tests/test_architecture_boundaries.py` and `tests/test_modularity.py`
-- [ ] T010 Run T005-T009 and record the expected missing-module/behavior failures, with no unexpected passing contract, in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T010 Run T005-T009 and record the expected missing-module/behavior failures, with no unexpected passing contract, in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Foundation implementation
 
@@ -65,7 +65,7 @@ these foundations pass.
 - [ ] T015 Implement the typed adapter protocol and deterministic nginx/litespeed-only registry in `sandbox/server_config/adapters/base.py` and `sandbox/server_config/adapters/manifest.py`
 - [ ] T016 Implement public typed exports and dependency-only composition without policy duplication in `sandbox/server_config/__init__.py` and `sandbox/server_config/context.py`
 - [ ] T017 Add safe shared test builders, clocks, runtime observations, fragment sets, and adapter fakes in `tests/server_config_fixtures.py` without inherited environments or live runtime access
-- [ ] T018 Run `tests/test_server_config_models.py`, `tests/test_server_config_policy.py`, `tests/test_server_config_repository.py`, `tests/test_server_config_adapters.py`, `tests/test_architecture_boundaries.py`, and `tests/test_modularity.py`; make the foundational RED tests green without weakening assertions and record results in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T018 Run `tests/test_server_config_models.py`, `tests/test_server_config_policy.py`, `tests/test_server_config_repository.py`, `tests/test_server_config_adapters.py`, `tests/test_architecture_boundaries.py`, and `tests/test_modularity.py`; make the foundational RED tests green without weakening assertions and record results in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Common authority, exact identities, safe bytes, durable storage, and the
 adapter manifest exist; no server is yet activated.
@@ -89,7 +89,7 @@ nginx hit header without PHP and PHP fallback after revert.
 - [ ] T021 [P] [US1] Write failing xSpeed-compatible server-context tokenizer, deny-by-default directive/context, complete-candidate renderer, protected-base-route, duplicate marker/location/variable, and inclusion tests in `tests/test_server_config_nginx.py`
 - [ ] T022 [P] [US1] Write failing exact-active-image, network-none synthetic validator, target-only nginx test/reload, pre-activation identity recheck, effective-generation, and unknown-not-ready tests in `tests/test_server_config_nginx_runtime.py`
 - [ ] T023 [P] [US1] Write failing instance-specific nginx mount, existing-base-vhost include, unattached-legacy refusal, metadata read-only pre-dispatch, and zero-other-instance-write tests in `tests/test_server_config_lifecycle.py` and `tests/test_server_config_isolation.py`
-- [ ] T024 [US1] Run T019-T023 and record expected failures for every CLI and nginx adapter contract before editing production command/service/adapter files in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T024 [US1] Run T019-T023 and record expected failures for every CLI and nginx adapter contract before editing production command/service/adapter files in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 1
 
@@ -102,7 +102,7 @@ nginx hit header without PHP and PHP fallback after revert.
 - [ ] T031 [US1] Add the fixed per-incarnation read-only nginx mount and adapter-owned include without changing Docker/Caddy routing in `sandbox/core/_docker.py` and `config/nginx-sandbox.conf`
 - [ ] T032 [US1] Compose the resolved WordPress instance, repository, runtime gateway, clock, redaction boundary, and nginx adapter through typed dependencies in `sandbox/application/context.py` and `sandbox/server_config/context.py`
 - [ ] T033 [US1] Make config list and metadata show skip legacy migration/Compose/environment writers while mutations retain normal target resolution and capability checks in `sandbox/commands/server.py` and `sandbox/cli.py`
-- [ ] T034 [US1] Run `tests/test_server_config_cli.py`, `tests/test_server_config_service.py`, `tests/test_server_config_nginx.py`, `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_lifecycle.py`, `tests/test_server_config_isolation.py`, `tests/test_cli.py`, and `tests/test_clean_url_default_policy.py`; record the green story checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T034 [US1] Run `tests/test_server_config_cli.py`, `tests/test_server_config_service.py`, `tests/test_server_config_nginx.py`, `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_lifecycle.py`, `tests/test_server_config_isolation.py`, `tests/test_cli.py`, and `tests/test_clean_url_default_policy.py`; record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: nginx behavior is implemented and locally contract-tested. This is a
 technical MVP demonstration, not releasable proof until unsafe-input, recovery, isolation,
@@ -126,7 +126,7 @@ and canary behavior, activate/restart only the target, and revert to origin/PHP 
 - [ ] T036 [P] [US2] Write failing exact-image, `--network none`, read-only root, bounded tmpfs, no-live-volume/data/secret/environment, loopback canary, cleanup, and capability-unavailable tests in `tests/test_server_config_openlitespeed_runtime.py`
 - [ ] T037 [P] [US2] Write failing target-only OLS generation selection/restart, runtime/image/mount recheck, effective-vhost identity, readiness, and rollback-adapter operation tests in `tests/test_server_config_openlitespeed_activation.py`
 - [ ] T038 [P] [US2] Write failing OLS apply/list/show/revert and complete-set service integration tests in `tests/test_server_config_service_openlitespeed.py`
-- [ ] T039 [US2] Run T035-T038 and record every expected OLS contract failure before editing `sandbox/server_config/adapters/openlitespeed.py` in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T039 [US2] Run T035-T038 and record every expected OLS contract failure before editing `sandbox/server_config/adapters/openlitespeed.py` in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 2
 
@@ -135,7 +135,7 @@ and canary behavior, activate/restart only the target, and revert to origin/PHP 
 - [ ] T042 [US2] Implement target-only OLS generation selection, graceful restart/reload, effective-vhost observation, and unknown-not-ready proof in `sandbox/server_config/adapters/openlitespeed.py`
 - [ ] T043 [US2] Add the fixed per-incarnation OLS vhost mount/inclusion without overwriting plugin/WordPress `.htaccess` or host-global config in `sandbox/core/_docker.py` and `sandbox/core/_provision.py`
 - [ ] T044 [US2] Compose and expose only the registered `litespeed` adapter while keeping apache/herd explicit refusals in `sandbox/server_config/adapters/manifest.py`, `sandbox/server_config/context.py`, and `sandbox/application/context.py`
-- [ ] T045 [US2] Run all four OLS suites plus `tests/test_server_config_service.py`, `tests/test_lifecycle.py`, and `tests/test_clean_url_default_policy.py`; record the green story checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T045 [US2] Run all four OLS suites plus `tests/test_server_config_service.py`, `tests/test_lifecycle.py`, and `tests/test_clean_url_default_policy.py`; record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Both minimum adapters satisfy local contracts; live OLS cache/purge proof
 is still required.
@@ -158,7 +158,7 @@ set, bounded reason, and no content/path leak.
 - [ ] T047 [US3] Extend `tests/test_server_config_policy.py` with failing listener/vhost/include/proxy/upstream/process/module/program/TLS/DNS/Caddy/autologin/health/login/outside-docroot/header/log/unknown-directive and combined-conflict cases for both adapters
 - [ ] T048 [US3] Extend `tests/test_server_config_cli.py` with failing wrong-server, unsupported apache/herd, legacy unattached mount, bounded basename-only error, raw-content/native-stderr/path/secret omission, and `mutated:false` refusal cases using synthetic subprocess environments
 - [ ] T049 [US3] Extend `tests/test_server_config_nginx.py`, `tests/test_server_config_openlitespeed.py`, and `tests/test_server_config_isolation.py` with failing invalid-native/ignored-rule refusal, zero validator-to-live leakage, zero reload, unchanged target/control set/runtime/readiness cases
-- [ ] T050 [US3] Run T046-T049 and record the newly failing adversarial assertions before policy/input/adapter hardening in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T050 [US3] Run T046-T049 and record the newly failing adversarial assertions before policy/input/adapter hardening in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 3
 
@@ -166,7 +166,7 @@ set, bounded reason, and no content/path leak.
 - [ ] T052 [US3] Complete common deny-by-default authority, high-confidence name/content secret classification with fail-closed false-positive behavior, content-free refusal, protected-route/path/header/log rules, and deterministic combined-set conflict refusal in `sandbox/server_config/policy.py`
 - [ ] T053 [US3] Complete native unknown/context/server mismatch and ignored-directive refusal before live activation in `sandbox/server_config/adapters/nginx.py` and `sandbox/server_config/adapters/openlitespeed.py`
 - [ ] T054 [US3] Enforce bounded content-free refusals, phase evidence, structured output, and zero-reload/zero-commit semantics in `sandbox/commands/server.py` and `sandbox/server_config/service.py`
-- [ ] T055 [US3] Run the full adversarial matrix plus `tests/test_secret_leaks.py` and `tests/test_clean_url_default_policy.py`; record the green refusal checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T055 [US3] Run the full adversarial matrix plus `tests/test_secret_leaks.py` and `tests/test_clean_url_default_policy.py`; record the green refusal checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Unsafe input is refused before activation. Syntax-invalid refusal is not
 misreported as automatic rollback.
@@ -189,7 +189,7 @@ selection, bounded concurrency/deadlines, and write-free degraded inspection.
 - [ ] T058 [P] [US4] Write failing post-validation activation/reload/readiness fault, exact-prior restore, one recovery activation, rolled-back nonzero result, rollback-timeout, and recovery-needed tests in `tests/test_server_config_rollback.py`
 - [ ] T059 [P] [US4] Write failing per-incarnation lock contention, re-read-after-wait, whole-operation/phase deadline, cleanup timeout, and no duplicate retry tests in `tests/test_server_config_concurrency.py`
 - [ ] T060 [P] [US4] Write failing stopped/unknown/degraded/recovery-needed list/show projection and zero-persistent-write tests in `tests/test_server_config_inspection.py`
-- [ ] T061 [US4] Run T056-T060 and record the intended recovery/rollback/concurrency failures before changing journal/service behavior in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T061 [US4] Run T056-T060 and record the intended recovery/rollback/concurrency failures before changing journal/service behavior in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 4
 
@@ -199,7 +199,7 @@ selection, bounded concurrency/deadlines, and write-free degraded inspection.
 - [ ] T065 [US4] Enforce one monotonic 180-second operation deadline, 60-second phase/rollback ceilings, bounded lock wait, and timeout propagation through `sandbox/server_config/service.py`, `sandbox/server_config/repository.py`, and `sandbox/server_config/adapters/base.py`
 - [ ] T066 [US4] Implement read-only healthy/stopped/degraded/recovery-needed/unsupported/absent projection without repair, pruning, timestamp writes, or lock-file creation in `sandbox/server_config/service.py` and `sandbox/server_config/repository.py`
 - [ ] T067 [US4] Add test-only injected activation/readiness/rollback fault adapters that are never registered or reachable from production CLI/environment in `tests/server_config_fixtures.py` and `tests/test_server_config_rollback.py`
-- [ ] T068 [US4] Run all transaction/recovery/rollback/concurrency/inspection suites plus service/adapter regressions and record the green recovery checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T068 [US4] Run all transaction/recovery/rollback/concurrency/inspection suites plus service/adapter regressions and record the green recovery checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Post-validation failure restores exactly once or remains visibly blocked;
 read-only inspection never repairs.
@@ -222,7 +222,7 @@ marker, and readiness of the control before/after every operation.
 - [ ] T071 [P] [US5] Write failing active/unresolved/degraded/recovery-needed server-switch and ordinary-delete refusal plus exact confirmed-state deletion tests in `tests/test_server_config_lifecycle.py`
 - [ ] T072 [P] [US5] Write failing stop/stopped/start, ensure/apply/reconcile/relocation, committed-generation restoration, image/mount drift, and readiness-before-dependent-use tests in `tests/test_server_config_restart.py`
 - [ ] T073 [P] [US5] Write failing target/control before-after evidence comparison tests for apply/replace/revert/refusal/rollback/recovery in `tests/test_server_config_control_instance.py`
-- [ ] T074 [US5] Run T069-T073 and record the expected identity/lifecycle/isolation failures before changing instance and lifecycle code in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T074 [US5] Run T069-T073 and record the expected identity/lifecycle/isolation failures before changing instance and lifecycle code in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 5
 
@@ -233,7 +233,7 @@ marker, and readiness of the control before/after every operation.
 - [ ] T079 [US5] Gate managed deletion, bind explicit fragment-state confirmation to exact incarnation/set/transaction identity, and disassociate before safe cleanup in `sandbox/commands/instances_cmd.py`, `sandbox/core/_instances.py`, and `sandbox/server_config/service.py`
 - [ ] T080 [US5] Preserve state across ordinary stop/start while requiring exact server/image/mount/generation readiness reconciliation in `sandbox/commands/lifecycle.py` and `sandbox/server_config/service.py`
 - [ ] T081 [US5] Return bounded target/control identity and readiness evidence without raw container/host details in `sandbox/server_config/models.py`, `sandbox/server_config/service.py`, and `sandbox/commands/server.py`
-- [ ] T082 [US5] Run every identity/isolation/lifecycle/control test plus `tests/test_lifecycle.py`, `tests/test_cli.py`, `tests/test_clean_url_default_policy.py`, and instance deletion regressions; record the green story checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T082 [US5] Run every identity/isolation/lifecycle/control test plus `tests/test_lifecycle.py`, `tests/test_cli.py`, `tests/test_clean_url_default_policy.py`, and instance deletion regressions; record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: No fragment can cross an incarnation/server/instance boundary, and
 lifecycle mutations fail before writes when state is unsafe.
@@ -254,14 +254,14 @@ receive exact bytes.
 - [ ] T083 [P] [US6] Write failing exact `show --content` stdout-only, no-added-newline/progress/heading, missing/degraded pre-emission refusal, and `--content --json` incompatibility tests in `tests/test_server_config_content_show.py`
 - [ ] T084 [P] [US6] Write failing owner-only regular destination, safe-parent, symlink/special/non-owner/type-swap, atomic replacement, basename-only JSON, and no-state-write tests in `tests/test_server_config_content_export.py`
 - [ ] T085 [P] [US6] Write failing recognizable-marker leak scans across list/default show/JSON/errors/phase evidence/log captures/native failures and synthetic subprocess environments in `tests/test_server_config_content_leaks.py`
-- [ ] T086 [US6] Run T083-T085 and record every expected content-output/leak failure before modifying exact-content behavior in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T086 [US6] Run T083-T085 and record every expected content-output/leak failure before modifying exact-content behavior in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 6
 
 - [ ] T087 [P] [US6] Implement healthy-committed-fragment exact reads and safe owner-only atomic export with no unproven candidate disclosure in `sandbox/server_config/input.py` and `sandbox/server_config/repository.py`
 - [ ] T088 [US6] Implement `show --content` stdout-only mode, JSON incompatibility, `--output` result metadata, and pre-emission error ordering in `sandbox/commands/server.py`
 - [ ] T089 [US6] Enforce content-free logs/exceptions/phase evidence/native diagnostics and safe basename-only output across `sandbox/server_config/service.py`, `sandbox/server_config/adapters/nginx.py`, and `sandbox/server_config/adapters/openlitespeed.py`
-- [ ] T090 [US6] Run all content tests plus CLI/policy/secret-leak regressions and record the green story checkpoint in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T090 [US6] Run all content tests plus CLI/policy/secret-leak regressions and record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Exact bytes appear only where explicitly requested; metadata inspection
 remains read-only.
@@ -278,30 +278,30 @@ control instance, obtain human security approval, then close feedback truthfully
 - [ ] T091 [P] Document public commands, bounds, server support, phases/outcomes, no-op/rollback/recovery meanings, legacy mount remedy, lifecycle gates, and unsupported Apache/Herd in `docs/sandbox-config-reference.md`
 - [ ] T092 [P] Document the CLI-first safe apply/inspect/revert workflow, exact-content warning, no raw Docker/SSH route, and live evidence requirements in `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md`
 - [ ] T093 [P] Update feature discoverability, security boundary, compatibility, and no-MCP/no-host-global scope in `README.md` and `CLAUDE.md` without weakening `docs/clean-url-default.md`
-- [ ] T094 Record exact public CLI/schema/policy/adapter revisions, changed files, test matrix, known unsupported cases, and evidence placeholders in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T095 Run every Feature 049 focused suite from `specs/049-server-config-fragments/quickstart.md`, preserve RED-before-green evidence, and record exact counts/durations in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T096 Run Feature 047/048 hosting/recovery, command manifest, CLI, lifecycle, architecture, modularity, secret, and clean-URL regression suites named in `specs/049-server-config-fragments/plan.md`; fix only Feature 049 regressions and record results in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T097 Run `py_compile` on every changed Python file, `git diff --check`, package/release-prune checks excluding `.specify/`, and a secret/content marker scan; record the clean static gate in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T098 Verify command help/JSON/docs/error-code parity and public runtime-revision evidence across `sandbox/commands/server.py`, `docs/sandbox-config-reference.md`, `skills/sandbox-cli/SKILL.md`, and `specs/049-server-config-fragments/contracts/cli.md`
-- [ ] T099 Refresh and integrate current `origin/latest` by normal non-force history after local gates, re-resolve Feature 047/048 overlaps without restoring legacy parser behavior, rerun T095-T098, and record the exact final candidate SHA in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T094 Record exact public CLI/schema/policy/adapter revisions, changed files, test matrix, known unsupported cases, and evidence placeholders in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T095 Run every Feature 053 focused suite from `specs/053-server-config-fragments/quickstart.md`, preserve RED-before-green evidence, and record exact counts/durations in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T096 Run Feature 047/048 hosting/recovery, command manifest, CLI, lifecycle, architecture, modularity, secret, and clean-URL regression suites named in `specs/053-server-config-fragments/plan.md`; fix only Feature 053 regressions and record results in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T097 Run `py_compile` on every changed Python file, `git diff --check`, package/release-prune checks excluding `.specify/`, and a secret/content marker scan; record the clean static gate in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T098 Verify command help/JSON/docs/error-code parity and public runtime-revision evidence across `sandbox/commands/server.py`, `docs/sandbox-config-reference.md`, `skills/sandbox-cli/SKILL.md`, and `specs/053-server-config-fragments/contracts/cli.md`
+- [ ] T099 Refresh and integrate current `origin/latest` by normal non-force history after local gates, re-resolve Feature 047/048 overlaps without restoring legacy parser behavior, rerun T095-T098, and record the exact final candidate SHA in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Human security authorization before live mutation
 
-- [ ] T100 Prepare a content-free security review package covering authority grammar, path/header/log controls, exact-image validators, OLS network/data isolation, argv/environment safety, durable rollback, lifecycle/deletion, content output, and test evidence in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T101 Obtain explicit independent human security approval for the consequential server-config path and authorization for disposable live acceptance, record reviewer/verdict/scope in `specs/049-server-config-fragments/implementation-evidence.md`, and stop before live mutation if approval is absent or conditional blockers remain
+- [ ] T100 Prepare a content-free security review package covering authority grammar, path/header/log controls, exact-image validators, OLS network/data isolation, argv/environment safety, durable rollback, lifecycle/deletion, content output, and test evidence in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T101 Obtain explicit independent human security approval for the consequential server-config path and authorization for disposable live acceptance, record reviewer/verdict/scope in `specs/053-server-config-fragments/implementation-evidence.md`, and stop before live mutation if approval is absent or conditional blockers remain
 
 ### Disposable live acceptance through Sandbox only
 
-- [ ] T102 Using only supported `./sb` and Sandbox tools, create/reconcile disposable nginx target/control and OpenLiteSpeed target/control projects, prove exact Git/installed-runtime/image/incarnation/mount/readiness baselines, and record content-free evidence in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T103 Have a fresh agent use only the published guide and prepared fixture to execute the nginx apply/list/show/warm/server-hit-without-PHP/reapply-no-op/replace/revert/PHP-fallback sequence with no undocumented command or infrastructure access, prove the control instance unchanged after every mutation, require each injected failure to identify its phase and one safe next action, and record SC-001/SC-006/SC-007/SC-011 evidence in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T104 Have a fresh agent use only the published guide and prepared fixture to execute the OpenLiteSpeed origin/PHP/warm/server-hit-without-PHP/plugin-purge/non-hit-with-PHP/rewarm/hit/revert/origin sequence with no undocumented command or infrastructure access, prove exact-image isolated validation and unchanged control, require each injected failure to identify its phase and one safe next action, and record SC-002/SC-006/SC-011 evidence in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T105 Execute both-server invalid/out-of-authority/wrong-server/unsafe-source/oversized refusal, idempotency, read-only inspection, controlled post-validation rollback, rollback-timeout recovery-needed, switch/delete/stop/start/name-reuse, and content-leak acceptance from `specs/049-server-config-fragments/quickstart.md`; record SC-003-SC-010/SC-012 evidence without raw Docker, SSH, curl, or runtime edits in `specs/049-server-config-fragments/implementation-evidence.md`
-- [ ] T106 Reconcile all live/local evidence against FR-001-FR-050 and SC-001-SC-012, mark any unproven item open rather than inferred, and record the complete coverage verdict in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T102 Using only supported `./sb` and Sandbox tools, create/reconcile disposable nginx target/control and OpenLiteSpeed target/control projects, prove exact Git/installed-runtime/image/incarnation/mount/readiness baselines, and record content-free evidence in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T103 Have a fresh agent use only the published guide and prepared fixture to execute the nginx apply/list/show/warm/server-hit-without-PHP/reapply-no-op/replace/revert/PHP-fallback sequence with no undocumented command or infrastructure access, prove the control instance unchanged after every mutation, require each injected failure to identify its phase and one safe next action, and record SC-001/SC-006/SC-007/SC-011 evidence in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T104 Have a fresh agent use only the published guide and prepared fixture to execute the OpenLiteSpeed origin/PHP/warm/server-hit-without-PHP/plugin-purge/non-hit-with-PHP/rewarm/hit/revert/origin sequence with no undocumented command or infrastructure access, prove exact-image isolated validation and unchanged control, require each injected failure to identify its phase and one safe next action, and record SC-002/SC-006/SC-011 evidence in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T105 Execute both-server invalid/out-of-authority/wrong-server/unsafe-source/oversized refusal, idempotency, read-only inspection, controlled post-validation rollback, rollback-timeout recovery-needed, switch/delete/stop/start/name-reuse, and content-leak acceptance from `specs/053-server-config-fragments/quickstart.md`; record SC-003-SC-010/SC-012 evidence without raw Docker, SSH, curl, or runtime edits in `specs/053-server-config-fragments/implementation-evidence.md`
+- [ ] T106 Reconcile all live/local evidence against FR-001-FR-050 and SC-001-SC-012, mark any unproven item open rather than inferred, and record the complete coverage verdict in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Final review and feedback closure
 
-- [ ] T107 Obtain independent final human/security review of the exact final candidate SHA and live evidence, record release/adoption verdict and any required follow-up in `specs/049-server-config-fragments/implementation-evidence.md`, and do not merge/deploy/release while verdict is not approved
-- [ ] T108 After T107 approval only, review feedback `0df918a754a862fb10667b3b0d3f6855` as `verified` with bounded evidence through `./sb feedback review`, retain `80d1ef1465068665f33bf6afe97c4ef3` as the separate already-fixed LiteSpeed bootstrap record, and record the redacted feedback receipts plus final branch/SHA/status in `specs/049-server-config-fragments/implementation-evidence.md`
+- [ ] T107 Obtain independent final human/security review of the exact final candidate SHA and live evidence, record release/adoption verdict and any required follow-up in `specs/053-server-config-fragments/implementation-evidence.md`, and do not merge/deploy/release while verdict is not approved
+- [ ] T108 After T107 approval only, review feedback `0df918a754a862fb10667b3b0d3f6855` as `verified` with bounded evidence through `./sb feedback review`, retain `80d1ef1465068665f33bf6afe97c4ef3` as the separate already-fixed LiteSpeed bootstrap record, and record the redacted feedback receipts plus final branch/SHA/status in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ---
 
@@ -436,7 +436,7 @@ validate it independently at T034.
 
 Do not release the technical MVP. Minimum support promised by the specification requires
 US1-US5, including OpenLiteSpeed, unsafe-input refusal, recovery, and isolation. US6 is P3
-but remains required before declaring the complete Feature 049 scope done because exact
+but remains required before declaring the complete Feature 053 scope done because exact
 content show is part of the accepted public contract.
 
 ### Incremental delivery

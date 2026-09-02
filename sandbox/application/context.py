@@ -799,8 +799,8 @@ def runtime_service(cfg):
     from sandbox.runtimes.incumbent.herd import HerdAdapter
     from sandbox.runtimes.incumbent.valet import ValetAdapter
 
-    def resolve_descriptor(root, label=None):
-        return sc.load_project_config(root, label=label)
+    def resolve_descriptor(root, label=None, config_file=None):
+        return sc.load_project_config(root, label=label, config_file=config_file)
 
     def ensure(request: OperationRequest):
         return core.ensure_instance(
@@ -808,10 +808,14 @@ def runtime_service(cfg):
             request.project_root,
             label=request.label,
             create=bool(request.arguments.get("create", False)),
+            config_file=request.arguments.get("config_file"),
         )
 
     def apply(request: OperationRequest):
-        return core.apply_config(cfg, request.project_root, label=request.label)
+        return core.apply_config(
+            cfg, request.project_root, label=request.label,
+            config_file=request.arguments.get("config_file"),
+        )
 
     def status(request: OperationRequest):
         entry = sc.registry_get(request.project_root, label=request.label)
@@ -1096,9 +1100,12 @@ def execute_project(cfg, execution):
         "exec": "exec", "composer": "exec", "plugin_activation": "exec",
         "phpunit": "test", "durable_job": "exec",
     }[execution.entry_path]
+    arguments = {"execution": execution}
+    if execution.config_file is not None:
+        arguments["config_file"] = execution.config_file
     result = runtime_service(cfg).invoke(OperationRequest(
         execution.project_root, operation, label=execution.label,
-        arguments={"execution": execution},
+        arguments=arguments,
     ))
     if isinstance(result, OperationError):
         return ExecutionResult(False, 126, "blocked", {
@@ -1114,7 +1121,8 @@ def execute_project(cfg, execution):
     })
 
 
-def managed_native_project_selected(project_root: str, *, label: str = "default") -> bool:
+def managed_native_project_selected(project_root: str, *, label: str = "default",
+                                    config_file: str | None = None) -> bool:
     """Read the selected runtime through the application boundary.
 
     Legacy execution callers use this solely to fail closed before dispatching
@@ -1122,18 +1130,25 @@ def managed_native_project_selected(project_root: str, *, label: str = "default"
     """
     import sandbox_core as sc
 
-    config = sc.load_project_config(project_root, label=label)
+    config = (sc.load_project_config(project_root, label=label, config_file=config_file)
+              if config_file is not None else sc.load_project_config(project_root, label=label))
     runtime = config.get("wordpressRuntime", {}) if isinstance(config, dict) else {}
     return runtime.get("mode", "compose") == "managed_native"
 
 
-def managed_native_instance_selected(instance: str) -> tuple[str, str] | None:
+def managed_native_instance_selected(instance: str, *,
+                                     config_file: str | None = None) -> tuple[str, str] | None:
     """Return a managed instance owner, or ``None`` for legacy runtimes."""
     import sandbox_core as sc
 
     owner = sc.registry_find_instance(instance) or {}
     root, label = owner.get("root"), owner.get("label", "default")
-    if not root or not managed_native_project_selected(str(root), label=label):
+    selected = (managed_native_project_selected(
+        str(root), label=label, config_file=config_file,
+    ) if config_file is not None else managed_native_project_selected(
+        str(root), label=label,
+    )) if root else False
+    if not selected:
         return None
     return str(root), label
 

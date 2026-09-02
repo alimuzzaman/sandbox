@@ -2,7 +2,7 @@
 
 **Branch**: `codex/server-config-fragments` | **Date**: 2026-08-31 | **Spec**: [spec.md](spec.md)
 
-**Input**: Feature specification from `/specs/049-server-config-fragments/spec.md`
+**Input**: Feature specification from `/specs/053-server-config-fragments/spec.md`
 
 ## Summary
 
@@ -98,7 +98,7 @@ deployment, release readiness, or Apache support.
 ### Documentation (this feature)
 
 ```text
-specs/049-server-config-fragments/
+specs/053-server-config-fragments/
 ├── plan.md
 ├── research.md
 ├── data-model.md
@@ -229,7 +229,7 @@ resolved; no `NEEDS CLARIFICATION` remains.
 
 - Feature 047 changes `sandbox/cli.py`, `sandbox/commands/manifest.py`, hosting modules,
   modularity tests, docs, and command behavior. Feature 048 also changes `sandbox/cli.py`
-  and adds a separate `sandbox/hosting/` recovery package. Feature 049 must rebase after
+  and adds a separate `sandbox/hosting/` recovery package. Feature 053 must rebase after
   both approved branches land and must not create or import `sandbox.hosting`.
 - Resolve CLI conflicts by retaining Feature 047/048 pre-dispatch, remote, and recovery
   policies first, then add the `server` command-owned policy as one narrow predicate.
@@ -238,7 +238,7 @@ resolved; no `NEEDS CLARIFICATION` remains.
   lifecycle, and server-config focused suites after rebase. A clean textual merge is not
   evidence that parser ownership or pre-dispatch ordering survived.
 - Feature 048's host recovery state is host-scoped and read-only/recovery-oriented.
-  Feature 049 state is local instance-incarnation scoped. They share no repository,
+  Feature 053 state is local instance-incarnation scoped. They share no repository,
   lock, transaction, receipt, deletion rule, or recovery meaning.
 
 ## Verification Strategy

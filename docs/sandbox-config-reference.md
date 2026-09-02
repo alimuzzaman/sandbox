@@ -13,6 +13,53 @@ MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
 
 There is **no central catalog**; each plugin self-describes here.
 
+## Optional immutable OCI project intent
+
+Feature 049 adds one kind-neutral, untrusted project channel. It applies to both
+WordPress and generic Compose descriptors and is absent by default:
+
+```json
+{
+  "hostingImages": {
+    "schema_version": 1,
+    "policy_selector": "production-widget",
+    "declared_services": ["db", "migrate", "web", "worker"],
+    "persistent_services": ["web", "worker"],
+    "one_shot_services": ["migrate"]
+  }
+}
+```
+
+Service arrays are unique, bounded, and normalized into canonical order. The project
+may narrow a named machine policy. It cannot declare policy authority, an image,
+provenance, or the primary service.
+
+`hostingImages` is project-owned and primary-file-only. Sandbox reads it from the
+selected primary `sandbox.config.{json,yml,yaml}` in the project root or selected
+`.config/sandbox` home. User-global configuration, `sandbox.config.override.*`, and
+label-specific files cannot add, inherit, or replace this key. Their copies are ignored.
+When the primary key is absent, the normalized descriptor has no `hostingImages` key.
+
+The matching trusted collection is machine-owned under
+`hosting.images.policies.<policy_selector>`. Each closed policy carries its own
+`authority_id`, positive revision, canonical domain-separated `policy_digest`, target
+scope, approved canonical receipt-payload digest, exact GHCR OCI image-manifest and
+configuration digests, platform, provenance, `not_required` signature mode, primary
+service, and maximum persistent/one-shot partitions. Do not derive the policy or its
+digest from project content. An authorized release process must supply the exact
+receipt/image facts before machine approval.
+Provenance is a closed four-field digest identity: `builder_id`, `workflow_id`,
+`invocation_id`, and `materials_digest` are each exact lowercase `sha256` values;
+`build_identity` is also a digest. Source repository is a canonical lowercase
+owner/repository name with no traversal or dot segments, and source revision is exact
+lowercase 40- or 64-hex. These fields cannot carry paths, bare tokens, authorization or
+API-key shapes, environment values, diagnostics, URLs, or arbitrary annotations.
+Machine normalization issues a private policy token; neither its type nor issuer is
+exported by the public image-trust package.
+
+This configuration only enables pure equality verification. It neither loads a
+credential nor observes, stages, starts, deploys, or proves an image.
+
 ## Generic Compose projects
 
 For non-WordPress projects, set `kind` to `compose` (the aliases `php`, `js`,
@@ -210,12 +257,55 @@ priority last):
 2. **user-global** — `~/.config/sandbox/config.json` (machine-wide; see below)
 3. `sandbox.config.json` **or** `sandbox.config.yml` / `.yaml` (canonical, native)
    - `+ sandbox.config.override.{json,yml,yaml}` — gitignored, **deep-merged on top**
+   - when neither the repo root nor `.config/sandbox/` contains a primary
+     descriptor, the complete family may instead live in
+     `$SANDBOX_HOME/projects/<repo-key>/`; the key is derived from the Git
+     origin URL, falling back to the Git common directory, so all worktrees
+     share it
 4. `.wp-env.json` — **import/fallback only** (mapped field-by-field; see below).
    `sandbox init` converts it to a native `sandbox.config.json`.
 
 The project root is found by walking up from the directory to the nearest
 `sandbox.config.*` / `.wp-env.json` / `.git`. Paths must live under `$HOME` (or a
 `SANDBOX_PROJECT_ROOTS` entry) — `project_dir=/etc` is rejected.
+
+To find the exact shared directory for a checkout without writing anything,
+run:
+
+```sh
+python3 -c 'from sandbox.config.descriptors import shared_config_home; import sys; print(shared_config_home(sys.argv[1]) or "")' /path/to/repo
+```
+
+An in-tree primary descriptor always wins over this shared fallback. Overrides
+and per-label files are read only from the selected home, so layers are never
+mixed between the working tree and `$SANDBOX_HOME`.
+
+For a plugin that keeps its Sandbox descriptor in another directory inside the
+checkout, select it explicitly:
+
+```sh
+sb ensure --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+sb test --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+sb apply --project-dir /path/to/repo \
+  --config-file tooling/sandbox/sandbox.config.json
+```
+
+`--config-file` always requires an explicit `--project-dir`. Relative paths are
+resolved from that canonical project root. The file must remain inside the
+project, must be a regular non-symlink file, and its basename must be exactly
+`sandbox.config.json`, `sandbox.config.yml`, or `sandbox.config.yaml`. Its
+non-symlink parent directory owns the complete sibling override and per-label
+family; every matching family entry must also be a regular non-symlink file
+inside that exact directory and the project root.
+Explicit selection never mixes with or falls back to root, `.config/sandbox`,
+or shared config layers. Paths declared inside the descriptor still resolve
+from the project root, not the descriptor directory. CLI and matching MCP
+ensure/apply/test operations use the same contract; remote execution forwards
+only the validated project-relative selector after deploying the checkout.
+Durable `sb test matrix` orchestration does not yet accept this selector and
+fails explicitly instead of falling back to another descriptor family.
 
 ### User-global config (`$SANDBOX_HOME/config.json`)
 

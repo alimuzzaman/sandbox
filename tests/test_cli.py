@@ -29,6 +29,20 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_explicit_config_requires_project_dir_on_supported_commands(self):
+        for command in ("ensure", "apply", "test"):
+            result = run_sb(command, "--config-file", "nested/sandbox.config.json")
+            with self.subTest(command=command):
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--config-file requires an explicit --project-dir", result.stderr)
+
+    def test_supported_project_commands_advertise_explicit_config(self):
+        for command in ("ensure", "apply", "test"):
+            result = run_sb(command, "--help")
+            with self.subTest(command=command):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--config-file", result.stdout)
+
     def test_host_help_advertises_sync_action(self):
         result = run_sb("host", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1424,11 +1438,10 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint.parent.mkdir(parents=True)
             hint.write_text(str(selected) + "\n")
 
-            env = synthetic_environment()
-            env["HOME"] = str(home)
-            env.pop("SANDBOX_HOME", None)
-            env.pop("SANDBOX_RUNTIME", None)
-            env["PYTHONPATH"] = str(root)
+            env = synthetic_environment({
+                "HOME": str(home),
+                "PYTHONPATH": str(root),
+            })
             register = (
                 "import sandbox_core; sandbox_core.registry_put(%r, instance=%r)"
                 % (str(project), "cli-instance")
@@ -1460,11 +1473,10 @@ class TestRemoteAdmissionCLI(unittest.TestCase):
             hint = home / ".config" / "sandbox" / "home"
             hint.parent.mkdir(parents=True)
             hint.write_text("relative-state\n")
-            env = synthetic_environment()
-            env["HOME"] = str(home)
-            env.pop("SANDBOX_HOME", None)
-            env.pop("SANDBOX_RUNTIME", None)
-            env["PYTHONPATH"] = str(root)
+            env = synthetic_environment({
+                "HOME": str(home),
+                "PYTHONPATH": str(root),
+            })
             probe = (
                 "import sandbox.cli; from sandbox.core._paths import _sandbox_base; "
                 "print(_sandbox_base())"

@@ -196,6 +196,7 @@ def _die_status_resolution(args, code: str, message: str, hint: str) -> None:
 
 _TEST_ROUTING_OPTIONS = {
     "--project-dir": True,
+    "--config-file": True,
     "--label": True,
     "--provision-only": False,
     "--local": False,
@@ -414,6 +415,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     ap.add_argument("--project-dir", dest="project_dir", default=None,
         help="reconcile this project's running instance with its current "
              "config (constants/plugins/themes/multisite) without dropping the DB")
+    ap.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     ap.add_argument("--json", action="store_true",
         help="print the reconciled instance record as JSON (for the MCP server)")
     ap.add_argument("--label", default=argparse.SUPPRESS,
@@ -620,6 +624,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="declared Compose mode, or WordPress auto/unit/integration/matrix")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    ts.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     ts.add_argument("--label", default=argparse.SUPPRESS,
         help="which of --project-dir's instances to test, when it owns more "
              "than one (multi-instance-per-root, e.g. a CI matrix cell); "
@@ -859,15 +866,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, apply, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "apply", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p.add_argument("image_action", nargs="?",
+        choices=["activate", "adopt", "rollback", "recover"],
+        help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
-    host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
+    host_p.add_argument("--confirm", action="store_true",
+        help="allow protected host apply or separately confirmed edge continuation")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",
@@ -881,7 +892,29 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
     host_p.add_argument("--request-id", default=None,
-        help="replay-safe host sync request identity (auto-generated when omitted)")
+        help="replay-safe host sync/recovery request identity")
+    host_p.add_argument("--verified-plan", default=None, metavar="PATH",
+        help="closed Feature 049 VerifiedImagePlan JSON for host stage")
+    host_p.add_argument("--staged-proof", default=None, metavar="PATH",
+        help="closed retained Feature 050 StagedImageProof JSON claim for host image actions")
+    host_p.add_argument("--admission-deadline", default=None, metavar="RFC3339",
+        help="finite proof-custody admission deadline for a new image activation acceptance")
+    host_p.add_argument("--activation-transaction", default=None, metavar="DIGEST",
+        help="exact active transaction digest for `host image recover`")
+    host_p.add_argument("--stage-status", action="store_true",
+        help="read the exact Feature 050 request status without helper or credential access")
+    host_p.add_argument("--job-id", default=None,
+        help="failed durable host-apply job identity for recovery")
+    host_p.add_argument("--original-request-id", default=None,
+        help="original failed host-apply request identity")
+    host_p.add_argument("--expected-generation", type=int, default=None,
+        help="exact hosting generation fence for recovery")
+    host_p.add_argument("--continue-edge", action="store_true",
+        help="continue only the proven pending edge after a successful observation")
+    host_p.add_argument("--observation-request-id", default=None,
+        help="successful observation request referenced by edge continuation")
+    host_p.add_argument("--evidence-id", default=None,
+        help="exact observation evidence digest referenced by edge continuation")
     host_p.add_argument("--include", action="append", default=None, metavar="PATH",
         help="explicit relative source path to include (repeatable; credential-like paths are refused)")
     host_p.add_argument("--watch", action="store_true",
@@ -971,6 +1004,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
     en.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    en.add_argument("--config-file", dest="config_file", default=None,
+        help="project-relative path to an explicit sandbox.config.json/yml/yaml; "
+             "requires --project-dir")
     en.add_argument("--json", action="store_true",
         help="print the instance record as JSON (for the MCP server)")
     en.add_argument("--label", default=argparse.SUPPRESS,
@@ -1196,6 +1232,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     if not args.cmd:
         p.print_help()
         return
+
+    if getattr(args, "config_file", None) and not getattr(args, "project_dir", None):
+        die("--config-file requires an explicit --project-dir", 2)
 
     if (args.cmd == "wp" and getattr(args, "remote", None)
             and _explicit_global_option(raw_argv, "--instance")):

@@ -1,5 +1,34 @@
 # Remote VPS hosting for sandbox instances
 
+## Immutable OCI trust is a pure preflight
+
+An optional project `hostingImages` declaration selects one machine-owned policy and
+narrows its allowed persistent and one-shot application services. The project cannot
+declare the authority ID, policy digest, release digest, repository, platform,
+provenance, signature mode, or primary service. The primary service is a trusted
+machine-topology constraint and must remain in the project's persistent selection.
+Only the selected primary project descriptor may declare `hostingImages`. Global,
+`sandbox.config.override.*`, and label-specific files cannot add or replace it.
+
+The machine policy lives under `hosting.images.policies` in machine configuration. It
+approves one canonical release-receipt payload digest, one intended-private GHCR
+repository, one exact target-platform OCI image-manifest digest, its configuration
+digest, provenance, platform, and bounded service topology. Verification returns an
+immutable `VerifiedImagePlan`; invalid or substituted input returns only a stable safe
+refusal. Projects without `hostingImages` keep their existing hosting behavior.
+The machine provider issues a private authority token whose type and issuer are not
+exported; callers cannot construct one through the public image-trust package.
+Builder, workflow, invocation, materials, and build identities are lowercase SHA-256
+digests. Source repository is canonical lowercase owner/repository, and source revision
+is exact lowercase 40- or 64-hex. Free-form release metadata is not retained.
+
+This decision proves equality to machine approval only. `private` is intent, not an
+observed registry visibility result. Registry login is transport access, not trust.
+Feature 049 does not prove registry availability, manifest/configuration byte
+relationship, publisher identity, a signature, staging, a running container, remote
+health, edge readiness, deployment, or production. Those require later authorized
+observation and exact public evidence.
+
 ## Agent-aware source sync
 
 Use the opt-in one-time path to transfer one credential-screened generation
@@ -909,6 +938,138 @@ install, not backed up or losslessly recoverable.
 
 ## 9. Troubleshooting a failed `host apply`
 
+### Observation-only receipt recovery
+
+Do not retry ordinary `host apply` merely to learn whether a failed durable apply
+already left its exact runtime ready. Apply may stage source before deciding replay
+safety. Use the fenced recovery path:
+
+```sh
+./sb host status --project-dir DIR --environment ENV --remote NAME --json
+./sb host recover --project-dir DIR --environment ENV --remote NAME \
+  --job-id JOB_ID --original-request-id APPLY_REQUEST \
+  --request-id RECOVERY_REQUEST --expected-generation N --json
+```
+
+Only a current-contract terminal `failed` job with a pre-effect hosting receipt can
+reconcile. Generic and older jobs return `legacy_evidence`. Dirty or changed source,
+target, manifest, deployed config, images, topology, one-shot receipts, partial
+observation, torn epochs, stale generations, and mutation-requiring states refuse
+before source, Compose, initializer, image, DNS, or Caddy effects. Exact success
+changes only Sandbox-owned receipts and advances the generation once. Exact replay
+returns `already_reconciled` without another observation or generation advance.
+Recovery first writes an explicitly non-authorizing provisional marker, then immediately
+re-observes under the same ownership. That marker advances no generation and exposes no
+receipt, terminal success, or edge authority. A separate atomic commit promotes success only
+when pre/post evidence identities match; a deterministic change returns `evidence_changed`
+without any success window. A process-lost observation may resume only for the same
+request/digest and persisted pre-effect phase. A process-lost provisional resumes only its
+post-write observation. Different, malformed, or effect-entered ownership stays fenced.
+The target identity covers the normalized registered SSH endpoint, control transport and
+URL, Tailscale host, MCP port, remote name, and runtime home, but never the bearer token.
+Endpoint configuration alone is not host authority. Current-contract recovery also binds
+Feature 046's authenticated stable machine identity from apply to both sides of fresh
+runtime observation. Missing, legacy, rebuilt, or repointed identity refuses. Recovery
+uses an opaque domain-separated digest of the remote machine ID, not its hostname; the
+raw machine ID is never returned or persisted in hosting state. Invalid or unavailable
+machine ID makes the projection non-authorizing. Recovery
+resolves registration only after target ownership and holds the shared registration guard
+through durable commit; supported registration updates use that same guard. If apply
+cannot measure Feature 046 identity, apply may continue but no recovery authority is kept.
+Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
+and Cloudflare preconditions from the entry held under that guard. Recovery authority
+stores a canonical non-secret desired edge intent plus digest; observation and immediate
+pre-edge validation require an exact match, and the adapter uses the bound records. A
+same-machine origin change refuses before DNS or Caddy effects.
+Bound edge intent also supplies the exact certificate hostnames for proxied Origin CA
+issuance. Limits are 64 routes, 128 DNS records, 64 unique certificate hostnames, 64 KiB
+for edge intent, and 128 KiB for the complete operation. Overflow mints no recovery
+authority.
+Recovery has a command-owned predispatch path, so compatibility migration/finalization
+and Compose/environment writers do not run before a recovery refusal.
+Recovery requires explicit non-empty `--project-dir` and `--environment`; omission refuses
+before manifest inference, remote lookup, target construction, or a writer. Its local and
+remote Git head, branch, and clean-state probes run with a fixed synthetic environment and
+`GIT_OPTIONAL_LOCKS=0`, without copying the caller environment. Every Git invocation overrides
+repository `core.fsmonitor` and `core.untrackedCache` configuration. Status includes tracked
+submodule worktrees, so neither configured executables nor a dirty committed submodule can
+hide changed source.
+JSON selector refusal is one bounded schema-1 envelope and a nonzero exit.
+
+Eligible durable apply creates separate owner-only opaque secret-binding metadata.
+Recovery reads only its metadata ID, key version, key identity, and non-secret secret-file
+stat epoch; it
+never calls the secret resolver or parses values. Missing, stale, environment-backed,
+manually changed, or symbolic-link secret sources refuse before remote
+observation. The source and binding key must remain safe owner-only regular files; source
+epoch and key identity must remain exact.
+The broker metadata root itself must be canonical and exact owner-only `0700`. Metadata is
+read descriptor-relative without following links, bounded before JSON parsing, and must be
+an owner-only regular `0600` single-link inode with the exact nested schema. Symlinks,
+hardlinks, broad modes, wrong shapes, and oversized metadata refuse without exposing values.
+Target ownership is acquired before the broker revision lock, which stays held from
+metadata validation through durable receipt commit. The remote digest of secret-bearing
+`environment.env` is HMAC-blinded locally before it enters persisted or public evidence.
+The bounded broker guard also holds the canonical `.<name>.sb-secrets.lock` used by
+generic personal-secret updates. Apply resolves and caches secret values, computes the
+owner-keyed configuration identity, creates metadata, and durably accepts authority in
+that one transaction. Every apply state write uses the file-and-parent-fsynced recovery
+writer. The exact prospective operation, including an in-memory prepared key identity and
+metadata reference, must fit before first key or metadata-directory publication. First key
+publication and newly created authority-directory entries are parent
+fsynced before hosts state can reference them. Legacy refusal occurs before target or
+broker lock artifacts.
+One-time login receipt updates also use that durable writer under their target/state lock.
+The registration guard rejects symlinked or unsafe directories and symlinked, non-regular,
+wrong-owner, broadly accessible, or multiply linked lock files.
+Recovery lock/authority directories are exact owner-only `0700`; all existing parent
+components are checked before creation, so a symlinked parent creates no child. A trusted
+controller-owned `0755` runtime parent remains compatible, while `hosts.json` itself must be
+an owner-only regular `0600` single-link file opened without following links.
+
+Confirmed `--continue-edge` is a separate request referencing the successful
+observation and evidence ID. It revalidates under the same lock and can call only the
+declared Caddy/Cloudflare adapter. Missing governance, broader pending work, changed
+evidence, or missing confirmation refuses. An uncertain edge effect creates a
+target-level fence and cannot be repeated with another request.
+
+Feature 047's immutable-image edge journal authorizes replay only inside its own
+recorded image operation. Host recovery does not treat that journal, image state, or
+retained edge readiness as governance approval. Until a canonical host-recovery
+governance verifier exists, the public continuation command fails closed with
+`governance_unavailable`.
+Exact terminal edge replay returns the recorded `edge_only_completed` result with a replay
+marker and never enters the adapter again; only observation replay uses `already_reconciled`.
+Retained attempts and compacted tombstones are exact bounded schemas. Unknown/private fields
+or impossible action, effect, result, and generation combinations invalidate the target before
+replay; public replay is reconstructed from the validated safe fields only.
+The complete timestamped prospective terminal is validated and reconstructed before commit
+can mutate generation, receipts, provisional markers, uncertainty fences, or attempt history.
+Active/provisional request IDs and digests must be disjoint from retained terminal identities.
+Exact validated terminal replay is checked before live job lookup, so an expired job backend
+cannot erase idempotence. Never-seen identities still require the job and create no state or
+lock artifacts. One-shot initializer evidence is an exact bounded unique phase/state list
+bound to the operation's expected initializer phases and topology; malformed, missing,
+duplicate, or incomplete evidence cannot reconcile. Broker metadata opens nonblocking before
+inode validation, so a FIFO or device path cannot stall recovery.
+The durable operation independently binds the validated manifest's exact persistent and
+initializer service partitions. Observed topology must equal their union, fresh service IDs
+must equal the persistent partition, and completed one-shot IDs must equal the initializer
+projection. Missing initializer projections or an empty persistent partition fails closed.
+
+The reviewed Feature 047 implementation has no host-recovery governance projection.
+The public command therefore returns `governance_unavailable` for edge continuation
+in this revision. Its schema-v2 image planes are preserved as opaque sibling state and
+never interpreted as recovery authority. The narrow adapter remains implemented and
+locally tested for later activation; its presence does not make public continuation reachable.
+
+Recovery evidence is not deployment or production proof. Production still needs the
+exact terminal job, declared-service health, edge readiness, and direct public checks.
+
+Long-running `host sync --watch` holds only its target effect lease after a short shared
+state check. It does not hold the global hosting-state transaction for the watch duration,
+so unrelated targets can continue. Login issuance stays under the bounded full lock.
+
 **Read the error, not the exit code of a pipe.** `sb host apply` exits non-zero on
 every failure, including a branch-gate refusal. Piping it to `tail`/`head` replaces
 that status with the pager's, which reads as success — use `set -o pipefail`, check
@@ -984,3 +1145,200 @@ Remote instance inventory and teardown are explicit and name-scoped:
 Use the inventory instead of guessing a runtime directory. Deletion targets
 one validated instance name and lets the remote Sandbox CLI remove its own
 runtime, volume, config block, and registry identity.
+# Secure private image staging (Feature 050)
+
+`sb host stage` is a confirmation-gated boundary between image trust and host
+activation. It accepts one closed Feature 049 `VerifiedImagePlan`, an explicit
+registered remote/project/environment, a replay-safe request ID, and an expected
+stage generation. Machine-owned policy supplies the exact target, helper measurement,
+credential binding, and GHCR repository-read recipient. Caller input cannot replace
+those values.
+
+The broker first takes one safe source snapshot: its opaque revision and the one-use lease
+bytes come from that same snapshot, and consume never reopens the source. The transport then
+opens the root-owned, mode-constrained helper directories, artifact, and manifest without
+following symlinks. It hashes and executes the same already-open artifact inode through
+`/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
+helper or manifest evidence is never overwritten when it disagrees. The configured
+credential-source opaque revision must match before the helper launches.
+Consume and invalidation share one lock. Invalidation can win first and wipe/refuse the
+snapshot, or consume can win first and atomically detach that exact snapshot before delivery.
+Once detached, later invalidation cannot replace or clear the delivered bytes. The detached
+mutable copy is wiped after the callback on success and failure. Generic legacy broker leases
+retain their separate consume-time source-read behavior and are never used for staging.
+
+```sh
+./sb host stage --project-dir /absolute/project --environment production \
+  --remote production-host --verified-plan /absolute/verified-plan.json \
+  --request-id release-2026-09-01 --expected-generation 0 --confirm --json
+```
+
+The command returns only a bounded `success`, `refused`, `failed`, `cancelled`, or
+`uncertain` envelope. Success includes a canonical `StagedImageProof`; it does not
+claim Compose, init, migration, service health, edge readiness, activation, adoption,
+rollback, deployment, or production availability.
+
+Per target, Feature 050 retains at most 64 full proofs, 4096 permanent request
+tombstones, 64 live activation proof leases/pins, and 16 MiB of serialized authority.
+At 4096 tombstones every new request ID returns `retention_full` before a helper or
+credential effect. Replay of a compacted proof returns `proof_expired` and cannot
+authorize activation.
+One nonterminal request durably owns the target, including phase, effect boundary, unit,
+cgroup, and cleanup evidence. Another request returns `target_busy`; uncertainty keeps the
+owner as a fence. Admission reserves a full 1-MiB terminal proof frame plus its result
+envelope inside the 16-MiB ledger before effects, so a terminal commit cannot discover
+capacity only after pulling.
+An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
+`--stage-status` reports the same authority without opening a credential source or helper.
+Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
+workspace, and no-effect evidence; possible-effect reconciliation observes or fences and
+never launches a duplicate helper.
+
+Success requires unchanged machine and daemon epochs, exact RepoDigest, config digest,
+platform, image ID, and topology read from the digest-bound
+`org.sandbox.application-topology.v1` image-config label. Failure or cancellation is safely
+terminal only after the exact unit is inactive, its exact cgroup is empty or removed, and
+the credential workspace is verified absent. Otherwise the result is uncertain and fenced.
+The workspace parent is mechanically required to be root-owned mode 0700 on `/run` tmpfs
+before READY and therefore before credential transfer. READY has a finite timeout that kills
+the whole unit. The transient unit remains inspectable until it is explicitly stopped,
+checked, and collected.
+
+### Immutable staged-image activation
+
+Immutable delivery has four separate owners:
+
+- Feature 049 verifies trust and creates an exact plan. It performs no pull or deploy.
+- Feature 050 stages that exact image locally and owns proof custody. It does not activate.
+- Feature 051 runs inspected init, exact no-build/no-pull replacement, health/edge proof,
+  activation state, zero-init adoption, and one-generation local rollback.
+- Feature 048 only observes interrupted Feature 051 runtime evidence.
+
+The static command group is:
+
+```text
+./sb host image activate --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
+./sb host image adopt --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
+./sb host image rollback --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --verified-plan PLAN.json \
+  --staged-proof PROOF.json --admission-deadline UTC-SECONDS-Z --confirm
+./sb host image recover --project-dir DIR --environment ENV --remote NAME \
+  --request-id ID --expected-generation N --activation-transaction sha256:... --confirm
+```
+
+The plan and proof paths are caller claims. Machine activation policy, exact authority
+binding, rollback grant/subject, runtime capability, and edge policy are owner-only state;
+the command cannot replace or widen them. Activation refuses aliases, tags, indexes,
+builds, pulls, platform substitutions, missing/duplicate services, unsafe dependencies,
+unexpected orphans, changed local identity, incomplete health, or uncertain edge delivery.
+The machine bundle is accepted only as an owner-only, no-follow, single-link regular file.
+Its rollback public key must match the binding and validate the grant's Ed25519 signature;
+the signing key is never an activation input. The target-wide owner is acquired before the
+registration guard and both remain held through the final host-state commit.
+Admission deadlines use canonical UTC whole seconds ending in `Z`, for example
+`2099-01-01T00:00:00Z`; offsets, fractional seconds, and timezone-free values refuse.
+
+Compose replacement keeps the full private render inside the registered-host helper, passes
+those bytes on stdin with the exact Compose project, and verifies post-up Compose config
+hashes plus a fresh render. Each raw service config hash stays remote and crosses only as a
+target-scoped HMAC that every fresh running, post-edge, and recovery observation must match.
+Only a machine-keyed, target-scoped opaque HMAC over the complete raw render is
+persisted. SSH returns a closed allowlisted projection; commands, entrypoints, arbitrary
+labels/annotations, health checks, URLs, logging values, extensions, environment values, raw
+private-render hashes, and inline content do not cross. The owner-only machine master stays
+local. Only its machine/target-derived HMAC key travels in private stdin, is removed before
+Docker runs, and never enters state, output, commands, or receipts. Redaction covers rendered
+map keys as well as values.
+Fresh running observation is also projected inside the helper. Complete `ps` labels, inspect
+environment/arbitrary labels, and raw Compose hashes never cross SSH.
+All top-level Compose configs/secrets and external networks refuse until a future contract
+can snapshot their exact private bytes or immutable engine identity.
+Public HTTP reachability does not identify a runtime
+generation. Required-edge operations therefore stay `edge_incomplete` until an adapter
+returns a durable receipt bound to the target, prospective generation, observation, route,
+and application deployment identity.
+
+`host image recover` never changes the existing failed-apply `host recover` contract. It
+performs two read-only observations around a Feature 051-owned non-authorizing provisional
+and never starts init/services, pulls/builds, or changes edge. Adoption requires a plan with
+no init steps and performs no runtime or edge effect. Rollback uses only the one retained
+previous local image, revalidates its complete local target/daemon identity and retained
+rendered-Compose projection before replacement, records fresh running container identities,
+and never obtains credentials or contacts a registry.
+
+Local fake/unit acceptance does not prove a registered remote, live edge, rollback,
+deployment, or production. Do not use these commands against a live target without the
+separate authorization and validation gate for that environment.
+
+Activation admission begins only after ordered custody has fully decoded and canonical-byte
+compared the retained staged proof and matched its fixed ledger authority and exact record
+revision. The stage lock stays held through policy admission and durable host acceptance.
+Activation refuses before effects when proof custody is expired or ambiguous, or
+when bounded terminal storage cannot be reserved. Recovery never accepts a caller digest or
+partial container list as runtime proof. It requires every persisted selected service with
+exact health, platform, local image, topology, and stable runtime identity, plus the exact
+terminal edge receipt when edge is required. Init inspection is derived from actual runtime
+inspect output and a fresh runtime epoch; expected values are not inspection evidence.
+
+Machine activation policy now includes the exact Compose projection and edge route digest.
+`edge_required` is authority, not a caller toggle. Terminal replay uses private retained proof
+pin evidence to release exact custody without another runtime or edge observation. Image
+defaults outside the declared init environment do not authorize init and do not cause a false
+mismatch.
+
+Image recovery represents a first activation with an explicit absent prior generation; that state
+can classify only exact-new, never exact-prior. Recovery result slots are checked before the first
+observation/provisional write, and every stored result has a closed versioned schema, SHA-256 request
+binding, exact generation relation, and an `ok` value used identically by fresh and replayed CLI
+responses. Edge observation derives its normalized route plan from the current validated manifest;
+it never repeats a caller route claim as evidence. Adoption renders the authenticated machine-bound
+Compose files and project while remaining read-only. Local, running, recovery, and init evidence use
+fresh registered-target and Docker-daemon observations. Init platform architecture comes from an
+independent image inspection, not an optional container-inspect default.
+
+An exact activation terminal is looked up before current policy, grant, deadline, or custody
+admission. It returns the immutable result and never recreates a released lease. Image recovery
+atomically terminalizes the interrupted original activation as well as its separate recovery result;
+exact-prior is a stable refused `recovery_no_effect` result and exits nonzero, while exact-new
+promotion alone is successful. The retained terminal pin is closed and validates canonical lease,
+holder, proof digest, and host-acceptance identities before it can release Feature 050 custody.
+Initializer values come only from the already rendered bound Compose service environment or a narrow
+opaque provider. Values exist only in the synthetic child environment and private inspect comparison;
+they are not placed in activation state, receipts, output, or command arguments. Running OS and
+architecture come from an independent inspection of each container's exact local image ID.
+
+Terminal replay uses the private retained pin before returning the public result. If the exact
+accepted Feature 050 lease still exists after a crash, replay releases it; if it is already absent,
+replay does not prepare or recreate it. Declared init values cross SSH only in a bounded private
+stdin frame. The SSH command contains the public Docker argv and environment key names, never values;
+remote output is value-redacted before capture. No value enters activation state or receipts. An
+uncertain terminal envelope may coexist only with the same exact active request, transaction, digest,
+and pin. That narrow pair remains fenced and exact replay returns uncertainty without new effects.
+
+Raw `docker compose config` environment values and raw container `Config.Env` values never cross SSH
+stdout. The fixed remote launcher strips Compose environments, selects only declared initializer keys
+inside the remote process, compares inspected values there, and returns only key presence plus a match
+boolean. After Docker creates an initializer, every later cache/image/runtime/target failure triggers
+bounded stopped-container removal and private-cache erasure before refusal. The uncertain overlap also
+requires `active.phase == uncertain` and byte-exact equality between `active.result` and the retained
+public result; absent, distinct, or promotable variants are invalid state.
+
+The private Compose selector is bound to the exact successful admitted render: Compose files, project,
+closed image-override environment, and the machine-keyed, target-scoped opaque HMAC of the complete raw render.
+Remote declared-value selection reruns with those exact inputs, refuses nonzero status or any stderr,
+parses only bounded valid JSON, returns only a closed allowlisted projection, and requires the same
+opaque identity before selecting declared keys. No arbitrary rendered value is returned or persisted.
+
+Initializer names are target/image/declaration-bound and paired with an exact owner label.
+Cleanup removes only that proven owner; a foreign or unproved name collision is never deleted.
+Remote helper output redacts every observed rendered scalar independently, even when multiple
+services reuse one environment key, and replaces longer overlapping values first.
+Accepted transactions retain a closed recovery context with target, Compose project, and selected
+services. Therefore accepted/preflight/init-pending/runtime-pending recovery remains reachable before
+a candidate exists: exact prior, including an empty generation-zero runtime, closes as no-effect;
+anything else stays unpromoted. Rollback also compares the retained prior Compose project before its
+first runtime effect.

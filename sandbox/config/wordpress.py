@@ -20,11 +20,15 @@ class WordPressSchemaProvider:
     def __init__(self, legacy_loader: Callable) -> None:
         self._legacy_loader = legacy_loader
 
-    def resolve(self, root, *, label=None) -> dict:
+    def resolve(self, root, *, label=None, config_file=None) -> dict:
         root = Path(root)
-        home = config_home(root)
-        project_path = primary_config(root)
+        home = config_home(root, config_file)
+        project_path = primary_config(root, config_file)
         project_document = _load_mapping(project_path) if project_path is not None else {}
+        project_hosting_images = {
+            "declared": "hostingImages" in project_document,
+            "project_primary": project_document.get("hostingImages"),
+        }
         project_domains = raw_domain_layer(project_document)
         project_runtime = raw_wordpress_runtime_layer(project_document)
         project_secrets = raw_secret_layer(project_document)
@@ -54,7 +58,10 @@ class WordPressSchemaProvider:
                 machine_domains.update(raw_domain_layer(document))
                 machine_runtime.update(raw_wordpress_runtime_layer(document))
                 merge_secret_layers(machine_secrets, raw_secret_layer(document))
-        result = dict(self._legacy_loader(root, label=label))
+        if config_file is None:
+            result = dict(self._legacy_loader(root, label=label))
+        else:
+            result = dict(self._legacy_loader(root, label=label, config_file=config_file))
         result.setdefault("root", str(root))
         result["_domains_raw"] = {
             "project": project_domains,
@@ -66,6 +73,9 @@ class WordPressSchemaProvider:
         result["_secrets_raw"] = {
             "project": project_secrets, "machine_override": machine_secrets,
         }
+        # Keep the optional project channel kind-neutral.  Common config owns
+        # normalization, and absence must not alter legacy descriptors.
+        result["_hosting_images_raw"] = project_hosting_images
         if lifecycle_declared:
             result["instanceLifecycle"] = lifecycle
         if "tests" not in result:

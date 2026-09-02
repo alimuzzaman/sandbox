@@ -159,7 +159,15 @@ class ComposeAdapter:
         return collision
 
     def _descriptor(self, request: OperationRequest) -> dict[str, Any]:
-        descriptor = self.registry.load_project_config(request.project_root, label=request.label)
+        config_file = request.arguments.get("config_file")
+        if config_file is None:
+            descriptor = self.registry.load_project_config(
+                request.project_root, label=request.label,
+            )
+        else:
+            descriptor = self.registry.load_project_config(
+                request.project_root, label=request.label, config_file=config_file,
+            )
         if not isinstance(descriptor, dict) or descriptor.get("kind") != "compose":
             raise ValueError("project is not configured as a generic Compose project")
         try:

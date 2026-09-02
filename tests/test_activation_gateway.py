@@ -269,6 +269,10 @@ class ActivationCaddyTests(unittest.TestCase):
         wake = _caddy_block("site.tst", 8080, activation_route=route)
         self.assertNotIn("forward_auth", direct)
         self.assertIn("forward_auth host.docker.internal:8766", wake)
+        # The trailing question mark clears the original request query only
+        # on Caddy's cloned auth request. The later reverse_proxy still sends
+        # the untouched path and query to the instance backend.
+        self.assertIn("uri /v1/activate?", wake)
         self.assertLess(wake.index("forward_auth"), wake.index("reverse_proxy"))
 
     def test_gateway_enable_failure_is_reported_without_route_mutation(self):

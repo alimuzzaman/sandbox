@@ -3600,7 +3600,9 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     "rollback_public_key": signer.public_key,
                     "compose_provider_revision": args.compose_provider_revision}
                 authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
-                path = root / "image-verification" / "policies" / f"{selector}.json"
+                policy_identity = policy.policy_digest.removeprefix("sha256:")
+                path = (root / "image-verification" / "policies"
+                        / f"{selector}-{policy_identity}.json")
                 authority_disposition, disposition = install_owner_only_json_pair((
                     (authority_path, authority), (path, policy.as_mapping())))
                 response.update(ok=True, result_class=disposition, code="prepared",

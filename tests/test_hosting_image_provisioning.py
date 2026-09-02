@@ -88,6 +88,70 @@ class ProvisioningTests(unittest.TestCase):
             for item in outputs:
                 self.assertNotIn(str(private), json.dumps(item))
 
+    def test_machine_policy_cli_retains_prior_receipt_policy_for_release_rotation(self):
+        from sandbox.commands.hosting import _cmd_host_image_provision
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            first_receipt = root / "first"; first_receipt.mkdir()
+            second_receipt = root / "second"; second_receipt.mkdir()
+            first_digest = make_bundle(first_receipt)
+            make_bundle(second_receipt)
+            second = json.loads((second_receipt / "receipt.json").read_text())
+            second_sha = "a" * 40
+            second["source_sha"] = second_sha
+            second["sentry_sha"] = second_sha
+            second["workflow"]["sha"] = second_sha
+            second_bytes = json.dumps(second, sort_keys=True, separators=(",", ":")).encode()
+            (second_receipt / "receipt.json").write_bytes(second_bytes)
+            (second_receipt / "receipt.sha256").write_text(
+                f"{__import__('hashlib').sha256(second_bytes).hexdigest()}  receipt.json\n")
+            template = policy_mapping(first_digest)
+            private = root / "signer"
+            subprocess.run(("/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                "-f", str(private)), check=True)
+            public = private.with_suffix(".pub"); public.chmod(0o600)
+            class Port:
+                @contextmanager
+                def target_mutation_transaction(self, _target): yield
+            class Recovery:
+                def target_mutation_port(self, _name): return Port()
+            validated = {"project": "lenzora", "environment": "production", "compose": {
+                "service": "lenzora-web",
+                "background_services": [item for item in template["persistent_services"]
+                                        if item != "lenzora-web"],
+                "init_services": template["one_shot_services"],
+            }}
+            args = SimpleNamespace(remote="production", environment="production",
+                provision_phase="machine-policy", confirm=True,
+                signed_receipt_directory=str(first_receipt),
+                policy_authority_id=template["authority_id"], policy_revision=1,
+                rollback_public_key=str(public),
+                rollback_authority_id="rollback-authority/controller-a",
+                rollback_authority_revision="rollback-v2",
+                compose_provider_revision="compose-provider-v2",
+                service_image_binding=[f"{row['service']}={row['image']}"
+                    for row in template["service_image_bindings"]],
+                activation_environment_binding=[
+                    f"{row['image']}={row['environment_variable']}"
+                    for row in template["activation_environment_bindings"]])
+            outputs = []
+            with patch("sandbox.commands.hosting.RUNTIME_DIR", root / "runtime"), \
+                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()):
+                for receipt in (first_receipt, second_receipt, second_receipt):
+                    args.signed_receipt_directory = str(receipt)
+                    stream = StringIO()
+                    with redirect_stdout(stream): _cmd_host_image_provision({}, validated, args)
+                    outputs.append(json.loads(stream.getvalue()))
+
+            self.assertEqual([item["result_class"] for item in outputs],
+                             ["installed", "installed", "replayed"])
+            self.assertEqual([item["authority_result_class"] for item in outputs],
+                             ["installed", "replayed", "replayed"])
+            self.assertNotEqual(outputs[0]["installed_path"], outputs[1]["installed_path"])
+            self.assertEqual(outputs[1]["installed_path"], outputs[2]["installed_path"])
+            self.assertTrue(Path(outputs[0]["installed_path"]).is_file())
+            self.assertTrue(Path(outputs[1]["installed_path"]).is_file())
+
     def test_stage_bundle_cli_mints_fixed_binding_without_printing_secret(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
         with tempfile.TemporaryDirectory(dir=Path.home()) as temp:

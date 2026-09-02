@@ -75,6 +75,12 @@ The machine policy is a closed schema-version 2 object. It pins:
   `{image,environment_variable}`; and
 - `signature_mode: cosign_keyless_offline_bundle_v1`.
 
+Each receipt-bound machine policy is stored under an immutable,
+content-addressed path. A later release installs a new policy without replacing
+or conflicting with the prior release policy; replaying the same receipt is
+inert. The target's rollback-signing authority remains a separate stable file
+and must match exactly across release rotation.
+
 For the current Lenzora overlay the machine-owned activation bindings are
 `queue -> LENZORA_PRODUCTION_QUEUE_IMAGE`,
 `web -> LENZORA_PRODUCTION_WEB_IMAGE`, and

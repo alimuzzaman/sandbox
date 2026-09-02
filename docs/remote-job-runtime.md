@@ -83,6 +83,15 @@ falls back to deploy-before-job for a synchronized request. The public CLI does 
 accept hidden relationship or source-policy claims from callers. Jobs without sync
 fields keep the existing deploy-before-job path unchanged.
 
+Pending synchronized jobs use a durable launch-owner identity. Admission commits
+that owner before supervisor launch, so concurrent status, cancel, and startup
+reconciliation cannot launch or terminalize the same claim. Capacity contention
+returns the claim to the replayable pending queue; a dead owner is interrupted and
+releases its generation pin. A committed launch gets a bounded 30-second handoff
+window for the detached supervisor to publish its durable process identity before a
+dead claimant is treated as abandoned. Synchronized matrix submission stays refused until an
+equivalent batch authority can prove every child projection.
+
 Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test
 leaf for each named workspace.

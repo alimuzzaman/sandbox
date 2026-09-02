@@ -45,11 +45,13 @@ class SyncService:
 
     def __init__(self, repository: SyncRepository, transport_factory: Callable[[], Any],
                  *, identity_resolver: Callable = _default_identity_resolver,
-                 coordinator: RelationshipCoordinator | None = None):
+                 coordinator: RelationshipCoordinator | None = None,
+                 pin_reconciler: Callable[[], Any] | None = None):
         self.repository = repository
         self.transport_factory = transport_factory
         self.identity_resolver = identity_resolver
         self.coordinator = coordinator or RelationshipCoordinator(repository)
+        self.pin_reconciler = pin_reconciler
 
     def _relationship(self, project_dir: str | Path, remote: str, workspace_id: str,
                       *, mode: str = "off", lifecycle: str = "stopped",
@@ -290,6 +292,26 @@ class SyncService:
                 request_id=request_id,
                 accepted_generation=relationship.accepted_generation_id,
                 pending_generation=generation.generation_id, retryable=False,
+            )
+        if self.pin_reconciler is not None:
+            self.pin_reconciler()
+        active_pins = self.repository.active_pins(relationship.relationship_id)
+        blocking = tuple(
+            pin for pin in active_pins
+            if pin.generation_id != generation.generation_id
+        )
+        if blocking:
+            active_generation = (
+                blocking[0].generation_id
+                if all(pin.generation_id == blocking[0].generation_id
+                       for pin in blocking)
+                else relationship.accepted_generation_id
+            )
+            return success_envelope(
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship,
+                generation, status="pending",
+                active_generation=active_generation,
             )
         generation, claimed = self.repository.claim_generation_transfer(
             generation.generation_id)

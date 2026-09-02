@@ -518,6 +518,10 @@ class RemoteJobTransport:
         """
         if not submissions:
             return []
+        if any(item.sync_relationship_id is not None for item in submissions):
+            raise RemoteJobTransportError(
+                "synchronized matrix execution requires an explicit batch source authority"
+            )
         for item in submissions:
             try:
                 require_safe_argv(item.argv)

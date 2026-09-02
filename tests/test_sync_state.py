@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from sandbox.sync.repository import (
     RequestDigestConflict,
     SyncJournalCorruption,
     SyncRepository,
+    SyncRepositoryError,
 )
 
 
@@ -41,6 +43,64 @@ class SyncStateTests(unittest.TestCase):
             commit="1" * 40, dirty_digest="b" * 64,
             created_at="2026-08-26T00:00:01Z",
         )
+
+    def test_generation_pin_release_keeps_immutable_source_identity(self):
+        self.repo.put_relationship(relationship())
+        generation, _ = self.reserve()
+        self.repo.claim_generation_transfer(generation.generation_id)
+        self.repo.transition_generation(
+            generation.generation_id, "accepted",
+            accepted_at="2026-08-26T00:00:02Z",
+        )
+        active = self.repo.pin_job(
+            job_id="job_fixture", relationship_id="rel_fixture",
+            generation_id=generation.generation_id,
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        released = self.repo.release_job(active.job_id)
+        self.assertEqual(released.generation_id, active.generation_id)
+        self.assertEqual(released.relationship_id, active.relationship_id)
+        self.assertEqual(released.source_access, "managed_read_only")
+        self.assertEqual(self.repo.active_pins("rel_fixture"), ())
+
+    def test_generation_pin_refuses_stale_acceptance_after_new_pending_reservation(self):
+        self.repo.put_relationship(relationship())
+        accepted, _ = self.reserve("request-a", "a" * 64)
+        self.repo.claim_generation_transfer(accepted.generation_id)
+        self.repo.transition_generation(
+            accepted.generation_id, "accepted",
+            accepted_at="2026-08-26T00:00:02Z",
+        )
+        self.reserve("request-b", "b" * 64)
+        with self.assertRaisesRegex(SyncRepositoryError, "not newest"):
+            self.repo.pin_job(
+                job_id="job-stale", relationship_id="rel_fixture",
+                generation_id=accepted.generation_id,
+                source_access="managed_read_only", parallel_safe=True,
+            )
+
+    def test_interrupted_transfer_replay_is_bounded_and_stop_preserves_pending(self):
+        self.repo.put_relationship(replace(
+            relationship(), mode="live", lifecycle="active",
+        ))
+        generation, replay = self.reserve("request-interrupted")
+        self.assertFalse(replay)
+        transferring, claimed = self.repo.claim_generation_transfer(
+            generation.generation_id)
+        self.assertTrue(claimed)
+        stopped = self.repo.set_mode(
+            "rel_fixture", "off", lifecycle="stopped",
+        )
+        self.assertEqual(stopped.pending_generation_id, generation.generation_id)
+        self.assertEqual(
+            self.repo.lookup_request("rel_fixture", "request-interrupted").lifecycle,
+            "transferring",
+        )
+        replayed, claimed_again = self.repo.claim_generation_transfer(
+            generation.generation_id)
+        self.assertFalse(claimed_again)
+        self.assertEqual(replayed.generation_id, transferring.generation_id)
+        self.assertEqual(len(self.repo.list_generations("rel_fixture")), 1)
 
     def test_relationship_crud_is_owner_only_and_atomic(self):
         self.repo.put_relationship(relationship())

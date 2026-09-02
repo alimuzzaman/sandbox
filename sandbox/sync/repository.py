@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .models import (
     DivergenceRecord,
     Participant,
+    PinnedJob,
     SourceGeneration,
     SynchronizationRelationship,
     utc_now,
@@ -68,7 +69,8 @@ class SyncRepository:
         return {
             "schema_version": SCHEMA_VERSION,
             "relationships": {}, "generations": {}, "requests": {},
-            "participants": {}, "divergences": {}, "metrics": {}, "conflicts": {},
+            "participants": {}, "jobs": {}, "divergences": {}, "metrics": {},
+            "conflicts": {},
         }
 
     def _prepare(self) -> None:
@@ -95,7 +97,7 @@ class SyncRepository:
         # These additive collections were introduced after the original v1
         # journal. Keep old owner-only journals readable without advertising a
         # new schema before a migration is necessary.
-        for key in ("participants", "divergences", "metrics", "conflicts"):
+        for key in ("participants", "jobs", "divergences", "metrics", "conflicts"):
             collection = value.setdefault(key, {})
             if not isinstance(collection, dict):
                 raise SyncJournalCorruption("synchronization journal schema is invalid")
@@ -133,6 +135,9 @@ class SyncRepository:
                 participant = Participant.from_dict(item)
                 if key != f"{participant.relationship_id}:{participant.participant_id}":
                     raise ValueError("participant key mismatch")
+            for key, item in value["jobs"].items():
+                if PinnedJob.from_dict(item).job_id != key:
+                    raise ValueError("pinned job key mismatch")
             for key, item in value["divergences"].items():
                 divergence = DivergenceRecord.from_dict(item)
                 if key != divergence.relationship_id:
@@ -350,6 +355,60 @@ class SyncRepository:
         return self._locked(lambda value: (
             DivergenceRecord.from_dict(value["divergences"][relationship_id])
             if relationship_id in value["divergences"] else None
+        ))
+
+    def pin_job(
+        self, *, job_id: str, relationship_id: str, generation_id: str,
+        source_access: str, parallel_safe: bool,
+    ) -> PinnedJob:
+        pin = PinnedJob(
+            job_id, relationship_id, generation_id,
+            source_access=source_access, parallel_safe=parallel_safe,
+        )
+        def operation(value: dict[str, Any]) -> PinnedJob:
+            generation = value["generations"].get(generation_id)
+            relationship = value["relationships"].get(relationship_id)
+            if (
+                relationship is None
+                or generation is None
+                or generation.get("relationship_id") != relationship_id
+                or generation.get("lifecycle") != "accepted"
+            ):
+                raise SyncRepositoryError("job generation is not accepted")
+            newest = (
+                relationship.get("pending_generation_id")
+                or relationship.get("accepted_generation_id")
+            )
+            if newest != generation_id:
+                raise SyncRepositoryError("job generation is not newest")
+            existing = value["jobs"].get(job_id)
+            if existing is not None and existing != pin.as_dict():
+                raise SyncRepositoryError("job generation pin changed")
+            value["jobs"][job_id] = pin.as_dict()
+            return pin
+        return self._locked(operation, write=True)
+
+    def release_job(self, job_id: str) -> PinnedJob | None:
+        validate_identifier(job_id, "job id")
+        def operation(value: dict[str, Any]) -> PinnedJob | None:
+            raw = value["jobs"].get(job_id)
+            if raw is None:
+                return None
+            current = PinnedJob.from_dict(raw)
+            released = replace(current, release_state="released")
+            value["jobs"][job_id] = released.as_dict()
+            return released
+        return self._locked(operation, write=True)
+
+    def active_pins(self, relationship_id: str | None = None) -> tuple[PinnedJob, ...]:
+        if relationship_id is not None:
+            validate_identifier(relationship_id, "relationship id")
+        return self._locked(lambda value: tuple(
+            PinnedJob.from_dict(item)
+            for item in value["jobs"].values()
+            if (relationship_id is None
+                or item.get("relationship_id") == relationship_id)
+            and item.get("release_state") == "active"
         ))
 
     def clear_divergence(self, relationship_id: str) -> bool:

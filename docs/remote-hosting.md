@@ -94,8 +94,8 @@ divergence is never adopted or overwritten automatically; `sync resolve
 so the next explicit request repeats normal ownership checks.
 
 Generation-aware jobs pin the newest accepted generation before durable launch.
-If a newer generation is pending, a stale-generation request is refused before
-job acceptance and must wait for that generation to become accepted. Parallel-
+If a newer generation is pending, a new durable job queues against that generation
+and follows any still-newer pending generation before launch. Parallel-
 safe jobs may share only the same accepted `managed_read_only` projection. A job
 that needs source writes must request `isolated_copy`, declare retained artifact
 paths, and receives no authority to change the managed generation. Job acceptance

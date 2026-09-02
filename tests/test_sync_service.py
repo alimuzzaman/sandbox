@@ -54,6 +54,63 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(first["generation"]["id"], replay["generation"]["id"])
         self.assertEqual(len(self.transfers), 1)
 
+    def test_new_generation_waits_until_active_job_releases_accepted_pin(self):
+        first = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-a",
+        )
+        relationship = self.repository.list_relationships()[0]
+        self.repository.pin_job(
+            job_id="job-active", relationship_id=relationship.relationship_id,
+            generation_id=first["generation"]["id"],
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        (self.root / "source.txt").write_text("next generation\n")
+        pending = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertTrue(pending["ok"])
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["job"]["active_generation"],
+                         first["generation"]["id"])
+        self.assertEqual(len(self.transfers), 1)
+        self.repository.release_job("job-active")
+        accepted = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(len(self.transfers), 2)
+
+    def test_generation_gate_reconciles_terminal_pins_before_blocking(self):
+        first = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-a",
+        )
+        relationship = self.repository.list_relationships()[0]
+        self.repository.pin_job(
+            job_id="job-terminal", relationship_id=relationship.relationship_id,
+            generation_id=first["generation"]["id"],
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        reconciled = []
+        service = SyncService(
+            self.repository, self.service.transport_factory,
+            identity_resolver=self.service.identity_resolver,
+            pin_reconciler=lambda: (
+                reconciled.append("called"),
+                self.repository.release_job("job-terminal"),
+            ),
+        )
+        (self.root / "source.txt").write_text("next generation\n")
+        accepted = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(reconciled, ["called"])
+
     def test_status_does_not_create_a_relationship(self):
         result = self.service.status(self.root, remote="remote", workspace_id="workspace")
         self.assertTrue(result["ok"])

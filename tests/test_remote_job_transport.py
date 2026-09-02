@@ -366,6 +366,28 @@ class RemoteJobTransportTests(unittest.TestCase):
             transport.submit_many(submissions)
         self.assertIs(raised.exception, marker)
 
+    def test_synchronized_submit_many_refuses_before_deployment(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("must not deploy"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("must not run"),
+            remote_lookup=lambda _name: {
+                "provisioned": True,
+                "capabilities": [
+                    "job.exec", "job.execution-policy.v1",
+                    "job.sync-generation.v1",
+                ],
+            },
+        )
+        synchronized = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+            sync_relationship_id="rel_fixture",
+            sync_generation_id="gen_fixture",
+        )
+        with self.assertRaisesRegex(
+                RemoteJobTransportError, "explicit batch source authority"):
+            transport.submit_many([synchronized])
+
     def test_admission_payload_whitelists_codes_and_fails_closed_for_unknown_codes(self):
         exhausted = evaluate_network_capacity({
             "status": "complete",

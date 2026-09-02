@@ -144,16 +144,16 @@ job waits for B, and shared writes cannot alter A or a peer.
 
 ### Tests for User Story 4
 
-- [ ] T043 [P] [US4] Add generation pin, newest-pending queue, parallel-safe sharing, and release tests in `tests/test_sync_state.py`.
+- [X] T043 [P] [US4] Add generation pin, newest-pending queue, parallel-safe sharing, and release tests in `tests/test_sync_state.py`.
 - [X] T044 [P] [US4] Add job submission/acceptance generation fields and read-only source-policy tests in `tests/test_remote_job_transport.py`.
 - [X] T045 [P] [US4] Add shared-write rejection, isolated-copy output, and out-of-band divergence tests in `tests/test_sync_transport.py`.
 
 ### Implementation for User Story 4
 
 - [X] T046 [US4] Extend durable job submission/acceptance metadata with relationship and generation identity in `sandbox/jobs/models.py` and `sandbox/jobs/registry.py`.
-- [ ] T047 [US4] Add generation-aware workspace lease and newest-pending queue rules in `sandbox/jobs/scheduler.py` and `sandbox/application/job_service.py`.
-- [ ] T048 [US4] Integrate generation acceptance before remote job launch in `sandbox/transports/remote_jobs.py` without changing deploy-only callers.
-- [ ] T049 [US4] Add read-only managed-source projection and explicit isolated-copy policy to remote job execution preparation in `sandbox/transports/remote_jobs.py`.
+- [X] T047 [US4] Add generation-aware workspace lease and newest-pending queue rules in `sandbox/jobs/scheduler.py` and `sandbox/application/job_service.py`.
+- [X] T048 [US4] Integrate generation acceptance before remote job launch in `sandbox/transports/remote_jobs.py` without changing deploy-only callers.
+- [X] T049 [US4] Add read-only managed-source projection and explicit isolated-copy policy to remote job execution preparation in `sandbox/transports/remote_jobs.py`.
 - [X] T050 [US4] Add divergence detection, explicit resolution gating, and artifact-only isolated output handling in `sandbox/sync/projection.py`.
 - [X] T051 [US4] Add generation fields and source-access policy to CLI/MCP job status and acceptance envelopes in `sandbox/sync/models.py` and `mcp/wp-server/tools/sync.py`.
 - [X] T052 [US4] Document job generation pinning, source-write rejection, and isolated output in `docs/remote-hosting.md` and the job guide.
@@ -172,7 +172,7 @@ exercise each negative outcome without false acceptance or protected output.
 
 ### Tests for User Story 5
 
-- [ ] T053 [P] [US5] Add interruption, lost-response replay, retry-bound, and stop-during-transfer tests in `tests/test_sync_state.py`.
+- [X] T053 [P] [US5] Add interruption, lost-response replay, retry-bound, and stop-during-transfer tests in `tests/test_sync_state.py`.
 - [X] T054 [P] [US5] Add credential-refusal-before-mutation and remote-divergence tests in `tests/test_sync_transport.py`.
 - [X] T055 [P] [US5] Add CLI/MCP status-field equivalence and redaction tests in `tests/test_sync_mcp.py`.
 

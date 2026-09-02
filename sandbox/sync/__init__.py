@@ -27,7 +27,9 @@ from .models import (
 from .policy import CredentialDetected, SyncPolicy
 from .projection import (
     ProjectionDecision,
+    ProjectionPending,
     ProjectionRefused,
+    ProjectionTerminal,
     SyncJobGateway,
     authorize_projection,
     detect_divergence,
@@ -50,7 +52,9 @@ __all__ = [
     "Participant",
     "PinnedJob",
     "ProjectionDecision",
+    "ProjectionPending",
     "ProjectionRefused",
+    "ProjectionTerminal",
     "SyncJobGateway",
     "RelationshipConflict",
     "RequestDigestConflict",

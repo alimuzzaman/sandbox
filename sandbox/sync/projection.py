@@ -23,6 +23,14 @@ class ProjectionRefused(RuntimeError):
         super().__init__(code)
 
 
+class ProjectionPending(ProjectionRefused):
+    """The newest generation is known but not yet accepted."""
+
+
+class ProjectionTerminal(ProjectionRefused):
+    """The pinned generation reached a terminal non-accepted state."""
+
+
 @dataclass(frozen=True)
 class ProjectionDecision:
     relationship_id: str
@@ -59,7 +67,7 @@ def authorize_projection(
     if newest is None or requested_generation_id != newest:
         raise ProjectionRefused("newest_generation_required")
     if relationship.pending_generation_id is not None:
-        raise ProjectionRefused("generation_pending")
+        raise ProjectionPending("generation_pending")
     if (
         generation.relationship_id != relationship.relationship_id
         or generation.generation_id != requested_generation_id
@@ -125,6 +133,30 @@ class SyncJobGateway:
         self.repository = repository
         self.materialize = materialize
 
+    def select_submission(self, submission):
+        """Pin a new request to the newest durable generation identity."""
+        relationship = self.repository.get_relationship(
+            submission.sync_relationship_id)
+        if relationship is None:
+            raise ProjectionRefused("generation_not_found")
+        if relationship.project_identity != submission.project_identity:
+            raise ProjectionRefused("ownership_conflict")
+        if (submission.remote_name is not None
+                and submission.remote_name != relationship.remote_name):
+            raise ProjectionRefused("ownership_conflict")
+        requested = self.repository.get_generation(
+            submission.sync_generation_id)
+        if (requested is not None
+                and requested.lifecycle in {"refused", "failed", "diverged"}):
+            raise ProjectionTerminal(f"sync_generation_{requested.lifecycle}")
+        newest = (
+            relationship.pending_generation_id
+            or relationship.accepted_generation_id
+        )
+        if newest is None:
+            raise ProjectionPending("generation_pending")
+        return replace(submission, sync_generation_id=newest)
+
     def prepare_submission(self, submission):
         relationship = self.repository.get_relationship(
             submission.sync_relationship_id)
@@ -134,6 +166,11 @@ class SyncJobGateway:
             raise ProjectionRefused("generation_not_found")
         if relationship.project_identity != submission.project_identity:
             raise ProjectionRefused("ownership_conflict")
+        if (submission.remote_name is not None
+                and submission.remote_name != relationship.remote_name):
+            raise ProjectionRefused("ownership_conflict")
+        if generation.lifecycle in {"refused", "failed", "diverged"}:
+            raise ProjectionTerminal(f"sync_generation_{generation.lifecycle}")
         decision = authorize_projection(
             relationship, generation,
             requested_generation_id=submission.sync_generation_id,
@@ -147,10 +184,13 @@ class SyncJobGateway:
         if not isinstance(prepared, dict):
             raise ProjectionRefused("projection_unavailable")
         project_root = prepared.get("project_root")
+        projection_root = Path(project_root) if isinstance(project_root, str) else None
         if (
             not isinstance(project_root, str)
-            or not Path(project_root).is_absolute()
-            or ".." in Path(project_root).parts
+            or not projection_root.is_absolute()
+            or ".." in projection_root.parts
+            or not projection_root.is_dir()
+            or projection_root.is_symlink()
         ):
             raise ProjectionRefused("projection_unavailable")
         source_identity = prepared.get("source_identity")
@@ -167,10 +207,39 @@ class SyncJobGateway:
                             else submission.workspace_mode),
         )
 
+    def pin_job(self, row, submission) -> None:
+        self.repository.pin_job(
+            job_id=row["job_id"],
+            relationship_id=submission.sync_relationship_id,
+            generation_id=submission.sync_generation_id,
+            source_access=submission.source_access,
+            parallel_safe=submission.parallel_safe,
+        )
+
+    def release_job(self, job_id: str) -> None:
+        self.repository.release_job(job_id)
+
+    def release_terminal_jobs(self, job_repository) -> tuple[str, ...]:
+        from sandbox.jobs.registry import JobNotFound
+
+        terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
+        released = []
+        for pin in self.repository.active_pins():
+            try:
+                row = job_repository.get(pin.job_id)
+            except JobNotFound:
+                row = None
+            if row is None or row.get("lifecycle") in terminal:
+                self.repository.release_job(pin.job_id)
+                released.append(pin.job_id)
+        return tuple(released)
+
 
 __all__ = [
     "ProjectionDecision",
+    "ProjectionPending",
     "ProjectionRefused",
+    "ProjectionTerminal",
     "SyncJobGateway",
     "authorize_projection",
     "detect_divergence",

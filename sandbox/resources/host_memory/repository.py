@@ -61,6 +61,13 @@ class HostMemoryRepository:
         try: relative=Path(path).relative_to(self.history_ancestor_root)
         except ValueError: raise RepositoryError("history_unavailable") from None
         if not relative.parts: raise RepositoryError("history_unavailable")
+        # A host that has not emitted monitor history yet has no evidence file
+        # or dedicated history directory.  Treat that clean absence as empty
+        # history before walking shared ancestors such as /var/log, whose
+        # distro-owned group-write policy is outside Sandbox authority.
+        try: os.lstat(path)
+        except FileNotFoundError: return None
+        except OSError: raise RepositoryError("history_unavailable") from None
         directory_flags=(os.O_RDONLY|getattr(os,"O_CLOEXEC",0)
                          |getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0))
         file_flags=os.O_RDONLY|getattr(os,"O_CLOEXEC",0)|getattr(os,"O_NOFOLLOW",0)

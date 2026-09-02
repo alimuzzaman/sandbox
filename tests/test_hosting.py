@@ -840,7 +840,10 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate", commands[0])
         self.assertIn("--renew-anon-volumes", commands[0])
         build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
-        run_index = next(i for i, command in enumerate(commands) if command.endswith("run --rm setup"))
+        run_index = next(
+            i for i, command in enumerate(commands)
+            if command.endswith("run --rm --pull never setup")
+        )
         self.assertLess(build_index, run_index)
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -879,14 +882,18 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(preflight.call_args.args[2], ["web", "worker", "setup"])
         build_checked.assert_not_called()
         self.assertNotIn("--build", "\n".join(commands))
-        self.assertTrue(all("--no-build" in command for command in commands))
+        self.assertTrue(all(
+            "--no-build" in command
+            for command in commands
+            if " run --rm " not in command
+        ))
         self.assertIn(
             "up -d --no-build --force-recreate --renew-anon-volumes "
             "--remove-orphans web worker",
             commands[0],
         )
         self.assertFalse(any(command.endswith(" build setup") for command in commands))
-        self.assertTrue(any(command.endswith("run --rm --no-build setup") for command in commands))
+        self.assertTrue(any(command.endswith("run --rm --pull never setup") for command in commands))
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._preflight_no_build_images")
@@ -968,6 +975,7 @@ class TestHostingManifest(unittest.TestCase):
                 "('missing:latest' if mode == 'missing-local' else 'present:latest')\n"
                 " service={'build': {'context': '.'}}\n"
                 " if image is not None: service['image']=image\n"
+                " if mode == 'pull-build': service['pull_policy']='build'\n"
                 " padding=70000 if mode == 'large-valid' else "
                 "(1048576 if mode == 'oversized' else 0)\n"
                 " print(json.dumps({'services': {name: dict(service) for name in "
@@ -981,7 +989,7 @@ class TestHostingManifest(unittest.TestCase):
             docker.chmod(0o700)
             results = {}
             for mode in (
-                    "no-explicit", "missing-local", "ready", "large-valid", "oversized"):
+                    "no-explicit", "missing-local", "pull-build", "ready", "large-valid", "oversized"):
                 command = hosting_cmd._no_build_image_preflight_command(
                     f"docker compose -p {mode} -f compose.yml",
                     ["web", "worker", "setup"],
@@ -995,6 +1003,7 @@ class TestHostingManifest(unittest.TestCase):
 
         self.assertNotEqual(results["no-explicit"].returncode, 0)
         self.assertNotEqual(results["missing-local"].returncode, 0)
+        self.assertNotEqual(results["pull-build"].returncode, 0)
         self.assertEqual(results["ready"].returncode, 0)
         self.assertEqual(json.loads(results["ready"].stdout), {"ok": True, "services": 3})
         self.assertEqual(results["large-valid"].returncode, 0)
@@ -1675,6 +1684,30 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(classified["health"]["state"], "ready")
         self.assertEqual(observe.call_count, 2)
         sleep.assert_called_once_with(1.0)
+
+    def test_post_compose_observation_default_covers_late_readiness_receipt(self):
+        revision = "a" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision)
+        transient["rows"][0]["Health"] = "starting"
+        ready = _ready_observation(revision)
+        now = [0.0]
+
+        with patch.object(
+                hosting_cmd, "_observe_host_runtime",
+                side_effect=[*[transient] * 10, ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            _, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+            )
+
+        self.assertGreater(now[0], 30)
+        self.assertEqual(classified["health"]["state"], "ready")
+        self.assertEqual(observe.call_count, 11)
 
     def test_post_compose_observation_timeout_retains_last_evidence(self):
         revision = "b" * 40

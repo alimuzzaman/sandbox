@@ -55,7 +55,7 @@ _HOST_OBSERVATION_MAX_CONFIG_DIGESTS = 64
 _HOST_OBSERVATION_MAX_PHASES = 6 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
-_HOST_POST_COMPOSE_OBSERVATION_DEADLINE_SECONDS = 30.0
+_HOST_POST_COMPOSE_OBSERVATION_DEADLINE_SECONDS = 90.0
 _HOST_POST_COMPOSE_OBSERVATION_ATTEMPT_SECONDS = 10
 _HOST_POST_COMPOSE_OBSERVATION_INITIAL_BACKOFF_SECONDS = 1.0
 _HOST_POST_COMPOSE_OBSERVATION_MAX_BACKOFF_SECONDS = 4.0
@@ -858,6 +858,7 @@ def _no_build_image_preflight_command(prefix: str, services: list[str]) -> str:
         " service=configured.get(name)",
         " image=service.get('image') if isinstance(service,dict) else None",
         " if not isinstance(image,str) or not image.strip():fail()",
+        " if service.get('pull_policy') == 'build':fail()",
         " images.append(image.strip())",
         "for image in images:",
         " remaining=end-time.monotonic()",
@@ -974,8 +975,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
                 progress(f"Init service {init_service} build completed")
         _remote_checked(
             entry,
-            f"{prefix} --profile jobs run --rm"
-            f"{' --no-build' if not build else ''} {shlex.quote(init_service)}",
+            f"{prefix} --profile jobs run --rm --pull never"
+            f" {shlex.quote(init_service)}",
             timeout=900, progress=progress, log_path=apply_log,
         )
     _remote_checked(

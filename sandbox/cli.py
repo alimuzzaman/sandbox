@@ -235,7 +235,10 @@ def _normalize_test_routing_options(argv: list[str]) -> list[str]:
         if token.startswith("--instance=") or token.startswith("--label="):
             index += 1
             continue
-        index += 1
+        # The first non-global token is the top-level command.  Do not scan
+        # values owned by another command (for example ``ci run --job test``)
+        # and mistake them for the top-level ``test`` command.
+        break
     if command_index is None:
         return argv
 

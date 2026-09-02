@@ -1655,6 +1655,137 @@ class TestHostingManifest(unittest.TestCase):
             len(result.stdout.encode()), hosting_cmd._HOST_OBSERVATION_MAX_RECEIPT_BYTES,
         )
 
+    def test_post_compose_observation_poll_accepts_transient_unhealthy_then_ready(self):
+        revision = "a" * 40
+        manifest = _manifest_with_derived_revision().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision, services=("web", "worker"))
+        transient["rows"][1]["Health"] = "unhealthy"
+        ready = _ready_observation(revision, services=("web", "worker"))
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          side_effect=[transient, ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)) as sleep:
+            observation, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+                deadline_seconds=5, initial_backoff_seconds=1,
+                max_backoff_seconds=2,
+            )
+
+        self.assertIs(observation, ready)
+        self.assertEqual(classified["health"]["state"], "ready")
+        self.assertEqual(observe.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_post_compose_observation_default_covers_late_readiness_receipt(self):
+        revision = "a" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision)
+        transient["rows"][0]["Health"] = "starting"
+        ready = _ready_observation(revision)
+        now = [0.0]
+
+        with patch.object(
+                hosting_cmd, "_observe_host_runtime",
+                side_effect=[*[transient] * 10, ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            _, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+            )
+
+        self.assertGreater(now[0], 30)
+        self.assertEqual(classified["health"]["state"], "ready")
+        self.assertEqual(observe.call_count, 11)
+
+    def test_post_compose_observation_timeout_retains_last_evidence(self):
+        revision = "b" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision)
+        transient["rows"][0]["Health"] = "starting"
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=transient) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            with self.assertRaises(hosting_cmd._HostRuntimeObservationNotReady) as raised:
+                hosting_cmd._poll_post_compose_host_observation(
+                    validated, {}, "/source", "/runtime", revision,
+                    deadline_seconds=3, initial_backoff_seconds=1,
+                    max_backoff_seconds=2,
+                )
+
+        self.assertIs(raised.exception.observation, transient)
+        self.assertEqual(raised.exception.classified["health"]["state"], "degraded")
+        self.assertFalse(raised.exception.stable)
+        self.assertEqual(observe.call_count, 2)
+
+    def test_post_compose_source_mismatch_stops_without_replay_or_mutation(self):
+        revision = "c" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        mismatch = _ready_observation("d" * 40)
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=mismatch) as observe, \
+             patch.object(hosting_cmd.time, "sleep") as sleep, \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_mark_hosting_init_complete") as initializer, \
+             patch.object(hosting_cmd, "_configure_host_caddy") as edge:
+            with self.assertRaises(hosting_cmd._HostRuntimeObservationNotReady) as raised:
+                hosting_cmd._poll_post_compose_host_observation(
+                    validated, {}, "/source", "/runtime", revision,
+                )
+
+        self.assertTrue(raised.exception.stable)
+        self.assertEqual(
+            raised.exception.classified["source_revision"]["checks"][0]["state"],
+            "mismatch",
+        )
+        observe.assert_called_once()
+        sleep.assert_not_called()
+        compose.assert_not_called()
+        initializer.assert_not_called()
+        edge.assert_not_called()
+
+    def test_post_compose_observation_exception_can_recover_to_ready(self):
+        revision = "e" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        ready = _ready_observation(revision)
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          side_effect=[RuntimeError("temporary transport failure"), ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            observation, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+                deadline_seconds=5, initial_backoff_seconds=1,
+                max_backoff_seconds=2,
+            )
+
+        self.assertIs(observation, ready)
+        self.assertTrue(classified["complete"])
+        self.assertEqual(observe.call_count, 2)
+
     def test_observer_rejects_service_and_key_fanout_above_bounds(self):
         command = hosting_cmd._host_observation_command(
             "true",
@@ -2347,6 +2478,13 @@ class TestHostingManifest(unittest.TestCase):
         runtime = hosting.desired_runtime(validated, "myvps")
         runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
         state = {"version": 1, "hosts": {}}
+        unavailable = hosting_cmd._unavailable_host_observation()
+        failure = hosting_cmd._HostRuntimeObservationNotReady(
+            "remote runtime source/topology/health did not become fully ready before deadline",
+            observation=unavailable,
+            classified=hosting_cmd._classify_host_observation(
+                validated, unavailable, revision),
+        )
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
              patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
@@ -2358,11 +2496,12 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose"), \
              patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime", side_effect=RuntimeError("observation timeout")), \
+             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+                          side_effect=failure), \
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
              patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "runtime observation failed: observation timeout"):
+            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
@@ -2401,6 +2540,12 @@ class TestHostingManifest(unittest.TestCase):
                 {"phase": "source_revision:web", "state": "timeout"},
             ],
         }
+        failure = hosting_cmd._HostRuntimeObservationNotReady(
+            "remote runtime source/topology/health did not become fully ready before deadline",
+            observation=partial,
+            classified=hosting_cmd._classify_host_observation(
+                validated, partial, revision),
+        )
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
              patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
@@ -2412,11 +2557,12 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose"), \
              patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=partial), \
+             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+                          side_effect=failure), \
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
              patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "not fully proven ready"):
+            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )

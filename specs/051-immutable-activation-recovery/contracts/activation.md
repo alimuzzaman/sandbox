@@ -44,8 +44,12 @@ no init, service, edge, pull, or build effect. External/legacy receipts never au
 
 Require the single previous generation, its exact local image, and current machine grant
 over the pre-forward deterministic `ForwardRollbackSubject`. Forward acceptance and the
-terminal generation must reference the exact subject/grant digests. Use the same runtime/edge/proof/commit state machine as
-activation. Never pull or select an older/fallback generation.
+terminal generation must reference the exact subject/grant digests. Before effects,
+re-observe the previous config/local image/platform plus unchanged target/daemon epochs,
+and re-render the supplied Compose files against the retained exact previous projection.
+Use the same runtime/edge/proof/commit state machine as activation. A rollback generation
+retains that exact Compose projection but records the fresh post-replacement runtime-owned
+container identities. Never pull or select an older/fallback generation.
 
 ## Result
 

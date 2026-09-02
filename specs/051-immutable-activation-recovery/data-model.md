@@ -61,7 +61,8 @@
 
 - generation number; plan/proof/policy/request/transaction digests
 - target/daemon, exact image, topology, non-secret configuration identity
-- init receipt identities, running observation with runtime-owned container IDs, edge terminal receipt
+- exact retained rendered-Compose projection for pre-effect rollback validation
+- init receipt identities, fresh running observation with runtime-owned container IDs, edge terminal receipt
 - committed time/identity and canonical digest
 - forward `rollback_subject_digest` and `rollback_grant_digest`
 

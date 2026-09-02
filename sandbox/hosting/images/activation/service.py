@@ -63,9 +63,14 @@ class ActivationService:
                        edge_required, target):
         state_before = self.repository.snapshot(target)
         current = state_before.get("current")
-        rollback_target = ((current or {}).get("generation_digest") or activation_digest(
-            "sandbox.hosting.images.activation-genesis.v1",
-            {"target": request.proof.target.as_mapping(), "generation": request.expected_generation}))
+        previous = state_before.get("previous")
+        rollback_target = (((previous or {}).get("generation_digest")
+                            if request.operation == "rollback"
+                            else (current or {}).get("generation_digest"))
+                           or activation_digest(
+                               "sandbox.hosting.images.activation-genesis.v1",
+                               {"target": request.proof.target.as_mapping(),
+                                "generation": request.expected_generation}))
         expected_plan = request.plan.plan_digest if request.operation != "rollback" else (current or {}).get("plan_digest")
         expected_proof = request.proof.proof_digest if request.operation != "rollback" else (current or {}).get("proof_digest")
         expected_config = configuration_digest if request.operation != "rollback" else (current or {}).get("configuration_digest")
@@ -141,7 +146,8 @@ class ActivationService:
             rendered, selected_services=policy.selected_services,
             exact_image=image, exact_platform=request.plan.image.platform.as_mapping(),
             exact_topology_digest=request.proof.observed_identity["topology_digest"],
-            exact_service_projection=policy.compose_projection)
+            exact_service_projection=policy.compose_projection,
+            exact_runtime_epoch=target["daemon_identity"])
         return target, image, rendered
 
     def _activate(self, request, policy, subject, grant, lease, compose_files,
@@ -243,12 +249,22 @@ class ActivationService:
             raise ActivationContractError("rollback_unavailable")
         if previous.get("configuration_digest") != configuration_digest:
             raise ActivationContractError("rollback_grant_mismatch")
+        previous_generation = VerifiedActivationGeneration.from_mapping(previous)
         self.repository.transition(target_key, request, "preflight")
-        exact_image = previous["image"]["repository_qualified_digest"]
-        local = self.runtime_adapter.observe_local_image(
-            target=request.proof.target.as_mapping(), repository_digest=exact_image)
-        if type(local) is not dict or local.get("repo_digest") != exact_image:
-            raise ActivationContractError("local_image_mismatch")
+        target = request.proof.target.as_mapping()
+        exact_image = previous_generation.image["repository_qualified_digest"]
+        rendered = self.runtime_adapter.render_topology(
+            compose_files=compose_files, project_name=compose_project,
+            selected_services=policy.selected_services,
+            image_overrides={service: exact_image for service in policy.selected_services})
+        validate_rendered_topology(
+            rendered, selected_services=policy.selected_services,
+            exact_image=exact_image, exact_platform=previous_generation.image["platform"],
+            exact_topology_digest=previous_generation.topology_digest,
+            exact_service_projection=previous_generation.compose_projection,
+            exact_runtime_epoch=target["daemon_identity"])
+        self.runtime_observer.prove_generation_local(
+            target=target, generation=previous_generation)
         self.repository.transition(target_key, request, "runtime_pending", effect_entered=True)
         self.runtime_adapter.replace_services(
             compose_files=compose_files, project_name=compose_project,
@@ -257,12 +273,14 @@ class ActivationService:
                 f"SANDBOX_ACTIVATION_IMAGE_{service.upper().replace('-', '_')}": exact_image
                 for service in policy.selected_services}, timeout_seconds=300)
         observation = self.runtime_observer.observe(
-            target=request.proof.target.as_mapping(), selected_services=policy.selected_services,
-            exact_image=exact_image, local_image_id=previous["image"]["config_digest"],
-            config_digest=previous["image"]["config_digest"],
-            platform=previous["image"]["platform"],
-            topology_digest=previous["topology_digest"], edge_identity=policy.edge_policy_digest)
-        generation = self._generation_from_previous(request, previous, observation, grant, subject)
+            target=target, selected_services=policy.selected_services,
+            exact_image=exact_image, local_image_id=previous_generation.image["config_digest"],
+            config_digest=previous_generation.image["config_digest"],
+            platform=previous_generation.image["platform"],
+            topology_digest=previous_generation.topology_digest,
+            edge_identity=policy.edge_policy_digest)
+        generation = self._generation_from_previous(
+            request, previous_generation, observation, grant, subject)
         self.repository.transition(
             target_key, request, "runtime_proven",
             running_observation=observation.as_mapping(),
@@ -272,6 +290,9 @@ class ActivationService:
         edge = self._edge(request, policy, observation, required=edge_required, allow_effect=True)
         if edge is not None:
             mapping = generation.body_mapping(); mapping["edge_receipt_digest"] = edge["receipt_digest"]
+            mapping["init_receipt_digests"] = tuple(mapping["init_receipt_digests"])
+            mapping["compose_projection"] = tuple(mapping["compose_projection"])
+            mapping["service_projection"] = tuple(mapping["service_projection"])
             generation = VerifiedActivationGeneration(
                 **mapping, generation_digest=activation_digest(
                     "sandbox.hosting.images.activation-generation.v1", mapping))
@@ -343,6 +364,7 @@ class ActivationService:
                           "repository_qualified_digest": request.plan.image.repository_qualified_digest},
                 "topology_digest": request.proof.observed_identity["topology_digest"],
                 "configuration_digest": configuration_digest,
+                "compose_projection": policy.compose_projection,
                 "init_receipt_digests": tuple(item.receipt_digest for item in receipts),
                 "running_observation_digest": observation.observation_digest,
                 "service_projection": observation.services,
@@ -358,19 +380,17 @@ class ActivationService:
 
     def _generation_from_previous(self, request, previous, observation, grant, subject):
         state = self.repository.snapshot(request.proof.target.target_identity)
-        body = {**previous, "generation": request.expected_generation + 1,
+        body = {**previous.body_mapping(), "generation": request.expected_generation + 1,
                 "request_digest": request.request_digest,
                 "transaction_digest": state["active"]["transaction_digest"],
                 "running_observation_digest": observation.observation_digest,
+                "service_projection": observation.services,
                 "rollback_subject_digest": subject.subject_digest,
                 "rollback_grant_digest": grant.grant_digest}
-        body.pop("generation_digest", None)
         body["init_receipt_digests"] = tuple(body["init_receipt_digests"])
-        body["service_projection"] = tuple(body["service_projection"])
+        body["compose_projection"] = tuple(body["compose_projection"])
         return VerifiedActivationGeneration(**body, generation_digest=activation_digest(
-            "sandbox.hosting.images.activation-generation.v1",
-            {**body, "init_receipt_digests": list(body["init_receipt_digests"]),
-             "service_projection": list(body["service_projection"])}))
+            "sandbox.hosting.images.activation-generation.v1", body))
 
     def _commit_success(self, request, target, generation, observation, lease):
         state = self.repository.snapshot(target); transaction = state["active"]

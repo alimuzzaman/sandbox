@@ -1240,7 +1240,9 @@ unexpected orphans, changed local identity, incomplete health, or uncertain edge
 performs two read-only observations around a Feature 051-owned non-authorizing provisional
 and never starts init/services, pulls/builds, or changes edge. Adoption requires a plan with
 no init steps and performs no runtime or edge effect. Rollback uses only the one retained
-previous local image and never obtains credentials or contacts a registry.
+previous local image, revalidates its complete local target/daemon identity and retained
+rendered-Compose projection before replacement, records fresh running container identities,
+and never obtains credentials or contacts a registry.
 
 Local fake/unit acceptance does not prove a registered remote, live edge, rollback,
 deployment, or production. Do not use these commands against a live target without the

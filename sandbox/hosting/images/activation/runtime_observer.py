@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
-from .models import ActivationContractError, RunningObservation, activation_digest
+from .models import (
+    ActivationContractError, RunningObservation, VerifiedActivationGeneration,
+    activation_digest,
+)
 
 
 def validate_rendered_topology(rendered: object, *, selected_services: tuple[str, ...],
                                exact_image: str, exact_platform: dict,
                                exact_topology_digest: str,
                                exact_service_projection: tuple[dict, ...],
+                               exact_runtime_epoch: str,
                                allowed_dependencies: tuple[str, ...] = ()) -> dict:
     if type(rendered) is not dict or set(rendered) != {"services", "orphans", "runtime_epoch"} \
-            or type(rendered["services"]) is not dict or rendered["orphans"] != []:
+            or type(rendered["services"]) is not dict or rendered["orphans"] != [] \
+            or rendered["runtime_epoch"] != exact_runtime_epoch:
         raise ActivationContractError("topology_mismatch")
     if set(rendered["services"]) != set(selected_services):
         raise ActivationContractError("topology_mismatch")
     expected_projection = {item.get("service"): {
         key: value for key, value in item.items() if key != "service"}
         for item in exact_service_projection}
+    if set(expected_projection) != set(selected_services):
+        raise ActivationContractError("topology_mismatch")
     for name, service in rendered["services"].items():
         required = {"image", "build", "pull_policy", "platform", "dependencies",
                     "topology_identity", "configuration_digest"}
@@ -44,6 +51,31 @@ class RuntimeObserver:
         observed = self.adapter.observe_local_image(
             target=target, repository_digest=proof.observed_identity["repo_digest"])
         expected = proof.observed_identity
+        return self._validate_local(observed, expected)
+
+    def prove_generation_local(self, *, target: dict,
+                               generation: VerifiedActivationGeneration) -> dict:
+        if type(generation) is not VerifiedActivationGeneration or generation.target != target:
+            raise ActivationContractError("local_image_mismatch")
+        image = generation.image
+        exact_image = image.get("repository_qualified_digest")
+        observed = self.adapter.observe_local_image(
+            target=target, repository_digest=exact_image)
+        expected = {
+            "repository": image.get("repository"),
+            "repo_digest": exact_image,
+            "config_digest": image.get("config_digest"),
+            "platform": image.get("platform"),
+            "local_image_id": image.get("config_digest"),
+            "target_epoch_start": target.get("machine_identity"),
+            "target_epoch_end": target.get("machine_identity"),
+            "daemon_epoch_start": target.get("daemon_identity"),
+            "daemon_epoch_end": target.get("daemon_identity"),
+        }
+        return self._validate_local(observed, expected)
+
+    @staticmethod
+    def _validate_local(observed: object, expected: dict) -> dict:
         fields = ("repository", "repo_digest", "config_digest", "platform", "local_image_id",
                   "target_epoch_start", "target_epoch_end", "daemon_epoch_start", "daemon_epoch_end")
         if type(observed) is not dict or any(observed.get(name) != expected.get(name) for name in fields):

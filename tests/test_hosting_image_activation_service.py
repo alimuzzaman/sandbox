@@ -1,5 +1,7 @@
 import unittest
 
+from sandbox.hosting.images.activation.models import ActivationRequest
+from sandbox.hosting.images.activation.policy import create_forward_rollback_subject
 from sandbox.hosting.images.activation.runtime_observer import RuntimeObserver
 from sandbox.hosting.images.activation.service import ActivationService
 from tests.fixtures.hosting_image_activation import (
@@ -13,6 +15,41 @@ def service(repository, runtime=None, edge=None):
     return ActivationService(repository=repository, runtime_adapter=runtime,
                              runtime_observer=RuntimeObserver(runtime),
                              edge_adapter=edge or FakeEdge()), runtime
+
+
+def execute(instance, request, policy, binding, subject, grant):
+    return instance.execute(
+        request, policy, binding, rollback_subject=subject, rollback_grant=grant,
+        admission_deadline="2999-01-01T00:00:00+00:00",
+        compose_files=("compose.yml",), compose_project="widget",
+        configuration_digest=DIGEST_B, init_data_contract_digest=DIGEST_B)
+
+
+def prepared_rollback():
+    repository = FakeActivationRepository(); instance, runtime = service(repository)
+    policy = activation_policy(); binding = authority_binding(policy=policy)
+    first = activation_request(policy=policy)
+    first_subject = rollback_subject(policy); first_grant = rollback_grant(first_subject)
+    assert execute(instance, first, policy, binding, first_subject, first_grant)["ok"]
+    second = activation_request(generation=1, request_id="activation-b", policy=policy)
+    subject = create_forward_rollback_subject(
+        target=second.proof.target.as_mapping(),
+        rollback_target_generation_digest=repository.state["current"]["generation_digest"],
+        candidate_plan_digest=second.plan.plan_digest,
+        candidate_proof_digest=second.proof.proof_digest,
+        activation_authority_digest=binding.binding_digest,
+        configuration_digest=DIGEST_B,
+        topology_digest=second.proof.observed_identity["topology_digest"],
+        init_data_contract_digest=DIGEST_B,
+        policy_revision=policy.authority_revision)
+    grant = rollback_grant(subject)
+    assert execute(instance, second, policy, binding, subject, grant)["ok"]
+    request = ActivationRequest.create(
+        request_id="rollback-a", operation="rollback", expected_generation=2,
+        policy_digest=policy.policy_digest, plan=second.plan, proof=second.proof,
+        authority_binding_digest=binding.binding_digest,
+        rollback_grant_digest=grant.grant_digest, confirmed=True)
+    return repository, instance, runtime, policy, binding, subject, grant, request
 
 
 class ActivationServiceTests(unittest.TestCase):
@@ -107,6 +144,57 @@ class ActivationServiceTests(unittest.TestCase):
         instance, _ = service(FakeActivationRepository())
         forbidden = {"registry", "broker", "credential", "pull", "build", "tag", "prune"}
         self.assertFalse(forbidden & set(vars(instance)))
+
+    def test_rollback_refuses_changed_local_identity_before_runtime_effect(self):
+        repository, instance, runtime, policy, binding, subject, grant, request = prepared_rollback()
+        original = runtime.observe_local_image
+        def changed(**kwargs):
+            value = original(**kwargs)
+            value.update(config_digest="sha256:" + "e" * 64,
+                         local_image_id="sha256:" + "e" * 64,
+                         daemon_epoch_start="daemon-replaced",
+                         daemon_epoch_end="daemon-replaced")
+            return value
+        runtime.observe_local_image = changed
+        result = execute(instance, request, policy, binding, subject, grant)
+        self.assertFalse(result["ok"]); self.assertEqual(result["code"], "local_image_mismatch")
+        self.assertEqual(runtime.replacements, 2)
+        self.assertNotIn("runtime_pending", repository.events[-3:])
+
+    def test_rollback_refuses_changed_rendered_topology_before_runtime_effect(self):
+        repository, instance, runtime, policy, binding, subject, grant, request = prepared_rollback()
+        original = runtime.render_topology
+        def changed(**kwargs):
+            value = original(**kwargs)
+            value["services"]["web"]["configuration_digest"] = "sha256:" + "e" * 64
+            return value
+        runtime.render_topology = changed
+        renders_before = len(runtime.render_selectors)
+        result = execute(instance, request, policy, binding, subject, grant)
+        self.assertFalse(result["ok"]); self.assertEqual(result["code"], "topology_mismatch")
+        self.assertEqual(runtime.replacements, 2)
+        self.assertEqual(len(runtime.render_selectors), renders_before + 1)
+        self.assertNotIn("runtime_pending", repository.events[-3:])
+
+    def test_rollback_commits_fresh_runtime_projection_from_exact_previous_generation(self):
+        repository, instance, runtime, policy, binding, subject, grant, request = prepared_rollback()
+        restored_projection = repository.state["previous"]["compose_projection"]
+        original = runtime.observe_running
+        def fresh(**kwargs):
+            value = original(**kwargs)
+            for row in value["services"]:
+                row["runtime_identity"] = "fresh-" + row["service"]
+            return value
+        runtime.observe_running = fresh
+        result = execute(instance, request, policy, binding, subject, grant)
+        self.assertTrue(result["ok"], result)
+        stored = repository.state["current"]
+        self.assertEqual(stored["compose_projection"], restored_projection)
+        self.assertEqual(
+            {row["runtime_identity"] for row in stored["service_projection"]},
+            {"fresh-web", "fresh-worker"})
+        self.assertEqual(stored["service_projection"],
+                         repository.state["active"]["running_observation"]["services"])
 
 
 if __name__ == "__main__": unittest.main()

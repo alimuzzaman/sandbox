@@ -18,7 +18,8 @@ class ActivationRuntimeTests(unittest.TestCase):
         validate_rendered_topology(base, selected_services=policy.selected_services,
                                    exact_image=image, exact_platform=request.plan.image.platform.as_mapping(),
                                    exact_topology_digest=request.proof.observed_identity["topology_digest"],
-                                   exact_service_projection=policy.compose_projection)
+                                   exact_service_projection=policy.compose_projection,
+                                   exact_runtime_epoch=request.proof.target.daemon_identity)
         mutations = (
             lambda raw: raw["services"]["web"].update(image="ghcr.io/acme/widget:latest"),
             lambda raw: raw["services"]["web"].update(build={"context": "."}),
@@ -34,7 +35,15 @@ class ActivationRuntimeTests(unittest.TestCase):
                                                exact_image=image,
                                                exact_platform=request.plan.image.platform.as_mapping(),
                                                exact_topology_digest=request.proof.observed_identity["topology_digest"],
-                                               exact_service_projection=policy.compose_projection)
+                                               exact_service_projection=policy.compose_projection,
+                                               exact_runtime_epoch=request.proof.target.daemon_identity)
+        with self.assertRaises(ValueError):
+            validate_rendered_topology(
+                base, selected_services=policy.selected_services,
+                exact_image=image, exact_platform=request.plan.image.platform.as_mapping(),
+                exact_topology_digest=request.proof.observed_identity["topology_digest"],
+                exact_service_projection=policy.compose_projection[:-1],
+                exact_runtime_epoch=request.proof.target.daemon_identity)
 
     def test_running_observation_requires_one_coherent_epoch_and_exact_health(self):
         from sandbox.hosting.images.activation.runtime_observer import RuntimeObserver

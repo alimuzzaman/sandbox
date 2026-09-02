@@ -522,6 +522,7 @@ class VerifiedActivationGeneration:
     image: dict[str, Any]
     topology_digest: str
     configuration_digest: str
+    compose_projection: tuple[dict[str, Any], ...]
     init_receipt_digests: tuple[str, ...]
     running_observation_digest: str
     service_projection: tuple[dict[str, Any], ...]
@@ -539,9 +540,34 @@ class VerifiedActivationGeneration:
                      self.edge_receipt_digest, self.proof_pin_digest,
                      self.rollback_subject_digest, self.rollback_grant_digest,
                      self.generation_digest, *self.init_receipt_digests): _digest(item)
-        if len(self.init_receipt_digests) > MAX_INIT_STEPS or not self.service_projection:
+        if len(self.init_receipt_digests) > MAX_INIT_STEPS or not self.compose_projection \
+                or not self.service_projection:
             raise ActivationContractError()
         _safe_mapping(self.image, forbidden=SECRET_FIELDS)
+        exact_image = self.image.get("repository_qualified_digest")
+        exact_platform = self.image.get("platform")
+        if type(exact_image) is not str or "@sha256:" not in exact_image \
+                or type(exact_platform) is not dict:
+            raise ActivationContractError()
+        compose_fields = frozenset({"service", "image", "build", "pull_policy", "platform",
+                                    "dependencies", "topology_identity", "configuration_digest"})
+        compose_names = []
+        if len(self.compose_projection) > MAX_SERVICES:
+            raise ActivationContractError()
+        for item in self.compose_projection:
+            raw = _closed(item, compose_fields)
+            compose_names.append(_text(raw["service"], identity=True))
+            if raw["image"] != exact_image or raw["build"] is not None \
+                    or raw["pull_policy"] not in {"never", "missing-refused"} \
+                    or raw["platform"] != exact_platform \
+                    or raw["topology_identity"] != self.topology_digest \
+                    or type(raw["dependencies"]) is not list:
+                raise ActivationContractError()
+            _digest(raw["configuration_digest"])
+            for dependency in raw["dependencies"]:
+                _text(dependency, identity=True)
+        if len(compose_names) != len(set(compose_names)):
+            raise ActivationContractError()
         RunningObservation(
             target=self.target, target_epoch_start="projection", target_epoch_end="projection",
             runtime_epoch_start="projection", runtime_epoch_end="projection",
@@ -552,6 +578,15 @@ class VerifiedActivationGeneration:
                 "runtime_epoch_start": "projection", "runtime_epoch_end": "projection",
                 "services": list(self.service_projection), "topology_digest": self.topology_digest,
                 "health_complete": True, "edge_identity": "projection"}))
+        if {item["service"] for item in self.service_projection} != set(compose_names) \
+                or any(item["declared_image"] != exact_image
+                       or item["repository_digest"] != exact_image
+                       or item["local_image_id"] != self.image.get("config_digest")
+                       or item["config_digest"] != self.image.get("config_digest")
+                       or item["platform"] != exact_platform
+                       or item["topology_identity"] != self.topology_digest
+                       for item in self.service_projection):
+            raise ActivationContractError()
         if self.generation_digest != activation_digest("sandbox.hosting.images.activation-generation.v1", self.body_mapping()):
             raise ActivationContractError("artifact_invalid")
 
@@ -567,6 +602,7 @@ class VerifiedActivationGeneration:
         fields = frozenset(cls.__dataclass_fields__)
         raw = _closed(value, fields)
         return cls(**{**raw, "init_receipt_digests": tuple(raw["init_receipt_digests"]),
+                      "compose_projection": tuple(raw["compose_projection"]),
                       "service_projection": tuple(raw["service_projection"])})
 
 

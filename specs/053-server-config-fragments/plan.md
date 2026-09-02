@@ -1,8 +1,16 @@
 # Implementation Plan: Instance-Scoped Server Configuration Fragments
 
-**Branch**: `codex/server-config-fragments` | **Date**: 2026-08-31 | **Spec**: [spec.md](spec.md)
+**Branch**: `codex/server-config-fragments` | **Date**: 2026-09-02 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `/specs/053-server-config-fragments/spec.md`
+
+**Planning checkpoint**: refreshed against `origin/latest` at `c6c06e5`, which contains
+the accepted source for Features 048-051. The persisted active feature pointer remains
+`specs/051-immutable-activation-recovery` by owner request; Feature 053 analysis uses the
+read-only `--feature-dir specs/053-server-config-fragments` selector and does not rewrite
+`.specify/feature.json` or the managed AGENTS/CLAUDE pointers. Accepted source is not
+live, deployment, production, or human-security proof; the open Feature 051 gates remain
+open.
 
 ## Summary
 
@@ -30,8 +38,12 @@ native nginx and OpenLiteSpeed configuration data rendered by server adapters
 **Primary Dependencies**: `sandbox.registry.CommandSpec` and the built-in command
 manifest; existing canonical instance resolver and WordPress Compose lifecycle;
 `sandbox.core` Compose/runtime observation helpers; explicit server-adapter manifest;
+the existing project/instance lifecycle mutation lock exposed through one typed
+fragment-lifecycle guard;
 POSIX `openat`/`O_NOFOLLOW`, `flock`, `fsync`, and atomic rename; active nginx and
-`litespeedtech/openlitespeed` images; existing redaction and structured-result rules
+`litespeedtech/openlitespeed` images; existing redaction and structured-result rules.
+The accepted Feature 048 recovery and Feature 049-051 OCI packages are compatibility
+boundaries only, not dependencies or authority sources for local server fragments
 
 **Storage**: owner-only durable state beneath
 `$SANDBOX_HOME/runtime/server-config/<instance-incarnation-id>/`, containing a lock,
@@ -87,6 +99,7 @@ through every live mutation
 | Module and manifest boundaries | PASS. A `CommandSpec` owns parsing and pre-dispatch policy; an adapter manifest owns server policy. No new consumer of `sandbox_core.py`, `sandbox.registry.COMMANDS`, Hermes facades, MCP app helpers, or raw registry/state JSON is added. |
 | Test subprocess environment | PASS. Every captured subprocess test uses `run_test_process` or an explicit synthetic environment. Parent `os.environ` is never copied, enumerated, or forwarded. |
 | Secrets and consequential change | PASS BY DESIGN. The authority rejects credential-like names and secret transport; content-free evidence crosses routine output. This privileged configuration path requires human security review and live acceptance before release. |
+| Features 048-051 authority separation | PASS BY PLAN. Local fragment code does not import host recovery, OCI trust, credential staging/proof custody, immutable activation, or remote activation transports. Its exact-image observation is a local runtime precondition only. |
 | Dev-tool packaging | PASS. Spec Kit artifacts and the managed AGENTS pointer remain outside shipped product artifacts. |
 
 Post-design re-check: the state, policy, adapter, CLI, and lifecycle contracts preserve
@@ -135,6 +148,7 @@ sandbox/
     ├── models.py                        # fragments, sets, transactions, observations, results
     ├── policy.py                        # common wordpress-cache-v1 authority and name/content bounds
     ├── repository.py                    # owner-only generations, journal, lock, read-only observation
+    ├── lifecycle.py                     # lock-ordered switch/delete/reconcile guard
     ├── service.py                       # apply/list/show/revert/reconcile orchestration
     └── adapters/
         ├── base.py                      # adapter protocol and typed evidence
@@ -186,7 +200,11 @@ of parsing feature JSON.
 ## Research
 
 See [research.md](research.md). All technical choices and integration unknowns are
-resolved; no `NEEDS CLARIFICATION` remains.
+resolved; no product `NEEDS CLARIFICATION` remains. Current-image OpenLiteSpeed support is
+still a bounded implementation feasibility gate: Phase 1 must prove the planned stable
+vhost inclusion, isolated boot/canary, and reload path on a disposable instance after
+explicit authorization. Failure requires plan/design revision, not a fallback to
+`.htaccess`, host-global config, raw runtime edits, or assumed image behavior.
 
 ## Design Artifacts
 
@@ -201,15 +219,25 @@ resolved; no `NEEDS CLARIFICATION` remains.
 
 - The `server` command becomes feature-owned. Its parser recognizes `config` first;
   every other valid token shape is delegated to the preserved server-switch operation.
+  The current optional-name parser accepts both `sb server <type>` and
+  `sb server <instance> <type>`; both remain compatibility behavior even though the
+  current README documents only the named form. The refresh must correct supporting
+  research/docs and add parser tests rather than infer syntax from documentation alone.
   `list` and default `show` declare a pre-dispatch skip so auto-migration, Compose
   regeneration, and legacy environment writes cannot violate read-only behavior.
 - The authoritative instance record gains a random opaque incarnation ID when a new
   instance is created. Apply/reconcile preserves it; confirmed deletion disassociates
   its fragment root. A reused display name receives a new ID and cannot adopt old state.
+  Incarnation minting, legacy-record adoption rules, typed projection, and rollback-safe
+  preservation are foundational work completed before any adapter mount or candidate.
 - Compose mounts only the selected incarnation's adapter root. nginx keeps its checked-in
-  base vhost and includes the mounted active generation. OpenLiteSpeed uses a complete
-  adapter-rendered instance vhost rooted in the mounted generation. Caddy never consumes
-  either mount.
+  base vhost and an absent-safe fixed guest include glob; each nginx container mounts only
+  its own incarnation directory at that fixed guest path, so a legacy container without
+  the mount still boots but cannot apply fragments. OpenLiteSpeed may use a complete
+  adapter-rendered instance vhost rooted in the mounted generation only after the Phase 1
+  exact-image capability probe proves a stable instance-local inclusion point, isolated
+  candidate boot/canary, and fixed target-only reload path. Probe failure stops the feature
+  for design revision before production source work. Caddy never consumes either mount.
 - Existing instances without the mount fail `config apply` before state mutation with an
   actionable supported `sb apply --instance NAME` reconciliation. The fragment operation
   never silently recreates a web tier merely to attach authority.
@@ -217,29 +245,48 @@ resolved; no `NEEDS CLARIFICATION` remains.
   server type, runtime image, mount identity, and readiness before reporting fragment
   state healthy. They never pick a generation by timestamp. Read-only inspection reports
   drift without repairing it.
-- Server switching calls the read-only lifecycle gate before it writes local YAML or
-  Compose. Any active, unresolved, degraded, or recovery-needed fragment state refuses.
-  Confirmed deletion must include exact fragment-state removal; ordinary stop/start keeps
-  the same incarnation and known-good state.
+- Server switching and deletion run through one lifecycle mutation owner. It acquires the
+  existing project/instance lifecycle lock, then the fragment lock, re-reads both states,
+  and holds both across the gate, YAML/state write, runtime action, fragment commit or
+  disassociation, and rollback/terminal receipt. Any active, unresolved, degraded, or
+  recovery-needed fragment state refuses before the first lifecycle write. Confirmed
+  deletion must include exact fragment-state removal; ordinary stop/start keeps the same
+  incarnation and known-good state. No preflight-only gate may release locks before effect.
 - Exact fragment content never enters the registry or instance block. Those stores retain
   only opaque incarnation/mount identity. Fragment bytes remain owner-only in the feature
   repository and are exposed only by explicit content output.
 
-## Feature 047/048 Integration Risks
+## Current `latest` and Feature 048-051 Integration Boundaries
 
-- Feature 047 changes `sandbox/cli.py`, `sandbox/commands/manifest.py`, hosting modules,
-  modularity tests, docs, and command behavior. Feature 048 also changes `sandbox/cli.py`
-  and adds a separate `sandbox/hosting/` recovery package. Feature 053 must rebase after
-  both approved branches land and must not create or import `sandbox.hosting`.
-- Resolve CLI conflicts by retaining Feature 047/048 pre-dispatch, remote, and recovery
-  policies first, then add the `server` command-owned policy as one narrow predicate.
-  Do not restore the current legacy parser block or overwrite command manifest entries.
-- Re-run command-manifest coverage, CLI composition, architecture-boundary, hosting,
-  lifecycle, and server-config focused suites after rebase. A clean textual merge is not
-  evidence that parser ownership or pre-dispatch ordering survived.
-- Feature 048's host recovery state is host-scoped and read-only/recovery-oriented.
-  Feature 053 state is local instance-incarnation scoped. They share no repository,
-  lock, transaction, receipt, deletion rule, or recovery meaning.
+- `origin/latest` already contains Feature 048 observation-only host recovery, Feature
+  049 pure OCI trust verification, Feature 050 credential-brokered staging/proof custody,
+  and Feature 051 immutable activation/adoption/rollback/recovery. Feature 053 starts from
+  that integrated source; it does not recreate, replace, or backport any former Feature
+  047 path.
+- Feature 048 owns host-scoped observation/recovery under `sandbox.hosting.recovery`.
+  Features 049-051 own host-scoped image trust, staging/custody, activation state, the
+  shared outer hosting writer/target mutation port, and remote activation transport.
+  Feature 053 remains local instance-incarnation state under `sandbox.server_config`.
+  It imports none of those packages and shares no repository, lock, transaction, receipt,
+  proof, generation, recovery meaning, credential path, or mutation ownership.
+- Feature 053's "exact image" means an independently observed content-addressed image for
+  the selected local running web service, used only to validate the candidate and recheck
+  an activation precondition. It is not a Feature 049 trust plan, Feature 050 staged proof,
+  Feature 051 activation grant, registry credential, pull/build authority, remote-host
+  identity, or deployment receipt.
+- CLI work preserves the accepted `CommandSpec.predispatch_policy` composition and every
+  existing `host image` parser/handler. The `server` migration removes only its own legacy
+  parser/registration bridge and adds one narrow read-only predicate; it does not edit
+  `sandbox.commands.hosting`, `sandbox.core._hosting`, `sandbox.hosting`, or remote image
+  transports.
+- Re-run Feature 048 recovery suites, Feature 049 trust/contracts/boundary suites, Feature
+  050 staging/process/repository/secret/service suites, Feature 051 activation suites,
+  command-manifest/CLI/modularity/architecture checks, and Feature 053 focused suites after
+  integration. A clean textual merge is not evidence that command ownership, pre-dispatch
+  ordering, sole-writer rules, proof custody, or activation/recovery separation survived.
+- Feature 051 T060 human security review and live registered-host/edge/rollback/deployment/
+  production validation remain independent open gates. Feature 053 planning, source tests,
+  or local disposable-instance acceptance cannot close or inherit those gates.
 
 ## Verification Strategy
 
@@ -252,7 +299,8 @@ resolved; no `NEEDS CLARIFICATION` remains.
    target-only reload/restart, and unknown readiness refusal.
 3. CLI and lifecycle tests prove command-owned registration, all legacy server-switch
    forms, read-only pre-dispatch skip, server-switch/deletion gates, instance-name reuse,
-   safe content output, and synthetic subprocess environments.
+   safe content output, synthetic subprocess environments, and unchanged Feature 048-051
+   host/OCI command and authority boundaries.
 4. Live acceptance uses disposable target and control instances. It records both
    identities/readiness/markers before and after every operation; completes nginx static
    hit then PHP fallback; completes the required OpenLiteSpeed origin/warm/hit/purge/
@@ -263,7 +311,8 @@ resolved; no `NEEDS CLARIFICATION` remains.
 5. Live evidence records exact Git SHA, installed Sandbox revision, server image IDs,
    fragment-set digests, target/control observations, phase results, and terminal state.
    No content bytes, caller paths, secrets, raw container metadata, or unredacted logs
-   enter the evidence bundle.
+   enter the evidence bundle. This local acceptance does not exercise a registry, staged
+   image, remote host, Feature 051 activation, edge rollout, deployment, or production.
 
 ## Complexity Tracking
 

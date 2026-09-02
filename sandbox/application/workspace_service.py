@@ -9,11 +9,13 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
 import uuid
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -21,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Protocol
 
 from sandbox.workspaces import WorkspaceIndexError, WorkspaceRepository
+from sandbox.jobs.process import ProcessIdentity, capture_process_identity, verify_process_identity
 
 
 class WorkspaceServiceProtocol(Protocol):
@@ -117,6 +120,9 @@ class SyncReconcileRequest:
             byte_count=self.byte_count,
             expected_index_generation=self.expected_index_generation,
         )
+MAX_CI_MATERIALIZATION_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_CI_MATERIALIZATION_ENTRIES = 100_000
+MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES = 1024 * 1024 * 1024
 
 
 def _iso(epoch: float) -> str:
@@ -168,6 +174,340 @@ def _legacy_namespace(project_root: str, target_scope: str,
 
 def _durable_namespace(project_identity: str) -> str:
     return "project-" + hashlib.sha256(project_identity.encode()).hexdigest()[:24]
+
+
+def _digest_payload(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _filesystem_identity(path: Path) -> dict[str, int]:
+    observed = os.stat(path, follow_symlinks=False)
+    return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
+
+
+def _path_is_within(candidate: str, root: Path) -> bool:
+    try:
+        Path(candidate).resolve(strict=False).relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _decode_mountinfo_path(value: str) -> str:
+    return (value.replace("\\040", " ").replace("\\011", "\t")
+            .replace("\\012", "\n").replace("\\134", "\\"))
+
+
+def _mountinfo_reference_count(text: str, checkout: Path, *,
+                               device: tuple[int, int] | None = None) -> int:
+    """Count mountpoints in checkout and same-device bind roots from it."""
+    checkout = checkout.resolve(strict=False)
+    if device is None:
+        observed = os.stat(checkout, follow_symlinks=False)
+        device = (os.major(observed.st_dev), os.minor(observed.st_dev))
+    rows: list[tuple[tuple[int, int], Path, Path]] = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        try:
+            major, minor = (int(part) for part in fields[2].split(":", 1))
+        except (TypeError, ValueError):
+            continue
+        rows.append(((major, minor),
+                     Path(_decode_mountinfo_path(fields[3])).resolve(strict=False),
+                     Path(_decode_mountinfo_path(fields[4])).resolve(strict=False)))
+    covering = [row for row in rows if row[0] == device and
+                (row[2] == checkout or _path_is_within(str(checkout), row[2]))]
+    if not covering:
+        return 0
+    base = max(covering, key=lambda row: len(row[2].parts))
+    relative = checkout.relative_to(base[2])
+    checkout_root = (base[1] / relative).resolve(strict=False)
+    count = 0
+    for row_device, root, mountpoint in rows:
+        if row_device == device and root == base[1] and mountpoint == base[2]:
+            continue
+        mounted_inside = (mountpoint == checkout or
+                          _path_is_within(str(mountpoint), checkout))
+        sourced_inside = (row_device == device and
+                           (root == checkout_root or
+                            _path_is_within(str(root), checkout_root) or
+                            _path_is_within(str(checkout_root), root)))
+        if mounted_inside or sourced_inside:
+            count += 1
+    return count
+
+
+def _observe_mount_references(checkout: Path) -> int | None:
+    mountinfo = Path("/proc/self/mountinfo")
+    if not mountinfo.is_file():
+        return 0 if not sys.platform.startswith("linux") else None
+    try:
+        return _mountinfo_reference_count(
+            mountinfo.read_text(errors="replace"), checkout)
+    except (OSError, ValueError):
+        return None
+
+
+def _process_group_empty(pgid: int) -> bool:
+    try:
+        os.killpg(int(pgid), 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _owned_cgroup_empty(cgroup_path: str) -> bool:
+    if (not isinstance(cgroup_path, str) or not cgroup_path.startswith("/") or
+            cgroup_path == "/" or ".." in Path(cgroup_path).parts):
+        return False
+    root = Path("/sys/fs/cgroup").resolve(strict=False)
+    target = (root / cgroup_path.lstrip("/")).resolve(strict=False)
+    try:
+        target.relative_to(root)
+        payload = (target / "cgroup.procs").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return not any(line.strip() for line in payload.splitlines())
+
+
+def _remove_tree_fd(directory_fd: int) -> None:
+    """Delete one already-open directory without following path replacements."""
+    for name in os.listdir(directory_fd):
+        observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            child_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev != observed.st_dev or
+                        opened.st_ino != observed.st_ino):
+                    raise WorkspaceIndexError(
+                        "workspace_ownership_drift",
+                        "cleanup child directory identity changed")
+                _remove_tree_fd(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
+    """Return positive host/container mount absence or unknown on probe failure."""
+    mounts = _observe_mount_references(checkout)
+    containers: int | None = None
+    try:
+        from sandbox.services.environment import compatible_subprocess_environment
+        listed = subprocess.run(
+            ["docker", "ps", "-aq"], capture_output=True, text=True,
+            timeout=10, check=False, env=compatible_subprocess_environment(),
+        )
+        if listed.returncode == 0 and len(listed.stdout) <= 131_072:
+            all_identifiers = tuple(
+                line.strip() for line in listed.stdout.splitlines() if line.strip())
+            identifiers = all_identifiers if len(all_identifiers) <= 1000 else ()
+            if not identifiers:
+                containers = 0 if not all_identifiers else None
+            else:
+                inspected = subprocess.run(
+                    ["docker", "inspect", *identifiers], capture_output=True,
+                    text=True, timeout=20, check=False,
+                    env=compatible_subprocess_environment(),
+                )
+                if inspected.returncode == 0 and len(inspected.stdout) <= 16_777_216:
+                    rows = json.loads(inspected.stdout)
+                    if isinstance(rows, list):
+                        containers = sum(
+                            any(isinstance(mount, dict) and
+                                isinstance(mount.get("Source"), str) and
+                                (_path_is_within(mount["Source"], checkout) or
+                                 _path_is_within(str(checkout), Path(mount["Source"])))
+                                for mount in (row.get("Mounts") or ()))
+                            for row in rows if isinstance(row, dict)
+                        )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        containers = None
+    return {"containers": containers, "mounts": mounts}
+
+
+def _file_sha256(path_or_handle) -> str:
+    digest = hashlib.sha256()
+    if hasattr(path_or_handle, "read") and hasattr(path_or_handle, "seek"):
+        handle = path_or_handle
+        handle.seek(0)
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+        handle.seek(0)
+    else:
+        with Path(path_or_handle).open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _artifact_identity(observed) -> dict[str, int]:
+    return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
+
+
+@contextmanager
+def _verified_artifact(artifact: Path, expected_digest: str,
+                       expected_size: int):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(artifact, flags)
+    except OSError as exc:
+        raise WorkspaceIndexError(
+            "workspace_materialization_unavailable",
+            "retained CI materialization artifact is unavailable") from exc
+    handle = os.fdopen(descriptor, "rb", closefd=False)
+    try:
+        observed = os.fstat(descriptor)
+        if (not stat.S_ISREG(observed.st_mode) or
+                observed.st_size != expected_size or
+                _file_sha256(handle) != expected_digest):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "retained CI materialization artifact proof changed")
+        yield handle, _artifact_identity(observed)
+    finally:
+        handle.close()
+        os.close(descriptor)
+
+
+def _unlink_verified_artifact(artifact: Path, expected_digest: str,
+                              expected_size: int) -> None:
+    """Verify the exact archive, then fail closed without a safe unlink API."""
+    with _verified_artifact(artifact, expected_digest, expected_size):
+        raise WorkspaceIndexError(
+            "workspace_identity_bound_removal_unavailable",
+            "platform cannot retire an archive by open descriptor identity")
+
+
+def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
+    measured, reason = _measure_tree(
+        checkout, entry_budget=MAX_CI_MATERIALIZATION_ENTRIES,
+        deadline=time.monotonic() + 30.0)
+    if measured is None or measured > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+        raise WorkspaceIndexError(
+            "workspace_materialization_too_large",
+            f"materialization archive exceeds its bounded input ({reason})")
+    artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    usage = shutil.disk_usage(artifact.parent)
+    if (usage.free - MAX_CI_MATERIALIZATION_ARCHIVE_BYTES <
+            MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES):
+        raise WorkspaceIndexError(
+            "workspace_materialization_reserve",
+            "materialization archive cannot preserve the disk reserve")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".ci-materialization-", suffix=".tar.gz", dir=artifact.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary)
+    try:
+        archive_entries = 0
+        archive_bytes = 0
+
+        def bounded_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+            nonlocal archive_entries, archive_bytes
+            archive_entries += 1
+            archive_bytes += member.size if member.isfile() else 0
+            if (archive_entries > MAX_CI_MATERIALIZATION_ENTRIES or
+                    archive_bytes > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_too_large",
+                    "materialization archive changed beyond its bounded input")
+            return member
+
+        class BoundedWriter:
+            def __init__(self, handle):
+                self.handle = handle
+                self.written = 0
+
+            def write(self, payload):
+                if self.written + len(payload) > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+                    raise WorkspaceIndexError(
+                        "workspace_materialization_too_large",
+                        "materialization archive exceeds its bounded output")
+                written = self.handle.write(payload)
+                self.written += written
+                return written
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+        with temporary_path.open("wb") as raw_archive:
+            writer = BoundedWriter(raw_archive)
+            with tarfile.open(fileobj=writer, mode="w:gz") as archive:
+                archive.add(
+                    checkout, arcname="workspace", recursive=True,
+                    filter=bounded_member)
+        size = temporary_path.stat().st_size
+        if size > MAX_CI_MATERIALIZATION_ARCHIVE_BYTES:
+            raise WorkspaceIndexError(
+                "workspace_materialization_too_large",
+                "materialization archive exceeds its bounded output")
+        if (shutil.disk_usage(artifact.parent).free <
+                MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES):
+            raise WorkspaceIndexError(
+                "workspace_materialization_reserve",
+                "materialization archive crossed the disk reserve")
+        os.chmod(temporary_path, 0o600)
+        digest = _file_sha256(temporary_path)
+        try:
+            os.link(temporary_path, artifact, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise WorkspaceIndexError(
+                "workspace_materialization_failed",
+                "materialization archive generation already exists") from exc
+        return digest, size
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _restore_checkout(artifact: Path, expected_digest: str,
+                      expected_size: int, checkout: Path) -> None:
+    if checkout.exists():
+        raise WorkspaceIndexError(
+            "workspace_materialization_unavailable",
+            "retained CI materialization artifact is unavailable")
+    staging = checkout.parent / f".{checkout.name}.restore-{uuid.uuid4().hex}"
+    try:
+        staging.mkdir(mode=0o700)
+        with _verified_artifact(
+                artifact, expected_digest, expected_size) as (handle, identity):
+            with tarfile.open(fileobj=handle, mode="r:gz") as archive:
+                archive.extractall(staging, filter="data")
+            try:
+                entry_identity = _artifact_identity(os.stat(
+                    artifact, follow_symlinks=False))
+            except OSError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization artifact entry changed") from exc
+            if entry_identity != identity:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retained CI materialization artifact entry changed")
+        restored = staging / "workspace"
+        if not restored.is_dir() or restored.is_symlink():
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "retained CI materialization artifact is invalid")
+        os.rename(restored, checkout)
+    except WorkspaceIndexError:
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_materialization_failed",
+            "retained CI materialization restore failed") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _public_record(record, repository: WorkspaceRepository, *,
@@ -1007,6 +1347,7 @@ class WorkspaceService:
     repository: WorkspaceRepository | None = None
     lifecycle_gateway: Any | None = None
     resource_binding_resolver: Any | None = None
+    cleanup_reference_observer: Any | None = None
     deployment_receipt_resolver: Any | None = None
     deployment_root: Path | None = None
     # Remote workspace control is allowed only after the selected MCP service
@@ -1379,7 +1720,8 @@ class WorkspaceService:
 
     def _register(self, *, project_identity: str, label: str, namespace: str,
                   checkout_locator: str | None = None, source: str = "index",
-                  deployment_proof: dict[str, str] | None = None):
+                  deployment_proof: dict[str, Any] | None = None,
+                  mode: str = "persistent"):
         if not isinstance(label, str) or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
             raise WorkspaceIndexError(
@@ -1436,7 +1778,7 @@ class WorkspaceService:
                 "label": label,
                 "target": "remote" if namespace.startswith("remote-") else "local",
                 "namespace": namespace.replace("-", ":", 2),
-                "mode": "persistent",
+                "mode": mode,
                 "path": str(directory),
                 "project_identity": project_identity,
                 "workspace_id": workspace_id,
@@ -1465,7 +1807,106 @@ class WorkspaceService:
             raise
         return record, True
 
-    def ensure_submission(self, submission) -> None:
+    def _materialize_ci_checkout(self, submission, *,
+                                 restore_authority: dict[str, Any] | None = None,
+                                 ) -> dict[str, Any] | None:
+        source_value = getattr(submission, "materialization_source_root", None)
+        if submission.kind != "ci" or not isinstance(source_value, str):
+            return None
+        if self.deployment_root is None:
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "CI cleanup requires a controller deployment root")
+        source = Path(source_value).resolve(strict=False)
+        checkout = Path(submission.project_root).resolve(strict=False)
+        deployment_root = Path(self.deployment_root).resolve(strict=False)
+        try:
+            source.relative_to(deployment_root)
+            checkout.relative_to(deployment_root)
+        except ValueError as exc:
+            raise WorkspaceIndexError(
+                "workspace_path_escape",
+                "CI materialization must stay inside deploy storage") from exc
+        if source == checkout or source.parent != checkout.parent:
+            raise WorkspaceIndexError(
+                "workspace_materialization_unavailable",
+                "CI source and disposable checkout must be distinct siblings")
+        if restore_authority is not None:
+            artifact = Path(str(restore_authority.get("artifact_locator")))
+            artifact_digest = restore_authority.get("artifact_digest")
+            artifact_root = self._repo().index_path.parent / "ci-materializations"
+            try:
+                artifact.resolve(strict=False).relative_to(
+                    artifact_root.resolve(strict=False))
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape",
+                    "retained CI materialization artifact escapes its owner root") from exc
+            if (not isinstance(artifact_digest, str) or
+                    not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest)):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_unavailable",
+                    "retained CI materialization artifact proof is incomplete")
+            artifact_size = restore_authority.get("artifact_size_bytes")
+            if (isinstance(artifact_size, bool) or
+                    not isinstance(artifact_size, int) or artifact_size < 0):
+                raise WorkspaceIndexError(
+                    "workspace_materialization_unavailable",
+                    "retained CI materialization size proof is incomplete")
+            _restore_checkout(
+                artifact, artifact_digest, artifact_size, checkout)
+            receipt_payload = {
+                "schema": 1, "workspace_path": str(checkout),
+                "source_identity": submission.source.identity,
+                "history_mode": "retained-artifact", "hardlinked_files": 0,
+                "copied_git_entries": 0, "fallback_reason": None,
+                "source_mutation_check": "artifact-digest-verified",
+                "lock": {"key": "retained-artifact", "acquired": True,
+                         "released": True},
+            }
+        else:
+            from sandbox.workspaces.checkout import (
+                WorkspaceMaterializationError, materialize, plan_materialization,
+            )
+            source_identity = (submission.source.identity
+                               if re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                               submission.source.identity)
+                               else None)
+            try:
+                receipt = materialize(plan_materialization(
+                    source, checkout, source_identity=source_identity,
+                    workspace_label=submission.workspace_label,
+                ))
+            except WorkspaceMaterializationError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_materialization_failed",
+                    "controller CI materialization failed") from exc
+            receipt_payload = receipt.to_dict()
+        generation = uuid.uuid4().hex
+        if restore_authority is None:
+            artifact = self._repo().index_path.parent / "ci-materializations" / (
+                generation + ".tar.gz")
+            artifact_digest, artifact_size = _archive_checkout(checkout, artifact)
+        authority = {
+            "schema": 1,
+            "owner": "controller-ci-materialization",
+            "job_kind": "ci",
+            "checkout_locator": str(checkout),
+            "source_checkout_locator": str(source),
+            "source_identity": submission.source.identity,
+            "workspace_label": submission.workspace_label,
+            "checkout_identity": _filesystem_identity(checkout),
+            "receipt": receipt_payload,
+            "generation": generation,
+            "artifact_locator": str(artifact),
+            "artifact_digest": artifact_digest,
+            "artifact_size_bytes": artifact_size,
+        }
+        authority["digest"] = _digest_payload(authority)
+        return authority
+
+    def ensure_submission(self, submission, *,
+                          expected_previous_authority_digest: str | None = None):
         repo = self._repo()
         existing = repo.find(
             submission.project_identity, submission.workspace_label)
@@ -1483,12 +1924,95 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_index_incomplete",
                     "legacy workspace metadata must be migrated before accepting a job")
+        checkout = str(Path(submission.project_root).resolve(strict=False))
+        if existing is not None:
+            # Supported reusable/index/legacy workspaces remain authoritative.
+            # A job may reference them, but never upgrades them into disposable
+            # cleanup authority.
+            if existing.source != "ci-materialization":
+                return existing
+            if existing.lifecycle not in {"destroyed", "indeterminate"}:
+                return existing
+            if (existing.lifecycle == "indeterminate" and
+                    expected_previous_authority_digest is None):
+                raise WorkspaceIndexError(
+                    "workspace_recovery_required",
+                    "fail-closed CI cleanup requires an explicit retry")
+            previous_authority = existing.metadata.get("ci_cleanup_authority")
+            if (not isinstance(previous_authority, dict) or
+                    expected_previous_authority_digest is None or
+                    previous_authority.get("digest") !=
+                    expected_previous_authority_digest or
+                    previous_authority.get("digest") != _digest_payload({
+                        key: value for key, value in previous_authority.items()
+                        if key != "digest"
+                    })):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "retry materialization authority changed")
+            authority = self._materialize_ci_checkout(
+                submission,
+                restore_authority=(previous_authority
+                                   if isinstance(previous_authority, dict)
+                                   else None),
+            )
+            if authority is None:
+                return existing
+            metadata_path = Path(str(existing.path))
+            metadata_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._write_json_atomic(metadata_path, {
+                "label": existing.label, "target": "local",
+                "namespace": existing.namespace,
+                "mode": submission.workspace_mode,
+                "path": str(metadata_path.parent),
+                "project_identity": submission.project_identity,
+                "workspace_id": existing.workspace_id,
+            })
+            return repo.revive_disposable(existing.workspace_id, metadata={
+                "checkout_locator": checkout,
+                "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    checkout.encode()).hexdigest(),
+                "source_checkout_locator": authority["source_checkout_locator"],
+                "source_checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    authority["source_checkout_locator"].encode()).hexdigest(),
+                "ci_cleanup_authority": authority,
+            })
         namespace = _durable_namespace(submission.project_identity)
-        record, _created = self._register(
-            project_identity=submission.project_identity,
-            label=submission.workspace_label, namespace=namespace,
-            checkout_locator=submission.project_root, source="job",
-        )
+        authority = self._materialize_ci_checkout(submission)
+        proof = {
+            "checkout_locator": checkout,
+            "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                checkout.encode()).hexdigest(),
+            **({
+                "source_checkout_locator": authority["source_checkout_locator"],
+                "source_checkout_locator_digest": "sha256:" + hashlib.sha256(
+                    authority["source_checkout_locator"].encode()).hexdigest(),
+                "ci_cleanup_authority": authority,
+            } if authority is not None else {}),
+        }
+        try:
+            record, _created = self._register(
+                project_identity=submission.project_identity,
+                label=submission.workspace_label, namespace=namespace,
+                checkout_locator=checkout,
+                source="ci-materialization" if authority is not None else "job-reference",
+                deployment_proof=proof, mode=submission.workspace_mode,
+            )
+        except Exception as exc:
+            if authority is not None:
+                artifact = Path(authority["artifact_locator"])
+                artifact_root = repo.index_path.parent / "ci-materializations"
+                try:
+                    artifact.resolve(strict=False).relative_to(
+                        artifact_root.resolve(strict=False))
+                    _unlink_verified_artifact(
+                        artifact, authority["artifact_digest"],
+                        authority["artifact_size_bytes"])
+                except (OSError, ValueError):
+                    raise WorkspaceIndexError(
+                        "workspace_materialization_failed",
+                        "unpublished materialization artifact could not be retired") from exc
+            raise
         if self.resource_binding_resolver is not None:
             bindings = self.resource_binding_resolver(submission) or ()
             for binding in bindings:
@@ -1498,6 +2022,333 @@ class WorkspaceService:
                         "workspace resource binding is invalid")
                 repo.bind_resource(
                     record.workspace_id, str(binding[0]), str(binding[1]))
+        return record
+
+    def terminal_cleanup_context(self) -> dict[str, str] | None:
+        """Return the owner-only paths needed by a detached supervisor."""
+        if self.repository is None or self.deployment_root is None:
+            return None
+        return {
+            "index_path": str(self.repository.index_path),
+            "legacy_root": str(self.repository.legacy_root),
+            "deployment_root": str(Path(self.deployment_root)),
+        }
+
+    @staticmethod
+    def _submission_operation_key(project_identity: str,
+                                  workspace_label: str) -> str:
+        payload = f"{project_identity}\0{workspace_label}".encode("utf-8")
+        return "job-workspace-" + hashlib.sha256(payload).hexdigest()[:32]
+
+    def submission_guard(self, submission):
+        return self._repo().operation_lock(self._submission_operation_key(
+            submission.project_identity, submission.workspace_label))
+
+    def has_retained_materialization(self, job: dict) -> bool:
+        workspace_id = job.get("workspace_id")
+        if not isinstance(workspace_id, str):
+            return False
+        record = self._repo().get(workspace_id)
+        if record is None or record.source != "ci-materialization":
+            return False
+        authority = record.metadata.get("ci_cleanup_authority")
+        return (isinstance(authority, dict) and
+                authority.get("digest") == job.get("workspace_authority_digest") and
+                not record.metadata.get("ci_materialization_retired", False))
+
+    def retire_terminal_materialization(self, job: dict) -> bool:
+        """Retire the exact retained artifact, never a guessed generation."""
+        workspace_id = job["workspace_id"]
+        repo = self._repo()
+        key = self._submission_operation_key(
+            str(job.get("project_identity")), str(job.get("workspace_label")))
+        with repo.operation_lock(key):
+            record = repo.get(workspace_id)
+            if record is None:
+                raise WorkspaceIndexError(
+                    "workspace_identity_ambiguous", "workspace artifact owner is unavailable")
+            authority = record.metadata.get("ci_cleanup_authority")
+            if (not isinstance(authority, dict) or
+                    authority.get("digest") != job.get("workspace_authority_digest") or
+                    record.metadata.get("ci_materialization_retired", False)):
+                return False
+            artifact = Path(str(authority.get("artifact_locator")))
+            artifact_root = repo.index_path.parent / "ci-materializations"
+            try:
+                artifact.resolve(strict=False).relative_to(
+                    artifact_root.resolve(strict=False))
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape", "workspace artifact escapes retention root") from exc
+            expected_size = authority.get("artifact_size_bytes")
+            if (isinstance(expected_size, bool) or
+                    not isinstance(expected_size, int)):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift", "workspace artifact proof changed")
+            _unlink_verified_artifact(
+                artifact, authority.get("artifact_digest"), expected_size)
+            repo.mark_lifecycle(
+                workspace_id, record.lifecycle, status=record.status,
+                metadata={"ci_materialization_retired": True},
+            )
+            return True
+
+    def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
+        """Attempt fail-closed disposal of one exact terminal CI checkout."""
+        terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
+        if job.get("lifecycle") not in terminal:
+            raise WorkspaceIndexError(
+                "active_job_protected", "workspace cleanup requires a terminal job")
+        policy = job.get("cleanup_policy")
+        mode = job.get("workspace_mode")
+        if job.get("kind") != "ci":
+            job_repository.set_cleanup_state(job["job_id"], "retained")
+            return {"ok": True, "status": "retained"}
+        workspace_id = job.get("workspace_id")
+        if not isinstance(workspace_id, str) or not re.fullmatch(
+                r"ws_[0-9a-f]{32}", workspace_id):
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal job has no exact workspace identity")
+        repo = self._repo()
+        preliminary = repo.get(workspace_id)
+        if preliminary is None:
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal workspace identity is unavailable")
+        guard = repo.operation_lock(self._submission_operation_key(
+            preliminary.project_identity, preliminary.label))
+        with guard:
+            record = repo.get(workspace_id)
+            if record is None:
+                raise WorkspaceIndexError(
+                    "workspace_identity_ambiguous",
+                    "terminal workspace identity is unavailable")
+            if record.lifecycle == "destroyed" and record.status == "destroyed":
+                job_repository.set_cleanup_state(job["job_id"], "completed")
+                return {"ok": True, "status": "already_released"}
+            checkout = str(Path(str(job.get("project_root"))).resolve(strict=False))
+            expected_digest = "sha256:" + hashlib.sha256(checkout.encode()).hexdigest()
+            authority = record.metadata.get("ci_cleanup_authority")
+            authority_digest = (authority.get("digest")
+                                if isinstance(authority, dict) else None)
+            authorized_policy = (
+                mode in {"isolated", "ephemeral"}
+                and (policy in {"always", "ephemeral"}
+                     or policy == "on-success" and
+                     job.get("lifecycle") == "succeeded")
+            )
+            if not authorized_policy or job.get("workspace_authority_digest") is None:
+                job_repository.set_cleanup_state(job["job_id"], "retained")
+                return {"ok": True, "status": "retained"}
+            if (record.project_identity != job.get("project_identity") or
+                    record.label != job.get("workspace_label") or
+                    record.source != "ci-materialization" or
+                    record.lifecycle != "ready" or record.status != "ready" or
+                    record.metadata.get("checkout_locator") != checkout or
+                    record.metadata.get("checkout_locator_digest") != expected_digest or
+                    authority.get("owner") != "controller-ci-materialization" or
+                    authority.get("job_kind") != "ci" or
+                    authority.get("checkout_locator") != checkout or
+                    authority.get("workspace_label") != record.label or
+                    authority_digest != job.get("workspace_authority_digest") or
+                    authority_digest != _digest_payload({
+                        key: value for key, value in authority.items()
+                        if key != "digest"
+                    })):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal job does not exactly own the indexed workspace")
+            active = job_repository.connection.execute(
+                "SELECT job_id FROM jobs WHERE workspace_id=? AND job_id<>? "
+                "AND lifecycle IN ('accepted','queued','running','cancelling') LIMIT 1",
+                (workspace_id, job["job_id"]),
+            ).fetchone()
+            if active is not None:
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "another active job still owns the disposable workspace")
+            lease = job_repository.connection.execute(
+                "SELECT lease_id FROM workspace_leases WHERE project_identity=? "
+                "AND workspace_label=? LIMIT 1",
+                (job.get("project_identity"), job.get("workspace_label")),
+            ).fetchone()
+            if lease is not None:
+                raise WorkspaceIndexError(
+                    "workspace_busy", "workspace lease is still live")
+            process = job_repository.snapshot(job["job_id"]).get("process") or {}
+            for role, pid_key, identity_key in (
+                    ("supervisor", "supervisor_pid", "supervisor_start_identity"),
+                    ("child", "child_pid", "child_start_identity")):
+                pid = process.get(pid_key)
+                identity = process.get(identity_key)
+                if not pid or not identity:
+                    continue
+                observed = capture_process_identity(int(pid))
+                if observed is not None:
+                    observed = ProcessIdentity(
+                        observed.host_boot_id, observed.pid, observed.start_identity,
+                        process.get("supervisor_nonce_hash") or "",
+                        observed.process_group_id,
+                    )
+                expected = ProcessIdentity(
+                    process.get("host_boot_id") or "", int(pid), identity,
+                    process.get("supervisor_nonce_hash") or "",
+                    process.get("child_pgid") if role == "child" else None,
+                )
+                if verify_process_identity(expected, observed):
+                    if role == "supervisor" and int(pid) == os.getpid():
+                        continue
+                    raise WorkspaceIndexError(
+                        "workspace_busy", f"recorded {role} process is still live")
+            child_pgid = process.get("child_pgid")
+            if child_pgid is not None and not _process_group_empty(int(child_pgid)):
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "recorded child process group is not proven empty")
+            child_cgroup = process.get("child_cgroup_path")
+            if child_cgroup is not None and not _owned_cgroup_empty(child_cgroup):
+                raise WorkspaceIndexError(
+                    "workspace_busy", "recorded child cgroup is not proven empty")
+            if self.deployment_root is None:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "deployment root is unavailable for terminal cleanup")
+            deployment_root = Path(self.deployment_root).resolve(strict=False)
+            checkout_path = Path(checkout).resolve(strict=False)
+            try:
+                checkout_path.relative_to(deployment_root)
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape",
+                    "terminal workspace escapes deploy storage") from exc
+            if checkout_path == deployment_root or checkout_path.is_symlink():
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe",
+                    "terminal workspace locator is unsafe")
+            references = (
+                self.cleanup_reference_observer(checkout_path, record)
+                if self.cleanup_reference_observer is not None
+                else _observe_cleanup_references(checkout_path)
+            )
+            if (not isinstance(references, dict) or
+                    references.get("containers") != 0 or
+                    references.get("mounts") != 0 or record.bindings):
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "live container, mount, or binding absence is not proven")
+            metadata_path = Path(record.path) if isinstance(record.path, str) else None
+            legacy_root = repo.legacy_root.resolve(strict=False)
+            if (metadata_path is None or metadata_path.name != "workspace.json" or
+                    metadata_path.is_symlink() or metadata_path.parent.is_symlink()):
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "workspace metadata is unsafe")
+            try:
+                metadata_path.parent.resolve(strict=False).relative_to(legacy_root)
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape", "workspace metadata escapes its owner root") from exc
+            try:
+                metadata_payload = json.loads(
+                    metadata_path.read_text(encoding="utf-8"))
+                metadata_entries = tuple(metadata_path.parent.iterdir())
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace metadata cannot prove exact ownership") from exc
+            if (not isinstance(metadata_payload, dict) or
+                    metadata_payload.get("workspace_id") != workspace_id or
+                    metadata_payload.get("project_identity") != job.get("project_identity") or
+                    metadata_payload.get("label") != job.get("workspace_label") or
+                    metadata_payload.get("mode") != mode or
+                    metadata_payload.get("path") != str(metadata_path.parent) or
+                    metadata_entries != (metadata_path,)):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace metadata directory is not an exact owned leaf")
+            expected_identity = authority.get("checkout_identity")
+            if (not isinstance(expected_identity, dict) or
+                    _filesystem_identity(checkout_path) != expected_identity):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal checkout filesystem identity changed")
+            cleanup_root = deployment_root / ".sandbox-ci-cleanup"
+            try:
+                cleanup_root.mkdir(mode=0o700, exist_ok=True)
+                cleanup_identity = os.stat(cleanup_root, follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "private cleanup root is unavailable") from exc
+            if (not stat.S_ISDIR(cleanup_identity.st_mode) or
+                    cleanup_identity.st_uid != os.getuid() or
+                    stat.S_IMODE(cleanup_identity.st_mode) & 0o077):
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "private cleanup root is not owner-only")
+            repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
+            try:
+                directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                   getattr(os, "O_NOFOLLOW", 0))
+                parent_fd = os.open(checkout_path.parent, directory_flags)
+                cleanup_fd = os.open(cleanup_root, directory_flags)
+                operation_name = uuid.uuid4().hex
+                os.mkdir(operation_name, mode=0o700, dir_fd=cleanup_fd)
+                operation_fd = os.open(operation_name, directory_flags,
+                                       dir_fd=cleanup_fd)
+                expected_fd = None
+                owned_fd = None
+                try:
+                    expected_fd = os.open(
+                        checkout_path.name, directory_flags, dir_fd=parent_fd)
+                    expected_entry = os.fstat(expected_fd)
+                    if (_artifact_identity(expected_entry) != expected_identity or
+                            not stat.S_ISDIR(expected_entry.st_mode)):
+                        raise WorkspaceIndexError(
+                            "workspace_ownership_drift",
+                            "terminal checkout entry changed before quarantine")
+                    try:
+                        os.rename(
+                            checkout_path.name, "owned",
+                            src_dir_fd=parent_fd, dst_dir_fd=operation_fd,
+                        )
+                    except FileNotFoundError as exc:
+                        raise WorkspaceIndexError(
+                            "workspace_ownership_drift",
+                            "terminal checkout disappeared before quarantine",
+                        ) from exc
+                    owned_fd = os.open("owned", directory_flags,
+                                       dir_fd=operation_fd)
+                    observed = os.fstat(owned_fd)
+                    if (_artifact_identity(observed) !=
+                            _artifact_identity(expected_entry)):
+                        os.rename(
+                            "owned", checkout_path.name,
+                            src_dir_fd=operation_fd, dst_dir_fd=parent_fd,
+                        )
+                        raise WorkspaceIndexError(
+                            "workspace_ownership_drift",
+                            "quarantined checkout identity changed")
+                    _remove_tree_fd(owned_fd)
+                    raise WorkspaceIndexError(
+                        "workspace_identity_bound_removal_unavailable",
+                        "platform cannot remove an emptied quarantine by "
+                        "open descriptor identity")
+                finally:
+                    if owned_fd is not None:
+                        os.close(owned_fd)
+                    if expected_fd is not None:
+                        os.close(expected_fd)
+                    os.close(operation_fd)
+                    os.close(cleanup_fd)
+                    os.close(parent_fd)
+                metadata_path.unlink()
+                metadata_path.parent.rmdir()
+            except Exception:
+                repo.mark_lifecycle(
+                    workspace_id, "indeterminate", status="indeterminate")
+                raise
+            repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
+            job_repository.set_cleanup_state(job["job_id"], "completed")
+            return {"ok": True, "status": "released"}
 
     def create(self, request):
         target = self._target(request)
@@ -1838,3 +2689,57 @@ class WorkspaceService:
 
     def destroy(self, request):
         return self._mutate(request, "destroy")
+
+
+def finalize_terminal_workspace(job_repository, job_id: str,
+                                context: dict[str, Any] | None, *,
+                                workspace_service: WorkspaceService | None = None,
+                                ) -> dict[str, Any]:
+    """Run the shared fail-closed cleanup seam without changing job result truth."""
+    job = job_repository.get(job_id)
+    if job.get("cleanup_state") in {"completed", "retained"}:
+        return {"ok": True, "status": job["cleanup_state"]}
+    if not isinstance(context, dict) or set(context) != {
+            "index_path", "legacy_root", "deployment_root"}:
+        # Compatibility compositions without a workspace index cannot infer a
+        # deletion target. Retention is the only safe terminal outcome.
+        job_repository.set_cleanup_state(job_id, "retained")
+        return {"ok": True, "status": "retained"}
+    try:
+        registry_path = Path(job_repository.path).resolve(strict=False)
+        runtime_root = registry_path.parent.parent
+        expected = {
+            "index_path": runtime_root / "workspaces" / "index.sqlite3",
+            "legacy_root": registry_path.parent / "workspaces",
+            "deployment_root": runtime_root.parent / "deploy-src",
+        }
+        if any(Path(context[key]).resolve(strict=False) != value.resolve(strict=False)
+               for key, value in expected.items()):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "terminal cleanup context does not match the job registry owner")
+        if workspace_service is None:
+            repository = WorkspaceRepository(
+                context["index_path"], context["legacy_root"],
+                job_index_reader=lambda: __import__(
+                    "sandbox.jobs.registry", fromlist=["read_resource_index"]
+                ).read_resource_index(job_repository.path),
+            )
+            service = WorkspaceService(
+                None, repository=repository,
+                deployment_root=Path(context["deployment_root"]),
+            )
+        else:
+            service = workspace_service
+        result = service.release_terminal_job(job, job_repository)
+        job_repository.append_event(
+            job_id, "workspace_cleanup", {"status": result["status"]})
+        return result
+    except Exception as exc:
+        job_repository.set_cleanup_state(job_id, "failed")
+        code = getattr(exc, "code", "workspace_cleanup_failed")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            code = "workspace_cleanup_failed"
+        job_repository.append_event(
+            job_id, "workspace_cleanup", {"status": "failed", "code": code})
+        return {"ok": False, "status": "failed", "code": code}

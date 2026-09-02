@@ -506,6 +506,7 @@ class RemoteJobTransport:
             if argv[:1] == ["sb"]:
                 argv[0] = self.remote_sb_path(remote)
             plan.append({"kind": item.kind, "workspace": item.workspace_label, "project_dir": workspace_path,
+                 "materialization_source_root": deployed["target_path"],
                  "project_identity": item.project_identity,
                  "argv": argv,
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
@@ -601,6 +602,8 @@ class RemoteJobTransport:
         # SSH submission safely after a control-plane timeout.
         workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
         args = ["job-start", "--local", "--project-dir", workspace_path,
+                "--kind", submission.kind,
+                "--materialization-source-root", deployed["target_path"],
                 "--project-identity", submission.project_identity,
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
                 "--cwd-relative", submission.cwd_relative,

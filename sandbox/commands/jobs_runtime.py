@@ -162,6 +162,7 @@ def _resolved_execution_policy(target, args):
             cancel_grace_seconds=getattr(args, "cancel_grace_seconds", None),
             cancel_on_stall=getattr(args, "cancel_on_stall", None),
             cleanup_policy=getattr(args, "cleanup_policy", None),
+            fallback_profile=getattr(args, "fallback_profile", "exec"),
         )
     except ValueError as exc:
         _die(str(exc))
@@ -184,6 +185,8 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--project-dir", default=".")
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
+    parser.add_argument("--kind", default="exec", help=argparse.SUPPRESS)
+    parser.add_argument("--materialization-source-root", help=argparse.SUPPRESS)
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
@@ -385,7 +388,8 @@ def cmd_job_start(_cfg, args) -> None:
     project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = _resolved_output_profile(target, getattr(args, "output_profile", None))
     submission = JobSubmission(
-        kind="exec", project_root=target.project_root, project_identity=project_identity,
+        kind=getattr(args, "kind", "exec"), project_root=target.project_root,
+        project_identity=project_identity,
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=policy.deadline_seconds, source=source,
         request_id=getattr(args, "request_id", None), execution_profile=policy.execution_profile, output_profile=output_profile,
@@ -396,6 +400,8 @@ def cmd_job_start(_cfg, args) -> None:
         stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
         cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
         execution_policy_provenance=policy.provenance,
+        materialization_source_root=getattr(
+            args, "materialization_source_root", None),
     )
     if target.kind == "remote":
         from sandbox.core import _remote
@@ -951,6 +957,8 @@ def cmd_job_matrix(_cfg, args) -> None:
                     failure_policy=item.get("failure_policy", "fail-fast"),
                     artifact_paths=tuple(item.get("artifact_paths", ())),
                     compatibility_differences=tuple(item.get("compatibility_differences", ())),
+                    materialization_source_root=item.get(
+                        "materialization_source_root"),
                 ))
                 difference_by_workspace[item["workspace"]] = tuple(item.get("compatibility_differences", ()))
             except (KeyError, TypeError, ValueError) as exc:

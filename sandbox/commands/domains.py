@@ -125,7 +125,7 @@ def _ingress_owner(args) -> str:
 def _use_provider(args) -> dict:
     """Switch the clean-URL provider on demand (037 FR-032, 038 FR-031).
 
-    Writes the machine-local `domains.ingress` selection; no reprovisioning, no
+    Writes the machine-local ingress or resolver selection; no reprovisioning or
     hostname change. `./sb domains use` with no value reports the current one.
     """
     from sandbox.core import _domains as core_domains
@@ -160,9 +160,11 @@ def _use_provider(args) -> dict:
                                       f"`./sb domains use {DEFAULT_PROVIDER}`"}}
     known = {DEFAULT_PROVIDER, "default", "disabled"} | {
         item.adapter_id for item in BUILTIN_RESOLVER_ADAPTERS}
+    ingress_ids = set()
     try:
         from sandbox.ingress.manifest import BUILTIN_INGRESS
-        known |= {item.adapter_id for item in BUILTIN_INGRESS}
+        ingress_ids = {item.adapter_id for item in BUILTIN_INGRESS}
+        known |= ingress_ids
     except ImportError:
         pass
     if requested not in known:
@@ -175,10 +177,17 @@ def _use_provider(args) -> dict:
     block = local.setdefault("domains", {})
     if requested in (DEFAULT_PROVIDER, "default"):
         block.pop("ingress", None)
+        block.pop("strategy", None)
         if not block:
             local.pop("domains", None)
     else:
-        block["ingress"] = requested
+        resolver_ids = {item.adapter_id for item in BUILTIN_RESOLVER_ADAPTERS}
+        if requested in resolver_ids and requested not in ingress_ids:
+            block.pop("ingress", None)
+            block["strategy"] = requested
+        else:
+            block.pop("strategy", None)
+            block["ingress"] = requested
     _write_local_yaml(local)
     return {"ok": True, "operation": "domains_use", "state": "ready",
             "mutated": True, "provider": effective(),

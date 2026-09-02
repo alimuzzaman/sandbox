@@ -580,7 +580,7 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
     from sandbox.commands.jobs_runtime import _resolved_execution_policy, _resolved_output_profile
     policy = _resolved_execution_policy(target, type("PolicyArgs", (), {
-        "execution_policy_json": None, "profile": None,
+        "execution_policy_json": None, "profile": None, "fallback_profile": "ci",
         "timeout": getattr(args, "timeout", None), "stall_seconds": None,
         "cancel_grace_seconds": None, "cancel_on_stall": None, "cleanup_policy": None,
     })())

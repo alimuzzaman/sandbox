@@ -32,7 +32,7 @@ BUILTIN_EXECUTION_PROFILES = {
     "e2e": {"timeoutSeconds": 14400, "stallSeconds": 900, "cancelGraceSeconds": 60,
             "cancelOnStall": False, "cleanup": "retain"},
     "ci": {"timeoutSeconds": 14400, "stallSeconds": 900, "cancelGraceSeconds": 60,
-           "cancelOnStall": False, "cleanup": "retain"},
+           "cancelOnStall": False, "cleanup": "ephemeral"},
     "overall": {"timeoutSeconds": 21600, "stallSeconds": 1200, "cancelGraceSeconds": 60,
                 "cancelOnStall": False, "cleanup": "retain"},
     "overnight": {"timeoutSeconds": 86400, "stallSeconds": 3600, "cancelGraceSeconds": 120,

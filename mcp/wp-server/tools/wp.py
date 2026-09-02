@@ -37,14 +37,21 @@ def register(server, dependencies: ToolDependencies) -> None:
 
 
 def _managed_execution_unavailable(project_dir: str, label: str | None, entry_path: str,
-                                   argv: tuple[str, ...], timeout: int):
+                                   argv: tuple[str, ...], timeout: int,
+                                   config_file: str | None = None):
     """Dispatch managed-native MCP payloads through the isolation gateway."""
     try:
         from sandbox.application.context import execute_project, managed_native_project_selected
         from sandbox.runtimes.base import ExecutionRequest
-        if not managed_native_project_selected(project_dir, label=label or "default"):
+        selected = (managed_native_project_selected(
+            project_dir, label=label or "default", config_file=config_file,
+        ) if config_file is not None else managed_native_project_selected(
+            project_dir, label=label or "default",
+        ))
+        if not selected:
             return None
-        request = ExecutionRequest(str(project_dir), label or "default", entry_path, argv, timeout)
+        request = ExecutionRequest(str(project_dir), label or "default", entry_path, argv,
+                                   timeout, config_file)
         execution = execute_project({}, request)
     except Exception:
         return {"ok": False, "error": "managed execution request is invalid"}
@@ -64,19 +71,28 @@ def _remote_job_transport():
         remote_sb_path=_remote.remote_sb_path)
 
 
-def _resolve_test_mode(project_dir: str, label: str | None, explicit: str | None) -> str:
+def _resolve_test_mode(project_dir: str, label: str | None, explicit: str | None,
+                       config_file: str | None = None) -> str:
     """Resolve mode before target/capability selection changes execution scope."""
     from sandbox.core._tests import resolve_test_mode
 
     # MCP registration always supplies the explicit composition-root dependency.
     # The fallback keeps this module independently importable in contract tests.
-    config = _core().load_project_config(project_dir, label=label) if _core is not None else {}
+    if _core is None:
+        config = {}
+    elif config_file:
+        config = _core().load_project_config(
+            project_dir, label=label, config_file=config_file,
+        )
+    else:
+        config = _core().load_project_config(project_dir, label=label)
     return resolve_test_mode(project_dir,
                              configured=config.get("tests", {}).get("suite", "auto"),
                              explicit=explicit)
 
 
-def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None) -> dict:
+def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None,
+           config_file: str | None = None) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
@@ -85,11 +101,16 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     project_dir: the plugin project to target (its instance must already exist —
     call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.cli", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.cli",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "wordpress_cli",
-                                             ("wp", *shlex.split(command)), timeout)
+                                             ("wp", *shlex.split(command)), timeout,
+                                             config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
@@ -97,7 +118,8 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     return _wpcli(shlex.split(command), instance=inst, timeout=timeout)
 
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120, *, project_dir: str, label: str | None = None) -> dict:
+            timeout: int = 120, *, project_dir: str, label: str | None = None,
+            config_file: str | None = None) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -107,11 +129,15 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.exec")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.exec", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.exec",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "exec",
-                                             ("sh", "-c", command), timeout)
+                                             ("sh", "-c", command), timeout, config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
@@ -166,6 +192,7 @@ def wp_rest(method: str, path: str, body: dict | None = None,
 
 def run_tests(project_dir: str, phpunit_args: str = "",
              label: str | None = None, mode: str | None = None,
+             config_file: str | None = None,
              local: bool = False,
              remote: str | None = None, workspace: str | None = None,
              timeout_seconds: int | None = None, output_profile: str | None = None,
@@ -197,7 +224,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                 "output": "", "mode": None,
                 "error": "test mode must be auto, unit, or integration"}
     try:
-        resolved_mode = _resolve_test_mode(project_dir, label, mode)
+        resolved_mode = _resolve_test_mode(project_dir, label, mode, config_file)
     except (AttributeError, TypeError, ValueError, OSError) as exc:
         return {"ok": False, "passed": False, "summary": None,
                 "output": "", "mode": None, "error": str(exc)}
@@ -209,7 +236,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
             from sandbox.application.context import durable_job_dependencies
             from sandbox.jobs.models import TargetRequest
             auto_target = durable_job_dependencies()["target_service"].resolve(
-                TargetRequest(project_dir=project_dir, required_capability="job.exec"))
+                TargetRequest(project_dir=project_dir, config_file=config_file,
+                              required_capability="job.exec"))
             if auto_target.kind == "remote":
                 selected_remote, workspace = auto_target.remote_name, auto_target.workspace_label
         except Exception:
@@ -226,7 +254,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
-                project_dir=project_dir, remote=selected_remote, workspace=workspace,
+                project_dir=project_dir, config_file=config_file,
+                remote=selected_remote, workspace=workspace,
                 required_capability="job.exec"))
             if target.kind != "remote":
                 raise ValueError("remote test target did not resolve to a remote")
@@ -244,6 +273,10 @@ def run_tests(project_dir: str, phpunit_args: str = "",
             if resolved_output not in runtime["outputProfiles"]:
                 raise ValueError("output profile is invalid")
             command = ["sb", "test", resolved_mode, "--local", "--project-dir", "."]
+            if config_file:
+                from sandbox.config.descriptors import explicit_primary_config
+                selected = explicit_primary_config(target.project_root, config_file)
+                command += ["--config-file", str(selected.relative_to(Path(target.project_root)))]
             if phpunit_args.strip():
                 command += ["--", *shlex.split(phpunit_args)]
             accepted = _remote_job_transport().submit(JobSubmission(
@@ -267,18 +300,25 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         return {"ok": True, "passed": None, "summary": "remote test job accepted", "output": "",
                 "mode": resolved_mode, "job_id": accepted["job_id"], "lifecycle": "accepted",
                 "workspace": target.workspace_label, "remote": target.remote_name}
-    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.cli", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.cli",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "phpunit",
                                              ("sb", "test", mode or "auto"),
-                                             timeout_seconds if timeout_seconds is not None else 900)
+                                             timeout_seconds if timeout_seconds is not None else 900,
+                                             config_file)
     if blocked: return {**blocked, "passed": False, "summary": None, "output": "", "mode": mode}
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "test", "--project-dir", project_dir]
+    if config_file:
+        cmd += ["--config-file", config_file]
     if label:
         cmd += ["--label", label]
     if mode:
@@ -303,7 +343,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     }
 
 
-def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
+def wp_cli_async(command: str, *, project_dir: str, label: str | None = None,
+                 config_file: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
     (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
@@ -311,11 +352,16 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    capability_error = (_require_project_capability(
+        project_dir, label, "wordpress.cli", config_file,
+    ) if config_file is not None else _require_project_capability(
+        project_dir, label, "wordpress.cli",
+    ))
     if capability_error:
         return capability_error
     blocked = _managed_execution_unavailable(project_dir, label, "durable_job",
-                                             ("wp", *shlex.split(command)), 300)
+                                             ("wp", *shlex.split(command)), 300,
+                                             config_file)
     if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:

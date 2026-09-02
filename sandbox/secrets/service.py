@@ -16,6 +16,54 @@ from .organizer import organize as organize_document
 from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
 
 
+class GHCRStagingCredentialAdapter:
+    """Fixed repository-read broker adapter for Feature 050.
+
+    This adapter never returns plaintext.  It issues one ``BrokerLease`` and
+    invokes its consume callback for the exact measured staging recipient.
+    """
+
+    def __init__(self, resolver, binding, *, recipient: str,
+                 credential_reference_revision: str,
+                 revision_key: bytes) -> None:
+        from sandbox.isolation.credential_binding import CredentialBinding
+        if type(binding) is not CredentialBinding:
+            raise SecretBrokerError("binding_invalid", "staging credential binding is invalid")
+        if not isinstance(recipient, str) or not recipient.startswith("ghcr-repository-read:"):
+            raise SecretBrokerError("destination_denied", "staging recipient is invalid")
+        if not isinstance(credential_reference_revision, str) or not credential_reference_revision:
+            raise SecretBrokerError("binding_invalid", "credential reference revision is invalid")
+        if not isinstance(revision_key, bytes) or len(revision_key) != 32:
+            raise SecretBrokerError("binding_invalid", "credential revision key is invalid")
+        self._resolver = resolver
+        self._binding = binding
+        self.recipient = recipient
+        self.credential_reference_revision = credential_reference_revision
+        self._revision_key = revision_key
+
+    @property
+    def binding_id(self) -> str:
+        return self._binding.binding_id
+
+    @property
+    def binding_version(self) -> int:
+        return self._binding.version
+
+    def prepare_for_stage(self, *, recipient: str, binding_id: str,
+                          binding_version: int):
+        if recipient != self.recipient or binding_id != self.binding_id \
+                or binding_version != self.binding_version:
+            raise SecretBrokerError("binding_invalid", "staging broker authority changed")
+        return self._resolver.issue_revision_bound(
+            self._binding, expected_revision=self.credential_reference_revision,
+            revision_key=self._revision_key)
+
+    def consume_for_stage(self, *, recipient: str, binding_id: str,
+                          binding_version: int, consumer: Callable[[bytes], object]):
+        return self.prepare_for_stage(recipient=recipient, binding_id=binding_id,
+                                      binding_version=binding_version).consume(consumer)
+
+
 def _bounded_call(callback):
     """Return a result or a newly allocated public error with no traceback chain.
 

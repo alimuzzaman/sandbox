@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 
@@ -142,6 +143,79 @@ class TestCredentialResolver(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "unavailable") as raised:
                 lease.consume(lambda _value: {"status": 200})
             self.assertNotIn("LEAKED_SOURCE_VALUE", str(raised.exception))
+
+    def _revision_bound_lease(self):
+        from datetime import datetime, timedelta, timezone
+        from sandbox.isolation.credential_resolver import BrokerLease, SecretReference
+
+        class RefusingResolver:
+            def __init__(self): self.reads = 0
+            def _read_reference(self, _reference):
+                self.reads += 1
+                raise AssertionError("revision-bound lease reopened its source")
+
+        resolver = RefusingResolver()
+        lease = BrokerLease(resolver, SecretReference("fixture", "API_TOKEN", "project"),
+            binding_id="binding-race", binding_version=1,
+            deadline=datetime.now(timezone.utc) + timedelta(minutes=1),
+            lease_id="lease-race", material=b"REVISION_BOUND_SNAPSHOT",
+            snapshot_bound=True)
+        return resolver, lease
+
+    @staticmethod
+    def _ordered_lock(order):
+        class OrderedLock:
+            def __init__(self):
+                self.condition = threading.Condition(); self.active = False
+            def __enter__(self):
+                name = threading.current_thread().name
+                with self.condition:
+                    while self.active or not order or order[0] != name:
+                        self.condition.wait()
+                    order.pop(0); self.active = True
+                return self
+            def __exit__(self, *_args):
+                with self.condition:
+                    self.active = False; self.condition.notify_all()
+        return OrderedLock()
+
+    def test_revision_bound_invalidation_wins_before_consume_without_source_fallback(self):
+        resolver, lease = self._revision_bound_lease()
+        lease._lock = self._ordered_lock(["invalidate", "consume"])
+        start = threading.Event(); errors = []; delivered = []
+        def invalidate(): start.wait(); lease.invalidate()
+        def consume():
+            start.wait()
+            try: lease.consume(lambda value: delivered.append(value) or {})
+            except Exception as exc: errors.append(exc)
+        threads = [threading.Thread(target=invalidate, name="invalidate"),
+                   threading.Thread(target=consume, name="consume")]
+        for thread in threads: thread.start()
+        start.set()
+        for thread in threads: thread.join(timeout=2)
+        self.assertEqual(delivered, []); self.assertEqual(resolver.reads, 0)
+        self.assertEqual(getattr(errors[0], "code", None), "lease_revoked")
+        self.assertIsNone(lease._material)
+
+    def test_revision_bound_consume_detaches_before_concurrent_invalidation(self):
+        resolver, lease = self._revision_bound_lease()
+        lease._lock = self._ordered_lock(["consume", "invalidate"])
+        start = threading.Event(); invalidated = threading.Event(); delivered = []; results = []
+        def consume():
+            start.wait()
+            def callback(value):
+                delivered.append(value); invalidated.wait(timeout=2); return {"ok": True}
+            results.append(lease.consume(callback))
+        def invalidate():
+            start.wait(); lease.invalidate(); invalidated.set()
+        threads = [threading.Thread(target=consume, name="consume"),
+                   threading.Thread(target=invalidate, name="invalidate")]
+        for thread in threads: thread.start()
+        start.set()
+        for thread in threads: thread.join(timeout=2)
+        self.assertEqual(delivered, [b"REVISION_BOUND_SNAPSHOT"])
+        self.assertEqual(results, [{"ok": True}]); self.assertEqual(resolver.reads, 0)
+        self.assertIsNone(lease._material)
 
 
 if __name__ == "__main__":

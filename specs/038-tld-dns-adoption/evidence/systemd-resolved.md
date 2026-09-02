@@ -8,21 +8,31 @@ answers, fresh lookup, HTTP through the selected ingress, repeat apply, and clea
 several unrelated services are running. Project `~/git/templately`, label `tmp-logo`,
 instance URL `http://localhost:8188`. 2026-08-02.
 
-**Harness**: `python3 tests/live_resolver_acceptance.py --project-dir ~/git/templately
+**Historical harness**: `python3 tests/live_resolver_acceptance.py --project-dir ~/git/templately
 --label tmp-logo --consent --evidence-id 038-t034-ubuntu-2404`. The typed attestation is
 constructed inside the harness for that single invocation. `--consent` records that the
 operator approved the first mutation of this machine's resolver; the run was authorized by
 the repository owner for this purpose.
 
+The current source-owned qualification uses this evidence ID as a constraint but keeps
+ordinary support `implemented_unproven` with no advertised evidence ID. It
+accepts no attestation, CLI/config/environment value, or other runtime promotion input. It
+is Linux-only and exact-name-only. Before mutation, a read-only installed-helper preflight
+must bind the observed resolved owner to the active service PID, process start identity,
+owner UID, and systemd control group. Local tests cover missing helpers, unsupported
+platforms/capabilities, changed and second owners, foreign state, and mutation ordering.
+This file does not yet contain a fresh normal `./sb domains use systemd-resolved` run, so
+T067 remains open.
+
 ## Promotion is proof-gated, not configuration-gated
 
 ```text
-advertised without attestation:  systemd-resolved adoptable = False
-advertised with attestation:     systemd-resolved adoptable = True
+historical harness without attestation:  systemd-resolved adoptable = False
+historical harness with attestation:     systemd-resolved adoptable = True
+current source-owned composition:        implemented_unproven, adoptable = False
 ```
 
-Nothing on the CLI or in configuration can flip that; `./sb domains support` continues to
-report `implemented_unproven` for every caller.
+Nothing on the CLI or in configuration can widen the current fixed qualification.
 
 ## Lifecycle
 
@@ -105,6 +115,7 @@ Each fix has unit coverage; see the commits referencing this file.
 
 ## Not covered
 
+- A fresh normal `./sb domains use systemd-resolved` production-composition run (T067).
 - Wildcard zone lifecycle (T055) and the drift/unreachable cleanup cases (T050 remainder).
 - NetworkManager, standalone dnsmasq, and Herd/Valet resolver paths.
 - A host where `/etc/resolv.conf` is a plain file rather than the resolved stub.

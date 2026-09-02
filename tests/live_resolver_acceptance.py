@@ -2,10 +2,9 @@
 """Live resolver conformance run (038 T034).
 
 Drives the composed domain service against a REAL host resolver and records
-before/after state. The typed proof attestation is constructed here, in the
-harness, and only for this invocation: no CLI flag, environment variable, or
-configuration value can promote an adapter, and running this script does not
-change what `./sb domains support` advertises to anyone else.
+before/after state. Resolver qualification comes only from checked-in source;
+no CLI flag, environment variable, configuration value, or harness object can
+promote or widen it.
 
 Usage:
     python3 tests/live_resolver_acceptance.py --project-dir <dir> [--label L]
@@ -69,23 +68,13 @@ def main() -> None:
     args = parser.parse_args()
 
     from sandbox.application.context import domain_service
-    from sandbox.network.manifest import ResolverProofAttestation
-
-    attestation = ResolverProofAttestation("systemd-resolved", args.evidence_id)
     observed: dict[str, object] = {"evidence_id": args.evidence_id,
                                    "before": host_state()}
 
-    unproven = domain_service(None)
-    observed["advertised_without_attestation"] = {
-        item["adapter_id"]: item["adoptable"]
-        for item in unproven.support()["adapters"]
-    }
-
     service = domain_service(
-        None, proof_attestation=attestation,
-        consent_decider=lambda _owner: bool(args.consent),
+        None, consent_decider=lambda _owner: bool(args.consent),
     )
-    observed["advertised_with_attestation"] = {
+    observed["advertised_from_source"] = {
         item["adapter_id"]: item["adoptable"]
         for item in service.support()["adapters"]
     }

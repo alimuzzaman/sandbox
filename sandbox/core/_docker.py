@@ -789,7 +789,7 @@ def wpcli(args: list[str], instance: str,
 
 
 def _managed_execution_gate(instance: str, capability: str, entry_path: str, argv: tuple[str, ...],
-                            *, timeout: int = 300):
+                            *, timeout: int = 300, config_file: str | None = None):
     """Refuse managed-native legacy execution until its adapter endpoint is wired.
 
     Compose instances return ``None`` and retain the exact historical path.
@@ -799,11 +799,13 @@ def _managed_execution_gate(instance: str, capability: str, entry_path: str, arg
     from sandbox.application.context import execute_project, managed_native_instance_selected
     from sandbox.runtimes.base import ExecutionRequest
 
-    owner = managed_native_instance_selected(instance)
+    owner = (managed_native_instance_selected(instance, config_file=config_file)
+             if config_file is not None else managed_native_instance_selected(instance))
     if owner is None:
         return None
     root, label = owner
-    request = ExecutionRequest(str(root), label, entry_path, tuple(argv), timeout)
+    request = ExecutionRequest(str(root), label, entry_path, tuple(argv), timeout,
+                               config_file)
     execution = execute_project(load_config(), request)
     stdout = str(execution.data.get("stdout", ""))
     stderr = str(execution.data.get("stderr", ""))

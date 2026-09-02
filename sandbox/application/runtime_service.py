@@ -624,7 +624,13 @@ class RuntimeService:
 
     def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
         try:
-            descriptor = self._resolve_descriptor(request.project_root, label=request.label)
+            config_file = request.arguments.get("config_file")
+            if config_file is None:
+                descriptor = self._resolve_descriptor(request.project_root, label=request.label)
+            else:
+                descriptor = self._resolve_descriptor(
+                    request.project_root, label=request.label, config_file=config_file,
+                )
             kind = self._descriptor_kind(descriptor)
         except (KeyError, OSError, TypeError, ValueError) as exc:
             return OperationError("invalid_descriptor", f"runtime descriptor is invalid: {exc}",
@@ -668,9 +674,12 @@ class RuntimeService:
             )
         return self._with_capability_envelope(result, spec.adapter)
 
-    def check(self, project_root: str, capability: str, *, label: str = "default") -> OperationError | None:
+    def check(self, project_root: str, capability: str, *, label: str = "default",
+              config_file: str | None = None) -> OperationError | None:
         try:
-            descriptor = self._resolve_descriptor(project_root, label=label)
+            descriptor = (self._resolve_descriptor(
+                project_root, label=label, config_file=config_file,
+            ) if config_file is not None else self._resolve_descriptor(project_root, label=label))
             kind = self._descriptor_kind(descriptor)
         except (KeyError, OSError, TypeError, ValueError) as exc:
             return OperationError(

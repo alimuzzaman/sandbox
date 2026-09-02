@@ -501,7 +501,7 @@ def cmd_ensure(cfg, args) -> None:
             project_root=pd,
             operation="ensure",
             label=label or "default",
-            arguments={"create": create},
+            arguments={"create": create, "config_file": getattr(args, "config_file", None)},
         ))
     except sc.ConfigError as e:
         message = str(e)

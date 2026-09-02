@@ -58,6 +58,7 @@ class RemoteCIJobTests(unittest.TestCase):
                                                   _plan_workflow(workflow), args)
             self.assertEqual(len(submissions), 2)
             self.assertEqual({item.workspace_mode for item in submissions}, {"isolated"})
+            self.assertEqual({item.cleanup_policy for item in submissions}, {"ephemeral"})
             self.assertEqual({item.artifact_paths for item in submissions}, {("reports",)})
             self.assertTrue(all("--matrix-filter" in item.argv for item in submissions))
             self.assertTrue(all(item.deadline_seconds == 3600 for item in submissions))

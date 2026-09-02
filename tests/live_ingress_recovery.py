@@ -48,7 +48,6 @@ def main() -> None:
 
     from sandbox.application.context import clean_url_service, domain_service, ingress_service
     from sandbox.ingress.models import RouteRecord
-    from sandbox.network.manifest import ResolverProofAttestation
     import sandbox_core as sc
 
     owner_root = str(Path(args.project_dir).expanduser().resolve())
@@ -58,9 +57,7 @@ def main() -> None:
                "port": record.get("wordpress_port") or record.get("http_port")}
 
     ingress = ingress_service(None, consent_decider=lambda _identity: True)
-    domains = domain_service(
-        None, proof_attestation=ResolverProofAttestation("systemd-resolved", args.evidence_id),
-        consent_decider=lambda _owner: True)
+    domains = domain_service(None, consent_decider=lambda _owner: True)
     service = clean_url_service(None, ingress=ingress, domains=domains)
 
     observed = {"evidence_id": args.evidence_id,

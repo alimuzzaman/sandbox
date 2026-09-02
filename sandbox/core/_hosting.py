@@ -21,6 +21,29 @@ class HostingError(ValueError):
     pass
 
 
+# One explicit capability registry names every target mutation that must share
+# the RecoveryRepository owner/CAS boundary.  Consumers validate membership
+# before opening state or entering an effect.  Unknown/bypass names fail closed.
+TARGET_MUTATION_CAPABILITIES = {
+    "apply": "hosting.apply.v1",
+    "sync": "hosting.sync.v1",
+    "login-url": "hosting.login-url.v1",
+    "edge-continue": "hosting.edge-continue.v1",
+    "failed-apply-recover": "hosting.failed-apply-recover.v1",
+    "image-stage": "hosting.image-stage.v1",
+    "activate": "hosting.image-activate.v1",
+    "adopt": "hosting.image-adopt.v1",
+    "rollback": "hosting.image-rollback.v1",
+    "image-recover": "hosting.image-recover.v1",
+}
+
+
+def target_mutation_capability(name: object) -> str:
+    if type(name) is not str or name not in TARGET_MUTATION_CAPABILITIES:
+        raise HostingError("unknown target mutation capability")
+    return TARGET_MUTATION_CAPABILITIES[name]
+
+
 _SERVICE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _BASIC_AUTH_BYPASS_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
@@ -323,7 +346,15 @@ def _autologin(env: dict) -> dict | None:
     ttl = raw.get("ttl_seconds", 900)
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise HostingError("autologin.ttl_seconds must be an integer from 60 to 3600")
-    return {"user": user, "container_path": path, "ttl_seconds": ttl}
+    service = str(raw.get("service") or "").strip()
+    if service and not _SERVICE_RE.fullmatch(service):
+        raise HostingError("autologin.service contains unsupported characters")
+    request_path = str(raw.get("request_path") or "/").strip()
+    if (not request_path.startswith("/") or "?" in request_path
+            or "#" in request_path or ".." in Path(request_path).parts):
+        raise HostingError("autologin.request_path must be an absolute URL path without a query or fragment")
+    return {"user": user, "container_path": path, "ttl_seconds": ttl,
+            "service": service or None, "request_path": request_path}
 
 
 def _basic_auth(env: dict) -> dict | None:
@@ -763,7 +794,8 @@ add_action( 'init', static function () {{
 def autologin_url(validated: dict, token: str, expires_at: int) -> str:
     primary = next(route["hostname"] for route in validated["routes"] if route.get("primary"))
     query = urllib.parse.urlencode({"sandbox_autologin": token, "expires": int(expires_at)})
-    return f"https://{primary}/?{query}"
+    request_path = validated.get("autologin", {}).get("request_path", "/")
+    return f"https://{primary}{request_path}?{query}"
 
 
 def render_compose_command(validated: dict, source_dir: str, override_path: str) -> str:

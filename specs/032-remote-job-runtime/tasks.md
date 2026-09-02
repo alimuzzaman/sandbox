@@ -495,3 +495,23 @@ and evidence actually present in this branch.
 - [ ] T170 [Phase 8] Record focused and read-only remote evidence for metadata migration,
   relocation, checkout-independent controls, and unchanged job/container/network counts;
   keep unresolved/conflict decisions visible and do not claim cleanup proof.
+
+## Phase 14: Disposable CI workspace terminal cleanup — 2026-08-30
+
+- [ ] T171 [US3/US4] Bind accepted jobs to an exact durable `workspace_id`, use one
+  fail-closed terminal cleanup seam from launch failure, observation/reconciliation,
+  cancellation, dependency failure, and the detached supervisor, and preserve terminal
+  job evidence while releasing only policy-authorized isolated/ephemeral workspaces.
+- [ ] T172 [US3/US4] Add local regressions for pre-launch failure, successful and failed
+  supervisor completion, persistent/retained/on-success retention, foreign/ambiguous
+  ownership, cleanup failure truth, replay idempotency, and terminal active-reference
+  projection, live-child refusal, pathname ABA, retry rematerialization, non-CI
+  authority refusal, reusable/index/legacy compatibility, residual process-group and
+  owned-cgroup refusal, FD-bound second-replacement safety, v5 request replay,
+  bind-source mount observation, bounded/inventoried artifact retirement, empty-quarantine
+  replacement, post-recheck quarantine and archive replacement, accept-during-delete
+  serialization, open-descriptor artifact swaps, and failed-restore rollback. Local
+  regressions exist. Add an isolated cleanup broker or equivalent ownership boundary that
+  is inaccessible to the submitting UID and can perform identity-bound final directory and
+  archive removal; until then unsupported platforms must retain and report failure. Live
+  disposable-remote acceptance and measured reclamation remain pending.

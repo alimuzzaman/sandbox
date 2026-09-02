@@ -81,6 +81,7 @@ class ExecutionRequest:
     entry_path: str
     argv: tuple[str, ...]
     timeout: int = 300
+    config_file: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "project_root", _transport_text(self.project_root, "project root"))
@@ -92,6 +93,9 @@ class ExecutionRequest:
             raise ValueError("execution argv is invalid")
         if isinstance(self.timeout, bool) or not isinstance(self.timeout, int) or not 1 <= self.timeout <= 3600:
             raise ValueError("execution timeout is invalid")
+        if self.config_file is not None:
+            object.__setattr__(self, "config_file",
+                               _transport_text(self.config_file, "config file"))
 
 
 @dataclass(frozen=True)

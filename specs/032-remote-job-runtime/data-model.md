@@ -82,6 +82,8 @@ One durable accepted execution or aggregate parent.
 | `project_identity` | TEXT | stable hash/slug, never an unowned global project |
 | `target_kind` | TEXT | `local` or `remote` as submitted/result provenance |
 | `remote_name` | TEXT nullable | registered remote selected by caller/config |
+| `workspace_id` | TEXT nullable | exact opaque workspace owner fixed before acceptance; null only for legacy/unindexed rows |
+| `workspace_authority_digest` | TEXT nullable | immutable controller CI-materialization authority fixed before acceptance; null for generic/reusable/legacy references |
 | `workspace_label` | TEXT | validated label |
 | `workspace_mode` | TEXT | persistent or isolated/ephemeral |
 | `lifecycle` | TEXT | lifecycle enum |
@@ -121,6 +123,25 @@ Indexes: `(project_identity, accepted_at)`, `(workspace_label, lifecycle)`,
 `(target_kind, COALESCE(remote_name,''), project_identity, request_id)` when request ID
 is non-null.
 
+For terminal workspace cleanup, `workspace_id` plus the accepted
+`workspace_authority_digest` identify the exact controller-materialized CI generation.
+`project_identity`, `workspace_label`, paths, age, and naming patterns are
+cross-check evidence and can never substitute for a missing or conflicting ID.
+Mode/policy and job-supplied paths never create cleanup authority. A fresh
+process-group/owned-cgroup/container/mountpoint/bind-source/binding/lease/job observation
+must prove zero live references. The owned filesystem identity then moves to a private
+owner-only root and content deletion remains bound to its open descriptor. Final entry
+removal requires an identity-conditional kernel operation or a private broker ownership
+boundary. Until that exists, macOS/Linux retain the empty quarantine and verified archive
+and record cleanup as failed/indeterminate; they never report deletion or retirement.
+Validation/materialization, durable acceptance, retry, artifact retirement, and terminal
+deletion serialize on one stable project-identity/workspace-label controller lock.
+Terminal job/result rows and one bounded materialization artifact remain retained;
+retry publishes fresh authority without creating another archive generation. Archive
+digest, size, and extraction operate on one identity-checked open descriptor. Retirement
+fails closed when identity-bound final removal is unavailable; an entry replacement
+preserves foreign bytes and restore staging is rolled back.
+
 ### `process_identities`
 
 One current supervisor and optional child identity per leaf job.
@@ -134,6 +155,7 @@ One current supervisor and optional child identity per leaf job.
 | `supervisor_nonce_hash` | TEXT | launch nonce identity without exposing nonce |
 | `child_pid` | INTEGER nullable | >0 when running |
 | `child_pgid` | INTEGER nullable | owned process group |
+| `child_cgroup_path` | TEXT nullable | controller-observed dedicated child cgroup; when present it must be absent or empty before cleanup |
 | `child_start_identity` | TEXT nullable | PID-reuse guard |
 | `child_executable_identity` | TEXT nullable | safe executable basename/hash |
 | `recorded_at` | TEXT | UTC RFC3339 |

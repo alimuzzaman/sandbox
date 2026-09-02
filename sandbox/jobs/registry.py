@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -15,7 +16,7 @@ from sandbox.services.redaction import require_safe_argv
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 MAX_SUBMISSION_SNAPSHOT_BYTES = 65_536
 MAX_SUBMISSION_ITEMS = 256
 MAX_SUBMISSION_TEXT = 4_096
@@ -51,10 +52,17 @@ def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
     )
     connection.row_factory = sqlite3.Row
     try:
+        job_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(jobs)")
+        }
+        workspace_id_column = (
+            "workspace_id" if "workspace_id" in job_columns
+            else "NULL AS workspace_id"
+        )
         jobs = [
             dict(row) for row in connection.execute(
                 "SELECT job_id, project_root, project_identity, target_kind, "
-                "remote_name, lifecycle, workspace_label, workspace_mode, "
+                f"remote_name, lifecycle, {workspace_id_column}, workspace_label, workspace_mode, "
                 "cleanup_policy, cleanup_state, finished_at "
                 "FROM jobs ORDER BY job_id LIMIT 10000"
             )
@@ -132,6 +140,9 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "remote_name": _bounded_text(raw.get("remote_name"), "remote name", maximum=64, allow_none=True),
         "workspace_label": _bounded_text(raw["workspace_label"], "workspace label", maximum=64),
         "workspace_mode": raw["workspace_mode"],
+        "materialization_source_root": _bounded_text(
+            raw.get("materialization_source_root"),
+            "materialization source root", allow_none=True),
         "argv": _bounded_argv(raw["argv"]),
         "cwd_relative": _bounded_text(raw["cwd_relative"], "working directory"),
         "execution_profile": _bounded_text(raw["execution_profile"], "execution profile", maximum=64),
@@ -237,6 +248,8 @@ class JobRepository:
             project_identity TEXT NOT NULL,
             target_kind TEXT NOT NULL,
             remote_name TEXT,
+            workspace_id TEXT,
+            workspace_authority_digest TEXT,
             workspace_label TEXT NOT NULL,
             workspace_mode TEXT NOT NULL,
             lifecycle TEXT NOT NULL,
@@ -292,6 +305,7 @@ class JobRepository:
             supervisor_nonce_hash TEXT NOT NULL,
             child_pid INTEGER,
             child_pgid INTEGER,
+            child_cgroup_path TEXT,
             child_start_identity TEXT,
             recorded_at TEXT NOT NULL,
             last_verified_at TEXT
@@ -406,6 +420,8 @@ class JobRepository:
                 ("sync_generation_id", "TEXT"),
                 ("source_access", "TEXT"),
                 ("parallel_safe", "INTEGER NOT NULL DEFAULT 0"),
+                ("workspace_id", "TEXT"),
+                ("workspace_authority_digest", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -424,6 +440,13 @@ class JobRepository:
                     connection.execute(
                         f"ALTER TABLE workspace_leases ADD COLUMN {name} {declaration}"
                     )
+            process_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(process_identities)")
+            }
+            if "child_cgroup_path" not in process_columns:
+                connection.execute(
+                    "ALTER TABLE process_identities ADD COLUMN child_cgroup_path TEXT")
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -440,10 +463,38 @@ class JobRepository:
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
-    def accept(self, submission: JobSubmission) -> tuple[dict[str, Any], bool]:
+    def replay(self, submission: JobSubmission) -> dict[str, Any] | None:
+        """Return one exact durable request replay without creating side effects."""
+        if submission.request_id is None:
+            return None
+        row = self.connection.execute(
+            "SELECT * FROM jobs WHERE target_kind=? AND IFNULL(remote_name, '')=? "
+            "AND project_identity=? AND request_id=?",
+            (submission.target_kind, submission.remote_name or "",
+             submission.project_identity, submission.request_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["request_digest"] != submission.canonical_digest():
+            raise RequestIdConflict(
+                "request id was already used for a different submission")
+        return dict(row)
+
+    def accept(self, submission: JobSubmission, *,
+               workspace_id: str | None = None,
+               workspace_authority_digest: str | None = None,
+               ) -> tuple[dict[str, Any], bool]:
         # Persisted argv is later executed verbatim. Refuse credential-bearing
         # forms instead of redacting them into a different command.
         require_safe_argv(submission.argv)
+        if (workspace_id is not None and
+                (not isinstance(workspace_id, str) or
+                 not re.fullmatch(r"ws_[0-9a-f]{32}", workspace_id))):
+            raise ValueError("workspace id is invalid")
+        if (workspace_authority_digest is not None and
+                (not isinstance(workspace_authority_digest, str) or
+                 not re.fullmatch(r"sha256:[0-9a-f]{64}", workspace_authority_digest))):
+            raise ValueError("workspace authority digest is invalid")
         digest = submission.canonical_digest()
         now = _now()
         with self.transaction(immediate=True) as connection:
@@ -457,6 +508,13 @@ class JobRepository:
                 if existing is not None:
                     if existing["request_digest"] != digest:
                         raise RequestIdConflict("request id was already used for a different submission")
+                    if (workspace_id is not None and
+                            existing["workspace_id"] != workspace_id):
+                        raise JobRepositoryError(
+                            "request workspace identity changed")
+                    if existing["workspace_authority_digest"] != workspace_authority_digest:
+                        raise JobRepositoryError(
+                            "request workspace authority changed")
                     return dict(existing), True
             submission_json = _canonical_submission_snapshot(submission)
             job_id = new_job_id()
@@ -464,7 +522,8 @@ class JobRepository:
                 job_id, submission.request_id, digest, submission.parent_job_id, None,
                 submission.retry_of_job_id, submission.attempt, submission.kind,
                 submission.project_root, submission.project_identity, submission.target_kind,
-                submission.remote_name, submission.workspace_label, submission.workspace_mode,
+                submission.remote_name, workspace_id, workspace_authority_digest,
+                submission.workspace_label, submission.workspace_mode,
                 Lifecycle.ACCEPTED.value, Health.UNKNOWN.value,
                 json.dumps(list(submission.depends_on)), submission.failure_policy, None, None,
                 json.dumps(list(submission.argv)),
@@ -484,7 +543,8 @@ class JobRepository:
                 """INSERT INTO jobs(
                     job_id, request_id, request_digest, parent_job_id, root_job_id,
                     retry_of_job_id, attempt, kind, project_root, project_identity,
-                    target_kind, remote_name, workspace_label, workspace_mode, lifecycle,
+                    target_kind, remote_name, workspace_id, workspace_authority_digest,
+                    workspace_label, workspace_mode, lifecycle,
                     health, depends_on_json, failure_policy, queue_reason, queue_position,
                     command_json, cwd_relative, environment_keys_json,
                     execution_profile, output_profile, deadline_seconds, deadline_source,
@@ -493,7 +553,7 @@ class JobRepository:
                     source_commit, source_dirty_digest, sync_relationship_id,
                     sync_generation_id, source_access, parallel_safe,
                     accepted_at, updated_at, submission_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id
@@ -609,22 +669,25 @@ class JobRepository:
                              supervisor_pid: int, supervisor_start_identity: str,
                              supervisor_nonce_hash: str, child_pid: int | None = None,
                              child_pgid: int | None = None,
+                             child_cgroup_path: str | None = None,
                              child_start_identity: str | None = None) -> None:
         now = _now()
         self.connection.execute(
             """INSERT INTO process_identities(job_id, host_boot_id, supervisor_pid,
                supervisor_start_identity, supervisor_nonce_hash, child_pid, child_pgid,
-               child_start_identity, recorded_at, last_verified_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)
+               child_cgroup_path, child_start_identity, recorded_at, last_verified_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(job_id) DO UPDATE SET host_boot_id=excluded.host_boot_id,
                supervisor_pid=excluded.supervisor_pid,
                supervisor_start_identity=excluded.supervisor_start_identity,
                supervisor_nonce_hash=excluded.supervisor_nonce_hash,
                child_pid=excluded.child_pid, child_pgid=excluded.child_pgid,
+               child_cgroup_path=excluded.child_cgroup_path,
                child_start_identity=excluded.child_start_identity,
                last_verified_at=excluded.last_verified_at""",
             (job_id, host_boot_id, supervisor_pid, supervisor_start_identity,
-             supervisor_nonce_hash, child_pid, child_pgid, child_start_identity, now, now),
+             supervisor_nonce_hash, child_pid, child_pgid, child_cgroup_path,
+             child_start_identity, now, now),
         )
 
     def put_heartbeat(self, job_id: str, *, supervisor_at: str,

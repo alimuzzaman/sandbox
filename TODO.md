@@ -36,6 +36,28 @@ not close the external or human gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
+- [ ] **Prove fail-closed disposable CI workspace terminal cleanup.**
+  The local candidate binds controller materialization authority to the accepted
+  job, refuses residual process-group/owned-cgroup, container, bind-source or
+  mountpoint, and binding references, then moves the exact inode into an
+  owner-only cleanup root and removes its contents through the open descriptor.
+  macOS/Linux lack an identity-conditional final unlink/rmdir, so the candidate
+  fails closed, retains the empty quarantine and verified archive, and records
+  cleanup as failed/indeterminate instead of claiming release. Workspace
+  validation, durable acceptance, retry,
+  artifact retirement, and terminal deletion share one controller lock. Retry
+  reuses one bounded, reserve-checked retained materialization through one
+  identity-checked open descriptor; inventory and job retention report that exact
+  artifact and retirement fails closed. A private cleanup broker or equivalent
+  ownership boundary,
+  inaccessible to the submitting UID and capable of identity-bound final removal,
+  remains required before automatic terminal reap can be complete.
+  Reviewer reproductions and local focused/adjacent proof are recorded in Spec
+  032, but live disposable-remote and measured reclamation gates remain open.
+  Feedback/incident evidence: `52622c4577419a51f02d728f886b40f0`,
+  `7ba71712a512c41794c72116ab503b70`. This repository note does not change the
+  machine-local feedback status.
+
 - [ ] **Make remote durable-job acceptance and observation one replay-safe
   contract.** Persist the durable row before acknowledgement; return a
   non-empty canonical request/job ID; make request-ID lookup distinguish

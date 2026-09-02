@@ -97,6 +97,14 @@ class JobServiceTests(unittest.TestCase):
             accepted = service.submit(submission)
             descriptor = json.loads(launched[0].read_text())
             self.assertEqual(descriptor["cancel_grace_seconds"], 13)
+            self.assertEqual(descriptor["authoritative_context"], {
+                "job_id": accepted["job_id"], "request_id": None,
+                "project_identity": "p",
+                "project_root_digest": "sha256:" + __import__("hashlib").sha256(
+                    temp.encode()).hexdigest(),
+                "source_identity": "source", "source_commit": None,
+                "source_dirty_digest": None,
+            })
             self.assertEqual(accepted["deadline"]["reminder"], submission.deadline_reminder)
             self.assertEqual(accepted["execution_policy"]["provenance"],
                              dict(submission.execution_policy_provenance))

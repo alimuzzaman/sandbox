@@ -20,12 +20,12 @@ from sandbox.runtimes.base import OperationResult  # noqa: E402
 class TestWordPressCoreDownload(unittest.TestCase):
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
-    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
-    def test_download_repairs_docroot_ownership_first(self, _is_herd, compose, wpcli):
+    def test_apache_download_waits_for_seed_and_repairs_runtime_ownership(
+            self, compose, wpcli):
         args = ["core", "download", "--force", "--version=7.0"]
         compose.return_value.returncode = 0
 
-        lifecycle._download_wordpress_core("preview-demo", args)
+        lifecycle._download_wordpress_core("preview-demo", args, "apache")
 
         self.assertEqual(compose.call_args_list, [
             call(
@@ -36,8 +36,8 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 instance="preview-demo", check=False, capture=True, timeout=5,
             ),
             call(
-            "exec", "-T", "wp", "chown", "-R", "www-data:www-data",
-            "/var/www/html", instance="preview-demo", check=True,
+            "exec", "-T", "wp", "chown", "-R", "33:33", "/var/www/html",
+            instance="preview-demo", check=True,
             ),
         ])
         wpcli.assert_called_once_with(
@@ -49,27 +49,94 @@ class TestWordPressCoreDownload(unittest.TestCase):
            side_effect=[0, 1, 31])
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
-    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
     def test_download_fails_before_wpcli_when_image_seed_never_completes(
-            self, _is_herd, compose, wpcli, _clock, _sleep):
+            self, compose, wpcli, _clock, _sleep):
         compose.return_value = SimpleNamespace(returncode=1)
         with self.assertRaisesRegex(RuntimeError, "document root is still incomplete"):
             lifecycle._download_wordpress_core(
-                "preview-demo", ["core", "download", "--force"]
+                "preview-demo", ["core", "download", "--force"], "nginx"
             )
         wpcli.assert_not_called()
 
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
-    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=True)
-    def test_download_keeps_herd_on_its_host_path(self, _is_herd, compose, wpcli):
+    def test_litespeed_skips_image_seed_wait_and_repairs_runtime_ownership(
+            self, compose, wpcli):
         args = ["core", "download", "--force", "--version=7.0"]
 
-        lifecycle._download_wordpress_core("preview-demo", args)
+        lifecycle._download_wordpress_core("preview-demo", args, "litespeed")
+
+        compose.assert_called_once_with(
+            "exec", "-T", "wp", "chown", "-R", "1000:1000",
+            "/var/www/vhosts/localhost/html",
+            instance="preview-demo", check=True,
+        )
+        wpcli.assert_called_once_with(
+            args, instance="preview-demo", check=True
+        )
+
+    @patch("sandbox.commands.lifecycle.wpcli")
+    @patch("sandbox.commands.lifecycle.compose")
+    def test_download_keeps_herd_on_its_host_path(self, compose, wpcli):
+        args = ["core", "download", "--force", "--version=7.0"]
+
+        lifecycle._download_wordpress_core("preview-demo", args, "herd")
 
         compose.assert_not_called()
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
+        )
+
+    def test_litespeed_install_downloads_core_then_generates_config(self):
+        args = SimpleNamespace(resolved_instance="preview-demo")
+        runtime = {
+            "server": "litespeed", "domain": "preview-demo.test",
+            "wordpress_port": 8188, "wp_version": None,
+            "admin": {"user": "admin", "password": "admin",
+                      "email": "admin@example.com", "site_title": "Sandbox"},
+        }
+        result = SimpleNamespace(returncode=1, stdout="")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(lifecycle, "preflight_instance_capability", return_value=None), \
+                patch.object(lifecycle, "resolve_instances", return_value={
+                    "preview-demo": runtime}), \
+                patch.object(lifecycle, "compose") as compose, \
+                patch.object(lifecycle, "wpcli", return_value=result) as wpcli, \
+                patch.object(lifecycle, "_prepare_mu_plugin_directory"), \
+                patch.object(lifecycle, "_write_host_runtime_muplugins"), \
+                patch.object(lifecycle, "_ensure_litespeed_htaccess"), \
+                patch.object(lifecycle, "_pin_wp_constants_in_config"), \
+                patch.object(lifecycle, "_convert_multisite"), \
+                patch.object(lifecycle, "wp_dir", return_value=Path(directory)), \
+                patch.object(lifecycle, "_autologin_mu_plugin", return_value="<?php"), \
+                patch.object(lifecycle, "save_local_autologin_token"), \
+                patch.object(lifecycle, "_write_snapshot_muplugin"), \
+                patch.object(lifecycle, "save_local_bridge_token"), \
+                patch.object(lifecycle, "_write_mail_muplugin"), \
+                patch.object(lifecycle, "_write_dl_cache_muplugin"), \
+                patch.object(lifecycle, "_write_ondemand_muplugin"), \
+                patch.object(lifecycle, "_write_licensing_muplugin"), \
+                patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"):
+            lifecycle.cmd_install({}, args)
+
+        compose.assert_called_once_with(
+            "exec", "-T", "wp", "chown", "-R", "1000:1000",
+            "/var/www/vhosts/localhost/html",
+            instance="preview-demo", check=True,
+        )
+        core_download = call(
+            ["core", "download", lifecycle.WORDPRESS_LATEST_DOWNLOAD_URL, "--force"],
+            instance="preview-demo", check=True,
+        )
+        config_create = call([
+            "config", "create", "--dbhost=db:3306", "--dbname=wp",
+            "--dbuser=wp", "--dbpass=wp", "--skip-check", "--force",
+        ], instance="preview-demo", check=False)
+        self.assertIn(core_download, wpcli.call_args_list)
+        self.assertIn(config_create, wpcli.call_args_list)
+        self.assertLess(
+            wpcli.call_args_list.index(core_download),
+            wpcli.call_args_list.index(config_create),
         )
 
 
@@ -223,7 +290,7 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
                 patch.object(lifecycle, "resolve_instances", return_value={
                     "preview-demo": runtime}), \
                 patch.object(lifecycle, "_download_wordpress_core",
-                             side_effect=lambda _instance, download: (
+                             side_effect=lambda _instance, download, _server: (
                                  download_args.append(download), events.append("download")
                              )[-1]), \
                 patch.object(lifecycle, "wpcli", return_value=result), \

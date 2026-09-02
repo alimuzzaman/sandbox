@@ -673,7 +673,9 @@ current registry/config on authenticated activation requests and scheduler
 cycles, so it does not keep serving a stale route snapshot after an instance
 is created, changed, or removed. Liveness stays independent of registry I/O;
 a failed refresh revokes the previous route allowlist until the source is
-readable again.
+readable again. Caddy clears the original query from its cloned activation
+request; after activation, the instance proxy receives the original path and
+query unchanged.
 
 ```bash
 ./sb activation status
@@ -777,6 +779,9 @@ Two layers:
 - **Per-project** `sandbox.config.json` (in the plugin repo, canonical) +
   gitignored `sandbox.config.override.json`. This is what makes a plugin a
   sandbox project. See [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).
+  A descriptor in another checkout directory can be selected with
+  `--project-dir DIR --config-file path/to/sandbox.config.json` for
+  ensure/apply/test; the path must stay inside `DIR`.
 - **Machine/global** [`sandbox.yml`](sandbox.yml) — ports base, admin creds,
   image defaults. Per-machine overrides go in the gitignored `sandbox.local.yml`:
 

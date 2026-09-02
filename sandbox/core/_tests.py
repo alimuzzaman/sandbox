@@ -233,10 +233,12 @@ def _write_wp_tests_config() -> Path:
     return path
 
 
-def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path) -> None:
+def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path,
+                                        config_file: str | None = None) -> None:
     """Install only the project's Composer dependencies in a bounded container."""
     gateway = _managed_execution_gate(
         inst, "exec", "composer", ("/usr/bin/composer", "install"),
+        config_file=config_file,
     )
     if gateway is not None:
         return gateway.returncode
@@ -282,12 +284,22 @@ def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path) ->
                     instance=inst, check=False)
 
 
-def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> int:
+def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list,
+               config_file: str | None = None) -> int:
     """Run PHPUnit with the external WordPress harness mounted."""
     plug = str(root)
-    dependency = _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    dependency = (_ensure_project_dependencies_docker(
+        inst, root, tools["composer"], config_file=config_file,
+    ) if config_file is not None else _ensure_project_dependencies_docker(
+        inst, root, tools["composer"],
+    ))
     if isinstance(dependency, int): return dependency
-    gateway = _managed_execution_gate(inst, "test", "phpunit", ("php", "/phpunit.phar", *extra))
+    gateway = (_managed_execution_gate(
+        inst, "test", "phpunit", ("php", "/phpunit.phar", *extra),
+        config_file=config_file,
+    ) if config_file is not None else _managed_execution_gate(
+        inst, "test", "phpunit", ("php", "/phpunit.phar", *extra),
+    ))
     if gateway is not None: return gateway.returncode
     info("running phpunit…")
     r = compose("run", "--rm",
@@ -305,15 +317,23 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
     return getattr(r, "returncode", 1)
 
 
-def _run_tests_unit(inst: str, root: str, tools: dict, extra: list) -> int:
+def _run_tests_unit(inst: str, root: str, tools: dict, extra: list,
+                    config_file: str | None = None) -> int:
     """Run a pure PHPUnit suite without WordPress harness or test DB setup."""
     plug = str(root)
-    dependency = _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    dependency = (_ensure_project_dependencies_docker(
+        inst, root, tools["composer"], config_file=config_file,
+    ) if config_file is not None else _ensure_project_dependencies_docker(
+        inst, root, tools["composer"],
+    ))
     if isinstance(dependency, int): return dependency
     phpunit = str(tools["phpunit"])
-    gateway = _managed_execution_gate(
+    gateway = (_managed_execution_gate(
         inst, "test", "phpunit", ("php", phpunit, *extra),
-    )
+        config_file=config_file,
+    ) if config_file is not None else _managed_execution_gate(
+        inst, "test", "phpunit", ("php", phpunit, *extra),
+    ))
     if gateway is not None: return gateway.returncode
     info("running pure PHPUnit unit suite…")
     r = compose("run", "--rm", "--no-deps",

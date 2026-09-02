@@ -39,7 +39,8 @@ def register(server, dependencies: ToolDependencies) -> None:
 
 
 
-def ensure_instance(project_dir: str, label: str = "default", create: bool = False) -> dict:
+def ensure_instance(project_dir: str, label: str = "default", create: bool = False,
+                    config_file: str | None = None) -> dict:
     """Ensure a configured project instance exists and return its kind-neutral record.
 
     WordPress projects retain their existing install/wiring behavior. Explicit
@@ -63,6 +64,8 @@ def ensure_instance(project_dir: str, label: str = "default", create: bool = Fal
     """
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "ensure", "--project-dir", project_dir, "--json"]
+    if config_file:
+        cmd += ["--config-file", config_file]
     if label and label != "default":
         cmd += ["--label", label]
         if create:
@@ -271,7 +274,8 @@ def secure_instance(project_dir: str, label: str | None = None) -> dict:
     return {"ok": True, "instance": inst, "url": _site_url(_resolve_instance(inst)),
             "output": out}
 
-def apply_config(project_dir: str, label: str | None = None) -> dict:
+def apply_config(project_dir: str, label: str | None = None,
+                 config_file: str | None = None) -> dict:
     """Reconcile a RUNNING instance with its current project config WITHOUT
     dropping the database or uploads — the non-destructive alternative to
     recreate_instance.
@@ -296,6 +300,8 @@ def apply_config(project_dir: str, label: str | None = None) -> dict:
     """
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "apply", "--project-dir", project_dir, "--json"]
+    if config_file:
+        cmd += ["--config-file", config_file]
     if label:
         cmd += ["--label", label]
     try:

@@ -147,8 +147,8 @@ class TestStorageMonitorValidation(TestCase):
 
 class TestStorageMonitorMachineManifest(TestCase):
     def test_manifest_registers_nested_machine_provider(self):
-        self.assertEqual(len(MACHINE_CONFIG_PROVIDERS), 1)
-        key, provider, owner, order = MACHINE_CONFIG_PROVIDERS[0]
+        providers = {item[0]: item for item in MACHINE_CONFIG_PROVIDERS}
+        key, provider, owner, order = providers["resources.monitor"]
         self.assertEqual(key, "resources.monitor")
         self.assertEqual(owner, "sandbox.config.storage_monitor")
         self.assertEqual(order, 10)

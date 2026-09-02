@@ -51,15 +51,19 @@ def _normalize_node_store(compose: dict) -> bool:
 class ComposeSchemaProvider:
     """Normalize the small, explicit Compose project descriptor."""
 
-    def resolve(self, root: Path, *, label: str | None = None) -> dict:
+    def resolve(self, root: Path, *, label: str | None = None, config_file=None) -> dict:
         if label is not None and (not isinstance(label, str) or not _SAFE_LABEL.fullmatch(label)):
             raise ValueError("compose configuration label is invalid")
-        home = config_home(root)
-        config_path = primary_config(root)
+        home = config_home(root, config_file)
+        config_path = primary_config(root, config_file)
         if config_path is None:
             raise ValueError("generic Compose project requires sandbox.config.json or sandbox.config.yml")
         document = _load_mapping(config_path)
         _reject_php_extensions(document)
+        project_hosting_images = {
+            "declared": "hostingImages" in document,
+            "project_primary": document.get("hostingImages"),
+        }
         project_domains = raw_domain_layer(document)
         project_runtime = raw_wordpress_runtime_layer(document)
         project_secrets = raw_secret_layer(document)
@@ -170,6 +174,10 @@ class ComposeSchemaProvider:
                 "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",
                 "runtime": document.get("runtime"),
+                # Preserve project intent exactly until the common provider
+                # owns closed-schema normalization.  The generic Compose
+                # adapter does not interpret image trust or topology here.
+                "_hosting_images_raw": project_hosting_images,
                 "_domains_raw": {"project": project_domains,
                                  "machine_override": machine_domains},
                 "_wordpress_runtime_raw": {"project": project_runtime,

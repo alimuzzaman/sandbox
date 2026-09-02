@@ -49,6 +49,8 @@ import sys
 import time
 import selectors
 import tarfile
+import fcntl
+import stat
 from contextlib import contextmanager
 from pathlib import PurePosixPath
 from pathlib import Path
@@ -307,6 +309,46 @@ def get_remote(name: str) -> dict | None:
     return copy
 
 
+@contextmanager
+def registered_remote_lock(*, timeout_seconds: float = 30):
+    """Serialize supported remote registration writers and authority readers."""
+    directory = Path(RUNTIME_DIR).expanduser().resolve() / "remote-registration"
+    if directory.is_symlink():
+        raise ValueError("remote registration lock directory is unsafe")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory_info = directory.lstat()
+    if (not stat.S_ISDIR(directory_info.st_mode) or
+            directory_info.st_uid != os.geteuid() or
+            stat.S_IMODE(directory_info.st_mode) & 0o077):
+        raise ValueError("remote registration lock directory is unsafe")
+    path = directory / "registry.lock"
+    if path.is_symlink():
+        raise ValueError("remote registration lock file is unsafe")
+    descriptor = os.open(
+        path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        lock_info = os.fstat(descriptor)
+        if (not stat.S_ISREG(lock_info.st_mode) or
+                lock_info.st_uid != os.geteuid() or lock_info.st_nlink != 1 or
+                stat.S_IMODE(lock_info.st_mode) & 0o077):
+            raise ValueError("remote registration lock file is unsafe")
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote_registration_busy")
+                time.sleep(0.02)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
 def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
     """Resolve a named ref to one full commit before any remote mutation.
 
@@ -468,22 +510,24 @@ def put_remote(name: str, **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
     idempotency expectation, applied to registration too)."""
-    block = _remote_block()
-    entry = dict(block.get(name) or {})
-    entry.update({k: v for k, v in fields.items() if v is not None})
-    block[name] = entry
-    _write_remote_block(block)
-    return entry
+    with registered_remote_lock():
+        block = _remote_block()
+        entry = dict(block.get(name) or {})
+        entry.update({k: v for k, v in fields.items() if v is not None})
+        block[name] = entry
+        _write_remote_block(block)
+        return entry
 
 
 def remove_remote(name: str) -> bool:
     """Forget a remote locally. NEVER touches the VPS itself (spec FR-003) --
     any instance already running there is unaffected by this call."""
-    block = _remote_block()
-    existed = block.pop(name, None) is not None
-    if existed:
-        _write_remote_block(block)
-    return existed
+    with registered_remote_lock():
+        block = _remote_block()
+        existed = block.pop(name, None) is not None
+        if existed:
+            _write_remote_block(block)
+        return existed
 
 
 def list_remotes() -> dict:

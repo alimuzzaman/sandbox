@@ -1,6 +1,6 @@
 # Feature Specification: Owned Storage Authority
 
-**Feature Branch**: `codex/owned-storage-authority` (spec directory `048-owned-storage-authority`)
+**Feature Branch**: `codex/owned-storage-authority` (spec directory `052-owned-storage-authority`)
 
 **Created**: 2026-08-31
 

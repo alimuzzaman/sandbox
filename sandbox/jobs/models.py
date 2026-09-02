@@ -283,6 +283,7 @@ class SourceIdentity:
 @dataclass(frozen=True)
 class TargetRequest:
     project_dir: str = "."
+    config_file: str | None = None
     local: bool = False
     remote: str | None = None
     workspace: str | None = None
@@ -309,6 +310,8 @@ class TargetRequest:
 
     def __post_init__(self) -> None:
         _safe_text(self.project_dir, "project directory")
+        if self.config_file is not None:
+            _safe_text(self.config_file, "config file")
         if not isinstance(self.local, bool):
             raise ValueError("local selector must be boolean")
         if not isinstance(self.allow_inferred_remote, bool):

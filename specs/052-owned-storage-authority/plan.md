@@ -3,7 +3,7 @@
 **Branch**: `codex/owned-storage-authority` | **Date**: 2026-08-31 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from
-`specs/048-owned-storage-authority/spec.md` and the reviewed PRD in the same
+`specs/052-owned-storage-authority/spec.md` and the reviewed PRD in the same
 directory.
 
 **Planning Readiness**: **NOT READY**. A third independent review found the
@@ -121,7 +121,7 @@ The design adds no constitutional violation and needs no complexity waiver.
 ### Documentation (this feature)
 
 ```text
-specs/048-owned-storage-authority/
+specs/052-owned-storage-authority/
 ├── prd.md
 ├── spec.md
 ├── plan.md

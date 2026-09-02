@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
+  an explicit project-local `--config-file` selector when paired with
+  `--project-dir`. Selection is fail-closed, owns one sibling descriptor
+  family, preserves project-root-relative paths, and forwards remotely only as
+  a validated project-relative path.
+
 ### Changed
 - `sb apply --project-dir` / `apply_config` now reconcile WordPress core itself:
   a pinned `wpVersion` is installed exactly (`wp core update --version=<pin>

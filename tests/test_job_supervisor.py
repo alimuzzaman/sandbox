@@ -11,10 +11,29 @@ from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
 from sandbox.jobs.output import OutputError
-from sandbox.jobs.supervisor import run_descriptor
+from sandbox.jobs.supervisor import _child_identity_context, run_descriptor
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_fixed_child_context_does_not_enumerate_or_copy_environment(self):
+        class FixedEnvironment(dict):
+            def __iter__(self):
+                raise AssertionError("parent environment must not be enumerated")
+
+            def items(self):
+                raise AssertionError("parent environment must not be copied")
+
+            def copy(self):
+                raise AssertionError("parent environment must not be copied")
+
+        environment = FixedEnvironment({"UNCHANGED": "value"})
+        with patch("sandbox.jobs.supervisor.os.environ", environment):
+            with _child_identity_context({"job_id": "a" * 32,
+                                          "request_id": "apply-1"}):
+                self.assertEqual(environment["SANDBOX_DURABLE_JOB_ID"], "a" * 32)
+                self.assertEqual(environment["UNCHANGED"], "value")
+            self.assertNotIn("SANDBOX_DURABLE_JOB_ID", environment)
+
     @staticmethod
     def _wait_terminal(service, job_id):
         for _ in range(200):

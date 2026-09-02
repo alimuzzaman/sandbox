@@ -180,3 +180,133 @@ PY
         "from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()"
 )
 ok "provisioning complete"
+
+# --- measured immutable image staging helper ----------------------------
+# Provision only. This does not contact a registry, start a helper, or stage an
+# image. Each source digest gets its own non-replaced directory and manifest.
+log "provisioning measured image staging helper"
+STAGING_HELPER_SOURCE="$SANDBOX_HOME/sb-src/sandbox/hosting/images/staging_helper.py"
+STAGING_HELPER_DIGEST="$(sha256sum "$STAGING_HELPER_SOURCE" | awk '{print $1}')"
+STAGING_HELPER_ROOT="$SANDBOX_HOME/runtime/helpers/image-stage/sha256-$STAGING_HELPER_DIGEST"
+python3 - "$SANDBOX_HOME" "$STAGING_HELPER_ROOT" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+home = Path(sys.argv[1])
+target = Path(sys.argv[2])
+if not home.is_absolute() or target.parent.parent != home / "runtime" / "helpers":
+    raise SystemExit("invalid staging helper directory identity")
+fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+try:
+    parts = target.parts[1:]
+    home_parts = home.parts[1:]
+    for index, part in enumerate(parts):
+        owned = index >= len(home_parts)
+        try:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            if not owned:
+                raise SystemExit("staging helper parent directory is missing")
+            os.mkdir(part, 0o700, dir_fd=fd)
+            os.fsync(fd)
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        info = os.fstat(child)
+        if owned and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+            raise SystemExit("staging helper directory ownership or mode is unsafe")
+        os.close(fd); fd = child
+finally:
+    os.close(fd)
+os.chmod(target.parent, 0o700)
+os.chmod(target, 0o700)
+PY
+if [[ -f "$STAGING_HELPER_ROOT/staging_helper.py" ]]; then
+    STAGING_INSTALLED_DIGEST="$(sha256sum "$STAGING_HELPER_ROOT/staging_helper.py" | awk '{print $1}')"
+    if [[ "$STAGING_INSTALLED_DIGEST" != "$STAGING_HELPER_DIGEST" ]]; then
+        fail "installed image staging helper digest mismatch at $STAGING_HELPER_ROOT"
+    fi
+else
+    install -m 0500 "$STAGING_HELPER_SOURCE" "$STAGING_HELPER_ROOT/staging_helper.py"
+fi
+STAGING_INSTALLED_DIGEST="$(sha256sum "$STAGING_HELPER_ROOT/staging_helper.py" | awk '{print $1}')"
+if [[ "$STAGING_INSTALLED_DIGEST" != "$STAGING_HELPER_DIGEST" ]]; then
+    fail "installed image staging helper could not be measured exactly"
+fi
+python3 - "$STAGING_HELPER_ROOT/staging_helper.py" <<'PY'
+import os
+import stat
+import sys
+info = os.lstat(sys.argv[1])
+if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
+        or stat.S_IMODE(info.st_mode) != 0o500 or info.st_nlink != 1:
+    raise SystemExit("installed staging helper artifact identity is unsafe")
+PY
+STAGING_RUNTIME_REVISION="$(git -C "$SANDBOX_HOME/sb-src" rev-parse HEAD)"
+python3 - "$STAGING_HELPER_ROOT/manifest.json" "$STAGING_HELPER_DIGEST" "$STAGING_RUNTIME_REVISION" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+payload = {
+    "schema_version": 1,
+    "artifact_digest": "sha256:" + sys.argv[2],
+    "entry": "sandbox-image-stage-helper-v1",
+    "runtime_revision": sys.argv[3],
+    "capability_revision": "systemd-cgroup-v2-stage-v1",
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+if path.exists():
+    try:
+        existing = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"could not read installed staging helper manifest: {exc}")
+    if existing != encoded:
+        raise SystemExit("installed staging helper manifest mismatch")
+    raise SystemExit(0)
+fd, temporary = tempfile.mkstemp(prefix=".manifest.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        if path.read_bytes() != encoded:
+            raise SystemExit("concurrent staging helper manifest mismatch")
+    parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+python3 - "$STAGING_HELPER_ROOT" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+for path, expected_mode, expected_type in (
+    (root.parent, 0o700, "directory"), (root, 0o700, "directory"),
+    (root / "staging_helper.py", 0o500, "file"),
+    (root / "manifest.json", 0o600, "file"),
+):
+    info = os.lstat(path)
+    valid_type = stat.S_ISDIR(info.st_mode) if expected_type == "directory" else stat.S_ISREG(info.st_mode)
+    if not valid_type or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
+            or stat.S_IMODE(info.st_mode) != expected_mode \
+            or (expected_type == "file" and info.st_nlink != 1):
+        raise SystemExit(f"installed staging helper {expected_type} identity is unsafe")
+PY
+ok "image staging helper provisioned at sha256:$STAGING_HELPER_DIGEST revision $STAGING_RUNTIME_REVISION"

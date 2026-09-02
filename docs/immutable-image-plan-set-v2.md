@@ -44,6 +44,11 @@ cosign sign-blob --yes --bundle worker.bundle worker.payload.json
 
 Each output bundle must be the Sigstore protobuf JSON media type
 `application/vnd.dev.sigstore.bundle.v0.3+json` with a `messageSignature`.
+Sandbox parses these bundles with dedicated byte, nesting, node, key, and value
+limits sized for Sigstore certificate and transparency-proof material. The
+smaller canonical policy-document limits do not apply to bundle internals.
+Passing structural validation does not establish trust: the offline Cosign
+signature and exact workflow certificate checks remain authoritative.
 Record the SHA-256 digest of each exact payload and bundle in the corresponding
 receipt image row. After the receipt is complete, sign its exact bytes the same
 way and produce the exact checksum file:

@@ -22,6 +22,35 @@ from tests.test_hosting_image_staging_v2 import observation, plan_set, policy_se
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_image_identity_accepts_partial_resource_evidence_but_recovery_stays_strict(self):
+        from sandbox.commands.hosting import _authenticated_machine_identity
+        from sandbox.resources.host_memory import HostMemoryStatusProjection
+        from sandbox.hosting.recovery.service import RecoveryAuthorityError
+
+        status = {
+            "target_identity": "a" * 24,
+            "observed_at": "2026-09-03T00:00:00Z",
+            "evidence_state": "partial",
+        }
+
+        class Service:
+            def status(self, _budget):
+                return {"ok": False, "data": status}
+
+            def projection(self, value):
+                return HostMemoryStatusProjection(
+                    value["target_identity"], value["observed_at"],
+                    value["evidence_state"], None, None, 0, 0,
+                    "absent", "missing", None, "unknown", None,
+                )
+
+        with patch("sandbox.resources.context._build_host_memory_service",
+                   return_value=Service()):
+            self.assertEqual(_authenticated_machine_identity(
+                "scaleway-sandbox", allow_partial=True), "a" * 24)
+            with self.assertRaises(RecoveryAuthorityError):
+                _authenticated_machine_identity("scaleway-sandbox")
+
     def test_missing_authority_refuses_before_target_mutation_port_is_opened(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
         class Recovery:

@@ -976,6 +976,9 @@ machine ID makes the projection non-authorizing. Recovery
 resolves registration only after target ownership and holds the shared registration guard
 through durable commit; supported registration updates use that same guard. If apply
 cannot measure Feature 046 identity, apply may continue but no recovery authority is kept.
+Immutable image staging uses the same authenticated Feature 046 machine identity
+even when the optional resource monitor reports partial evidence; capacity and
+swap authority remain fail-closed until that monitor is complete.
 Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
 and Cloudflare preconditions from the entry held under that guard. Recovery authority
 stores a canonical non-secret desired edge intent plus digest; observation and immediate

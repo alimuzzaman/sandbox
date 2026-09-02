@@ -1575,19 +1575,33 @@ def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
     return plan
 
 
-def _authenticated_machine_identity(remote_name: str) -> str:
-    """Read Feature 046's authenticated stable host projection."""
-    from sandbox.resources.context import host_memory_status_projection
+def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = False) -> str:
+    """Read Feature 046's authenticated stable host projection.
+
+    Image staging needs the authenticated machine identity, but it must not
+    accidentally become dependent on the optional host-memory/swap monitor.
+    The remote status envelope still authenticates the service/runtime and
+    carries a typed target identity when resource evidence is partial.  Keep
+    the complete-evidence requirement for ordinary hosting recovery; the
+    immutable-image path opts into the identity-only projection explicitly.
+    """
+    from sandbox.resources.context import _build_host_memory_service
 
     try:
-        projection = host_memory_status_projection(remote_name, budget_seconds=15)
+        service = _build_host_memory_service(remote_name)
+        status = service.status(15)
+        data = status.get("data") if isinstance(status, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("host-memory status data is unavailable")
+        projection = service.projection(data)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RecoveryAuthorityError(
             "stable machine identity is unavailable") from exc
     identity = getattr(projection, "target_identity", None)
     evidence_state = getattr(projection, "evidence_state", None)
     if (not isinstance(identity, str) or not identity or len(identity) > 128 or
-            evidence_state != "known"):
+            (not allow_partial and evidence_state != "known") or
+            (allow_partial and evidence_state in {"unknown", "malformed", "unsupported"})):
         raise RecoveryAuthorityError("stable machine identity is unavailable")
     return identity
 
@@ -3626,7 +3640,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     env={"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C"}).stdout.strip()
                 helper = HelperIdentity(helper_digest, "sandbox-image-stage-helper-v2", revision,
                     "systemd-cgroup-v2-batch-stage-v2")
-                machine = _authenticated_machine_identity(args.remote)
+                machine = _authenticated_machine_identity(args.remote, allow_partial=True)
                 observed = RegisteredRemoteImageTransport().observe_authority(args.remote, helper)
                 target = StagingTarget(machine, target_id, observed["daemon_identity"])
                 response["target"] = target.as_mapping()
@@ -4226,7 +4240,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     argv_runner=_host_image_argv_runner(
                         entry, compose_snapshot_provider=v2_selector),
                     target_identity_observer=lambda: {
-                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "machine_identity": _authenticated_machine_identity(
+                            args.remote, allow_partial=active_schema == 2),
                         "target_identity": target_key},
                     configuration_binding_key=configuration_binding_key)
                 services = tuple(selected_services)
@@ -4366,7 +4381,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     remote.registered_remote_lock():
                 entry = remote.get_remote(args.remote)
                 if not entry or proof_target["target_identity"] != hosting.state_key(args.remote, validated) \
-                        or proof_target["machine_identity"] != _authenticated_machine_identity(args.remote):
+                        or proof_target["machine_identity"] != _authenticated_machine_identity(
+                            args.remote, allow_partial=is_v2):
                     raise ValueError("registered target identity changed")
                 configuration_binding_master, _configuration_binding_key_version = \
                     personal_secrets.hosting_binding_key(create=False)
@@ -4379,7 +4395,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     argv_runner=_host_image_argv_runner(
                         entry, compose_snapshot_provider=selector),
                     target_identity_observer=lambda: {
-                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "machine_identity": _authenticated_machine_identity(
+                            args.remote, allow_partial=is_v2),
                         "target_identity": hosting.state_key(args.remote, validated)},
                     configuration_binding_key=configuration_binding_key)
                 edge = _HostImageEdgeAdapter(

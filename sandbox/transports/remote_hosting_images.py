@@ -20,9 +20,11 @@ from sandbox.hosting.images.staging_models import MAX_STAGE_FRAME_BYTES, canonic
 
 _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 FIXED_HELPER_ENTRY = "sandbox-image-stage-helper-v1"
+FIXED_HELPER_ENTRY_V2 = "sandbox-image-stage-helper-v2"
 READY_TIMEOUT_SECONDS = 15
 _INODE_EXEC = r'''import hashlib,json,os,stat,sys
-root,expected,entry=sys.argv[1:]
+root,expected,entry,manifest_name=sys.argv[1:]
+if (entry,manifest_name) not in {('sandbox-image-stage-helper-v1','manifest.json'),('sandbox-image-stage-helper-v2','manifest-v2.json')}: raise SystemExit(68)
 dfd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
 for part in root.split('/')[1:]:
  child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=dfd); info=os.fstat(child)
@@ -32,7 +34,7 @@ def opened(name,mode):
  fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=dfd); info=os.fstat(fd)
  if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=mode or info.st_nlink!=1: raise SystemExit(70)
  return fd
-hfd=opened('staging_helper.py',0o500); mfd=opened('manifest.json',0o600)
+hfd=opened('staging_helper.py',0o500); mfd=opened(manifest_name,0o600)
 with os.fdopen(mfd,'rb') as mh: actual=json.loads(mh.read())
 if actual!=json.loads(expected): raise SystemExit(71)
 measured=hashlib.sha256()
@@ -57,15 +59,18 @@ class RemoteStageResponse:
     ok: bool
     code: str
     payload: dict
+    schema_version: int = 1
 
 
 def parse_stage_response(value: object) -> RemoteStageResponse:
     if type(value) is not dict or set(value) != {"schema_version", "ok", "code", "payload"} \
-            or value["schema_version"] != 1 or type(value["ok"]) is not bool \
+            or type(value["schema_version"]) is not int \
+            or value["schema_version"] not in {1, 2} or type(value["ok"]) is not bool \
             or type(value["code"]) is not str or type(value["payload"]) is not dict:
         raise RemoteImageStageError("protocol_invalid")
     canonical_bytes(value)
-    return RemoteStageResponse(value["ok"], value["code"], value["payload"])
+    return RemoteStageResponse(value["ok"], value["code"], value["payload"],
+                               value["schema_version"])
 
 
 class RegisteredRemoteImageTransport:
@@ -106,8 +111,17 @@ class RegisteredRemoteImageTransport:
         helper = plan_frame.get("helper")
         if type(helper) is not dict or set(helper) != {"artifact_digest", "entry",
                 "runtime_revision", "capability_revision"} \
-                or helper["entry"] != FIXED_HELPER_ENTRY \
+                or helper["entry"] not in {FIXED_HELPER_ENTRY, FIXED_HELPER_ENTRY_V2} \
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", str(helper["artifact_digest"])) is None:
+            raise RemoteImageStageError("protocol_invalid")
+        if type(plan_frame.get("schema_version")) is not int \
+                or (plan_frame.get("schema_version"), helper["entry"]) not in {
+                (1, FIXED_HELPER_ENTRY), (2, FIXED_HELPER_ENTRY_V2)}:
+            raise RemoteImageStageError("protocol_invalid")
+        if plan_frame["schema_version"] == 2 \
+                and (helper["capability_revision"] != "systemd-cgroup-v2-batch-stage-v2"
+                     or type(helper["runtime_revision"]) is not str
+                     or re.fullmatch(r"[0-9a-f]{40}", helper["runtime_revision"]) is None):
             raise RemoteImageStageError("protocol_invalid")
         home = self._resolve_home(remote)
         if type(home) is not str or not home.startswith("/"):
@@ -115,7 +129,9 @@ class RegisteredRemoteImageTransport:
         digest_hex = helper["artifact_digest"].split(":", 1)[1]
         helper_root = f"{home}/runtime/helpers/image-stage/sha256-{digest_hex}"
         helper_path = f"{helper_root}/staging_helper.py"
-        manifest_path = f"{helper_root}/manifest.json"
+        manifest_name = "manifest-v2.json" if plan_frame["schema_version"] == 2 \
+            else "manifest.json"
+        manifest_path = f"{helper_root}/{manifest_name}"
         measured = self._observe_unit(
             remote, "sha256sum -- " + shlex.quote(helper_path), timeout=15)
         if getattr(measured, "returncode", 1) != 0 \
@@ -128,7 +144,7 @@ class RegisteredRemoteImageTransport:
             manifest = json.loads(str(getattr(manifest_result, "stdout", "")))
         except json.JSONDecodeError:
             raise RemoteImageStageError("helper_failed") from None
-        expected_manifest = {"schema_version": 1, **helper}
+        expected_manifest = {"schema_version": plan_frame["schema_version"], **helper}
         if getattr(manifest_result, "returncode", 1) != 0 or manifest != expected_manifest:
             raise RemoteImageStageError("helper_failed")
         argv = ("systemd-run", f"--unit={unit}", "--quiet", "--pipe",
@@ -138,7 +154,7 @@ class RegisteredRemoteImageTransport:
              "--property=ProtectControlGroups=yes", "--",
              "python3", "-c", _INODE_EXEC, helper_root,
              json.dumps(expected_manifest, sort_keys=True, separators=(",", ":")),
-             FIXED_HELPER_ENTRY)
+             helper["entry"], manifest_name)
         # The default seam deliberately uses the registered remote's exact SSH
         # argument constructor; fakes may inject a prepared channel instead.
         if hasattr(self._send, "prepare"):

@@ -62,7 +62,8 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
     required = {"schema_version", "generation", "current", "previous", "active", "results",
                 "tombstones", "recovery_provisional", "recovery_results",
                 "reserved_terminal_bytes"}
-    if type(value) is not dict or set(value) != required or value["schema_version"] != 1 \
+    if type(value) is not dict or set(value) != required \
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1 \
             or type(value["generation"]) is not int or value["generation"] < 0 \
             or any(type(value[name]) is not dict for name in ("results", "tombstones", "recovery_results")) \
             or len(value["results"]) > MAX_RESULTS or len(value["tombstones"]) > MAX_TOMBSTONES \
@@ -73,15 +74,23 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
     safe = json.loads(canonical_bytes(value))
     for name in ("current", "previous"):
         if safe[name] is not None:
-            try: VerifiedActivationGeneration.from_mapping(safe[name])
+            try:
+                from .v2_models import validate_activation_generation
+                validate_activation_generation(safe[name])
             except (TypeError, ActivationContractError):
                 raise ActivationRepositoryError("persistence_uncertain") from None
     if safe["active"] is not None:
         try:
-            ActivationTransaction(**{
-                **safe["active"], "init_receipts": tuple(safe["active"]["init_receipts"]),
-                "init_steps": tuple(safe["active"]["init_steps"])
-            })
+            if safe["active"].get("schema_version") == 1:
+                ActivationTransaction(**{
+                    **safe["active"], "init_receipts": tuple(safe["active"]["init_receipts"]),
+                    "init_steps": tuple(safe["active"]["init_steps"])
+                })
+            elif safe["active"].get("schema_version") == 2:
+                from .v2_repository import validate_transaction_v2
+                validate_transaction_v2(safe["active"])
+            else:
+                raise ActivationContractError()
         except (TypeError, KeyError, ActivationContractError):
             raise ActivationRepositoryError("persistence_uncertain") from None
     provisional = safe["recovery_provisional"]
@@ -94,8 +103,16 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
             if type(result) is not dict or set(result) != {
                     "result", "holder", "proof_digest", "proof_pin"}:
                 raise ActivationContractError()
-            terminal = ActivationResult.from_mapping(result["result"])
-            if terminal.request_id != request_id or result["holder"] != result["proof_pin"].get("holder") \
+            raw_terminal = result["result"]
+            if raw_terminal.get("schema_version") == 1:
+                terminal = ActivationResult.from_mapping(raw_terminal)
+                terminal_request_id = terminal.request_id
+            elif raw_terminal.get("schema_version") == 2:
+                from .v2_repository import validate_result_v2
+                terminal_request_id = validate_result_v2(raw_terminal)["request_id"]
+            else:
+                raise ActivationContractError()
+            if terminal_request_id != request_id or result["holder"] != result["proof_pin"].get("holder") \
                     or result["proof_digest"] != result["proof_pin"].get("proof_digest"):
                 raise ActivationContractError()
             validate_retained_proof_pin(result["proof_pin"])
@@ -122,7 +139,9 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
                     "activation_request_id",
                     "request_digest", "code", "promoted", "starting_generation",
                     "resulting_generation"} or result["request_id"] != request_id \
-                    or result["schema_version"] != 1 or type(result["ok"]) is not bool \
+                    or type(result["schema_version"]) is not int \
+                    or result["schema_version"] not in {1, 2} \
+                    or type(result["ok"]) is not bool \
                     or type(result["activation_request_id"]) is not str \
                     or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}",
                                     result["activation_request_id"]) is None \
@@ -407,6 +426,113 @@ class ActivationRepository:
             self.release_recovered_terminal_pin(target, terminal)
         return json.loads(canonical_bytes(terminal["result"]))
 
+    def lookup_terminal_v2(self, target: str, *, request_id: str,
+                           request_digest: str) -> dict | None:
+        terminal = None
+        with self.target_mutation.target_mutation_transaction(target):
+            with self.host_state.atomic_host_state_transaction(target):
+                state = decode_activation_state(self.host_state.read_activation_nested(target))
+                stored = state["results"].get(request_id)
+                if stored is None:
+                    if request_id in state["tombstones"]:
+                        raise ActivationRepositoryError("request_conflict")
+                    return None
+                result = stored.get("result") if type(stored) is dict else None
+                if type(result) is not dict or result.get("schema_version") != 2 \
+                        or result.get("request_digest") != request_digest:
+                    raise ActivationRepositoryError("request_conflict")
+                from .v2_repository import validate_result_v2
+                terminal = stored; validate_result_v2(result)
+        if terminal["result"]["result_class"] != "uncertain":
+            self.release_recovered_terminal_pin(target, terminal)
+        return json.loads(canonical_bytes(terminal["result"]))
+
+    def accept_v2(self, request, *, proof_set_digest: str, recovery_context: dict,
+                  prior_generation_digest: str, admission_deadline: str,
+                  stage_ledger_authority: str,
+                  stage_ledger_revision: int) -> tuple[str, dict | None]:
+        from .v2_models import ActivationRequestV2
+        from .v2_repository import accept_candidate_v2
+        if type(request) is not ActivationRequestV2 \
+                or proof_set_digest != request.proof_set["proof_digest"]:
+            return "conflict", None
+        holder = f"activation-owner/{request.request_id}"
+        target = request.proof_set["target"]["target_identity"]
+        lease_id = "activation-lease/" + request.request_digest.split(":", 1)[1][:48]
+        proof = request.proof_set
+        with self.stage_repository.proof_custody_transaction(
+                target, target_mutation_port=self.target_mutation,
+                host_state_port=self.host_state) as custody:
+            custody.validate_retained_proof(
+                stage_request_id=proof["request"]["request_id"],
+                stage_request_digest=proof["request"]["request_digest"],
+                proof_digest=proof["proof_digest"],
+                stage_generation=proof["staging_generation"],
+                ledger_authority=stage_ledger_authority,
+                ledger_revision=stage_ledger_revision,
+                supplied_proof=proof)
+            current = decode_activation_state(self.host_state.read_activation_nested(target))
+            receipt = self.host_state.activation_acceptance_receipt(
+                target, holder=holder, request_id=request.request_id,
+                request_digest=request.request_digest, proof_digest=proof_set_digest)
+            pin = {"lease_id": lease_id, "holder": holder, "phase": "accepted",
+                   "proof_digest": proof_set_digest,
+                   "host_acceptance_receipt": receipt}
+            status, candidate, replay = accept_candidate_v2(
+                current, request, holder=holder, proof_pin=pin,
+                recovery_context=recovery_context,
+                prior_generation_digest=prior_generation_digest)
+            if status not in {"accepted", "resume", "replay"}:
+                return status, None
+            if status == "accepted":
+                try:
+                    canonical_bytes(candidate, maximum=MAX_ACTIVATION_BYTES - 16384)
+                except ActivationContractError:
+                    return "retention_full", None
+            prior_evidence = self.host_state.lookup_activation_acceptance(
+                target, holder=holder, request_id=request.request_id,
+                request_digest=request.request_digest, proof_digest=proof_set_digest)
+            lease = custody.prepare(
+                lease_id=lease_id, holder=holder, admission_deadline=admission_deadline,
+                activation_request_id=request.request_id,
+                activation_request_digest=request.request_digest,
+                stage_request_id=proof["request"]["request_id"],
+                stage_request_digest=proof["request"]["request_digest"],
+                proof_digest=proof_set_digest,
+                stage_generation=proof["staging_generation"],
+                ledger_authority=stage_ledger_authority,
+                ledger_revision=stage_ledger_revision)
+            if prior_evidence.state == "ambiguous":
+                return "conflict", None
+            if prior_evidence.state == "absent" and lease.phase == "prepared" and lease.expired:
+                absent = self.host_state.absent_activation_evidence(
+                    target, holder=holder, request_id=request.request_id,
+                    request_digest=request.request_digest, proof_digest=proof_set_digest)
+                custody.cancel(lease, absent)
+                return "lease_expired", None
+            latest = decode_activation_state(self.host_state.read_activation_nested(target))
+            status, candidate, replay = accept_candidate_v2(
+                latest, request, holder=holder, proof_pin=pin,
+                recovery_context=recovery_context,
+                prior_generation_digest=prior_generation_digest)
+            if status == "accepted":
+                canonical_bytes(candidate, maximum=MAX_ACTIVATION_BYTES - 16384)
+                evidence = self.host_state.compare_and_commit_activation(
+                    target, expected_generation=request.expected_generation,
+                    candidate=candidate, holder=holder, request_id=request.request_id,
+                    request_digest=request.request_digest, proof_digest=proof_set_digest,
+                    acceptance_receipt=receipt)
+            elif status in {"resume", "replay"} and prior_evidence.state == "accepted":
+                evidence = prior_evidence
+                if status == "replay" and replay is not None:
+                    return "replay", replay
+            else:
+                return status, replay
+            custody.promote(lease, evidence)
+            active = decode_activation_state(
+                self.host_state.read_activation_nested(target)).get("active")
+            return ("accepted" if status == "accepted" else "resume"), active
+
     def accept(self, request: ActivationRequest, *, authority_binding_digest: str,
                stage_ledger_authority: str, stage_ledger_revision: int,
                admission_validator,
@@ -541,6 +667,15 @@ class ActivationRepository:
                     target, request.expected_generation,
                     lambda current: transition_candidate(current, request, phase, **values))
 
+    def transition_v2(self, target: str, request, phase: str, **values: object) -> dict:
+        from .v2_repository import transition_candidate_v2
+        with self.target_mutation.target_mutation_transaction(target):
+            with self.host_state.atomic_host_state_transaction(target):
+                return self.host_state.update_activation_nested(
+                    target, request.expected_generation,
+                    lambda current: transition_candidate_v2(
+                        decode_activation_state(current), request, phase, **values))
+
     def snapshot(self, target: str) -> dict:
         with self.target_mutation.target_mutation_transaction(target):
             with self.host_state.atomic_host_state_transaction(target):
@@ -553,6 +688,165 @@ class ActivationRepository:
                 return self.host_state.update_activation_nested(
                     target, request.expected_generation,
                     lambda current: commit_candidate(current, request, result, generation))
+
+    def commit_v2(self, target: str, request, result: dict,
+                  generation: dict | None = None) -> dict:
+        from .v2_repository import commit_candidate_v2
+        with self.target_mutation.target_mutation_transaction(target):
+            with self.host_state.atomic_host_state_transaction(target):
+                state = self.host_state.update_activation_nested(
+                    target, request.expected_generation,
+                    lambda current: commit_candidate_v2(
+                        decode_activation_state(current), request, result, generation))
+        terminal = state["results"][request.request_id]
+        if result["result_class"] != "uncertain":
+            self.release_recovered_terminal_pin(target, terminal)
+        return state
+
+    def fence_v2(self, target: str, request, result: dict, *, effect_entered: bool) -> dict:
+        from .v2_repository import commit_candidate_v2, transition_candidate_v2
+        with self.target_mutation.target_mutation_transaction(target):
+            with self.host_state.atomic_host_state_transaction(target):
+                def fence(current):
+                    state = decode_activation_state(current)
+                    active = state.get("active")
+                    if type(active) is not dict or active.get("request_digest") != request.request_digest:
+                        return state
+                    phase = "uncertain" if effect_entered else "refused"
+                    state = transition_candidate_v2(
+                        state, request, phase, effect_entered=effect_entered)
+                    return commit_candidate_v2(state, request, result, None)
+                state = self.host_state.update_activation_nested(
+                    target, request.expected_generation, fence)
+        terminal = state["results"].get(request.request_id)
+        if not effect_entered and type(terminal) is dict:
+            self.release_recovered_terminal_pin(target, terminal)
+        return state
+
+    def recover_v2(self, target: str, *, request_id: str, request_digest: str,
+                   expected_generation: int, observer,
+                   ownership_held: bool = False) -> dict:
+        """Recover a v2 active transaction without passing it to v1 codecs."""
+        from .v2_models import VerifiedActivationGenerationV2
+        from .v2_repository import validate_result_v2, validate_transaction_v2
+        release_terminal = None
+        owner = nullcontext() if ownership_held else \
+            self.target_mutation.target_mutation_transaction(target)
+        with owner:
+            with self.host_state.atomic_host_state_transaction(target):
+                state = decode_activation_state(self.host_state.read_activation_nested(target))
+                stored = state["recovery_results"].get(request_id)
+                if stored is not None:
+                    if stored.get("schema_version") != 2:
+                        raise ActivationRepositoryError("recovery_ineligible")
+                    if stored.get("request_digest") != request_digest:
+                        raise ActivationRepositoryError("request_conflict")
+                    return stored
+                active = state.get("active")
+                if type(active) is not dict or active.get("schema_version") != 2:
+                    raise ActivationRepositoryError("recovery_ineligible")
+                validate_transaction_v2(active)
+                existing = state.get("recovery_provisional")
+                if existing is None:
+                    ensure_recovery_capacity(state)
+                    first = observer()
+                    provisional = ActivationRecoveryProvisional(
+                        request_id=request_id, request_digest=request_digest,
+                        transaction_digest=first.transaction_digest,
+                        expected_generation=expected_generation,
+                        owner=f"activation-owner/{request_id}",
+                        evidence_identity=first.evidence_identity,
+                        classification=first.classification,
+                        target_epoch_start=first.target_epoch_start,
+                        target_epoch_end=first.target_epoch_end,
+                        target_identity_start=first.target_identity_start,
+                        target_identity_end=first.target_identity_end,
+                        runtime_epoch_start=first.runtime_epoch_start,
+                        runtime_epoch_end=first.runtime_epoch_end)
+                    self.host_state.store_activation_recovery_provisional(
+                        target, expected_generation, provisional.as_mapping())
+                else:
+                    provisional = ActivationRecoveryProvisional(**existing)
+                    if provisional.request_id != request_id \
+                            or provisional.request_digest != request_digest:
+                        raise ActivationRepositoryError("request_conflict")
+                    first = ActivationRecoveryObservation(
+                        transaction_digest=provisional.transaction_digest,
+                        expected_generation=provisional.expected_generation,
+                        classification=provisional.classification,
+                        target_epoch_start=provisional.target_epoch_start,
+                        target_epoch_end=provisional.target_epoch_end,
+                        target_identity_start=provisional.target_identity_start,
+                        target_identity_end=provisional.target_identity_end,
+                        runtime_epoch_start=provisional.runtime_epoch_start,
+                        runtime_epoch_end=provisional.runtime_epoch_end,
+                        evidence_identity=provisional.evidence_identity)
+                try:
+                    second = observer()
+                except Exception:
+                    second = None
+                if second is None:
+                    code, promote, close = "observation_unavailable", False, False
+                elif first.as_mapping() != second.as_mapping():
+                    code, promote, close = "evidence_changed", False, False
+                else:
+                    code, promote, close = recovery_decision(active, first.classification)
+
+                def finalize(current):
+                    nested = decode_activation_state(current)
+                    current_active = nested.get("active")
+                    if type(current_active) is not dict \
+                            or current_active.get("transaction_digest") != first.transaction_digest:
+                        raise ActivationRepositoryError("recovery_conflict")
+                    resulting = expected_generation
+                    generation_digest = None
+                    if promote:
+                        generation = VerifiedActivationGenerationV2.from_mapping(
+                            current_active.get("candidate_generation"))
+                        nested["previous"] = nested["current"]
+                        nested["current"] = generation.as_mapping()
+                        nested["generation"] = resulting = expected_generation + 1
+                        generation_digest = generation.generation_digest
+                    if code in {"committed", "recovery_no_effect"}:
+                        terminal = {"schema_version": 2, "ok": code == "committed",
+                            "result_class": "success" if code == "committed" else "refused",
+                            "code": code, "request_id": current_active["request_id"],
+                            "request_digest": current_active["request_digest"],
+                            "transaction_digest": current_active["transaction_digest"],
+                            "starting_generation": expected_generation,
+                            "resulting_generation": resulting,
+                            "generation_digest": generation_digest}
+                        validate_result_v2(terminal)
+                        nested["results"][current_active["request_id"]] = {
+                            "result": terminal, "holder": current_active["holder"],
+                            "proof_digest": current_active["proof_pin"]["proof_digest"],
+                            "proof_pin": current_active["proof_pin"]}
+                        release = nested["results"][current_active["request_id"]]
+                    else:
+                        release = None
+                    recovery_result = {"schema_version": 2, "ok": code == "committed",
+                        "request_id": request_id,
+                        "activation_request_id": current_active["request_id"],
+                        "request_digest": request_digest, "code": code,
+                        "promoted": promote, "starting_generation": expected_generation,
+                        "resulting_generation": resulting}
+                    nested["recovery_results"][request_id] = recovery_result
+                    nested["recovery_provisional"] = None
+                    if close or promote:
+                        nested["active"] = None
+                    return nested, release, recovery_result
+
+                captured = {}
+                def update(current):
+                    nested, terminal, outcome = finalize(current)
+                    captured["terminal"] = terminal; captured["outcome"] = outcome
+                    return nested
+                self.host_state.update_activation_nested(target, expected_generation, update)
+                release_terminal = captured["terminal"]
+                outcome = captured["outcome"]
+        if release_terminal is not None:
+            self.release_recovered_terminal_pin(target, release_terminal)
+        return outcome
 
     def recover(self, target: str, *, request_id: str, request_digest: str,
                 expected_generation: int, observer, ownership_held: bool = False) -> dict:

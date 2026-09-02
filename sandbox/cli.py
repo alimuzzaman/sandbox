@@ -869,7 +869,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["activate", "adopt", "rollback", "recover"],
+        choices=["verify", "activate", "adopt", "rollback", "recover"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -894,7 +894,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",
-        help="closed Feature 049 VerifiedImagePlan JSON for host stage")
+        help="closed VerifiedImagePlan v1 or VerifiedImagePlanSet v2 JSON for host stage")
+    host_p.add_argument("--machine-plan-set-policy", default=None, metavar="PATH",
+        help="closed machine-owned v2 multi-image policy for `host image verify`")
+    host_p.add_argument("--signed-receipt-directory", default=None, metavar="PATH",
+        help="closed receipt, payload, and offline Sigstore bundle directory")
     host_p.add_argument("--staged-proof", default=None, metavar="PATH",
         help="closed retained Feature 050 StagedImageProof JSON claim for host image actions")
     host_p.add_argument("--admission-deadline", default=None, metavar="RFC3339",

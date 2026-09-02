@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from contextlib import redirect_stdout
+import hashlib
+from io import StringIO
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget, staging_digest
+from sandbox.hosting.images.staging_v2 import (
+    BatchImageObservation, BatchObservation, StageRequestSet, StagedImageProofSet,
+    StagingPolicySet,
+)
+from tests.hosting_image_fixtures import FakeBroker, stage_request, staging_policy
+from tests.test_hosting_image_plan_set import FakeVerifier, make_bundle, policy_mapping
+
+
+def plan_set():
+    from sandbox.hosting.images.plan_set import verify_release_bundle
+    temp = tempfile.TemporaryDirectory()
+    root = Path(temp.name); digest = make_bundle(root)
+    plan = verify_release_bundle(policy_mapping(digest), root, FakeVerifier())
+    temp.cleanup()
+    return plan
+
+
+def policy_set(plan=None):
+    plan = plan or plan_set()
+    target = StagingTarget("machine-a", "target-a", "daemon-a")
+    helper = HelperIdentity("sha256:" + "9" * 64, "sandbox-image-stage-helper-v2",
+                            "a" * 40, "systemd-cgroup-v2-batch-stage-v2")
+    body = {"schema_version": 2, "plan_set_digest": plan.plan_set_digest,
+            "target": target.as_mapping(), "helper": helper.as_mapping(),
+            "broker_recipient": f"ghcr-plan-set-read:{plan.plan_set_digest}",
+            "broker_binding_id": "binding-a", "broker_binding_version": 3,
+            "credential_reference_revision": "credential-revision-a",
+            "operation": "ghcr.plan-set.read",
+            "capability_revision": "systemd-cgroup-v2-batch-stage-v2"}
+    return StagingPolicySet(2, staging_digest(
+        "sandbox.hosting.images.staging-policy-set.v2", body), plan.plan_set_digest,
+        target, helper, body["broker_recipient"], "binding-a", 3,
+        "credential-revision-a", "ghcr.plan-set.read",
+        "systemd-cgroup-v2-batch-stage-v2")
+
+
+def request_set(plan=None, policy=None, *, request_id="stage-set-a", generation=0):
+    plan = plan or plan_set(); policy = policy or policy_set(plan)
+    return StageRequestSet.create(request_id=request_id, expected_generation=generation,
+        plan_set=plan, staging_policy_digest=policy.policy_digest,
+        target=policy.target, confirmed=True)
+
+
+def observation(plan, policy):
+    images = tuple(BatchImageObservation(item.name, item.repository, item.image_ref,
+        item.config_digest, item.platform, item.config_digest, "denied", "succeeded")
+        for item in plan.receipt.images)
+    body = {"target_epoch_start": "machine-a", "target_epoch_end": "machine-a",
+            "daemon_epoch_start": "daemon-a", "daemon_epoch_end": "daemon-a",
+            "target": policy.target.as_mapping(),
+            "images": [item.as_mapping() for item in images]}
+    return BatchObservation("machine-a", "machine-a", "daemon-a", "daemon-a",
+        policy.target, images, staging_digest(
+            "sandbox.hosting.images.batch-observation.v2", body))
+
+
+class FakePrepared:
+    def __init__(self, plan, policy, *, unsafe_cleanup=False):
+        self.frame = {"unit_name": "sandbox-image-stage-fake.service"}
+        self.plan = plan; self.policy = policy; self.unsafe_cleanup = unsafe_cleanup
+        self.deliveries = 0
+
+    def deliver(self, credential):
+        self.deliveries += 1
+        if self.unsafe_cleanup:
+            from sandbox.hosting.images.staging_worker import StageWorkerError
+            raise StageWorkerError("pull_failed",
+                process={"unit_inactive": False, "cgroup_empty_or_removed": False},
+                cleanup={"complete": False})
+        return observation(self.plan, self.policy), {
+            "unit_name": self.frame["unit_name"],
+            "cgroup": "/system.slice/" + self.frame["unit_name"],
+            "delegated": False, "escape_allowed": False,
+            "unit_inactive": True, "cgroup_empty_or_removed": True}, {"complete": True}
+
+    def cancel(self):
+        return {"unit_inactive": not self.unsafe_cleanup,
+                "cgroup_empty_or_removed": not self.unsafe_cleanup,
+                "cleanup_complete": not self.unsafe_cleanup}
+
+
+class FakeBatchWorker:
+    def __init__(self, *, unsafe_cleanup=False):
+        self.prepares = 0; self.unsafe_cleanup = unsafe_cleanup; self.prepared = None
+
+    def prepare(self, request, policy):
+        self.prepares += 1
+        self.prepared = FakePrepared(request.plan_set, policy,
+                                     unsafe_cleanup=self.unsafe_cleanup)
+        return self.prepared
+
+
+class TestV2BatchStaging(unittest.TestCase):
+    def test_v2_cli_refusal_preserves_response_schema(self):
+        from sandbox.commands.hosting import _cmd_host_stage
+
+        plan = plan_set()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            plan_path = root / "plan-set.json"
+            plan_path.write_text(json.dumps(plan.as_mapping()))
+            args = SimpleNamespace(
+                project_dir=str(project), environment="production",
+                remote="scaleway-sandbox", request_id="stage/v2-refusal",
+                expected_generation=0, verified_plan=str(plan_path),
+                stage_status=False, confirm=True,
+            )
+            output = StringIO()
+            with patch("sandbox.core._paths.RUNTIME_DIR", root / "runtime"), \
+                    redirect_stdout(output), self.assertRaises(SystemExit):
+                _cmd_host_stage(args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual((payload["result_class"], payload["code"]),
+                         ("refused", "policy_mismatch"))
+
+    def test_one_lease_one_helper_persists_one_exhaustive_proof_and_replays(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            broker = FakeBroker(); worker = FakeBatchWorker()
+            service = ImagePlanSetStagingService(
+                repository=StageRepository(Path(temp)), broker=broker, worker=worker)
+            first = service.stage(request, policy); replay = service.stage(request, policy)
+            self.assertTrue(first.ok)
+            self.assertEqual(first.as_mapping(), replay.as_mapping())
+            self.assertEqual((len(broker.calls), worker.prepares,
+                              worker.prepared.deliveries), (1, 1, 1))
+            self.assertEqual([row["name"] for row in first.proof.as_mapping()
+                              ["observation"]["images"]], ["queue", "web", "worker"])
+            self.assertEqual(StagedImageProofSet.from_mapping(
+                first.proof.as_mapping()).as_mapping(), first.proof.as_mapping())
+            self.assertNotIn("credential", repr(first.as_mapping()).lower())
+
+    def test_policy_drift_refuses_before_broker_or_helper(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        raw = policy.as_mapping(); raw["plan_set_digest"] = "sha256:" + "f" * 64
+        identity = dict(raw); identity.pop("policy_digest")
+        raw["broker_recipient"] = f'ghcr-plan-set-read:{raw["plan_set_digest"]}'
+        identity = dict(raw); identity.pop("policy_digest")
+        raw["policy_digest"] = staging_digest(
+            "sandbox.hosting.images.staging-policy-set.v2", identity)
+        with tempfile.TemporaryDirectory() as temp:
+            broker = FakeBroker(); worker = FakeBatchWorker()
+            result = ImagePlanSetStagingService(repository=StageRepository(Path(temp)),
+                broker=broker, worker=worker).stage(request, StagingPolicySet.from_mapping(raw))
+        self.assertEqual(result.result_class, "refused")
+        self.assertEqual((broker.calls, worker.prepares), ([], 0))
+
+    def test_unproven_cleanup_is_uncertain_and_emits_no_proof(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            result = ImagePlanSetStagingService(repository=StageRepository(Path(temp)),
+                broker=FakeBroker(), worker=FakeBatchWorker(unsafe_cleanup=True)).stage(request, policy)
+        self.assertEqual((result.result_class, result.code, result.proof),
+                         ("uncertain", "cleanup_unproven", None))
+
+    def test_v1_and_v2_share_target_single_flight(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            v1_policy = staging_policy(); v1_request = stage_request(policy=v1_policy)
+            self.assertEqual(repository.accept(v1_request)[0], "accepted")
+            broker = FakeBroker(); worker = FakeBatchWorker()
+            result = ImagePlanSetStagingService(
+                repository=repository, broker=broker, worker=worker).stage(request, policy)
+        self.assertEqual((result.result_class, result.code), ("refused", "target_busy"))
+        self.assertEqual((broker.calls, worker.prepares), ([], 0))
+
+    def test_one_retained_proof_set_gets_one_custody_lease(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from tests.test_hosting_image_staging_repository import OrderedHostPort, OrderedTargetPort
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp)); result = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=FakeBatchWorker()).stage(
+                    request, policy)
+            events = []
+            with repository.proof_custody_transaction(policy.target.target_identity,
+                    target_mutation_port=OrderedTargetPort(events),
+                    host_state_port=OrderedHostPort(events)) as port:
+                retained = port.validate_retained_proof(
+                    stage_request_id=request.request_id,
+                    stage_request_digest=request.request_digest,
+                    proof_digest=result.proof.proof_digest,
+                    stage_generation=result.generation,
+                    ledger_authority="feature-050-stage-ledger-v2", ledger_revision=7,
+                    supplied_proof=result.proof)
+                lease = port.prepare(lease_id="batch-lease-a",
+                    holder="activation-owner/batch-a",
+                    admission_deadline="2099-01-01T00:00:00Z",
+                    activation_request_id="batch-activation-a",
+                    activation_request_digest="sha256:" + "c" * 64,
+                    stage_request_id=request.request_id,
+                    stage_request_digest=request.request_digest,
+                    proof_digest=result.proof.proof_digest,
+                    stage_generation=result.generation,
+                    ledger_authority="feature-050-stage-ledger-v2", ledger_revision=7)
+            self.assertEqual(retained.proof_digest, result.proof.proof_digest)
+            self.assertEqual(lease.proof_digest, result.proof.proof_digest)
+            self.assertEqual([event[1] for event in events], ["target", "host", "host", "target"])
+
+    def test_expired_v2_proof_status_preserves_schema_and_tombstone_code(self):
+        from sandbox.hosting.images.staging_models import StageProofTombstone
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            first_request = request_set(plan, policy)
+            result = ImagePlanSetStagingService(repository=repository,
+                broker=FakeBroker(), worker=FakeBatchWorker()).stage(first_request, policy)
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["tombstones"][first_request.request_id] = StageProofTombstone(
+                    first_request.request_id, first_request.request_digest,
+                    result.proof.proof_digest).as_mapping()
+                del state["proofs"][first_request.request_id]
+                del state["records"][first_request.request_id]
+                repository._write_unlocked(policy.target.target_identity, state)
+            status = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None).status(first_request)
+        self.assertEqual(status.as_mapping(), {
+            "schema_version": 2, "ok": False, "result_class": "refused",
+            "code": "proof_expired", "request_id": first_request.request_id,
+            "generation": 1})
+
+    def test_helper_v2_frame_refuses_boolean_version_and_identity_drift(self):
+        from sandbox.hosting.images.staging_helper import _closed_plan_v2
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        worker = __import__("sandbox.hosting.images.staging_worker",
+                            fromlist=["StageWorkerV2"]).StageWorkerV2
+        class Capture:
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                self.frame = frame; return object()
+        transport = Capture(); worker(transport).prepare(request, policy)
+        # Measurement is checked after shape, so malformed frames refuse without file access.
+        for mutate in (lambda raw: raw.update(schema_version=True),
+                       lambda raw: raw["images"][0].update(config_digest="bad"),
+                       lambda raw: raw["service_image_bindings"].append(
+                           deepcopy(raw["service_image_bindings"][0]))):
+            raw = deepcopy(transport.frame); mutate(raw)
+            with self.assertRaisesRegex(ValueError, "protocol_invalid"):
+                _closed_plan_v2(raw)
+        from sandbox.transports.remote_hosting_images import (
+            RemoteImageStageError, parse_stage_response,
+        )
+        with self.assertRaises(RemoteImageStageError):
+            parse_stage_response({"schema_version": True, "ok": False,
+                                  "code": "protocol_invalid", "payload": {}})
+
+    def test_real_v2_helper_uses_one_login_three_pulls_and_no_topology_label(self):
+        import shutil
+        import subprocess
+        from sandbox.hosting.images import staging_helper
+        from sandbox.hosting.images.staging_worker import StageWorkerV2
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        class Capture:
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                self.frame = frame; return object()
+        transport = Capture(); StageWorkerV2(transport).prepare(request, policy)
+        frame = transport.frame
+        frame["helper"]["artifact_digest"] = "sha256:" + hashlib.sha256(
+            Path(staging_helper.__file__).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temp:
+            run_root = Path(temp); calls = []
+            def runner(argv, *, environment, input_data=None, timeout=300):
+                calls.append(tuple(argv)); command = tuple(argv)
+                if command[:2] == ("docker", "login"):
+                    config = Path(environment["DOCKER_CONFIG"]); config.mkdir(parents=True)
+                    (config / "config.json").write_text("credential-material")
+                    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                if command[:2] == ("docker", "pull"):
+                    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                if command[:2] == ("docker", "info"):
+                    return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
+                image = next(item for item in frame["images"]
+                             if item["repository_qualified_digest"] == command[3])
+                inspected = {"Id": image["config_digest"],
+                    "RepoDigests": [image["repository_qualified_digest"]],
+                    "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {}}}
+                return subprocess.CompletedProcess(command, 0,
+                    stdout=json.dumps(inspected).encode(), stderr=b"")
+            result = staging_helper.execute_v2(frame, b"canary", run_root=run_root,
+                runner=runner, anonymous_probe=lambda *_: True,
+                cgroup_identity=lambda unit: "/system.slice/" + unit,
+                machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+        self.assertTrue(result["ok"])
+        self.assertEqual(sum(call[:2] == ("docker", "login") for call in calls), 1)
+        self.assertEqual(sum(call[:2] == ("docker", "pull") for call in calls), 3)
+        self.assertEqual([row["name"] for row in result["payload"]["observation"]["images"]],
+                         ["queue", "web", "worker"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -72,6 +72,10 @@ class TestRemoteHostingImages(unittest.TestCase):
         self.assertNotIn('"--collect"', transport)
         self.assertIn("installed image staging helper digest mismatch", installer)
         self.assertIn("installed staging helper manifest mismatch", installer)
+        self.assertIn('"$STAGING_HELPER_ROOT/manifest-v2.json"', installer)
+        self.assertIn('"entry": "sandbox-image-stage-helper-v2"', installer)
+        self.assertIn('"capability_revision": "systemd-cgroup-v2-batch-stage-v2"', installer)
+        self.assertIn("installed v2 staging helper manifest mismatch", installer)
 
 
 if __name__ == "__main__": unittest.main()

@@ -290,6 +290,53 @@ finally:
     except FileNotFoundError:
         pass
 PY
+python3 - "$STAGING_HELPER_ROOT/manifest-v2.json" "$STAGING_HELPER_DIGEST" "$STAGING_RUNTIME_REVISION" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+payload = {
+    "schema_version": 2,
+    "artifact_digest": "sha256:" + sys.argv[2],
+    "entry": "sandbox-image-stage-helper-v2",
+    "runtime_revision": sys.argv[3],
+    "capability_revision": "systemd-cgroup-v2-batch-stage-v2",
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+if path.exists():
+    try:
+        existing = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"could not read installed v2 staging helper manifest: {exc}")
+    if existing != encoded:
+        raise SystemExit("installed v2 staging helper manifest mismatch")
+    raise SystemExit(0)
+fd, temporary = tempfile.mkstemp(prefix=".manifest-v2.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        if path.read_bytes() != encoded:
+            raise SystemExit("concurrent v2 staging helper manifest mismatch")
+    parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
 python3 - "$STAGING_HELPER_ROOT" <<'PY'
 import os
 from pathlib import Path
@@ -301,6 +348,7 @@ for path, expected_mode, expected_type in (
     (root.parent, 0o700, "directory"), (root, 0o700, "directory"),
     (root / "staging_helper.py", 0o500, "file"),
     (root / "manifest.json", 0o600, "file"),
+    (root / "manifest-v2.json", 0o600, "file"),
 ):
     info = os.lstat(path)
     valid_type = stat.S_ISDIR(info.st_mode) if expected_type == "directory" else stat.S_ISREG(info.st_mode)

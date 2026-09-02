@@ -318,6 +318,75 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             self.assertNotIn(value, combined)
         self.assertIn("[redacted]", combined)
 
+    def test_v2_helper_reads_owner_only_env_by_fd_and_redacts_effect_stderr(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+
+        secret = "v2-private-env-file-sentinel"
+        image = "ghcr.io/lenzora/lenzora/web@sha256:" + "a" * 64
+        rendered = {"services": {"web": {"image": image,
+            "environment": {"DATABASE_URL": secret}}}}
+        raw_render = (json.dumps(rendered) + "\n").encode()
+        render_digest = "sha256:" + hmac.new(
+            CONFIGURATION_KEY,
+            b"sandbox-hosting-private-compose-render.v2\0" + raw_render,
+            hashlib.sha256).hexdigest()
+        digest = "sha256:" + "b" * 64
+        target = {"machine_identity": "machine-a", "target_identity": "target-a",
+                  "daemon_identity": "daemon-a"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_file = root / "environment.env"
+            env_file.write_text(f"DATABASE_URL={secret}\n")
+            env_file.chmod(0o600)
+            docker = root / "docker"
+            docker.write_text("\n".join((
+                "#!/usr/bin/env python3",
+                "import sys",
+                "a=sys.argv[1:]",
+                "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
+                "if a and a[0]=='compose' and 'config' in a: print(" +
+                    repr(json.dumps(rendered)) + "); sys.exit(0)",
+                "print(" + repr(secret) + ",file=sys.stderr)",
+                "sys.exit(7)",
+            )))
+            docker.chmod(0o700)
+            provider = {"snapshot_id": "compose-snapshot/test-v2",
+                "snapshot_digest": digest, "provider_revision": "provider-v2",
+                "target": target, "compose_files": (str(root / "compose.yml"),),
+                "project_name": "lenzora", "project_directory": str(root),
+                "environment_file": str(env_file), "render_digest": render_digest}
+            source = {"kind": "compose_replace_v2",
+                "snapshot_id": provider["snapshot_id"],
+                "snapshot_digest": digest, "provider_revision": "provider-v2",
+                "target": target, "services": ["web"],
+                "render_digest": render_digest, "topology_digest": digest}
+            captured = []
+
+            def ssh_run(entry, command, **kwargs):
+                captured.append((command, kwargs.get("input_data", "")))
+                return run_test_process(
+                    shlex.split(command),
+                    env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
+                    input=kwargs.get("input_data"), text=True, capture_output=True)
+
+            with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run):
+                result = _host_image_argv_runner(
+                    {"name": "synthetic"}, compose_snapshot_provider=provider)(
+                    argv=("docker", "compose", "--file", "-", "up"),
+                    environment={"PATH": f"{root}:/usr/bin:/bin", "LANG": "C",
+                                 "LC_ALL": "C", "LENZORA_PRODUCTION_WEB_IMAGE": image},
+                    private_environment={CONFIGURATION_KEY_ENV: base64.b64encode(
+                        CONFIGURATION_KEY).decode()}, private_environment_source=source,
+                    redact_environment_keys=None, timeout_seconds=30,
+                    max_output_bytes=4096)
+
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertIn("[redacted]", result["stderr"])
+        self.assertNotIn(secret, result["stdout"] + result["stderr"])
+        self.assertNotIn(secret, "".join(command + frame for command, frame in captured))
+        self.assertIn("/proc/self/fd/", "".join(command for command, _ in captured))
+
     def test_real_helper_marks_every_unsnapshotted_resource_for_refusal(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from sandbox.transports.remote_hosting_activation import (

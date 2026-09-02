@@ -196,6 +196,7 @@ import sys
 
 home = Path(sys.argv[1])
 target = Path(sys.argv[2])
+owner_uid = os.geteuid()
 if not home.is_absolute() or target.parent.parent != home / "runtime" / "helpers":
     raise SystemExit("invalid staging helper directory identity")
 fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
@@ -213,7 +214,7 @@ try:
             os.fsync(fd)
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         info = os.fstat(child)
-        if owned and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+        if owned and (info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) & 0o022):
             raise SystemExit("staging helper directory ownership or mode is unsafe")
         os.close(fd); fd = child
 finally:
@@ -344,6 +345,7 @@ import stat
 import sys
 
 root = Path(sys.argv[1])
+owner_uid = os.geteuid()
 for path, expected_mode, expected_type in (
     (root.parent, 0o700, "directory"), (root, 0o700, "directory"),
     (root / "staging_helper.py", 0o500, "file"),
@@ -352,7 +354,7 @@ for path, expected_mode, expected_type in (
 ):
     info = os.lstat(path)
     valid_type = stat.S_ISDIR(info.st_mode) if expected_type == "directory" else stat.S_ISREG(info.st_mode)
-    if not valid_type or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
+    if not valid_type or stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid \
             or stat.S_IMODE(info.st_mode) != expected_mode \
             or (expected_type == "file" and info.st_nlink != 1):
         raise SystemExit(f"installed staging helper {expected_type} identity is unsafe")

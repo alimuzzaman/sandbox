@@ -337,6 +337,11 @@ class TestValidation(unittest.TestCase):
         self.assertIn('root / "cron_scripts" / script', script)
         self.assertNotIn("todo_md_monitor.py", script)
 
+    def test_remote_install_staging_helper_uses_provisioning_owner(self):
+        script = (ROOT / "scripts/install-remote.sh").read_text()
+        self.assertIn("owner_uid = os.geteuid()", script)
+        self.assertIn("info.st_uid != owner_uid", script)
+
     def test_remote_install_upgrades_cloudflared_for_token_file_connectors(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()
         self.assertIn('cloudflared tunnel run --help 2>&1 | grep -q -- "--token-file"', script)

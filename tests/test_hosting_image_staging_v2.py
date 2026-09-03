@@ -768,7 +768,7 @@ class TestV2BatchStaging(unittest.TestCase):
                 # Docker 29's containerd image store reports the pulled
                 # manifest as Image ID; the signed receipt still carries the
                 # independent config digest.
-                inspected = {"Id": image["repository_qualified_digest"],
+                inspected = {"Id": image["manifest_digest"],
                     "RepoDigests": [image["repository_qualified_digest"]],
                     "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {}}}
                 return subprocess.CompletedProcess(command, 0,
@@ -785,7 +785,7 @@ class TestV2BatchStaging(unittest.TestCase):
                          ["queue", "web", "worker"])
         for row, expected in zip(result["payload"]["observation"]["images"], frame["images"]):
             self.assertEqual(row["config_digest"], expected["config_digest"])
-            self.assertEqual(row["local_image_id"], expected["repository_qualified_digest"])
+            self.assertEqual(row["local_image_id"], expected["manifest_digest"])
 
 
 if __name__ == "__main__":

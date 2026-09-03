@@ -319,7 +319,9 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         # pulled manifest; retain both identities instead of rejecting a
         # valid pull solely on the engine's image-ID representation.
         local_image_id = raw.get("Id")
-        if local_image_id not in {plan["config_digest"], plan["repository_qualified_digest"]}:
+        if local_image_id not in {
+                plan["config_digest"], plan["manifest_digest"],
+                plan["repository_qualified_digest"]}:
             raise ValueError("observation_invalid")
         config_digest = plan["config_digest"]
         platform = {"os": raw.get("Os"), "architecture": raw.get("Architecture")}
@@ -414,7 +416,9 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
             local_image_id = raw.get("Id")
             if type(raw.get("RepoDigests")) is not list \
                     or raw["RepoDigests"].count(image["repository_qualified_digest"]) != 1 \
-                    or local_image_id not in {image["config_digest"], image["repository_qualified_digest"]}:
+                    or local_image_id not in {
+                        image["config_digest"], image["manifest_digest"],
+                        image["repository_qualified_digest"]}:
                 raise ValueError("observation_invalid")
             platform = f'{raw.get("Os")}/{raw.get("Architecture")}'
             if raw.get("Variant"): platform += f'/{raw["Variant"]}'

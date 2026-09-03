@@ -283,8 +283,12 @@ observations; these are deduplicated work items, not permission to mutate.
 The current 639-record ledger has no unreviewed rows. The stale-network JSON
 record `bab948b8` is resolved by `046993b`; `282cd7f7` is resolved by the local
 Spec 033 same-request recovery slice after 61 sync tests and an independent Sol
-High PASS. Spec 033 `T053`, `T056`, and `T061` remain open for their broader and
-disposable-remote acceptance. The remaining `2672614f` row overlaps Feature
+High PASS. Spec 033 now also has local projection, divergence, isolated-output,
+public-generation, redaction, and compatibility contracts. Generation-aware
+queue/materialization/controller-authority seams are locally covered; synchronized
+remote execution remains fail closed until that authority is composed and live-
+accepted. Disposable-remote acceptance (`T026`, `T026b`, `T061`, `T066`) remains
+open. The remaining `2672614f` row overlaps Feature
 047's remote-job transport and remains deferred to that owner. Historical theme
 rows remain regression and ownership guides; resolved, verified, duplicate,
 and not-applicable records must not be reimplemented without fresh evidence.

@@ -72,11 +72,36 @@ ordered relationship. Symlink locators may share that identity. A fresh clone
 or unresolved relocation is a different owner and is refused before source
 transfer until the existing lifecycle adoption flow explicitly preserves the
 durable identity. Ownership errors expose opaque IDs only, never checkout paths.
+Immediately before staging a disposable-workspace generation, the source
+transport rechecks the durable workspace ID and project identity through the
+workspace controller. A mismatch returns `ownership_conflict` before any source
+bytes are uploaded; CLI and MCP expose the same bounded code. Transfer also
+requires a complete ready workspace record whose checkout locator and exact-tree
+deployment receipt provide the canonical source binding; destroyed, incomplete,
+unhealthy, ambiguous, or unbound records remain unavailable. The controller
+also attests that both protected checkout directories still exist as real
+directories at status time; stored locator digests alone are not acceptance.
+Publication keeps the workspace operation lock while it binds every staging and
+generation directory to an opened filesystem identity, validates the complete
+tree, and atomically changes the `current` pointer. A renamed or cleanup entry
+whose identity changes is refused. If the final validation fails after the
+pointer change, the controller restores the exact prior pointer (or removes the
+new pointer when there was no prior generation) before returning failure.
 
 Lost acknowledgments reconcile with the original request identity. Remote
 divergence is never adopted or overwritten automatically; `sync resolve
 --resolution keep-local --confirm` clears the conflict gate and leaves sync off
 so the next explicit request repeats normal ownership checks.
+
+Generation-aware jobs pin the newest accepted generation before durable launch.
+If a newer generation is pending, a new durable job queues against that generation
+and follows any still-newer pending generation before launch. Parallel-
+safe jobs may share only the same accepted `managed_read_only` projection. A job
+that needs source writes must request `isolated_copy`, declare retained artifact
+paths, and receives no authority to change the managed generation. Job acceptance
+and status expose only the relationship ID, generation ID, and source-access
+policy. Out-of-band source change records bounded divergence and blocks another
+projection until the explicit sync resolution boundary runs.
 
 ## 1. What this is
 

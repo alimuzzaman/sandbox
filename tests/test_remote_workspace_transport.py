@@ -24,6 +24,7 @@ class _Result:
 class TestRemoteWorkspaceTransport(unittest.TestCase):
     def setUp(self):
         self.calls = []
+        self.process_calls = []
 
         def run(remote, command, *, timeout):
             self.calls.append((remote, command, timeout))
@@ -35,6 +36,10 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
                 "capabilities": ["workspace.index"],
             },
             ssh_run=run,
+            ssh_process=lambda remote, command, input_data, timeout: (
+                self.process_calls.append((remote, command, input_data, timeout))
+                or _Result(stdout='{"ok":true,"status":"accepted"}')
+            ),
             remote_sb_path=lambda _remote: "/opt/sandbox/sb",
         )
 
@@ -88,6 +93,48 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
         self.assertIn("--plan-id plan-123", command)
         self.assertIn("--confirm", command)
         self.assertNotIn("--project-dir", command)
+
+    def test_sync_publication_is_path_free_and_bound_to_preflight_generation(self):
+        self.transport.publish_sync(
+            "remote-a", "ws-123", "project-identity", "gen-123",
+            "a" * 64, "b" * 64, 2, 12, 7,
+            b"archive",
+        )
+        self.assertEqual(len(self.process_calls), 1)
+        command = self.process_calls[0][1]
+        self.assertIn("workspace publish-sync", command)
+        self.assertIn("--workspace-id ws-123", command)
+        self.assertIn("--project-identity project-identity", command)
+        self.assertIn("--generation-id gen-123", command)
+        self.assertIn("--expected-index-generation 7", command)
+        self.assertNotIn("--project-dir", command)
+        self.assertNotIn("--path", command)
+        self.assertEqual(self.process_calls[0][2], b"archive")
+
+        self.transport.reconcile_sync(
+            "remote-a", "ws-123", "project-identity", "gen-123",
+            "a" * 64, 2, 12, 7,
+        )
+        self.assertEqual(len(self.calls), 1)
+        reconcile = self.calls[0][1]
+        self.assertIn("workspace reconcile-sync", reconcile)
+        self.assertNotIn("--project-dir", reconcile)
+        self.assertNotIn("--path", reconcile)
+
+    def test_sync_publication_accepts_bytes_process_stdout(self):
+        transport = RemoteWorkspaceTransport(
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["workspace.index"]},
+            ssh_run=lambda *args, **kwargs: _Result(),
+            ssh_process=lambda remote, command, input_data, timeout: _Result(stdout=b'{"ok":true,"status":"accepted"}'),
+            remote_sb_path=lambda _remote: "/opt/sandbox/sb",
+        )
+        result = transport.publish_sync(
+            "remote-a", "ws-123", "project-identity", "gen-123",
+            "a" * 64, "b" * 64, 2, 12, 7,
+            b"archive",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "accepted")
 
     def test_reset_and_destroy_require_confirmation_and_workspace_id(self):
         for method in (self.transport.reset, self.transport.destroy):

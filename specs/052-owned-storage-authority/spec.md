@@ -1,8 +1,9 @@
 # Feature Specification: Owned Storage Authority
 
-> **Planning status: NOT READY.** FR-058 cannot be implemented through the
-> current immutable Feature 051 public ports. See [analysis.md](./analysis.md).
-> This specification authorizes no source or live work.
+> **Planning status: REPAIRED (Option 2 Authorized).** FR-058 is amended to
+> decouple lifecycle state from OCI hosting and use a dedicated, crash-safe
+> storage authority lifecycle repository. See [analysis.md](./analysis.md).
+> This specification authorizes planning and task generation; implementation remains gated.
 
 **Feature Branch**: `codex/owned-storage-authority` (spec directory `052-owned-storage-authority`)
 
@@ -431,9 +432,10 @@ decision while containing none of the prohibited data classes.
   may authorize `future` only for its exact disposable fixture with no qualification ancestry,
   and MUST require a separate replay-safe protected finalization that derives all ordinary-path
   evidence through trusted read-only sources before reporting proven/adoptable support.
-- **FR-058**: Lifecycle review, promotion, finalization, and revocation state MUST remain a closed
-  nested value behind the existing shared hosting target transaction owner and generation;
-  Feature 052 MUST NOT create another hosting state file/database or bypass the shared lock/CAS.
+- **FR-058**: Lifecycle review, promotion, finalization, and revocation state MUST be durably
+  persisted by a dedicated crash-safe storage authority lifecycle repository with atomic replacement,
+  advisory locking, and generation CAS. Feature 052 MUST NOT depend on or mutate shared OCI hosting
+  state (`hosts.json` / `RecoveryRepository`) or bypass its own lifecycle CAS.
 
 ### Scope Boundaries
 

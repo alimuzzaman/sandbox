@@ -162,13 +162,13 @@ requires a new candidate. Review consumes no qualification budget.
 
 Accepted review uses an explicit prepared-binding handshake:
 
-1. Through the existing shared hosting target transaction port, the lifecycle
+1. In the dedicated `StorageAuthorityLifecycleRepository`, the lifecycle
    durably reserves the review request and exact proposed IDs/digest.
 2. The authority records one exact `prepared` adoption binding. It grants no
    policy or mutation authority.
 3. The lifecycle atomically commits review decision, fixture-validation
    promotion receipt, primitive evidence ID, and
-   `acceptance_state=pending_ordinary` in the shared target record. Public tier
+   `acceptance_state=pending_ordinary` in the lifecycle repository record. Public tier
    remains `implemented_unproven` and `adoptable=false`.
 4. Exact replay activates the matching authority binding only after proving the
    committed lifecycle receipt.
@@ -185,12 +185,12 @@ exact authority binding revoked. Lost deactivation acknowledgement remains
 fail-closed. Expiry, revision skew, or later drift follows the same order and
 never deletes owned objects.
 
-The lifecycle state is one closed nested value behind the existing shared
-hosting `RecoveryRepository`; Feature 052 owns no outer state parser/writer,
-lock, fsync, generation, file, or database. Every review, promotion,
-acceptance-finalize, and revocation transition uses the shared per-target lock
-and hosting generation CAS. Cross-store lock order is shared target lock then
-authority binding lock, released in reverse.
+The lifecycle state is durably maintained in a dedicated crash-safe
+`StorageAuthorityLifecycleRepository` (`runtime/storage_authority/lifecycle.json`);
+it is completely decoupled from OCI hosting (`RecoveryRepository` / `hosts.json`).
+Every review, promotion, acceptance-finalize, and revocation transition uses
+per-remote advisory locking and generation CAS. Cross-store lock order is
+lifecycle repository lock then authority binding lock, released in reverse.
 
 After accepted promotion and binding activation, the exact disposable fixture
 must set ordinary policy `future`, create and replay one new normal sync

@@ -6,17 +6,14 @@
 `specs/052-owned-storage-authority/spec.md` and the reviewed PRD in the same
 directory.
 
-**Planning Readiness**: **NOT READY — PUBLIC PORT BLOCKED**. The bounded design
-text closes the three original semantic blockers, but two fresh independent
-post-edit analyses found that its lifecycle persistence boundary cannot be
-implemented through the immutable Feature 051 public ports. The fixed target
-mutation registry has no owned-storage lifecycle capability, while
-`activation_host_state_port()` reads and writes only the closed
-`image_activation` value. Implementing this plan would therefore require a
-forbidden hosting/schema change, a private repository bypass, or reinterpretation
-of an accepted capability. No tasks are published. See [analysis.md](./analysis.md).
+**Planning Readiness**: **REPAIRED (Option 2 Authorized)**. Under explicit
+human authorization, FR-058 has been amended to decouple owned-storage lifecycle
+persistence from OCI hosting (`RecoveryRepository` / `hosts.json`). The lifecycle
+module uses a dedicated, crash-safe `StorageAuthorityLifecycleRepository` with
+advisory locking, atomic file replacement, and generation CAS. Protected paths
+(`sandbox/hosting/**`, `specs/048-051/**`) remain 100% immutable. See [analysis.md](./analysis.md).
 Implementation, service installation, privilege grants, live qualification,
-promotion, rollout, and production adoption are not authorized.
+promotion, rollout, and production adoption remain separately gated.
 
 ## Summary
 
@@ -227,11 +224,10 @@ only storage mechanisms, its private journal, its codec, and exact Linux
 filesystem operations. Existing sync/job/workspace application services retain
 policy and call the authority through a narrow typed port. The separate
 `sandbox/owned_storage_lifecycle/` module is the sole owner of
-candidate/review/promotion/revocation semantics. It consumes the existing public
-Feature 051 `RecoveryRepository` target-mutation and host-state transaction ports
-without editing `sandbox/hosting/**`, owning outer persistence, or importing private
-repository helpers. It uses a prepared, non-authorizing authority binding instead
-of direct cross-repository writes. CLI/MCP and remote
+candidate/review/promotion/revocation semantics. It uses a dedicated, crash-safe
+`StorageAuthorityLifecycleRepository` with advisory locking and generation CAS,
+completely decoupled from OCI hosting. It uses a prepared, non-authorizing
+authority binding instead of direct cross-repository writes. CLI/MCP and remote
 transport modules validate and project results only. The standalone service is
 packaged as a fixed executable with fixed lifecycle assets; no generic root
 helper, callback, path, or command channel is added.
@@ -297,12 +293,11 @@ lifecycle: commit non-adoptable + revocation
     -> exact replay reconciles acknowledgement; mixed state stays closed
 ```
 
-The existing shared hosting `RecoveryRepository` remains the sole outer target
-parser/writer/locker/fsync and generation-CAS owner. Feature 052 validates and
-serializes only a closed nested lifecycle value and proposes transitions
-through that shared transaction port; it creates no second hosting state file
-or database and performs no direct outer-state write. Lock order is shared
-target lock then authority-binding lock, released in reverse. The authority
+The dedicated `StorageAuthorityLifecycleRepository` is the sole lifecycle
+state parser/writer/locker/fsync and generation-CAS owner for owned-storage
+authority. It creates no dependency on hosting state and leaves `sandbox/hosting/**`
+completely untouched. Lock order is lifecycle repository lock then authority-binding
+lock, released in reverse. The authority
 repository never receives reviewer identity as authority, never decides a
 support tier, and never reads lifecycle storage directly. The authenticated
 controller carries only the exact typed receipt/binding data. This preserves

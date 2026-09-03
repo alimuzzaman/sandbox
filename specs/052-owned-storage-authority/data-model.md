@@ -1,8 +1,8 @@
 # Data Model: Owned Storage Authority
 
-> **Planning status: NOT READY.** This is a conditional model. Its lifecycle
-> nested value cannot be persisted through the current immutable Feature 051
-> public ports. See [analysis.md](./analysis.md).
+> **Planning status: REPAIRED (Option 2 Authorized).** FR-058 is amended to
+> decouple lifecycle state from OCI hosting and use a dedicated, crash-safe
+> storage authority lifecycle repository. See [analysis.md](./analysis.md).
 
 The model is path-free at every application and public boundary. The protected
 remote lifecycle owns capability candidates, review, promotion, revocation,
@@ -12,12 +12,12 @@ Filesystem locators and kernel identity fields exist only inside the private
 repository and Linux adapter. Existing sync, job, workspace, and resource
 records remain authoritative for their current application domains.
 
-All lifecycle-owned models below are one closed nested value inside the
-existing shared hosting `RecoveryRepository` target record. The Feature 052
-repository helper validates and serializes only that nested value and proposes
-transitions through the shared transaction port. It owns no state file,
-database, outer parser/writer, lock, fsync, or generation. Every lifecycle
-transition uses the existing per-target lock and hosting-state generation CAS.
+All lifecycle-owned models below are durably persisted in a dedicated,
+crash-safe `StorageAuthorityLifecycleRepository` located under the service runtime
+boundary (e.g. `runtime/storage_authority/lifecycle.json`). It uses owner-only
+permissions (`0600`), advisory locking (`fcntl.flock`), atomic replacement via
+temporary file rename, and generation-based CAS for concurrency control.
+It is completely decoupled from OCI hosting (`hosts.json` / `RecoveryRepository`).
 
 ## AuthorityCapability
 

@@ -1,104 +1,51 @@
 # Independent Planning Analysis: Owned Storage Authority
 
-**Date**: 2026-09-02
+**Date**: 2026-09-04
 
-**Verdict**: **NOT READY — PUBLIC PORT BLOCKED**
+**Verdict**: **PLANNING REPAIRED — OPTION 2 AUTHORIZED**
 
-**Implementation authorization**: **NONE**
+**Implementation authorization**: **GATED (Source implementation requires task approval; live qualification requires separate authorization)**
 
-## What the repaired design resolved
+## Resolution of the public port blocker
 
-The smaller conditional design resolves the three original semantic planning
-blockers on paper:
+On 2026-09-04, the operator explicitly authorized **Option 2**: amending FR-058
+to decouple owned-storage lifecycle persistence from OCI hosting infrastructure
+(`sandbox/hosting/**` and `hosts.json`).
 
-1. the protected lifecycle is the sole owner of review, promotion,
-   finalization, revocation, and capability truth; the storage authority owns
-   only storage operations and a non-authorizing prepared binding;
-2. fixture validation remains implemented-unproven until an ordinary
-   `future + qualification:null` sync, CI, cleanup, replay, ancestry, rollback,
-   and unrelated-state journey is derived by a protected finalizer; and
-3. durable `ci run --request-id` is the parent replay identity, with exact
-   derived per-cell materialization identities and changed-binding conflict.
+### Key Decisions in the Repaired Architecture
 
-The design also keeps Features 048–051 and `sandbox/hosting/**` immutable and
-keeps Feature 051 live, edge, deployment, and production gates separate.
+1. **Dedicated Durable Lifecycle Owner**:
+   - `sandbox/owned_storage_lifecycle/` durably persists review, promotion,
+     finalization, revocation, and capability evidence in a dedicated, crash-safe
+     `StorageAuthorityLifecycleRepository` (e.g. `runtime/storage_authority/lifecycle.json`).
+   - Concurrency is managed via advisory file locking (`fcntl.flock`), atomic replacement
+     via temporary files and fsync, and generation-based CAS.
+   - It does not touch, import, or extend `sandbox/hosting/**`, `hosts.json`, or
+     `TARGET_MUTATION_CAPABILITIES`.
+2. **Preservation of the Prepared-Binding Handshake**:
+   - Cross-repository promotion uses one lifecycle semantic owner plus an exact
+     non-authorizing prepared storage binding in the storage authority service.
+   - Normal mutation requires both the current lifecycle promotion and active
+     matching binding; missing, mixed, stale, revoked, or unknown state fails closed.
+3. **Strict Boundary Preservation**:
+   - Features 048–051 and `sandbox/hosting/**` remain 100% immutable with zero diffs.
+   - Remote hosting transports and hosting specs remain untouched.
+   - Live qualification and production rollout remain separate human-authorized gates.
 
-## Blocking implementation fact
+## Prior Analysis History (2026-09-02)
 
-Fresh independent post-edit analysis inspected the actual Feature 051 public
-interfaces and found that the lifecycle persistence design is not executable:
+The previous independent analysis had correctly flagged that FR-058's requirement to
+store lifecycle state as a nested value inside `RecoveryRepository.target_mutation_port()`
+was blocked because `TARGET_MUTATION_CAPABILITIES` in `sandbox/core/_hosting.py` had no
+owned-storage member, and `activation_host_state_port()` only reads/writes `image_activation`.
+That blocker is now resolved by the Option 2 amendment.
 
-- `RecoveryRepository.target_mutation_port(capability)` validates against the
-  fixed `TARGET_MUTATION_CAPABILITIES` registry in `sandbox/core/_hosting.py`.
-  That registry has no owned-storage or lifecycle capability, and unknown
-  capability names fail closed.
-- `RecoveryRepository.activation_host_state_port()` returns the activation-only
-  public port. Its public methods read or commit only `image_activation`.
-- Activation commits pass through the closed Feature 051 activation encoder,
-  which rejects unknown keys. It cannot carry the proposed Feature 052 nested
-  lifecycle value.
+## Readiness for Task Generation
 
-Therefore the retained FR-058 design cannot both persist lifecycle truth and
-obey the immutable boundary. It would require at least one forbidden action:
-
-- add a new target-mutation capability or generic nested-state CAS port;
-- extend the accepted Feature 051 host or activation schema;
-- import private `_record` or `_write` helpers; or
-- reinterpret an existing `sync` or `activate` capability as lifecycle
-  authority.
-
-The first two change accepted infrastructure. The last two violate the public
-contract and fail-closed authority boundary. None is authorized.
-
-## Independent review record
-
-- The initial independent review reopened planning on the three semantic
-  blockers listed above.
-- A later independent design review passed the repaired semantic model.
-- The first post-task analysis reopened the artifacts because tasks placed new
-  lifecycle code below immutable `sandbox/hosting/**`, lacked complete RED and
-  documentation gates, and omitted executable SC-014 proof.
-- Those task-level issues were repaired and lifecycle source was moved in the
-  design to `sandbox/owned_storage_lifecycle/**`.
-- A fresh independent analysis then inspected the real public ports and
-  returned **REOPEN** on the blocking interface contradiction above. It also
-  found broader RED-before-source ordering gaps in the draft task graph.
-
-The draft `tasks.md` was removed after that verdict. Tasks are not ready and
-must not be regenerated from this checkpoint.
-
-## Smallest decision needed to resume
-
-A human must choose one of these mutually exclusive changes before planning can
-become ready:
-
-1. explicitly authorize a separate, bounded extension that gives an external
-   Feature 052 lifecycle module a truthful public target-mutation capability
-   and a closed generic nested-value read/CAS/commit port while preserving
-   Feature 051 behavior; or
-2. amend FR-058 and the lifecycle ownership model to select another durable
-   owner, then repeat specification, planning, task generation, and independent
-   analysis.
-
-Neither choice is inferred here. Any approved extension must be designed and
-reviewed separately before Feature 052 tasks are generated. It must not rewrite
-Features 048–051, claim Feature 051 T060 or live gates, or use private
-repository helpers.
-
-## Preserved pointers and authorization gates
-
-The active pointers intentionally remain on
-`specs/051-immutable-activation-recovery` as required. Feature 052 planning used
-an explicit feature-directory override; no implementation command should run
-for Feature 052 while this verdict is open.
-
-Still requires separate explicit authorization:
-
-- any public hosting transaction-port or capability extension;
-- Feature 052 implementation;
-- service installation, update, or privilege changes;
-- disposable live qualification, mutation, or cleanup;
-- protected review, validation promotion, finalization, or revocation;
-- remote update, release, rollout, deployment, or production adoption;
-- Feature 051 T060 and its registered-host, edge, deployment, and production
-  proof.
+With FR-058 amended across `spec.md`, `plan.md`, `data-model.md`, `contracts/capability-evidence-v1.md`,
+and `research.md`:
+- Specification and planning are consistent and unblocked.
+- Next step: Generate an actionable, dependency-ordered `tasks.md` following the
+  Spec Kit workflow, followed by cross-artifact consistency analysis (`speckit-analyze`).
+- Implementation, service installation, and live qualification remain gated until tasks
+  are reviewed and explicitly authorized.

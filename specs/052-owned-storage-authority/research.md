@@ -520,9 +520,9 @@ hide the missing authority.
 
 ## Clarification status
 
-The three original semantic blockers have conditional design answers, but one
-material planning blocker remains: a human must authorize and specify a
-truthful public lifecycle transaction owner/port, or amend FR-058 to select a
-different durable owner. Until then no tasks may be generated and no source or
-live lifecycle, privilege, remote, promotion, rollout, or production action is
-authorized.
+The planning blocker is RESOLVED. Under explicit human authorization (Option 2),
+FR-058 is amended to select a dedicated `StorageAuthorityLifecycleRepository` as the
+durable semantic owner for owned storage lifecycle, decoupling it from OCI hosting
+(`hosts.json` / `RecoveryRepository`). Protected paths (`sandbox/hosting/**`,
+`specs/048-051/**`) remain 100% immutable. Planning and task generation are
+unblocked; implementation remains gated.

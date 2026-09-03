@@ -105,6 +105,28 @@ class FakeBatchWorker:
         return self.prepared
 
 
+class SafeFailurePrepared(FakePrepared):
+    """Models a negative helper frame whose cleanup proof is complete."""
+
+    def deliver(self, credential):
+        from sandbox.hosting.images.staging_worker import StageWorkerError
+        raise StageWorkerError("pull_failed",
+            process={"unit_inactive": True, "cgroup_empty_or_removed": True},
+            cleanup={"complete": True})
+
+    def cancel(self):
+        # A transient systemd unit may already be unloaded by this point.
+        return {"unit_inactive": False, "cgroup_empty_or_removed": False,
+                "cleanup_complete": False}
+
+
+class SafeFailureWorker(FakeBatchWorker):
+    def prepare(self, request, policy):
+        self.prepares += 1
+        self.prepared = SafeFailurePrepared(request.plan_set, policy)
+        return self.prepared
+
+
 class TestV2BatchStaging(unittest.TestCase):
     @staticmethod
     def _uncertain(repository, request, *, effect_entered=False):
@@ -566,6 +588,17 @@ class TestV2BatchStaging(unittest.TestCase):
                 broker=FakeBroker(), worker=FakeBatchWorker(unsafe_cleanup=True)).stage(request, policy)
         self.assertEqual((result.result_class, result.code, result.proof),
                          ("uncertain", "cleanup_unproven", None))
+
+    def test_complete_helper_cleanup_is_not_downgraded_by_unloaded_cancel_probe(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            worker = SafeFailureWorker()
+            result = ImagePlanSetStagingService(repository=StageRepository(Path(temp)),
+                broker=FakeBroker(), worker=worker).stage(request, policy)
+        self.assertEqual((result.result_class, result.code, result.proof),
+                         ("failed", "pull_failed", None))
 
     def test_v1_and_v2_share_target_single_flight(self):
         from sandbox.hosting.images.staging_repository import StageRepository

@@ -185,8 +185,25 @@ class ImagePlanSetStagingService:
             try: cancelled = prepared.cancel()
             except Exception: cancelled = None
             if isinstance(cancelled, dict):
-                process = cancelled
-                cleanup = {"complete": cancelled.get("cleanup_complete") is True}
+                # The helper response is the authoritative cleanup receipt.
+                # Cancellation is only a recovery observation and can lose
+                # the transient unit after a short-lived helper exits.  Do
+                # not turn a safe, fully-proven response into uncertainty just
+                # because that second observation cannot repeat its proof.
+                reported_safe = (
+                    isinstance(process, dict)
+                    and process.get("unit_inactive") is True
+                    and process.get("cgroup_empty_or_removed") is True
+                    and cleanup == {"complete": True}
+                )
+                cancelled_safe = (
+                    cancelled.get("unit_inactive") is True
+                    and cancelled.get("cgroup_empty_or_removed") is True
+                    and cancelled.get("cleanup_complete") is True
+                )
+                if cancelled_safe or not reported_safe:
+                    process = cancelled
+                    cleanup = {"complete": cancelled.get("cleanup_complete") is True}
         safe_process = isinstance(process, dict) \
             and process.get("unit_inactive") is True \
             and process.get("cgroup_empty_or_removed") is True

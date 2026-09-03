@@ -7,6 +7,32 @@ from tests.hosting_image_fixtures import FakeBroker, FakeWorker, stage_request, 
 
 
 class TestImageStagingService(unittest.TestCase):
+    def test_complete_helper_cleanup_is_not_downgraded_by_unloaded_cancel_probe(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_service import ImageStagingService
+        from sandbox.hosting.images.staging_worker import StageWorkerError
+
+        class Prepared:
+            frame = {"unit_name": "sandbox-image-stage-safe-failure.service"}
+
+            def deliver(self, _credential):
+                raise StageWorkerError("pull_failed",
+                    process={"unit_inactive": True, "cgroup_empty_or_removed": True},
+                    cleanup={"complete": True})
+
+            def cancel(self):
+                return {"unit_inactive": False, "cgroup_empty_or_removed": False,
+                        "cleanup_complete": False}
+
+        class Worker:
+            def prepare(self, _request, _policy): return Prepared()
+
+        with tempfile.TemporaryDirectory() as directory:
+            policy = staging_policy(); request = stage_request(policy=policy)
+            result = ImageStagingService(repository=StageRepository(Path(directory)),
+                broker=FakeBroker(), worker=Worker()).stage(request, policy)
+        self.assertEqual((result.result_class, result.code), ("failed", "pull_failed"))
+
     def test_unproved_prepare_cleanup_is_fenced_and_never_relaunched_on_replay(self):
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_service import ImageStagingService

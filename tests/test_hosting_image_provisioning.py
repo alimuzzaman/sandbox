@@ -206,7 +206,8 @@ class ProvisioningTests(unittest.TestCase):
             with patch("sandbox.commands.hosting.RUNTIME_DIR", runtime), \
                     patch("sandbox.core._paths.RUNTIME_DIR", runtime), \
                     patch("sandbox.hosting.images.staging_repository.RUNTIME_DIR", runtime), \
-                    patch("sandbox.core._paths.ENV_LOCAL", personal), \
+                    patch("sandbox.commands.hosting.personal_secrets.secret_file",
+                          return_value=personal), \
                     patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()), \
                     patch("sandbox.commands.hosting._authenticated_machine_identity",
                           return_value="machine-a"), \

@@ -3211,7 +3211,7 @@ def _cmd_host_stage(args) -> None:
         die("host stage is protected; pass --confirm after reviewing the exact verified plan")
     response_schema = 0
     try:
-        from sandbox.core._paths import ENV_LOCAL, RUNTIME_DIR
+        from sandbox.core._paths import RUNTIME_DIR
         from sandbox.hosting.images import validate_verified_image_plan
         from sandbox.hosting.images.plan_set import VerifiedImagePlanSet
         from sandbox.hosting.images.staging_models import StageRequest, StagingPolicy
@@ -3259,7 +3259,8 @@ def _cmd_host_stage(args) -> None:
             result = service_type(repository=repository, broker=None, worker=None).status(request)
         else:
             registry = SourceRegistry(
-                project_root, private["secret_sources"], personal_path=ENV_LOCAL,
+                project_root, private["secret_sources"],
+                personal_path=personal_secrets.secret_file(),
                 project_scope=str(project_root),
             )
             resolver = SecretReferenceResolver(registry, owner=binding.owner)
@@ -3560,7 +3561,6 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_v2 import StagedImageProofSet
-        from sandbox.core._paths import ENV_LOCAL
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
         from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
 
@@ -3656,8 +3656,11 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     from sandbox.secrets.writer import load_revision_key
                     secrets = normalize_secret_config({"root": validated["project_root"],
                         "secrets": cfg.get("secrets", {})})["sources"]
-                    registry = SourceRegistry(validated["project_root"], secrets,
-                        personal_path=ENV_LOCAL, project_scope=validated["project_root"])
+                    registry = SourceRegistry(
+                        validated["project_root"], secrets,
+                        personal_path=personal_secrets.secret_file(),
+                        project_scope=validated["project_root"],
+                    )
                     source_alias = args.credential_source_reference.split("/", 1)[0]
                     source_descriptor = secrets.get(source_alias)
                     owner = (source_descriptor.get("owner")

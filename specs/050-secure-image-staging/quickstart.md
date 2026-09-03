@@ -98,6 +98,16 @@ Observed v2 pre-credential convergence evidence (2026-09-03):
 - No ledger, remote, broker, secret, registry, Docker, helper, deployment, Lenzora, or
   production mutation was performed.
 
+Observed staging/activation generation separation evidence (2026-09-03):
+
+- The focused stage-bundle provisioning regression ran **1 test in 0.106s: OK**.
+- It proves activation generation `0` can safely provision a new stage bundle while the
+  independent staging ledger is already at generation `1`; the returned stage generation
+  remains the exact fence for the later `host stage` request.
+- `compileall` and `git diff --check` passed for the changed source and test surfaces.
+- This local regression is source evidence only. It does not claim staging, registry,
+  activation, deployment, edge, or production success.
+
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.
 
@@ -143,6 +153,8 @@ unattempted and remain separately authorized gates.
 Run `./sb host image provision --provision-phase stage-bundle --project-dir PROJECT
 --environment ENV --remote REMOTE --verified-plan PLAN_SET --expected-generation GENERATION
 --credential-source-reference SOURCE/KEY --credential-expires-at RFC3339 --confirm --json`.
-Output is limited to target identity, exact stage generation/ledger revision, plan/policy
-digests, disposition, and installed path. Existing protected `host stage` remains the
-sole staging effect.
+`GENERATION` is the exact current activation/hosting generation. The command separately reads
+and returns the exact stage generation and stage-ledger revision for the later staging request;
+the two counters are intentionally independent. Output is limited to target identity, exact
+activation/stage generation and ledger revision, plan/policy digests, disposition, and installed
+path. Existing protected `host stage` remains the sole staging effect.

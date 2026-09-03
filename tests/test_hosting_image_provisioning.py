@@ -194,6 +194,7 @@ class ProvisioningTests(unittest.TestCase):
                 def target_mutation_transaction(self, _target): yield
             class Recovery:
                 def target_mutation_port(self, _name): return Port()
+                def activation_host_state_port(self): return object()
             validated = {"project": "lenzora", "environment": "production",
                 "project_root": str(project), "compose": {}}
             args = SimpleNamespace(remote="production", environment="production",
@@ -209,6 +210,10 @@ class ProvisioningTests(unittest.TestCase):
                     patch("sandbox.commands.hosting.personal_secrets.secret_file",
                           return_value=personal), \
                     patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()), \
+                    patch("sandbox.hosting.images.staging_repository.StageRepository.target_revision",
+                          return_value=(1, 7)), \
+                    patch("sandbox.hosting.images.activation.repository.ActivationRepository.snapshot",
+                          return_value={"generation": 0}), \
                     patch("sandbox.commands.hosting._authenticated_machine_identity",
                           return_value="machine-a"), \
                     patch("sandbox.transports.remote_hosting_images.RegisteredRemoteImageTransport.observe_authority",
@@ -218,7 +223,8 @@ class ProvisioningTests(unittest.TestCase):
                 except SystemExit: pass
             payload = json.loads(output.getvalue())
             self.assertTrue(payload["ok"], payload)
-            self.assertEqual(payload["stage_generation"], 0)
+            self.assertEqual(payload["stage_generation"], 1)
+            self.assertEqual(payload["activation_generation"], 0)
             self.assertNotIn(canary, output.getvalue())
             installed = json.loads(Path(payload["installed_path"]).read_text())
             self.assertEqual(installed["binding"]["owner"], "personal")

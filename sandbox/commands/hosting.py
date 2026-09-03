@@ -3575,7 +3575,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
             read_stable_file,
         )
         from sandbox.hosting.images.provisioning import (
-            SshAgentRollbackSigner, install_owner_only_json,
+            ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
             install_owner_only_json_pair,
             prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
         )
@@ -3666,10 +3666,15 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                 target = StagingTarget(machine, target_id, observed["daemon_identity"])
                 response["target"] = target.as_mapping()
                 if phase == "stage-bundle":
-                    stage_generation, stage_ledger_revision = \
-                        StageRepository().target_revision(target_id)
-                    if args.expected_generation != stage_generation:
-                        raise ValueError("stage generation changed")
+                    stage = StageRepository()
+                    stage_generation, stage_ledger_revision = stage.target_revision(target_id)
+                    activation = ActivationRepository(
+                        host_state_port=recovery.activation_host_state_port(),
+                        stage_repository=stage,
+                        target_mutation_port=recovery.target_mutation_port("activate"))
+                    activation_generation = activation.snapshot(target_id)["generation"]
+                    if args.expected_generation != activation_generation:
+                        raise ProvisioningError("generation_mismatch")
                     from sandbox.isolation.credential_binding import CredentialBinding
                     from sandbox.isolation.credential_resolver import SecretReferenceResolver
                     from sandbox.config.secrets import normalize_secret_config
@@ -3720,6 +3725,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         staging_policy_digest=bundle["policy"]["policy_digest"],
                         stage_generation=stage_generation,
                         stage_ledger_revision=stage_ledger_revision,
+                        activation_generation=activation_generation,
                         installed_path=str(path))
                 else:
                     proof = StagedImageProofSet.from_mapping(_load_json_bytes(read_stable_file(

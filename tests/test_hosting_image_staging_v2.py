@@ -313,7 +313,7 @@ class TestV2BatchStaging(unittest.TestCase):
             scope_id = hashlib.sha256(
                 f"{scope.remote}\0{scope.project}\0{scope.environment}".encode()).hexdigest()
             policy_path = (runtime / "hosting" / "image-staging" / "policies"
-                           / f"{scope_id}.json")
+                           / f"{scope_id}-{policy.plan_set_digest.removeprefix('sha256:')}.json")
             policy_path.parent.mkdir(parents=True)
             policy_path.write_text(json.dumps({"policy": policy.as_mapping(),
                 "binding": "must-not-open", "secret_sources": "must-not-open"}))

@@ -39,3 +39,8 @@ plan, expected stage generation, registered `SOURCE/KEY`, and finite expiry. It 
 authenticated identity/helper/daemon observation, derives owner from registered policy,
 and installs `runtime/hosting/image-staging/policies/<selector>.json` mode `0600`. It does
 not contact the registry or return source bytes, resolved credentials, or config.
+
+For schema-v2 plan sets, `<selector>` is suffixed with the exact
+`plan_set_digest` (without the `sha256:` prefix). This keeps a retained policy
+from an earlier immutable plan inert while preserving exact replay for the same
+plan; schema-v1 policies retain the original target-scoped filename.

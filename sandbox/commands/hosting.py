@@ -3242,7 +3242,8 @@ def _cmd_host_stage(args) -> None:
             raise ValueError("verified plan target scope does not match explicit stage selectors")
         scope_id = hashlib.sha256(
             f"{args.remote}\0{scope.project}\0{args.environment}".encode()).hexdigest()
-        policy_path = RUNTIME_DIR / "hosting" / "image-staging" / "policies" / f"{scope_id}.json"
+        policy_path = _host_image_staging_policy_path(
+            scope_id, plan.plan_set_digest if is_v2 else None)
         private = json.loads(policy_path.read_text())
         if type(private) is not dict or set(private) != {"policy", "binding", "secret_sources"}:
             raise ValueError("machine staging policy is invalid")
@@ -3556,6 +3557,30 @@ def _provision_pairs(values, label: str) -> dict[str, str]:
     return result
 
 
+def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None = None) -> Path:
+    """Return the owner-only staging policy path for one immutable plan.
+
+    Legacy v1 staging keeps its original target-scoped filename.  V2 plans are
+    immutable and may legitimately advance while an earlier failed attempt is
+    still retained, so key their local policy by the exact plan digest.  This
+    preserves replay for the same plan without letting a stale plan block a
+    new one or requiring deletion of retained authority evidence.
+    """
+    if type(scope_id) is not str or not scope_id:
+        raise ValueError("staging policy selector is invalid")
+    if plan_set_digest is None:
+        name = f"{scope_id}.json"
+    else:
+        if (type(plan_set_digest) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", plan_set_digest) is None):
+            raise ValueError("staging plan digest is invalid")
+        name = f"{scope_id}-{plan_set_digest.removeprefix('sha256:')}.json"
+    # Resolve at call time so the host-stage command and its isolated tests can
+    # honor the same runtime root as the rest of Sandbox's path layer.
+    from sandbox.core import _paths
+    return _paths.RUNTIME_DIR / "hosting" / "image-staging" / "policies" / name
+
+
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
     phase = getattr(args, "provision_phase", None)
@@ -3718,7 +3743,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     bundle = prepare_stage_bundle(plan=plan, target=target, helper=helper,
                         binding=binding, credential_reference_revision=credential_revision,
                         secret_sources=secrets)
-                    path = root / "image-staging" / "policies" / f"{selector}.json"
+                    path = _host_image_staging_policy_path(
+                        selector, plan.plan_set_digest)
                     disposition = install_owner_only_json(path, bundle)
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,

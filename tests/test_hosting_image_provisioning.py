@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -204,6 +205,13 @@ class ProvisioningTests(unittest.TestCase):
             output = StringIO()
             runtime = root / "runtime"
             (runtime / "hosting").mkdir(parents=True, mode=0o700)
+            # A retained policy from an earlier plan must not block this exact
+            # v2 plan.  V2 storage is digest-scoped; the legacy target-scoped
+            # filename remains inert evidence.
+            scope_id = hashlib.sha256(b"production\0lenzora\0production").hexdigest()
+            legacy_path = runtime / "hosting" / "image-staging" / "policies" / f"{scope_id}.json"
+            legacy_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            legacy_path.write_text(json.dumps({"retained": "prior-plan"}))
             with patch("sandbox.commands.hosting.RUNTIME_DIR", runtime), \
                     patch("sandbox.core._paths.RUNTIME_DIR", runtime), \
                     patch("sandbox.hosting.images.staging_repository.RUNTIME_DIR", runtime), \

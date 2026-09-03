@@ -153,3 +153,6 @@ and the independent automated Sol High review do not supply those gates.
   activation generation, return the current staging generation and ledger revision for the
   subsequent stage request, and prove that a safely terminalized earlier stage attempt does
   not block a new first production activation or weaken either generation check.
+- [X] T053 Normalize each v2 per-image Docker pull failure to one closed image/class
+  diagnostic, carry it through the terminal result, ledger replay, and public stage status,
+  preserve legacy v1 and older v2 ledger reads, and add focused redaction/schema tests.

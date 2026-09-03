@@ -327,6 +327,26 @@ class StagedImageProofSet:
 
 
 @dataclass(frozen=True, slots=True)
+class PullFailure:
+    image: str
+    failure_class: str
+
+    def __post_init__(self) -> None:
+        if self.image not in {"queue", "web", "worker"} \
+                or self.failure_class not in {
+                    "denied", "not_found", "network", "timeout", "no_space", "daemon"}:
+            raise StagingContractError()
+
+    def as_mapping(self) -> dict[str, str]:
+        return {"image": self.image, "class": self.failure_class}
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "PullFailure":
+        raw = _closed(value, frozenset({"image", "class"}))
+        return cls(raw["image"], raw["class"])
+
+
+@dataclass(frozen=True, slots=True)
 class StageResultSet:
     schema_version: int
     ok: bool
@@ -335,6 +355,7 @@ class StageResultSet:
     request_id: str
     generation: int
     proof: StagedImageProofSet | None = None
+    pull_failure: PullFailure | None = None
 
     def __post_init__(self) -> None:
         from .staging_models import _RESULT_CLASSES, _RESULT_CODES
@@ -347,6 +368,10 @@ class StageResultSet:
                 or (self.ok and type(self.proof) is not StagedImageProofSet) \
                 or (not self.ok and self.proof is not None):
             raise StagingContractError()
+        if self.pull_failure is not None and (
+                type(self.pull_failure) is not PullFailure or self.ok
+                or self.result_class != "failed" or self.code != "pull_failed"):
+            raise StagingContractError()
         _text(self.request_id, identity=True)
 
     def as_mapping(self) -> dict[str, Any]:
@@ -354,6 +379,8 @@ class StageResultSet:
                  "result_class": self.result_class, "code": self.code,
                  "request_id": self.request_id, "generation": self.generation}
         if self.proof is not None: value["proof"] = self.proof.as_mapping()
+        if self.pull_failure is not None:
+            value["pull_failure"] = self.pull_failure.as_mapping()
         return value
 
 

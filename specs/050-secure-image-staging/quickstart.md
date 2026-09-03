@@ -111,6 +111,17 @@ Observed staging/activation generation separation evidence (2026-09-03):
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.
 
+Observed bounded v2 pull-diagnostic source evidence (2026-09-03):
+
+- The focused v2 staging module ran **29 tests in 0.444s: OK**.
+- The adjacent v1 staging, repository, secret-cleanup, process, and remote-transport
+  modules ran **84 tests in 8.824s: OK**.
+- Focused tests cover all six closed classes, helper redaction, malformed-field refusal,
+  terminal ledger/status replay, legacy v2 records without the optional diagnostic, and
+  unchanged v1 behavior. `compileall` and `git diff --check` passed.
+- No remote migration, registry access, secret use, deployment, production retry, or
+  production mutation was performed.
+
 ## Later authorized acceptance
 
 Use a disposable non-production host, synthetic read-only test package, exact installed

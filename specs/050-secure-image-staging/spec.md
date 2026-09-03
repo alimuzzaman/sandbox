@@ -228,7 +228,10 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-031**: Existing non-opt-in hosting, secret broker, durable-job, remote, and
   Feature 048 interfaces MUST remain compatible.
 - **FR-032**: Public results MUST use stable bounded success/refusal/failure/cancelled/
-  uncertain classes and MUST not include private paths or arbitrary helper output.
+  uncertain classes and MUST not include private paths or arbitrary helper output. A v2
+  per-image pull failure MUST expose only the closed image role (`queue`, `web`, or
+  `worker`) and one normalized class (`denied`, `not_found`, `network`, `timeout`,
+  `no_space`, or `daemon`); raw stdout/stderr and provider detail MUST not be retained.
 - **FR-033**: Documentation MUST distinguish Feature 049 trust, Feature 050 staging,
   Feature 051 activation, Feature 048 observation recovery, and production proof.
 - **FR-034**: Local implementation validation MUST use synthetic credentials/fakes;

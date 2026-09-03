@@ -6,8 +6,9 @@ from sandbox.transports.remote_hosting_images import RemoteImageStageError
 
 from .staging_repository import StageRepositoryError
 from .staging_v2 import (
-    StageRequestSet, StageResultSet, StagedImageProofSet, admit_stage_request_set,
+    PullFailure, StageRequestSet, StageResultSet, StagedImageProofSet, admit_stage_request_set,
 )
+from .staging_models import StagingContractError
 from .staging_worker import StageDeliveryFailure, StageWorkerError
 from .staging_worker import unit_name
 
@@ -18,8 +19,9 @@ class ImagePlanSetStagingService:
 
     @staticmethod
     def _failure(request: StageRequestSet, generation: int, code: str,
-                 result_class: str = "failed") -> StageResultSet:
-        return StageResultSet(2, False, result_class, code, request.request_id, generation)
+                 result_class: str = "failed", pull_failure=None) -> StageResultSet:
+        return StageResultSet(2, False, result_class, code, request.request_id, generation,
+                              pull_failure=pull_failure)
 
     def status(self, request: StageRequestSet) -> StageResultSet:
         current = self.repository.lookup_for_request(request)
@@ -138,6 +140,7 @@ class ImagePlanSetStagingService:
 
     def _execute_accepted(self, request, policy, generation):
         prepared = None; broker_lease = None
+        pull_failure = None
         process = {"unit_inactive": True, "cgroup_empty_or_removed": True,
                    "not_launched": True}
         cleanup = {"complete": True}
@@ -158,7 +161,8 @@ class ImagePlanSetStagingService:
                 except RemoteImageStageError as exc:
                     return StageDeliveryFailure("remote", exc.code, exc.process, exc.cleanup)
                 except StageWorkerError as exc:
-                    return StageDeliveryFailure("worker", exc.code, exc.process, exc.cleanup)
+                    return StageDeliveryFailure("worker", exc.code, exc.process, exc.cleanup,
+                                                exc.pull_failure)
 
             delivered = broker_lease.consume(consume)
             if isinstance(delivered, StageDeliveryFailure):
@@ -168,7 +172,8 @@ class ImagePlanSetStagingService:
                     raise RemoteImageStageError(delivered.code,
                         process=delivered.process, cleanup=delivered.cleanup)
                 raise StageWorkerError(delivered.code,
-                    process=delivered.process, cleanup=delivered.cleanup)
+                    process=delivered.process, cleanup=delivered.cleanup,
+                    pull_failure=delivered.pull_failure)
             observation, process, cleanup = delivered
             broker_lease = None
             self.repository.transition(request, "cleanup_pending", process=process, cleanup=cleanup)
@@ -188,6 +193,9 @@ class ImagePlanSetStagingService:
         except StageWorkerError as exc:
             code = exc.code if exc.code in {"pull_failed", "cleanup_unproven",
                 "observation_invalid", "process_unproven"} else "helper_failed"
+            if code == "pull_failed" and exc.pull_failure is not None:
+                try: pull_failure = PullFailure.from_mapping(exc.pull_failure)
+                except (StagingContractError, TypeError, ValueError): code = "helper_failed"
             process = exc.process or process; cleanup = exc.cleanup or cleanup
         except StageRepositoryError as exc:
             code = exc.code if exc.code in {"generation_conflict", "request_conflict"} \
@@ -228,6 +236,9 @@ class ImagePlanSetStagingService:
             "cleanup_unproven" if not safe_cleanup else "unknown_effect")
         try: self.repository.transition(request, result_class, process=process, cleanup=cleanup)
         except StageRepositoryError: pass
-        result = self._failure(request, generation, terminal_code, result_class)
+        if result_class != "failed" or terminal_code != "pull_failed":
+            pull_failure = None
+        result = self._failure(request, generation, terminal_code, result_class,
+                               pull_failure)
         try: return self.repository.commit(request, result)
         except StageRepositoryError: return result

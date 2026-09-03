@@ -27,7 +27,7 @@ from .staging_models import (
     ProofCustodyPort, StageProofActivationLease, StageProofTombstone, StageRequest,
     StageResult, StagedImageProof, StagingContractError, canonical_bytes,
 )
-from .staging_v2 import StageRequestSet, StageResultSet, StagedImageProofSet
+from .staging_v2 import PullFailure, StageRequestSet, StageResultSet, StagedImageProofSet
 
 TERMINAL_PHASES = frozenset({"succeeded", "refused", "failed", "cancelled", "uncertain"})
 EFFECT_PHASES = frozenset({"pulling", "cleanup_pending", "observing", "succeeded"})
@@ -172,12 +172,17 @@ def _result_from(raw: object, request_id: str, proof=None):
     if type(raw) is not dict:
         raise StageRepositoryError("ledger_invalid")
     try:
-        values = (raw["schema_version"], raw["ok"], raw["result_class"], raw["code"],
-                  request_id, raw["generation"], proof)
+        pull_failure = PullFailure.from_mapping(raw["pull_failure"]) \
+            if "pull_failure" in raw else None
         if raw.get("schema_version") == 1:
-            return StageResult(*values)
+            if pull_failure is not None:
+                raise StagingContractError()
+            return StageResult(raw["schema_version"], raw["ok"], raw["result_class"],
+                               raw["code"], request_id, raw["generation"], proof)
         if raw.get("schema_version") == 2:
-            return StageResultSet(*values)
+            return StageResultSet(raw["schema_version"], raw["ok"], raw["result_class"],
+                                  raw["code"], request_id, raw["generation"], proof,
+                                  pull_failure)
     except (KeyError, TypeError, ValueError, StagingContractError):
         pass
     raise StageRepositoryError("ledger_invalid")
@@ -348,9 +353,10 @@ class StageRepository:
                     if proof is not None or record["phase"] == "succeeded":
                         raise ValueError
                     continue
-                if type(result) is not dict or set(result) != {
-                        "schema_version", "ok", "result_class", "code",
-                        "request_id", "generation"}:
+                result_fields = {"schema_version", "ok", "result_class", "code",
+                                 "request_id", "generation"}
+                if type(result) is not dict or frozenset(result) not in {
+                        frozenset(result_fields), frozenset(result_fields | {"pull_failure"})}:
                     raise ValueError
                 parsed_result = _result_from(result, result["request_id"], proof)
                 if result != self._stored_result(parsed_result) \

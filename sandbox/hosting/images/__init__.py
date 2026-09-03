@@ -27,6 +27,14 @@ from .staging_models import (
     StagedImageProof,
     validate_staged_image_proof,
 )
+from .plan_set import (
+    CosignOfflineVerifier,
+    MachineImagePlanSetPolicy,
+    PlanSetContractError,
+    VerifiedImagePlanSet,
+    validate_verified_image_plan_set,
+    verify_release_bundle,
+)
 
 __all__ = (
     "ApplicationTopology", "DeliveryIdentityProjection", "ImageContractError",
@@ -38,4 +46,6 @@ __all__ = (
     "AtomicHostStateEvidence", "DurableTerminalAuthorityEvidence",
     "ProofCustodyPort", "StageProofActivationLease", "StageRequest", "StageResult",
     "StagedImageProof", "validate_staged_image_proof",
+    "CosignOfflineVerifier", "MachineImagePlanSetPolicy", "PlanSetContractError",
+    "VerifiedImagePlanSet", "validate_verified_image_plan_set", "verify_release_bundle",
 )

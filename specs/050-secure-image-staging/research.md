@@ -22,14 +22,15 @@
 
 ## Decision 4 — Temporary credential state must be volatile
 
-- **Decision**: Helper verifies the workspace is machine-owned volatile storage, uses
-  owner-only objects, and proves cleanup before success.
+- **Decision**: Helper derives its workspace below the effective service user's
+  `/run/user/<uid>` tmpfs, verifies owner-only objects without following links, and
+  proves cleanup before success.
 - **Rationale**: Docker authentication normally needs a client credential context.
 - **Alternatives considered**: Persistent Docker config; environment/argv. Rejected.
 
 ## Decision 5 — Kernel-enforced descendant scope
 
-- **Decision**: Require a uniquely named transient systemd service on cgroup v2 with
+- **Decision**: Require a uniquely named transient systemd user service on cgroup v2 with
   `KillMode=control-group`, no delegation/escape, and ledger-bound unit/cgroup identity.
   Complete termination is exact unit inactive plus `populated=0` or cgroup removal.
 - **Rationale**: Kernel cgroup membership is mechanically authoritative; PID/process-

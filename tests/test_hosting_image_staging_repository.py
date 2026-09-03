@@ -33,12 +33,25 @@ class TestImageStagingRepository(unittest.TestCase):
         from sandbox.hosting.images.staging_repository import StageRepository
         return StageRepository(Path(directory) / "stage")
 
+    def test_policy_provisioning_snapshot_refuses_an_active_stage_owner(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.repository(directory)
+            policy = staging_policy(); request = stage_request(policy=policy)
+            disposition, generation, result = repository.accept(request)
+            self.assertEqual((disposition, generation, result), ("accepted", 1, None))
+            with self.assertRaisesRegex(StageRepositoryError, "target_busy"):
+                with repository.policy_provisioning_snapshot(
+                        request.target.target_identity):
+                    self.fail("active staging must not expose a reusable policy snapshot")
+
     def committed(self, repository, request, policy):
         from sandbox.hosting.images.staging_models import StageResult, StagedImageProof
         decision, generation, _ = repository.accept(request)
         self.assertEqual(decision, "accepted")
         process = {"unit_name": "sandbox-image-stage-fixture.service",
-            "cgroup": "/system.slice/sandbox-image-stage-fixture.service",
+            "cgroup": ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       "sandbox-image-stage-fixture.service"),
             "delegated": False, "escape_allowed": False,
             "unit_inactive": True, "cgroup_empty_or_removed": True}
         repository.transition(request, "credential_pending")
@@ -250,7 +263,8 @@ class TestImageStagingRepository(unittest.TestCase):
                         repository.transition(request, "pulling")
                     if phase in {"cleanup_pending", "observing"}:
                         repository.transition(request, "cleanup_pending", process={
-                            "unit_name": "exact", "cgroup": "/system.slice/exact",
+                            "unit_name": "exact", "cgroup": (
+                                "/user.slice/user-1000.slice/user@1000.service/app.slice/exact"),
                             "delegated": False, "escape_allowed": False,
                             "unit_inactive": True, "cgroup_empty_or_removed": True},
                             cleanup={"complete": True})

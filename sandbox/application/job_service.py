@@ -27,9 +27,11 @@ from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
                                   signal_owned_process_group, verify_owned_process_identity,
                                   verify_process_identity)
 from sandbox.jobs.scheduler import WorkspaceBusy
+from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 
 MAX_AGGREGATE_RESULT_BYTES = 262_144
+SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
 
 
 class JobServiceProtocol(Protocol):
@@ -53,18 +55,32 @@ class JobService:
     sync_gateway: Any = None
 
     def submit(self, submission: JobSubmission):
+        pending_sync = False
+        request_digest = submission.canonical_digest()
         if submission.sync_relationship_id is not None:
             if self.sync_gateway is None:
                 raise RuntimeError("synchronized_job_authority_unavailable")
-            submission = self.sync_gateway.prepare_submission(submission)
+            replay = self.repository.replay(submission)
+            if replay is not None:
+                return self._accepted(replay, replay=True)
+            select = getattr(self.sync_gateway, "select_submission", None)
+            if callable(select):
+                submission = select(submission)
+            try:
+                submission = self.sync_gateway.prepare_submission(submission)
+            except ProjectionPending:
+                pending_sync = True
         guard = (
             self.workspace_registry.submission_guard(submission)
-            if (self.workspace_registry is not None and
+            if (not pending_sync and self.workspace_registry is not None and
                 hasattr(self.workspace_registry, "submission_guard"))
             else nullcontext()
         )
         with guard:
-            replay = self.repository.replay(submission)
+            replay = (
+                None if submission.sync_relationship_id is not None
+                else self.repository.replay(submission)
+            )
             if replay is not None:
                 return self._accepted(replay, replay=True)
             # Workspace validation/materialization and durable acceptance share
@@ -72,7 +88,7 @@ class JobService:
             # disappear between these two commits.
             workspace_id = None
             workspace_authority_digest = None
-            if self.workspace_registry is not None:
+            if not pending_sync and self.workspace_registry is not None:
                 previous_authority_digest = None
                 if submission.retry_of_job_id is not None:
                     previous_authority_digest = self.repository.get(
@@ -94,7 +110,8 @@ class JobService:
                     workspace_authority_digest = authority.get("digest")
             row, replay = self.repository.accept(
                 submission, workspace_id=workspace_id,
-                workspace_authority_digest=workspace_authority_digest)
+                workspace_authority_digest=workspace_authority_digest,
+                request_digest=request_digest)
         if replay:
             return self._accepted(row, replay=True)
         if submission.compatibility_differences:
@@ -102,6 +119,19 @@ class JobService:
                 row["job_id"], list(submission.compatibility_differences))
         try:
             self.storage.job_dir(row["job_id"], create=True)
+            if pending_sync:
+                row = self.repository.transition(
+                    row["job_id"], Lifecycle.QUEUED,
+                    queue_reason="sync_generation_pending",
+                )
+                row["_queue_details"] = {
+                    "reason": "sync_generation_pending",
+                    "position": None,
+                    "blocking_jobs": [],
+                }
+                return self._accepted(row, replay=False)
+            if submission.sync_relationship_id is not None:
+                self.sync_gateway.pin_job(row, submission)
             descriptor = self._descriptor(row, submission)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
             dependency_state, dependency_reason = self._dependency_state(row)
@@ -292,6 +322,69 @@ class JobService:
         # scheduler/launcher during status reconciliation.
         if self._is_aggregate(snapshot):
             return self._get_parent(snapshot)
+        if (
+            snapshot["lifecycle"] == Lifecycle.QUEUED.value
+            and snapshot.get("queue_reason") in {
+                "sync_generation_launching",
+                "sync_generation_launch_committed",
+            }
+        ):
+            snapshot["queue"] = {
+                "reason": snapshot["queue_reason"],
+                "position": None,
+                "blocking_jobs": [],
+            }
+            return snapshot
+        if (
+            snapshot["lifecycle"] == Lifecycle.QUEUED.value
+            and snapshot.get("queue_reason") == "sync_generation_pending"
+        ):
+            try:
+                submission = self._submission_from_snapshot(job_id)
+                selected = self.sync_gateway.select_submission(submission)
+                if selected.sync_generation_id != submission.sync_generation_id:
+                    self.repository.retarget_pending_sync(job_id, selected)
+                    submission = selected
+                prepared = self.sync_gateway.prepare_submission(submission)
+            except ProjectionPending:
+                snapshot["queue"] = {
+                    "reason": "sync_generation_pending",
+                    "position": None,
+                    "blocking_jobs": [],
+                }
+                return snapshot
+            except ProjectionTerminal as exc:
+                snapshot = self.repository.transition(
+                    job_id, Lifecycle.FAILED,
+                    termination_reason=exc.code,
+                )
+                self._finalize_terminal_workspace(job_id)
+                return self.repository.snapshot(job_id)
+            guard = (
+                self.workspace_registry.submission_guard(prepared)
+                if (self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "submission_guard"))
+                else nullcontext()
+            )
+            with guard:
+                workspace_id = None
+                authority_digest = None
+                if self.workspace_registry is not None:
+                    workspace = self.workspace_registry.ensure_submission(prepared)
+                    workspace_id = getattr(workspace, "workspace_id", None)
+                    authority = getattr(workspace, "metadata", {}).get(
+                        "ci_cleanup_authority")
+                    if isinstance(authority, dict):
+                        authority_digest = authority.get("digest")
+                snapshot = self.repository.bind_sync_projection(
+                    job_id, prepared, workspace_id=workspace_id,
+                    workspace_authority_digest=authority_digest,
+                )
+                descriptor = self._descriptor(snapshot, prepared)
+                self.storage.write_json_atomic(
+                    job_id, "descriptor.json", descriptor,
+                )
+                self.sync_gateway.pin_job(snapshot, prepared)
         if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
             dependency_state, dependency_reason = self._dependency_state(snapshot)
             if dependency_state == "blocked":
@@ -306,19 +399,59 @@ class JobService:
                 return snapshot
             if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
                 try:
+                    if (
+                        snapshot.get("sync_relationship_id") is not None
+                        and snapshot.get("queue_reason") == "sync_generation_pending"
+                    ):
+                        owner = capture_process_identity(os.getpid())
+                        if owner is None:
+                            raise RuntimeError("sync_launch_owner_unavailable")
+                        claimed = self.repository.claim_pending_sync_launch(
+                            job_id, owner_boot_id=owner.host_boot_id,
+                            owner_pid=owner.pid,
+                            owner_start_identity=owner.start_identity,
+                        )
+                        if claimed is None:
+                            return self.repository.snapshot(job_id)
+                        snapshot = claimed
                     if self.scheduler is not None:
                         self.scheduler.acquire(
                             snapshot,
                             parallel_safe=(bool(snapshot.get("parallel_safe")) or
                                            snapshot["workspace_mode"] == "isolated"),
                         )
+                    if snapshot.get("queue_reason") == "sync_generation_launching":
+                        committed = self.repository.commit_pending_sync_launch(
+                            job_id, owner_boot_id=owner.host_boot_id,
+                            owner_pid=owner.pid,
+                            owner_start_identity=owner.start_identity,
+                        )
+                        if committed is None:
+                            if self.scheduler is not None:
+                                self.scheduler.release(job_id)
+                            return self.repository.snapshot(job_id)
+                        snapshot = committed
                     self._launch(self.storage.job_dir(job_id) / "descriptor.json")
                     snapshot = self.repository.snapshot(job_id)
                 except WorkspaceBusy:
+                    if (
+                        snapshot.get("sync_relationship_id") is not None
+                        and snapshot.get("queue_reason") == "sync_generation_launching"
+                    ):
+                        snapshot = self.repository.reset_pending_sync_launch(job_id)
                     snapshot["queue_reason"] = "workspace_or_capacity_busy"
                     if self.scheduler is not None:
                         snapshot["queue"] = self.scheduler.queue_details(snapshot)
                         snapshot["queue_position"] = snapshot["queue"]["position"]
+                except BaseException as exc:
+                    if self.scheduler is not None:
+                        self.scheduler.release(job_id)
+                    self.repository.transition(
+                        job_id, Lifecycle.FAILED,
+                        termination_reason="supervisor_launch_failed",
+                    )
+                    self._finalize_terminal_workspace(job_id)
+                    raise RuntimeError("supervisor_launch_failed") from exc
         if reconcile:
             if self.scheduler is not None and snapshot["lifecycle"] in {"accepted", "queued", "running", "cancelling"}:
                 self.scheduler.renew(job_id, deadline_seconds=snapshot["deadline_seconds"])
@@ -366,7 +499,61 @@ class JobService:
             queue = self.scheduler.queue_details(snapshot)
             snapshot["queue"] = queue
             snapshot["queue_position"] = queue["position"]
+        if snapshot.get("sync_relationship_id") is not None:
+            snapshot["generation"] = {
+                "relationship_id": snapshot["sync_relationship_id"],
+                "generation_id": snapshot.get("sync_generation_id"),
+                "source_access": snapshot.get("source_access"),
+            }
         return snapshot
+
+    def _submission_from_snapshot(self, job_id: str) -> JobSubmission:
+        canonical = self.repository.submission_snapshot(job_id)
+        if canonical is None:
+            raise RuntimeError("synchronized_job_snapshot_unavailable")
+        source = canonical["source"]
+        return JobSubmission(
+            kind=canonical["kind"], project_root=canonical["project_root"],
+            project_identity=canonical["project_identity"],
+            target_kind=canonical["target_kind"],
+            remote_name=canonical.get("remote_name"),
+            workspace_label=canonical["workspace_label"],
+            workspace_mode=canonical["workspace_mode"],
+            argv=tuple(canonical["argv"]),
+            deadline_seconds=canonical["deadline_seconds"],
+            source=SourceIdentity(
+                source["identity"], source.get("commit"),
+                source.get("dirty_digest"),
+            ),
+            request_id=canonical.get("request_id"),
+            parent_job_id=canonical.get("parent_job_id"),
+            retry_of_job_id=canonical.get("retry_of_job_id"),
+            attempt=canonical.get("attempt", 1),
+            cwd_relative=canonical["cwd_relative"],
+            execution_profile=canonical["execution_profile"],
+            output_profile=canonical["output_profile"],
+            output_profile_definition=canonical.get("output_profile_definition"),
+            deadline_source=canonical["deadline_source"],
+            deadline_reminder=canonical.get("deadline_reminder"),
+            stall_seconds=canonical["stall_seconds"],
+            cancel_grace_seconds=canonical.get("cancel_grace_seconds", 20),
+            cancel_on_stall=bool(canonical["cancel_on_stall"]),
+            cleanup_policy=canonical["cleanup_policy"],
+            execution_policy_provenance=canonical.get(
+                "execution_policy_provenance"),
+            environment_keys=tuple(canonical.get("environment_keys", ())),
+            artifact_paths=tuple(canonical.get("artifact_paths", ())),
+            depends_on=tuple(canonical.get("depends_on", ())),
+            failure_policy=canonical.get("failure_policy", "fail-fast"),
+            compatibility_differences=tuple(
+                canonical.get("compatibility_differences", ())),
+            sync_relationship_id=canonical.get("sync_relationship_id"),
+            sync_generation_id=canonical.get("sync_generation_id"),
+            source_access=canonical.get("source_access"),
+            parallel_safe=bool(canonical.get("parallel_safe")),
+            materialization_source_root=canonical.get(
+                "materialization_source_root"),
+        )
 
     def _finalize_terminal_workspace(self, job_id: str) -> dict:
         from sandbox.application.workspace_service import finalize_terminal_workspace
@@ -375,9 +562,13 @@ class JobService:
         if self.workspace_registry is not None and hasattr(
                 self.workspace_registry, "terminal_cleanup_context"):
             context = self.workspace_registry.terminal_cleanup_context()
-        return finalize_terminal_workspace(
-            self.repository, job_id, context,
-            workspace_service=self.workspace_registry)
+        try:
+            return finalize_terminal_workspace(
+                self.repository, job_id, context,
+                workspace_service=self.workspace_registry)
+        finally:
+            if self.sync_gateway is not None:
+                self.sync_gateway.release_job(job_id)
 
     @staticmethod
     def _supervisor_is_owned(snapshot: dict) -> bool:
@@ -597,7 +788,58 @@ class JobService:
         is explicitly interrupted for later inspection.
         """
         interrupted = []
+        if self.sync_gateway is not None:
+            self.sync_gateway.release_terminal_jobs(self.repository)
+        terminal = {item.value for item in (
+            Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+            Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+        )}
         for row in self.repository.list(limit=limit):
+            if (
+                row["lifecycle"] in terminal
+                and row.get("sync_relationship_id") is not None
+                and self.sync_gateway is not None
+            ):
+                self.sync_gateway.release_job(row["job_id"])
+                continue
+            if (
+                row["lifecycle"] == Lifecycle.QUEUED.value
+                and row.get("queue_reason") in {
+                    "sync_generation_launching",
+                    "sync_generation_launch_committed",
+                }
+            ):
+                owner_pid = row.get("launch_owner_pid")
+                observed_owner = capture_process_identity(
+                    int(owner_pid)) if owner_pid else None
+                if (
+                    observed_owner is not None
+                    and observed_owner.host_boot_id == row.get("launch_owner_boot_id")
+                    and observed_owner.start_identity
+                    == row.get("launch_owner_start_identity")
+                ):
+                    continue
+                if row.get("queue_reason") == "sync_generation_launch_committed":
+                    try:
+                        committed_at = datetime.fromisoformat(
+                            str(row.get("updated_at", "")).replace("Z", "+00:00")
+                        )
+                        committed_age = datetime.now(timezone.utc) - committed_at
+                    except (TypeError, ValueError):
+                        committed_age = None
+                    if (
+                        committed_age is not None
+                        and timedelta(0) <= committed_age
+                        < timedelta(seconds=SYNC_LAUNCH_HANDOFF_GRACE_SECONDS)
+                    ):
+                        continue
+                self.repository.transition(
+                    row["job_id"], Lifecycle.INTERRUPTED,
+                    termination_reason="sync_launch_owner_lost",
+                )
+                self._finalize_terminal_workspace(row["job_id"])
+                interrupted.append(row["job_id"])
+                continue
             if row["lifecycle"] not in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
                 continue
             process = self.repository.snapshot(row["job_id"]).get("process") or {}
@@ -726,6 +968,8 @@ class JobService:
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
             if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
+                if snapshot.get("queue_reason") == "sync_generation_launch_committed":
+                    raise RuntimeError("process_launch_in_progress")
                 self.repository.transition(job_id, Lifecycle.CANCELLED,
                     termination_reason="cancelled_before_process_start")
                 if self.scheduler is not None:

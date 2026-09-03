@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .models import (
     DivergenceRecord,
     Participant,
+    PinnedJob,
     SourceGeneration,
     SynchronizationRelationship,
     utc_now,
@@ -68,7 +69,8 @@ class SyncRepository:
         return {
             "schema_version": SCHEMA_VERSION,
             "relationships": {}, "generations": {}, "requests": {},
-            "participants": {}, "divergences": {}, "metrics": {},
+            "participants": {}, "jobs": {}, "divergences": {}, "metrics": {},
+            "conflicts": {},
         }
 
     def _prepare(self) -> None:
@@ -95,13 +97,29 @@ class SyncRepository:
         # These additive collections were introduced after the original v1
         # journal. Keep old owner-only journals readable without advertising a
         # new schema before a migration is necessary.
-        for key in ("participants", "divergences", "metrics"):
+        for key in ("participants", "jobs", "divergences", "metrics", "conflicts"):
             collection = value.setdefault(key, {})
             if not isinstance(collection, dict):
                 raise SyncJournalCorruption("synchronization journal schema is invalid")
         try:
+            for key, item in value["conflicts"].items():
+                validate_identifier(key, "relationship id")
+                if not isinstance(item, dict) or set(item) != {
+                    "code", "request_id", "generation_id",
+                } or item.get("code") != "ownership_conflict":
+                    raise ValueError("conflict record invalid")
+                validate_identifier(item.get("request_id"), "conflict request id")
+                validate_identifier(item.get("generation_id"), "conflict generation id")
             for key, item in value["relationships"].items():
-                if SynchronizationRelationship.from_dict(item).relationship_id != key:
+                hydrated = dict(item)
+                conflict = value["conflicts"].get(key)
+                hydrated.update({
+                    "conflict_code": conflict.get("code") if conflict else None,
+                    "conflict_request_id": conflict.get("request_id") if conflict else None,
+                    "conflict_generation_id": conflict.get("generation_id") if conflict else None,
+                })
+                value["relationships"][key] = hydrated
+                if SynchronizationRelationship.from_dict(hydrated).relationship_id != key:
                     raise ValueError("relationship key mismatch")
             for key, item in value["generations"].items():
                 if SourceGeneration.from_dict(item).generation_id != key:
@@ -117,6 +135,9 @@ class SyncRepository:
                 participant = Participant.from_dict(item)
                 if key != f"{participant.relationship_id}:{participant.participant_id}":
                     raise ValueError("participant key mismatch")
+            for key, item in value["jobs"].items():
+                if PinnedJob.from_dict(item).job_id != key:
+                    raise ValueError("pinned job key mismatch")
             for key, item in value["divergences"].items():
                 divergence = DivergenceRecord.from_dict(item)
                 if key != divergence.relationship_id:
@@ -138,13 +159,29 @@ class SyncRepository:
         return value
 
     def _write_unlocked(self, value: dict[str, Any]) -> None:
+        serialized = dict(value)
+        serialized["relationships"] = {}
+        serialized["conflicts"] = dict(value.get("conflicts") or {})
+        for key, item in value["relationships"].items():
+            relationship = dict(item)
+            code = relationship.pop("conflict_code", None)
+            request_id = relationship.pop("conflict_request_id", None)
+            generation_id = relationship.pop("conflict_generation_id", None)
+            serialized["relationships"][key] = relationship
+            if code is None:
+                serialized["conflicts"].pop(key, None)
+            else:
+                serialized["conflicts"][key] = {
+                    "code": code, "request_id": request_id,
+                    "generation_id": generation_id,
+                }
         descriptor, temporary = tempfile.mkstemp(
             prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent,
         )
         temporary_path = Path(temporary)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+                json.dump(serialized, stream, sort_keys=True, separators=(",", ":"))
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -318,6 +355,60 @@ class SyncRepository:
         return self._locked(lambda value: (
             DivergenceRecord.from_dict(value["divergences"][relationship_id])
             if relationship_id in value["divergences"] else None
+        ))
+
+    def pin_job(
+        self, *, job_id: str, relationship_id: str, generation_id: str,
+        source_access: str, parallel_safe: bool,
+    ) -> PinnedJob:
+        pin = PinnedJob(
+            job_id, relationship_id, generation_id,
+            source_access=source_access, parallel_safe=parallel_safe,
+        )
+        def operation(value: dict[str, Any]) -> PinnedJob:
+            generation = value["generations"].get(generation_id)
+            relationship = value["relationships"].get(relationship_id)
+            if (
+                relationship is None
+                or generation is None
+                or generation.get("relationship_id") != relationship_id
+                or generation.get("lifecycle") != "accepted"
+            ):
+                raise SyncRepositoryError("job generation is not accepted")
+            newest = (
+                relationship.get("pending_generation_id")
+                or relationship.get("accepted_generation_id")
+            )
+            if newest != generation_id:
+                raise SyncRepositoryError("job generation is not newest")
+            existing = value["jobs"].get(job_id)
+            if existing is not None and existing != pin.as_dict():
+                raise SyncRepositoryError("job generation pin changed")
+            value["jobs"][job_id] = pin.as_dict()
+            return pin
+        return self._locked(operation, write=True)
+
+    def release_job(self, job_id: str) -> PinnedJob | None:
+        validate_identifier(job_id, "job id")
+        def operation(value: dict[str, Any]) -> PinnedJob | None:
+            raw = value["jobs"].get(job_id)
+            if raw is None:
+                return None
+            current = PinnedJob.from_dict(raw)
+            released = replace(current, release_state="released")
+            value["jobs"][job_id] = released.as_dict()
+            return released
+        return self._locked(operation, write=True)
+
+    def active_pins(self, relationship_id: str | None = None) -> tuple[PinnedJob, ...]:
+        if relationship_id is not None:
+            validate_identifier(relationship_id, "relationship id")
+        return self._locked(lambda value: tuple(
+            PinnedJob.from_dict(item)
+            for item in value["jobs"].values()
+            if (relationship_id is None
+                or item.get("relationship_id") == relationship_id)
+            and item.get("release_state") == "active"
         ))
 
     def clear_divergence(self, relationship_id: str) -> bool:
@@ -521,6 +612,13 @@ class SyncRepository:
                     relationship, accepted_generation_id=generation_id,
                     pending_generation_id=(None if relationship.pending_generation_id == generation_id
                                            else relationship.pending_generation_id),
+                    lifecycle=(
+                        "active" if relationship.mode in {"live", "checkpoint"}
+                        else "stopped"
+                    ),
+                    conflict_code=None,
+                    conflict_request_id=None,
+                    conflict_generation_id=None,
                     updated_at=when or utc_now(),
                 )
             elif lifecycle in {"refused", "failed", "diverged"}:
@@ -528,7 +626,32 @@ class SyncRepository:
                     relationship,
                     pending_generation_id=(None if relationship.pending_generation_id == generation_id
                                            else relationship.pending_generation_id),
-                    lifecycle=("diverged" if lifecycle == "diverged" else relationship.lifecycle),
+                    lifecycle=(
+                        "diverged" if lifecycle == "diverged"
+                        else "conflicted" if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        )
+                        else relationship.lifecycle
+                    ),
+                    conflict_code=(
+                        "ownership_conflict" if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_code
+                    ),
+                    conflict_request_id=(
+                        generation.request_id if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_request_id
+                    ),
+                    conflict_generation_id=(
+                        generation.generation_id if (
+                            lifecycle == "refused"
+                            and refusal_code == "ownership_conflict"
+                        ) else relationship.conflict_generation_id
+                    ),
                     updated_at=utc_now(),
                 )
             value["generations"][generation_id] = updated.as_dict()

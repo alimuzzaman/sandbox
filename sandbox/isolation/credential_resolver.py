@@ -465,6 +465,33 @@ class SecretReferenceResolver:
         self._leases.add(lease)
         return lease
 
+    def observe_reference_revision(self, binding: CredentialBinding, *,
+                                   revision_key: bytes) -> str:
+        """Prove one registered key and return only its opaque source revision."""
+        from sandbox.secrets.writer import opaque_revision
+        if not isinstance(binding, CredentialBinding) or not isinstance(revision_key, bytes) \
+                or len(revision_key) != 32 or binding.state != "ready" \
+                or binding.is_expired() or (self.owner is not None and binding.owner != self.owner):
+            raise _safe_error("binding_invalid", "revision-bound credential metadata is invalid")
+        reference = self._parse_reference(binding.source_reference)
+        try:
+            observation = self.registry.probe(reference.alias)
+            if not isinstance(observation, dict) or observation.get("safety") != "safe" \
+                    or observation.get("broker_readable") is not True:
+                raise _safe_error("source_unavailable", "registered credential source is unavailable")
+            safe = self.registry.read(reference.alias)
+            document = (parse_document(safe.content) if safe.policy.format == "dotenv"
+                        else parse_secret_document(safe.content, safe.policy.format))
+            record = document.entries.get(reference.key)
+            value = getattr(record, "value", None) if record is not None else None
+            if not isinstance(value, str) or not value:
+                raise _safe_error("source_key_missing", "registered credential key is unavailable")
+            return opaque_revision(revision_key, safe.content)
+        except SecretBrokerError:
+            raise
+        except Exception:
+            raise _safe_error("source_unavailable", "registered credential source is unavailable") from None
+
     def invalidate(self, binding_id: str, *, binding_version: int | None = None) -> int:
         """Invalidate outstanding leases for a binding before durable revoke."""
 

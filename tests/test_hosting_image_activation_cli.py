@@ -21,6 +21,99 @@ def run_sb(*args):
 
 
 class ActivationCliTests(unittest.TestCase):
+    def test_stage_refuses_missing_boolean_and_unsupported_plan_schemas_neutrally(self):
+        import json
+        from sandbox.commands.hosting import _cmd_host_stage
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); plan_path = root / "plan.json"
+            args = SimpleNamespace(project_dir=str(root), environment="development",
+                remote="synthetic", request_id="stage/schema", verified_plan=str(plan_path),
+                expected_generation=0, stage_status=False, confirm=True)
+            for raw in ({}, {"schema_version": True}, {"schema_version": 3}):
+                with self.subTest(raw=raw):
+                    plan_path.write_text(json.dumps(raw))
+                    output = StringIO()
+                    with redirect_stdout(output), self.assertRaises(SystemExit):
+                        _cmd_host_stage(args)
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["schema_version"], 0)
+                    self.assertEqual(payload["code"], "plan_invalid")
+
+    def test_activate_and_rollback_refuse_bad_plan_schemas_neutrally(self):
+        import json
+        from sandbox.commands.hosting import _cmd_host_image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); plan_path = root / "plan.json"
+            proof_path = root / "proof.json"; proof_path.write_text("{}")
+            args = SimpleNamespace(image_action="activate", project_dir=str(root),
+                environment="development", remote="synthetic", request_id="activate/schema",
+                expected_generation=0, verified_plan=str(plan_path),
+                staged_proof=str(proof_path), admission_deadline="2999-01-01T00:00:00Z",
+                confirm=True)
+            for action in ("activate", "rollback"):
+                args.image_action = action
+                for raw in ({}, {"schema_version": True}, {"schema_version": 3}):
+                    with self.subTest(action=action, raw=raw):
+                        plan_path.write_text(json.dumps(raw))
+                        output = StringIO()
+                        with redirect_stdout(output), self.assertRaises(SystemExit):
+                            _cmd_host_image({"project": "widget"}, args)
+                        payload = json.loads(output.getvalue())
+                        self.assertEqual(payload["schema_version"], 0)
+                        self.assertEqual(payload["code"], "artifact_invalid")
+
+    def test_activate_refuses_bad_staged_proof_schema_before_machine_bundle(self):
+        import json
+        from sandbox.commands.hosting import _cmd_host_image
+        from tests.hosting_image_fixtures import verified_plan_mapping
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); plan_path = root / "plan.json"
+            proof_path = root / "proof.json"
+            plan_path.write_text(json.dumps(verified_plan_mapping()))
+            args = SimpleNamespace(image_action="activate", project_dir=str(root),
+                environment="development", remote="synthetic", request_id="activate/proof-schema",
+                expected_generation=0, verified_plan=str(plan_path),
+                staged_proof=str(proof_path), admission_deadline="2999-01-01T00:00:00Z",
+                confirm=True)
+            for raw in ({}, {"schema_version": True}, {"schema_version": 3}):
+                with self.subTest(raw=raw):
+                    proof_path.write_text(json.dumps(raw))
+                    output = StringIO()
+                    with patch("sandbox.commands.hosting._host_image_machine_bundle") as bundle, \
+                            redirect_stdout(output), self.assertRaises(SystemExit):
+                        _cmd_host_image({"project": "widget"}, args)
+                    bundle.assert_not_called()
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["schema_version"], 0)
+                    self.assertEqual(payload["code"], "artifact_invalid")
+
+    def test_v2_runtime_selector_is_manifest_derived_and_includes_deployed_override(self):
+        from sandbox.commands.hosting import _host_image_v2_runtime_selector
+
+        snapshot = SimpleNamespace(
+            snapshot_id="compose-snapshot/a", snapshot_digest="sha256:" + "a" * 64,
+            provider_revision="provider-v2", configuration_digest="sha256:" + "b" * 64,
+            target={"machine_identity": "machine-a", "target_identity": "target-a",
+                    "daemon_identity": "daemon-a"})
+        validated = {"project": "widget", "environment": "production",
+                     "compose": {"files": ["compose.yml", "compose.prod.yml"]}}
+        with patch("sandbox.commands.hosting.remote.resolve_sandbox_home",
+                   return_value="/srv/sandbox"), \
+                patch("sandbox.commands.hosting.hosting.compose_project_name",
+                      return_value="widget-production"):
+            selector = _host_image_v2_runtime_selector(
+                validated, {"name": "synthetic"}, snapshot)
+        self.assertEqual(selector["compose_files"], (
+            "/srv/sandbox/deploy-src/hosts/widget/compose.yml",
+            "/srv/sandbox/deploy-src/hosts/widget/compose.prod.yml",
+            "/srv/sandbox/runtime/hosts/widget/production/compose.override.yml"))
+        self.assertEqual(selector["environment_file"],
+                         "/srv/sandbox/runtime/hosts/widget/production/environment.env")
+        self.assertNotIn("compose_files", snapshot.__dict__)
+
     def test_configuration_hmac_key_is_derived_per_registered_target(self):
         from sandbox.commands.hosting import _host_image_target_configuration_key
 
@@ -140,10 +233,132 @@ class ActivationCliTests(unittest.TestCase):
             transport_type.call_args.kwargs["configuration_binding_key"],
             _host_image_target_configuration_key(b"k" * 32, "machine-a", "target-a"))
 
+    def test_recovery_dispatches_from_stored_v2_transaction_schema(self):
+        from sandbox.commands.hosting import _cmd_host_image
+        from tests.fixtures.hosting_image_activation import DIGEST_A, DIGEST_B
+
+        target = {"machine_identity": "machine-a", "target_identity": "target-a",
+                  "daemon_identity": "daemon-a"}
+        active = {"schema_version": 2, "transaction_digest": DIGEST_A,
+            "request_digest": DIGEST_B, "operation": "activate", "phase": "accepted",
+            "effect_entered": False, "candidate_generation": None,
+            "recovery_context": {"target": target, "compose_project": "widget",
+                                 "selected_services": ["web"]}}
+        called = {}
+
+        class Repository:
+            def operation_transaction(self, _target_key): return nullcontext()
+            def snapshot(self, _target_key):
+                return {"current": None, "active": active, "recovery_results": {}}
+            def recover(self, *_args, **_kwargs):
+                raise AssertionError("v2 state reached v1 recovery")
+            def recover_v2(self, _target_key, **kwargs):
+                called["observation"] = kwargs["observer"]().classification
+                return {"schema_version": 2, "ok": False,
+                    "request_id": kwargs["request_id"], "request_digest": kwargs["request_digest"],
+                    "code": "recovery_no_effect", "promoted": False,
+                    "starting_generation": 0, "resulting_generation": 0}
+
+        runtime = SimpleNamespace(observe_running=lambda **_kwargs: {
+            "target_epoch_start": "machine-a", "target_epoch_end": "machine-a",
+            "target_identity_start": "target-a", "target_identity_end": "target-a",
+            "runtime_epoch_start": "daemon-a", "runtime_epoch_end": "daemon-a",
+            "services": []})
+        args = SimpleNamespace(image_action="recover", project_dir="/synthetic",
+            environment="development", remote="synthetic", request_id="recover/v2",
+            expected_generation=0, activation_transaction=DIGEST_A, confirm=True)
+        output = StringIO()
+        with patch("sandbox.commands.hosting.RecoveryRepository"), \
+                patch("sandbox.commands.hosting.hosting.state_key", return_value="target-a"), \
+                patch("sandbox.commands.hosting.personal_secrets.hosting_binding_key",
+                      return_value=(b"k" * 32, "binding-v1")), \
+                patch("sandbox.commands.hosting.remote.registered_remote_lock",
+                      return_value=nullcontext()), \
+                patch("sandbox.commands.hosting.remote.get_remote", return_value={"name": "synthetic"}), \
+                patch("sandbox.hosting.images.activation.repository.ActivationRepository",
+                      return_value=Repository()), \
+                patch("sandbox.transports.remote_hosting_activation."
+                      "RegisteredRemoteActivationTransport", return_value=runtime), \
+                redirect_stdout(output), self.assertRaises(SystemExit):
+            _cmd_host_image({"project": "widget"}, args)
+        payload = __import__("json").loads(output.getvalue())
+        self.assertEqual(called["observation"], "exact_prior")
+        self.assertEqual(payload["schema_version"], 2)
+
     def test_missing_selectors_refuse_before_manifest_or_state_open(self):
         result = run_sb("host", "image", "activate", "--json")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("explicit", result.stderr + result.stdout)
+
+    def test_v2_activate_dispatches_with_only_manifest_derived_compose_paths(self):
+        import json
+        from sandbox.commands.hosting import _cmd_host_image
+        from tests.test_hosting_image_activation_v2 import artifacts, grant_for
+
+        plan, proof, snapshot = artifacts()
+        grant = grant_for(plan, proof)
+        bundle = {"schema_version": 2, "compose_snapshot": snapshot.as_mapping(),
+            "rollback_grant": grant.as_mapping(),
+            "rollback_grant_public_key": "ssh-ed25519 AAAA",
+            "stage_ledger": {"authority": "feature-050-stage-ledger-v2",
+                             "revision": 1}}
+        captured = {}
+
+        class Repository:
+            def operation_transaction(self, _target): return nullcontext()
+
+        class Service:
+            def __init__(self, **kwargs): captured["service"] = kwargs
+            def execute(self, request, **kwargs):
+                captured["request"] = request
+                captured["execute"] = kwargs
+                return {"schema_version": 2, "ok": True, "result_class": "success",
+                        "code": "committed", "request_id": request.request_id}
+
+        validated = {"project": "lenzora", "environment": "production",
+            "compose": {"files": ["docker-compose.hosted-production.yml"]},
+            "routes": [], "healthcheck": {"path": "/health"}, "basic_auth": None}
+        args = SimpleNamespace(image_action="activate", project_dir="/synthetic",
+            environment="production", remote="synthetic", request_id="activate/v2-cli",
+            expected_generation=0, verified_plan=None, staged_proof=None,
+            admission_deadline="2999-01-01T00:00:00Z", confirm=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"; proof_path = root / "proof.json"
+            plan_path.write_text(json.dumps(plan.as_mapping()))
+            proof_path.write_text(json.dumps(proof.as_mapping()))
+            args.verified_plan = str(plan_path); args.staged_proof = str(proof_path)
+            output = StringIO()
+            with patch("sandbox.commands.hosting.RecoveryRepository") as recovery, \
+                    patch("sandbox.commands.hosting._host_image_machine_bundle",
+                          return_value=bundle), \
+                    patch("sandbox.commands.hosting.hosting.state_key",
+                          return_value="target-a"), \
+                    patch("sandbox.commands.hosting.hosting.compose_project_name",
+                          return_value="lenzora-production"), \
+                    patch("sandbox.commands.hosting._authenticated_machine_identity",
+                          return_value="machine-a"), \
+                    patch("sandbox.commands.hosting.personal_secrets.hosting_binding_key",
+                          return_value=(b"k" * 32, "binding-v1")), \
+                    patch("sandbox.commands.hosting.remote.registered_remote_lock",
+                          return_value=nullcontext()), \
+                    patch("sandbox.commands.hosting.remote.get_remote",
+                          return_value={"name": "synthetic"}), \
+                    patch("sandbox.commands.hosting.remote.resolve_sandbox_home",
+                          return_value="/srv/sandbox"), \
+                    patch("sandbox.commands.hosting._verify_edge"), \
+                    patch("sandbox.hosting.images.activation.repository.ActivationRepository",
+                          return_value=Repository()), \
+                    patch("sandbox.hosting.images.activation.v2_service.ActivationServiceV2",
+                          Service), redirect_stdout(output):
+                recovery.return_value.activation_host_state_port.return_value = object()
+                recovery.return_value.target_mutation_port.return_value = object()
+                _cmd_host_image(validated, args)
+        self.assertEqual(captured["request"].schema_version, 2)
+        self.assertEqual(captured["execute"]["compose_files"], (
+            "/srv/sandbox/deploy-src/hosts/lenzora/docker-compose.hosted-production.yml",
+            "/srv/sandbox/runtime/hosts/lenzora/production/compose.override.yml"))
+        self.assertEqual(captured["execute"]["compose_project"], "lenzora-production")
 
     def test_old_opaque_state_is_not_activation_authority(self):
         from sandbox.hosting.images.activation.repository import decode_activation_state

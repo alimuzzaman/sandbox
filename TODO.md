@@ -18,6 +18,27 @@ Sources reconciled in this pass:
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
 
+## 2026-09-02 resume checkpoint
+
+The reviewed but unmerged Spec 033, Feature 052, and Feature 053 checkpoints,
+their exact remote SHAs, verification evidence, blockers, immutable OCI guard,
+and safe resume order are recorded in
+`docs/resume-2026-09-02-unmerged-feature-work.md`.
+
+- [X] Complete Spec 033 disposable-remote and external evidence gates from
+  `origin/codex/finish-spec033-local`; live acceptance on `scaleway-sandbox`
+  passed on 2026-09-03 and merged into `latest`.
+- [ ] Resolve Feature 052's public lifecycle-port blocker before regenerating
+  tasks. The truthful planning checkpoint is
+  `origin/codex/owned-storage-authority-planning-repair` at
+  `e9111cfe14cfd88521289e8e39302b95cee0774c`; do not merge it as implemented.
+- [ ] Resume Feature 053 with the explicitly authorized T004 disposable
+  OpenLiteSpeed feasibility probe before T019–T108. The reviewed foundation is
+  `origin/codex/server-config-fragments` at
+  `a92272278bf94dd00d217491ea5de246e3bcc88c`.
+- [ ] Preserve Features 048–051 and their OCI hosting paths as immutable input;
+  do not rework, duplicate, or claim their separate human/live gates.
+
 ## Accepted slices integrated in this batch
 
 | Scope | Branch | Accepted SHA | Boundary |
@@ -262,8 +283,12 @@ observations; these are deduplicated work items, not permission to mutate.
 The current 639-record ledger has no unreviewed rows. The stale-network JSON
 record `bab948b8` is resolved by `046993b`; `282cd7f7` is resolved by the local
 Spec 033 same-request recovery slice after 61 sync tests and an independent Sol
-High PASS. Spec 033 `T053`, `T056`, and `T061` remain open for their broader and
-disposable-remote acceptance. The remaining `2672614f` row overlaps Feature
+High PASS. Spec 033 now also has local projection, divergence, isolated-output,
+public-generation, redaction, and compatibility contracts. Generation-aware
+queue/materialization/controller-authority seams are locally covered; synchronized
+remote execution remains fail closed until that authority is composed and live-
+accepted. Disposable-remote acceptance (`T026`, `T026b`, `T061`, `T066`) remains
+open. The remaining `2672614f` row overlaps Feature
 047's remote-job transport and remains deferred to that owner. Historical theme
 rows remain regression and ownership guides; resolved, verified, duplicate,
 and not-applicable records must not be reimplemented without fresh evidence.

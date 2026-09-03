@@ -2150,6 +2150,28 @@ REMOTE_MCP_SERVICE = "sandbox-mcp-remote.service"
 _REMOTE_MCP_ENV = "$HOME/.sandbox/mcp-remote.env"
 _REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
 _REMOTE_MCP_REVISION_RE = re.compile(r"[0-9a-f]{24}")
+_REMOTE_SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}")
+_REMOTE_SOURCE_ACTIVATE_PROGRAM = r'''import ctypes,os,sys
+source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
+flag=2 if os.path.exists(target) else 1
+if hasattr(libc,'renameat2'):
+ result=libc.renameat2(-100,os.fsencode(source),-100,os.fsencode(target),flag)
+else:
+ result=libc.renamex_np(os.fsencode(source),os.fsencode(target),2 if flag==2 else 4)
+if result:
+ error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
+fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+print('exchanged' if flag==2 else 'installed')'''
+_REMOTE_SOURCE_ROLLBACK_PROGRAM = r'''import ctypes,os,sys
+mode,source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
+flag=2 if mode=='exchanged' else 1
+if hasattr(libc,'renameat2'):
+ result=libc.renameat2(-100,os.fsencode(target),-100,os.fsencode(source),flag)
+else:
+ result=libc.renamex_np(os.fsencode(target),os.fsencode(source),2 if flag==2 else 4)
+if result:
+ error=ctypes.get_errno(); raise OSError(error,os.strerror(error),source)
+fd=os.open(os.path.dirname(source),os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)'''
 
 
 class RemoteWpControlError(RuntimeError):
@@ -2224,10 +2246,22 @@ def _validate_remote_mcp_public_url(public_url: str | None) -> str | None:
     return public_url
 
 
-def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) -> str:
+def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None, *,
+                           bound_record: dict | None = None) -> str:
     """Render a non-secret systemd user unit for the remote MCP service."""
     public_url = _validate_remote_mcp_public_url(public_url)
-    record = remote_mcp_service_record(bind, port, public_url)
+    record = bound_record if bound_record is not None \
+        else remote_mcp_service_record(bind, port, public_url)
+    if (type(record) is not dict
+            or set(record) != {"service_name", "transport", "bind", "port",
+                               "runtime_revision", "ownership_marker"}
+            or record.get("service_name") != REMOTE_MCP_SERVICE
+            or record.get("bind") != bind or record.get("port") != port
+            or record.get("transport") != (
+                "https" if ipaddress.ip_address(bind).is_loopback else "tailscale")
+            or _REMOTE_MCP_REVISION_RE.fullmatch(str(record.get("runtime_revision"))) is None
+            or record.get("ownership_marker") != _remote_mcp_marker(bind, port, public_url)):
+        raise ValueError("bound remote MCP service record is invalid")
     public_arg = f" --public-url {shlex.quote(public_url)}" if public_url else ""
     return "\n".join((
         "[Unit]",
@@ -4009,6 +4043,7 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
         "service": record,
         "steps": [
             "prepare the staged Sandbox CLI and MCP virtual environments",
+            "refresh and verify the owner-scoped measured image staging helper",
             "write owner-only remote credential file", "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
@@ -4018,21 +4053,55 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
 
 def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
                                public_url: str | None = None, *, confirm: bool = False,
-                               legacy_pidfile: bool = False) -> dict:
+                               legacy_pidfile: bool = False,
+                               source_revision: str | None = None,
+                               staged_source: dict | None = None) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
     """
-    plan = remote_mcp_service_plan(remote, bind, port, public_url,
-                                   observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
     if not confirm:
-        return plan
+        return remote_mcp_service_plan(
+            remote, bind, port, public_url,
+            observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
     if not isinstance(token, str) or not token:
         raise ValueError("remote MCP token is required")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise ValueError("remote MCP token has unsafe characters")
-    unit = render_remote_mcp_unit(bind, port, public_url)
+    if not isinstance(source_revision, str) \
+            or _REMOTE_SOURCE_REVISION_RE.fullmatch(source_revision) is None:
+        raise ValueError("staged Sandbox source revision is unavailable or invalid")
+    expected_receipt = json.dumps({"schema_version": 1, "source_revision": source_revision,
+        "runtime_revision": staged_source.get("runtime_revision") if isinstance(staged_source, dict)
+        else None,
+        "archive_digest": staged_source.get("archive_digest") if isinstance(staged_source, dict)
+        else None}, sort_keys=True, separators=(",", ":"))
+    if (not isinstance(staged_source, dict)
+            or set(staged_source) != {"stage_name", "source_revision", "runtime_revision",
+                                      "archive_digest", "receipt"}
+            or staged_source.get("source_revision") != source_revision
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", str(staged_source.get("archive_digest"))) is None
+            or re.fullmatch(r"\.sb-src-stage-[0-9a-f]{12}-[0-9a-f]{32}",
+                            str(staged_source.get("stage_name"))) is None
+            or not str(staged_source.get("stage_name")).startswith(
+                ".sb-src-stage-" + source_revision[:12] + "-")
+            or staged_source.get("receipt") != expected_receipt):
+        raise ValueError("staged Sandbox source authority is unavailable or invalid")
     record = remote_mcp_service_record(bind, port, public_url)
+    if record["runtime_revision"] != staged_source["runtime_revision"]:
+        raise ValueError("staged Sandbox runtime record revision does not match exact source")
+    plan = {
+        "status": "planned", "requires_confirm": True, "service": record,
+        "steps": [
+            "prepare the staged Sandbox CLI and MCP virtual environments",
+            "refresh and verify the owner-scoped measured image staging helper",
+            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            "reload user manager and enable linger", "enable and verify selected unit",
+        ],
+        "legacy_pidfile_detected": legacy_pidfile,
+    }
+    unit = render_remote_mcp_unit(
+        record["bind"], record["port"], public_url, bound_record=record)
     legacy_child = (
         f"echo $$ > {_MCP_PIDFILE}; exec ./sb mcp --transport streamable-http "
         f"--bind {shlex.quote(bind)} --port {port}"
@@ -4061,32 +4130,97 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     )
     runtime_preflight = (
         "runtime=$HOME/sandbox/sb-src; test -x \"$runtime/sb\"; "
-        "if test ! -x \"$runtime/.cli-venv/bin/python\"; then python3 -m venv \"$runtime/.cli-venv\"; "
-        "\"$runtime/.cli-venv/bin/python\" -m pip install --quiet --disable-pip-version-check pyyaml; fi; "
-        "( cd \"$runtime\" && ./sb mcp-install >/dev/null ); "
+        "test -f \"$runtime/sandbox/hermes/cron-catalog.json\"; "
+        "if test ! -x \"$runtime/.cli-venv/bin/python\"; then python3 -m venv \"$runtime/.cli-venv\" </dev/null; "
+        "\"$runtime/.cli-venv/bin/python\" -m pip install --quiet --disable-pip-version-check pyyaml </dev/null; fi; "
+        "python3 \"$runtime/scripts/provision_image_stage_helper.py\" "
+        "--sandbox-home \"$HOME/sandbox\" --runtime-revision "
+        + shlex.quote(source_revision) + " </dev/null; "
+        "( cd \"$runtime\" && ./sb mcp-install </dev/null >/dev/null ); "
+        "( cd \"$runtime\" && \"$runtime/.cli-venv/bin/python\" -c "
+        + shlex.quote("from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()")
+        + " </dev/null ); "
     )
+    normalize_program = r'''import os,stat,sys
+home=sys.argv[1]; owner=os.geteuid(); current=''
+fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+for part in home.split('/')[1:]:
+ child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd); info=os.fstat(child)
+ current+='/'+part; mode=stat.S_IMODE(info.st_mode)
+ if not stat.S_ISDIR(info.st_mode): raise SystemExit(69)
+ if current==home:
+  if info.st_uid!=owner or mode&0o002: raise SystemExit(69)
+  os.fchmod(child,mode&~0o022); os.fsync(child)
+ elif info.st_uid not in {0,owner} or mode&0o022: raise SystemExit(69)
+ os.close(fd); fd=child
+try: rfd=os.open('runtime',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+except FileNotFoundError: rfd=None
+if rfd is not None:
+ info=os.fstat(rfd); mode=stat.S_IMODE(info.st_mode)
+ if not stat.S_ISDIR(info.st_mode) or info.st_uid!=owner or mode&0o002: raise SystemExit(69)
+ os.fchmod(rfd,mode&~0o022); os.fsync(rfd); os.close(rfd)
+os.close(fd)'''
+    stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
     command = (
-        "set -eu; umask 077; mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
+        "set -eu; umask 077; IFS= read -r sandbox_remote_mcp_token; "
+        "mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
+        "python3 -c " + shlex.quote(normalize_program) + " \"$HOME/sandbox\" </dev/null; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
         + unit_ownership_preflight +
         "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
-        "had_unit=0; had_env=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
+        "early_cleanup() { rm -rf -- \"$backup\" && test ! -e \"$backup\" || exit 44; }; "
+        "trap early_cleanup EXIT; chmod 700 \"$backup\"; "
+        "had_unit=0; had_env=0; had_active=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
         "if test -f \"$env_path\"; then cp \"$env_path\" \"$backup/env\"; had_env=1; fi; "
+        f"unit_state=$(systemctl --user show --property=LoadState --property=ActiveState --value {REMOTE_MCP_SERVICE} | tr '\\n' ':') || exit 1; "
+        "case \"$unit_state\" in loaded:active:) had_active=1;; "
+        "loaded:inactive:|not-found:inactive:) :;; *) exit 1;; esac; "
         + legacy_preflight +
-        runtime_preflight +
-        "rollback() { if test \"$had_unit\" = 1; then cp \"$backup/unit\" \"$unit_path\"; else rm -f \"$unit_path\"; fi; "
-        "if test \"$had_env\" = 1; then cp \"$backup/env\" \"$env_path\"; else rm -f \"$env_path\"; fi; "
-        "systemctl --user daemon-reload || true; }; "
+        f"stage_root={stage_root}; source_stage=\"$stage_root/tree\"; runtime=$HOME/sandbox/sb-src; "
+        "test -d \"$stage_root\" && test ! -L \"$stage_root\" && test -d \"$source_stage\" && test ! -L \"$source_stage\"; "
+        "test \"$(stat -c '%u:%a' \"$stage_root\")\" = \"$(id -u):700\"; "
+        "test \"$(stat -c '%u:%a' \"$source_stage\")\" = \"$(id -u):700\"; "
+        "test -f \"$source_stage/sb\" && test ! -L \"$source_stage/sb\"; "
+        "test -f \"$source_stage/scripts/provision_image_stage_helper.py\" && "
+        "test ! -L \"$source_stage/scripts/provision_image_stage_helper.py\"; "
+        "if test -e \"$runtime\"; then test -d \"$runtime\" && test ! -L \"$runtime\" && "
+        "test \"$(stat -c '%u' \"$runtime\")\" = \"$(id -u)\"; "
+        "else test ! -L \"$runtime\"; fi; "
+        "test ! -L \"$stage_root/receipt.json\"; "
+        "test \"$(stat -c '%u:%a' \"$stage_root/receipt.json\")\" = \"$(id -u):600\"; "
+        "test \"$(cat -- \"$stage_root/receipt.json\")\" = " + shlex.quote(expected_receipt) + "; "
+        "activate_source() { python3 -c " + shlex.quote(_REMOTE_SOURCE_ACTIVATE_PROGRAM)
+        + " \"$source_stage\" \"$runtime\" </dev/null; }; "
+        "source_mode=''; legacy_stopped=0; unit_tmp=''; env_tmp=''; "
+        "restore_file() { saved=$1; target=$2; tmp=$(mktemp \"$target.rollback.XXXXXX\") || return 1; "
+        "cp \"$saved\" \"$tmp\" && chmod 600 \"$tmp\" && mv \"$tmp\" \"$target\" || "
+        "{ rm -f -- \"$tmp\"; return 1; }; }; "
+        "rollback() { set +e; failed=0; "
+        f"if test \"$had_active\" = 0; then systemctl --user stop {REMOTE_MCP_SERVICE}; stop_rc=$?; "
+        "if test \"$stop_rc\" != 0 && test \"$stop_rc\" != 5; then failed=1; fi; fi; "
+        "if test \"$had_unit\" = 1; then restore_file \"$backup/unit\" \"$unit_path\" || failed=1; else rm -f \"$unit_path\" || failed=1; fi; "
+        "if test \"$had_env\" = 1; then restore_file \"$backup/env\" \"$env_path\" || failed=1; else rm -f \"$env_path\" || failed=1; fi; "
+        "systemctl --user daemon-reload || failed=1; "
+        "if test -n \"$source_mode\"; then python3 -c " + shlex.quote(_REMOTE_SOURCE_ROLLBACK_PROGRAM)
+        + " \"$source_mode\" \"$source_stage\" \"$runtime\" </dev/null || failed=1; fi; "
+        f"if test \"$had_active\" = 1; then systemctl --user restart {REMOTE_MCP_SERVICE} && systemctl --user is-active --quiet {REMOTE_MCP_SERVICE} || failed=1; fi; "
+        "if test \"$legacy_stopped\" = 1; then " + legacy_restart + " || failed=1; fi; "
+        "if test -n \"$unit_tmp\"; then rm -f -- \"$unit_tmp\" || failed=1; fi; "
+        "if test -n \"$env_tmp\"; then rm -f -- \"$env_tmp\" || failed=1; fi; "
+        "rm -rf -- \"$backup\" || failed=1; test ! -e \"$backup\" || failed=1; "
+        "test \"$failed\" = 0; }; "
+        "on_exit() { status=$?; trap - EXIT; rollback || exit 44; exit \"$status\"; }; "
+        "trap on_exit EXIT; source_mode=$(activate_source); "
+        + runtime_preflight +
         "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
         + unit + "UNIT\n"
-        "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; "
-        "IFS= read -r sandbox_remote_mcp_token; "
+        "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; unit_tmp=''; "
         "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
         "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
-        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; "
-        "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; fi; "
+        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; env_tmp=''; "
+        "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; legacy_stopped=1; fi; "
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\"; then "
-        "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; "
+        "exit 1; fi; "
         # A first install has no loaded unit to reset.  Keep reset narrowly
         # scoped, but do not let that benign condition bypass the required
         # enablement and active-state checks below.
@@ -4096,7 +4230,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         # the Sandbox-owned unit to ensure its bearer middleware receives the
         # newly minted token rather than retaining an old process environment.
         f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user restart {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
-        "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
+        "exit 1; fi; trap - EXIT; source_mode=''; rm -rf -- \"$stage_root\" \"$backup\"; "
+        "test ! -e \"$backup\""
     )
     try:
         res = ssh_run(remote, command, timeout=300, input_data=token + "\n")
@@ -4105,11 +4240,13 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if res.returncode != 0:
         if res.returncode in {42, 43}:
             raise RuntimeError("remote_service_ownership_unknown")
+        if res.returncode == 44:
+            raise RuntimeError("remote_service_rollback_indeterminate")
         detail = _safe_remote_diagnostic(res, remote, limit=500)
         if detail:
             raise RuntimeError(f"could not install the remote MCP service: {detail}")
         raise RuntimeError("could not install the remote MCP service")
-    return {**plan, "status": "applied", "service": remote_mcp_service_record(bind, port, public_url)}
+    return {**plan, "status": "applied", "service": record}
 
 
 def resolve_tailscale_ip(remote: dict) -> str:
@@ -4141,9 +4278,13 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
 
 
 def start_remote_mcp_server(remote: dict, bind: str, port: int, token: str,
-                            public_url: str | None = None) -> None:
+                            public_url: str | None = None, *,
+                            source_revision: str | None = None,
+                            staged_source: dict | None = None) -> dict:
     """Compatibility wrapper for the confirmed, systemd-owned service path."""
-    migrate_remote_mcp_service(remote, bind, port, token, public_url, confirm=True)
+    return migrate_remote_mcp_service(
+        remote, bind, port, token, public_url, confirm=True,
+        source_revision=source_revision, staged_source=staged_source)
 
 
 def stop_remote_mcp_server(remote: dict) -> None:

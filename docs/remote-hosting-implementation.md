@@ -202,15 +202,18 @@ workspace, and returns one coherent daemon observation. Feature 050 emits a
 secret-free `StagedImageProof` and stops.
 
 The installed helper is content-addressed and rehashed on every install. Installer and
-transport require root-owned, non-symlink, mode-constrained directories, artifact, and
+transport require provisioning-owner-owned, non-symlink, mode-constrained directories, artifact, and
 manifest. Launch opens those components no-follow, hashes the artifact descriptor, and
 executes that same inode through `/proc/self/fd`; the closed manifest is checked in the same
 launch boundary. The GHCR adapter atomically derives the configured opaque revision and
-one-use lease bytes from one source snapshot before helper launch. Local observation derives the config digest from Docker's immutable image
-ID, keeps that local ID as a separate evidence field, and reads topology from the immutable
-config label rather than echoing the request. Start/end machine and daemon epochs must match.
-The model requires local image ID equality with config digest even after all digests are
-recomputed.
+one-use lease bytes from one source snapshot before helper launch. Local observation keeps the
+signed receipt config digest separate from Docker's local image ID and reads topology from the
+immutable config label rather than echoing the request. Docker 29 may report the exact
+repository-qualified manifest as that local ID; the exact RepoDigest, receipt config digest,
+and platform remain independently validated. Start/end machine and daemon epochs must match.
+Every activation and rollback model requires the local ID to equal either the signed config
+digest or the exact repository-qualified image reference, with no other identity accepted
+after all digests are recomputed.
 Revision-bound lease consume checks revoked/used state, marks the lease used, and detaches
 the required snapshot under the same lock. Thus concurrent invalidation has one deterministic
 winner: it either wipes before consume, or loses after consume has detached the exact bytes.

@@ -1,4 +1,7 @@
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 
 from sandbox.sync.models import (
     DivergenceRecord,
@@ -9,6 +12,13 @@ from sandbox.sync.models import (
     failure_envelope,
     success_envelope,
     validate_sync_envelope,
+)
+from sandbox.sync.repository import SyncRepository
+from sandbox.sync.projection import (
+    ProjectionRefused,
+    authorize_projection,
+    detect_divergence,
+    validate_isolated_outputs,
 )
 
 
@@ -103,6 +113,102 @@ class SyncTransportContractTests(unittest.TestCase):
         self.assertEqual(PinnedJob.from_dict(job.as_dict()), job)
         self.assertEqual(DivergenceRecord.from_dict(divergence.as_dict()), divergence)
         self.assertNotIn("path", repr((participant, job, divergence)).lower())
+
+    def test_concurrent_participants_coalesce_one_source_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = SyncRepository(Path(temporary) / "journal.json")
+            repository.put_relationship(self.relationship)
+            barrier = threading.Barrier(8)
+            results = []
+            errors = []
+
+            def participate(index):
+                try:
+                    barrier.wait()
+                    current = SyncRepository(repository.path)
+                    current.register_participant(Participant(
+                        f"participant_{index}", self.relationship.relationship_id,
+                        "2026-08-26T00:00:02Z",
+                    ))
+                    request_id = f"request_{index}"
+                    digest = current.canonical_request_digest({
+                        "request_id": request_id,
+                        "manifest_digest": "a" * 64,
+                    })
+                    results.append(current.reserve_generation(
+                        relationship_id=self.relationship.relationship_id,
+                        request_id=request_id, request_digest=digest,
+                        manifest_digest="a" * 64, file_count=2, byte_count=10,
+                    ))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=participate, args=(index,))
+                       for index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(repository.list_participants(
+                self.relationship.relationship_id)), 8)
+            self.assertEqual(len({item[0].generation_id for item in results}), 1)
+            self.assertEqual(len(repository.list_generations(
+                self.relationship.relationship_id)), 1)
+
+    def test_managed_source_is_read_only_and_isolated_writes_are_artifact_only(self):
+        managed = authorize_projection(
+            self.relationship, self.generation,
+            requested_generation_id="gen_fixture",
+            source_access="managed_read_only",
+        )
+        self.assertTrue(managed.read_only)
+        self.assertFalse(managed.isolated)
+        isolated = authorize_projection(
+            self.relationship, self.generation,
+            requested_generation_id="gen_fixture",
+            source_access="isolated_copy",
+        )
+        self.assertTrue(isolated.isolated)
+        self.assertTrue(isolated.artifact_only_output)
+        self.assertEqual(
+            validate_isolated_outputs(("reports/result.json", "reports/result.json")),
+            ("reports/result.json",),
+        )
+        for unsafe in ((), ("/private/output",), ("../escape",)):
+            with self.subTest(unsafe=unsafe), self.assertRaises(ProjectionRefused):
+                validate_isolated_outputs(unsafe)
+
+    def test_newest_pending_and_diverged_source_refuse_before_projection(self):
+        pending = SynchronizationRelationship(
+            **{
+                **self.relationship.as_dict(),
+                "pending_generation_id": "gen_pending",
+            }
+        )
+        with self.assertRaisesRegex(ProjectionRefused, "generation_pending"):
+            authorize_projection(
+                pending, self.generation,
+                requested_generation_id="gen_pending",
+                source_access="managed_read_only",
+            )
+        divergence = detect_divergence(
+            self.relationship, self.generation,
+            observed_manifest_digest="b" * 64, affected_count=1,
+        )
+        self.assertIsNotNone(divergence)
+        with self.assertRaisesRegex(ProjectionRefused, "divergence"):
+            authorize_projection(
+                self.relationship, self.generation,
+                requested_generation_id="gen_fixture",
+                source_access="managed_read_only", divergence=divergence,
+            )
+        self.assertIsNone(detect_divergence(
+            self.relationship, self.generation,
+            observed_manifest_digest=self.generation.manifest_digest,
+            affected_count=0,
+        ))
 
 
 if __name__ == "__main__":

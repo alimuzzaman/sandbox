@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dependencies import ToolDependencies
+from sandbox.sync.service import SyncServiceError
 
 
 _service = None
@@ -21,6 +22,11 @@ def _require_service():
     return _service
 
 
+def _failure(message: str, exc: Exception) -> dict:
+    code = exc.code if isinstance(exc, SyncServiceError) else "sync_failed"
+    return {"ok": False, "status": "failed", "code": code, "message": message}
+
+
 def sync_once(project_dir: str, remote: str, workspace_id: str, request_id: str,
               include: list[str] | None = None, checkpoint: bool = False,
               participant_id: str | None = None) -> dict:
@@ -31,9 +37,8 @@ def sync_once(project_dir: str, remote: str, workspace_id: str, request_id: str,
             request_id=request_id, explicit_includes=tuple(include or ()),
             checkpoint=checkpoint, participant_id=participant_id,
         )
-    except Exception:
-        return {"ok": False, "status": "failed", "code": "sync_failed",
-                "message": "synchronization operation failed"}
+    except Exception as exc:
+        return _failure("synchronization operation failed", exc)
 
 
 def sync_status(project_dir: str, remote: str, workspace_id: str) -> dict:
@@ -42,9 +47,8 @@ def sync_status(project_dir: str, remote: str, workspace_id: str) -> dict:
         return _require_service().status(
             project_dir, remote=remote, workspace_id=workspace_id,
         )
-    except Exception:
-        return {"ok": False, "status": "failed", "code": "sync_failed",
-                "message": "synchronization status is unavailable"}
+    except Exception as exc:
+        return _failure("synchronization status is unavailable", exc)
 
 
 def sync_start(project_dir: str, remote: str, workspace_id: str, mode: str,
@@ -55,9 +59,8 @@ def sync_start(project_dir: str, remote: str, workspace_id: str, mode: str,
             project_dir, remote=remote, workspace_id=workspace_id, mode=mode,
             participant_id=participant_id,
         )
-    except Exception:
-        return {"ok": False, "status": "failed", "code": "sync_failed",
-                "message": "synchronization mode could not be started"}
+    except Exception as exc:
+        return _failure("synchronization mode could not be started", exc)
 
 
 def sync_stop(project_dir: str, remote: str, workspace_id: str,
@@ -68,9 +71,8 @@ def sync_stop(project_dir: str, remote: str, workspace_id: str,
             project_dir, remote=remote, workspace_id=workspace_id,
             participant_id=participant_id,
         )
-    except Exception:
-        return {"ok": False, "status": "failed", "code": "sync_failed",
-                "message": "synchronization mode could not be stopped"}
+    except Exception as exc:
+        return _failure("synchronization mode could not be stopped", exc)
 
 
 def sync_resolve(project_dir: str, remote: str, workspace_id: str,
@@ -83,9 +85,8 @@ def sync_resolve(project_dir: str, remote: str, workspace_id: str,
             resolution=resolution, confirm=confirm,
             participant_id=participant_id,
         )
-    except Exception:
-        return {"ok": False, "status": "failed", "code": "sync_failed",
-                "message": "synchronization divergence was not resolved"}
+    except Exception as exc:
+        return _failure("synchronization divergence was not resolved", exc)
 
 
 __all__ = [

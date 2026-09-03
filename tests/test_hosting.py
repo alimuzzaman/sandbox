@@ -101,6 +101,70 @@ def _clean_source_identity():
     return "sha256:" + digest.hexdigest()
 
 
+def _run_host_observer_fixture(services, rows, inspections, *, deadline=10,
+                               inspect_delay=0):
+    """Run the generated observer against bounded fake Compose/Docker CLIs."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        fixture = root / "fixture.json"
+        counter = root / "inspect-count"
+        fixture.write_text(json.dumps({
+            "services": services, "rows": rows, "inspections": inspections,
+            "inspect_delay": inspect_delay, "counter": str(counter),
+        }))
+        compose = root / "compose.py"
+        compose.write_text(
+            "import json,sys\n"
+            "data=json.load(open(sys.argv[1]))\n"
+            "args=sys.argv[2:]\n"
+            "if 'config' in args and '--services' in args:\n"
+            " print('\\n'.join(data['services']))\n"
+            "elif 'ps' in args:\n"
+            " print(json.dumps(data['rows'],separators=(',',':')))\n"
+            "elif 'images' not in args:\n"
+            " raise SystemExit(2)\n"
+        )
+        docker = root / "docker"
+        docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,pathlib,sys,time\n"
+            f"data=json.load(open({str(fixture)!r}))\n"
+            "if sys.argv[1]=='info': print('test-engine');raise SystemExit\n"
+            "if sys.argv[1]!='inspect': raise SystemExit(2)\n"
+            "counter=pathlib.Path(data['counter'])\n"
+            "counter.write_text(str(int(counter.read_text() or '0')+1) "
+            "if counter.exists() else '1')\n"
+            "time.sleep(data['inspect_delay'])\n"
+            "for ident in sys.argv[4:]:\n"
+            " item=data['inspections'].get(ident)\n"
+            " if isinstance(item,str): print(item)\n"
+            " elif isinstance(item,dict):\n"
+            "  selected=[value for value in item.get('environment',[]) "
+            "if isinstance(value,str) and value.partition('=')[0] "
+            "== 'LENZORA_SOURCE_REVISION']\n"
+            "  print(json.dumps(ident)+'\\t'+json.dumps(item.get('service'))+"
+            "''.join('\\t'+json.dumps(value) "
+            "for value in selected))\n"
+            " else: print('null')\n"
+        )
+        docker.chmod(0o755)
+        prefix = shlex.join([sys.executable, str(compose), str(fixture)])
+        command = hosting_cmd._host_observation_command(
+            prefix, services, ["LENZORA_SOURCE_REVISION"], deadline,
+            source_dir=str(ROOT),
+        )
+        environment = dict(os.environ)
+        environment["PATH"] = str(root) + os.pathsep + environment.get("PATH", os.defpath)
+        started = time.monotonic()
+        result = subprocess.run(
+            shlex.split(command), capture_output=True, text=True,
+            check=False, env=environment, timeout=deadline + 3,
+        )
+        elapsed = time.monotonic() - started
+        return json.loads(result.stdout), (
+            int(counter.read_text()) if counter.exists() else 0), elapsed
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -840,7 +904,10 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate", commands[0])
         self.assertIn("--renew-anon-volumes", commands[0])
         build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
-        run_index = next(i for i, command in enumerate(commands) if command.endswith("run --rm setup"))
+        run_index = next(
+            i for i, command in enumerate(commands)
+            if command.endswith("run --rm --pull never setup")
+        )
         self.assertLess(build_index, run_index)
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -879,14 +946,18 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(preflight.call_args.args[2], ["web", "worker", "setup"])
         build_checked.assert_not_called()
         self.assertNotIn("--build", "\n".join(commands))
-        self.assertTrue(all("--no-build" in command for command in commands))
+        self.assertTrue(all(
+            "--no-build" in command
+            for command in commands
+            if " run --rm " not in command
+        ))
         self.assertIn(
             "up -d --no-build --force-recreate --renew-anon-volumes "
             "--remove-orphans web worker",
             commands[0],
         )
         self.assertFalse(any(command.endswith(" build setup") for command in commands))
-        self.assertTrue(any(command.endswith("run --rm --no-build setup") for command in commands))
+        self.assertTrue(any(command.endswith("run --rm --pull never setup") for command in commands))
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._preflight_no_build_images")
@@ -968,6 +1039,7 @@ class TestHostingManifest(unittest.TestCase):
                 "('missing:latest' if mode == 'missing-local' else 'present:latest')\n"
                 " service={'build': {'context': '.'}}\n"
                 " if image is not None: service['image']=image\n"
+                " if mode == 'pull-build': service['pull_policy']='build'\n"
                 " padding=70000 if mode == 'large-valid' else "
                 "(1048576 if mode == 'oversized' else 0)\n"
                 " print(json.dumps({'services': {name: dict(service) for name in "
@@ -981,7 +1053,7 @@ class TestHostingManifest(unittest.TestCase):
             docker.chmod(0o700)
             results = {}
             for mode in (
-                    "no-explicit", "missing-local", "ready", "large-valid", "oversized"):
+                    "no-explicit", "missing-local", "pull-build", "ready", "large-valid", "oversized"):
                 command = hosting_cmd._no_build_image_preflight_command(
                     f"docker compose -p {mode} -f compose.yml",
                     ["web", "worker", "setup"],
@@ -995,6 +1067,7 @@ class TestHostingManifest(unittest.TestCase):
 
         self.assertNotEqual(results["no-explicit"].returncode, 0)
         self.assertNotEqual(results["missing-local"].returncode, 0)
+        self.assertNotEqual(results["pull-build"].returncode, 0)
         self.assertEqual(results["ready"].returncode, 0)
         self.assertEqual(json.loads(results["ready"].stdout), {"ok": True, "services": 3})
         self.assertEqual(results["large-valid"].returncode, 0)
@@ -1463,6 +1536,143 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("subprocess.Popen", program)
         self.assertNotIn("capture_output=True", program)
 
+    def test_observer_batches_many_service_revisions_in_one_inspect_phase(self):
+        revision = "a" * 40
+        services = [f"service-{index}" for index in range(16)]
+        rows = [
+            {"Service": service, "ID": f"{index + 1:064x}",
+             "State": "running", "Health": "healthy"}
+            for index, service in enumerate(services)
+        ]
+        rows.append({
+            "Service": "infrastructure-postgres",
+            "ID": "f" * 64,
+            "State": "running",
+            "Health": "healthy",
+        })
+        secret = "must-not-enter-observer-receipt"
+        inspections = {
+            row["ID"]: {
+                "service": row["Service"],
+                "environment": [
+                    f"UNRELATED_SECRET={secret}",
+                    f"LENZORA_SOURCE_REVISION={revision}",
+                ],
+            }
+            for row in reversed(rows)
+        }
+
+        receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+            services, rows, inspections,
+        )
+
+        self.assertTrue(receipt["complete"])
+        self.assertEqual(inspect_count, 1)
+        self.assertEqual(
+            receipt["revision_checks"],
+            [{"service": service, "key": "LENZORA_SOURCE_REVISION",
+              "observed": revision} for service in services],
+        )
+        revision_phases = [
+            phase for phase in receipt["phases"]
+            if phase["phase"] == "source_revisions"
+        ]
+        self.assertEqual(len(revision_phases), 1)
+        self.assertNotIn(secret, json.dumps(receipt))
+        self.assertNotIn("UNRELATED_SECRET", json.dumps(receipt))
+
+    def test_observer_revision_batch_obeys_the_single_total_deadline(self):
+        service = "web"
+        ident = "1" * 64
+        receipt, inspect_count, elapsed = _run_host_observer_fixture(
+            [service],
+            [{"Service": service, "ID": ident,
+              "State": "running", "Health": "healthy"}],
+            {ident: {"service": service,
+                     "environment": ["LENZORA_SOURCE_REVISION=" + "a" * 40]}},
+            deadline=2, inspect_delay=5,
+        )
+
+        self.assertFalse(receipt["complete"])
+        self.assertEqual(inspect_count, 1)
+        self.assertLess(elapsed, 4)
+        self.assertEqual(receipt["revision_checks"], [{
+            "service": service, "key": "LENZORA_SOURCE_REVISION",
+            "observed": None,
+        }])
+        self.assertEqual(
+            [phase["state"] for phase in receipt["phases"]
+             if phase["phase"] == "source_revisions"],
+            ["timeout"],
+        )
+
+    def test_observer_revision_batch_refuses_inexact_container_evidence(self):
+        revision = "b" * 40
+        cases = {
+            "missing": (
+                [{"Service": "web", "ID": "1" * 64,
+                  "State": "running", "Health": "healthy"}],
+                {"1" * 64: {"service": "web", "environment": []}},
+            ),
+            "duplicate": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "web", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "unexpected": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "intruder", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "intruder", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "swapped_identity": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "worker", "ID": "2" * 64}],
+                {"1" * 64: {"service": "worker", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]}},
+            ),
+            "malformed": (
+                [{"Service": "web", "ID": "1" * 64},
+                 {"Service": "worker", "ID": "2" * 64}],
+                {"1" * 64: {"service": "web", "environment": [
+                    "LENZORA_SOURCE_REVISION=" + revision]},
+                 "2" * 64: "not-json"},
+            ),
+        }
+        expected = [
+            {"service": service, "key": "LENZORA_SOURCE_REVISION",
+             "observed": None}
+            for service in ("web", "worker")
+        ]
+        for label, (rows, inspections) in cases.items():
+            with self.subTest(label=label):
+                receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+                    ["web", "worker"], rows, inspections,
+                )
+                self.assertEqual(receipt["revision_checks"], expected)
+                self.assertNotIn(revision, json.dumps(receipt))
+                self.assertLessEqual(inspect_count, 1)
+
+    def test_observer_revision_batch_drops_malformed_value_without_leaking_it(self):
+        secret = "token-like-value-that-must-not-survive"
+        ident = "1" * 64
+        receipt, inspect_count, _elapsed = _run_host_observer_fixture(
+            ["web"], [{"Service": "web", "ID": ident}],
+            {ident: {"service": "web", "environment": [
+                "LENZORA_SOURCE_REVISION=" + secret]}},
+        )
+
+        self.assertEqual(inspect_count, 1)
+        self.assertEqual(receipt["revision_checks"][0]["observed"], None)
+        self.assertNotIn(secret, json.dumps(receipt))
+
     def test_observer_binds_remote_git_and_every_declared_compose_file_in_epoch(self):
         paths = ("/src/compose.yml", "/src/worker.yml", "/run/override.yml")
         command = hosting_cmd._host_observation_command(
@@ -1646,7 +1856,145 @@ class TestHostingManifest(unittest.TestCase):
             len(result.stdout.encode()), hosting_cmd._HOST_OBSERVATION_MAX_RECEIPT_BYTES,
         )
 
+    def test_post_compose_observation_poll_accepts_transient_unhealthy_then_ready(self):
+        revision = "a" * 40
+        manifest = _manifest_with_derived_revision().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision, services=("web", "worker"))
+        transient["rows"][1]["Health"] = "unhealthy"
+        ready = _ready_observation(revision, services=("web", "worker"))
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          side_effect=[transient, ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)) as sleep:
+            observation, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+                deadline_seconds=5, initial_backoff_seconds=1,
+                max_backoff_seconds=2,
+            )
+
+        self.assertIs(observation, ready)
+        self.assertEqual(classified["health"]["state"], "ready")
+        self.assertEqual(observe.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_post_compose_observation_default_covers_late_readiness_receipt(self):
+        revision = "a" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision)
+        transient["rows"][0]["Health"] = "starting"
+        ready = _ready_observation(revision)
+        now = [0.0]
+
+        with patch.object(
+                hosting_cmd, "_observe_host_runtime",
+                side_effect=[*[transient] * 10, ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            _, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+            )
+
+        self.assertGreater(now[0], 30)
+        self.assertEqual(classified["health"]["state"], "ready")
+        self.assertEqual(observe.call_count, 11)
+
+    def test_post_compose_observation_timeout_retains_last_evidence(self):
+        revision = "b" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        transient = _ready_observation(revision)
+        transient["rows"][0]["Health"] = "starting"
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=transient) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            with self.assertRaises(hosting_cmd._HostRuntimeObservationNotReady) as raised:
+                hosting_cmd._poll_post_compose_host_observation(
+                    validated, {}, "/source", "/runtime", revision,
+                    deadline_seconds=3, initial_backoff_seconds=1,
+                    max_backoff_seconds=2,
+                )
+
+        self.assertIs(raised.exception.observation, transient)
+        self.assertEqual(raised.exception.classified["health"]["state"], "degraded")
+        self.assertFalse(raised.exception.stable)
+        self.assertEqual(observe.call_count, 2)
+
+    def test_post_compose_source_mismatch_stops_without_replay_or_mutation(self):
+        revision = "c" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        mismatch = _ready_observation("d" * 40)
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          return_value=mismatch) as observe, \
+             patch.object(hosting_cmd.time, "sleep") as sleep, \
+             patch.object(hosting_cmd, "_run_compose") as compose, \
+             patch.object(hosting_cmd, "_mark_hosting_init_complete") as initializer, \
+             patch.object(hosting_cmd, "_configure_host_caddy") as edge:
+            with self.assertRaises(hosting_cmd._HostRuntimeObservationNotReady) as raised:
+                hosting_cmd._poll_post_compose_host_observation(
+                    validated, {}, "/source", "/runtime", revision,
+                )
+
+        self.assertTrue(raised.exception.stable)
+        self.assertEqual(
+            raised.exception.classified["source_revision"]["checks"][0]["state"],
+            "mismatch",
+        )
+        observe.assert_called_once()
+        sleep.assert_not_called()
+        compose.assert_not_called()
+        initializer.assert_not_called()
+        edge.assert_not_called()
+
+    def test_post_compose_observation_exception_can_recover_to_ready(self):
+        revision = "e" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        ready = _ready_observation(revision)
+        now = [0.0]
+
+        with patch.object(hosting_cmd, "_observe_host_runtime",
+                          side_effect=[RuntimeError("temporary transport failure"), ready]) as observe, \
+             patch.object(hosting_cmd.time, "monotonic",
+                          side_effect=lambda: now[0]), \
+             patch.object(hosting_cmd.time, "sleep",
+                          side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds)):
+            observation, classified = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+                deadline_seconds=5, initial_backoff_seconds=1,
+                max_backoff_seconds=2,
+            )
+
+        self.assertIs(observation, ready)
+        self.assertTrue(classified["complete"])
+        self.assertEqual(observe.call_count, 2)
+
     def test_observer_rejects_service_and_key_fanout_above_bounds(self):
+        command = hosting_cmd._host_observation_command(
+            "true",
+            [f"service-{index}" for index in range(17)],
+            [], 60,
+        )
+        self.assertTrue(command.startswith("python3 -c "))
+
         with self.assertRaisesRegex(ValueError, "service limit"):
             hosting_cmd._host_observation_command(
                 "docker compose",
@@ -2331,6 +2679,13 @@ class TestHostingManifest(unittest.TestCase):
         runtime = hosting.desired_runtime(validated, "myvps")
         runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
         state = {"version": 1, "hosts": {}}
+        unavailable = hosting_cmd._unavailable_host_observation()
+        failure = hosting_cmd._HostRuntimeObservationNotReady(
+            "remote runtime source/topology/health did not become fully ready before deadline",
+            observation=unavailable,
+            classified=hosting_cmd._classify_host_observation(
+                validated, unavailable, revision),
+        )
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
              patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
@@ -2342,11 +2697,12 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose"), \
              patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime", side_effect=RuntimeError("observation timeout")), \
+             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+                          side_effect=failure), \
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
              patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "runtime observation failed: observation timeout"):
+            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )
@@ -2385,6 +2741,12 @@ class TestHostingManifest(unittest.TestCase):
                 {"phase": "source_revision:web", "state": "timeout"},
             ],
         }
+        failure = hosting_cmd._HostRuntimeObservationNotReady(
+            "remote runtime source/topology/health did not become fully ready before deadline",
+            observation=partial,
+            classified=hosting_cmd._classify_host_observation(
+                validated, partial, revision),
+        )
 
         with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
              patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
@@ -2396,11 +2758,12 @@ class TestHostingManifest(unittest.TestCase):
              patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
              patch.object(hosting_cmd, "_run_compose"), \
              patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=partial), \
+             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+                          side_effect=failure), \
              patch.object(hosting_cmd, "_release_host_apply_reservation"), \
              patch.object(hosting_cmd, "_restore_host_caddy"), \
              patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "not fully proven ready"):
+            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
                 hosting_cmd._apply_host(
                     validated, {}, "myvps", runtime, state, False, "main",
                 )

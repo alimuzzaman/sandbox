@@ -156,7 +156,12 @@ class BatchImageObservation:
             _text(value)
         _digest(self.config_digest)
         _local_image_id(self.local_image_id, self.repo_digest)
-        if self.local_image_id not in {self.config_digest, self.repo_digest} \
+        # Docker 29's containerd image store may expose the pulled manifest
+        # digest (``sha256:…``) as ``.Id``.  Keep the receipt-bound config
+        # digest and qualified RepoDigest checks, while accepting that
+        # equivalent engine identity without widening the repository ref.
+        manifest_digest = self.repo_digest.rsplit("@", 1)[-1]
+        if self.local_image_id not in {self.config_digest, manifest_digest, self.repo_digest} \
                 or self.anonymous_exact_manifest != "denied" \
                 or self.authenticated_exact_manifest != "succeeded":
             raise StagingContractError("observation_invalid")

@@ -129,6 +129,13 @@ class SafeFailureWorker(FakeBatchWorker):
 
 
 class TestV2BatchStaging(unittest.TestCase):
+    def test_batch_observation_accepts_docker29_manifest_image_id(self):
+        plan = plan_set(); item = plan.receipt.images[0]
+        observed = BatchImageObservation(
+            item.name, item.repository, item.image_ref, item.config_digest,
+            item.platform, item.manifest_digest, "denied", "succeeded")
+        self.assertEqual(observed.local_image_id, item.manifest_digest)
+
     def test_v2_remote_delivery_failure_is_not_misreported_as_broker_failure(self):
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService

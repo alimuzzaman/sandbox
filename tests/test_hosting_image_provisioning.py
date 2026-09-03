@@ -14,7 +14,8 @@ from unittest.mock import patch
 from sandbox.hosting.images.provisioning import (
     ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
     install_owner_only_json_pair,
-    prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
+    prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
+    prepare_stage_bundle, reuse_owner_only_stage_bundle,
     target_policy_selector,
 )
 from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
@@ -23,6 +24,81 @@ from tests.test_hosting_image_staging_v2 import observation, plan_set, policy_se
 
 
 class ProvisioningTests(unittest.TestCase):
+    @staticmethod
+    def _stage_bundle_fixture(root: Path, *, expires_at: str = "2999-01-01T00:00:00Z"):
+        plan = plan_set(); scope = plan.policy.target_scope
+        target = StagingTarget("machine-a",
+            f"{scope.remote}/{scope.project}/{scope.environment}", "daemon-a")
+        helper = HelperIdentity("sha256:" + "9" * 64,
+            "sandbox-image-stage-helper-v2", "a" * 40,
+            "systemd-cgroup-v2-batch-stage-v2")
+        binding = prepare_stage_binding(
+            plan=plan, target=target, machine_identity="machine-a",
+            source_reference="personal/GHCR_TOKEN", expires_at=expires_at,
+            owner="personal")
+        bundle = prepare_stage_bundle(
+            plan=plan, target=target, helper=helper, binding=binding,
+            credential_reference_revision="credential-revision-a",
+            secret_sources={})
+        path = root / "policies" / "stage.json"
+        install_owner_only_json(path, bundle)
+        return plan, target, helper, bundle, path
+
+    def test_stage_bundle_reuses_exact_unexpired_policy_despite_new_requested_expiry(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            reused = reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+        self.assertEqual(reused, bundle)
+
+    def test_stage_bundle_reuse_refuses_expired_policy(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            bundle["binding"]["expires_at"] = "2000-01-01T00:00:00Z"
+            path.unlink(); install_owner_only_json(path, bundle)
+            with self.assertRaises(ProvisioningError):
+                reuse_owner_only_stage_bundle(
+                    path, plan=plan, target=target, helper=helper,
+                    machine_identity="machine-a",
+                    source_reference="personal/GHCR_TOKEN", owner="personal",
+                    credential_reference_revision="credential-revision-a",
+                    secret_sources={})
+
+    def test_stage_bundle_reuse_refuses_malformed_or_mismatched_authority(self):
+        mutations = {
+            "schema": lambda value: value.update(extra="unexpected"),
+            "plan": lambda value: value["policy"].update(
+                plan_set_digest="sha256:" + "f" * 64),
+            "target": lambda value: value["policy"]["target"].update(
+                daemon_identity="daemon-b"),
+            "helper": lambda value: value["policy"]["helper"].update(
+                runtime_revision="b" * 40),
+            "capability": lambda value: value["policy"].update(
+                capability_revision="other-capability"),
+            "source": lambda value: value["binding"].update(
+                source_reference="personal/OTHER_TOKEN"),
+            "reference_revision": lambda value: value["policy"].update(
+                credential_reference_revision="credential-revision-b"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+                root = Path(temp); root.chmod(0o700)
+                plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+                mutate(bundle); path.unlink(); install_owner_only_json(path, bundle)
+                with self.assertRaises(ProvisioningError):
+                    reuse_owner_only_stage_bundle(
+                        path, plan=plan, target=target, helper=helper,
+                        machine_identity="machine-a",
+                        source_reference="personal/GHCR_TOKEN", owner="personal",
+                        credential_reference_revision="credential-revision-a",
+                        secret_sources={})
+
     def test_image_identity_accepts_partial_resource_evidence_but_recovery_stays_strict(self):
         from sandbox.commands.hosting import _authenticated_machine_identity
         from sandbox.resources.host_memory import HostMemoryStatusProjection
@@ -202,7 +278,7 @@ class ProvisioningTests(unittest.TestCase):
                 provision_phase="stage-bundle", confirm=True, verified_plan=str(plan_path),
                 expected_generation=0, credential_source_reference="personal/GHCR_TOKEN",
                 credential_expires_at="2999-01-01T00:00:00Z")
-            output = StringIO()
+            outputs = []
             runtime = root / "runtime"
             (runtime / "hosting").mkdir(parents=True, mode=0o700)
             recovery = ShortTimeoutRecoveryRepository(
@@ -229,17 +305,26 @@ class ProvisioningTests(unittest.TestCase):
                     patch("sandbox.commands.hosting._authenticated_machine_identity",
                           return_value="machine-a"), \
                     patch("sandbox.transports.remote_hosting_images.RegisteredRemoteImageTransport.observe_authority",
-                          return_value={"daemon_identity": "daemon-a", "helper": {}}), \
-                    redirect_stdout(output):
-                try: _cmd_host_image_provision({}, validated, args)
-                except SystemExit: pass
-            payload = json.loads(output.getvalue())
+                          return_value={"daemon_identity": "daemon-a", "helper": {}}):
+                for expiry in ("2999-01-01T00:00:00Z", "2999-02-01T00:00:00Z"):
+                    args.credential_expires_at = expiry
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        try: _cmd_host_image_provision({}, validated, args)
+                        except SystemExit: pass
+                    outputs.append((json.loads(output.getvalue()), output.getvalue()))
+            payload = outputs[0][0]
             self.assertTrue(payload["ok"], payload)
             self.assertEqual(payload["target"]["target_identity"], target_id)
             self.assertEqual(payload["stage_generation"], 1)
             self.assertEqual(payload["stage_ledger_revision"], 7)
             self.assertEqual(payload["activation_generation"], 0)
-            self.assertNotIn(canary, output.getvalue())
+            self.assertEqual([item[0]["result_class"] for item in outputs],
+                             ["installed", "replayed"])
+            self.assertEqual([item[0]["stage_generation"] for item in outputs], [1, 1])
+            self.assertEqual([item[0]["staging_policy_digest"] for item in outputs],
+                             [payload["staging_policy_digest"], payload["staging_policy_digest"]])
+            self.assertNotIn(canary, "".join(item[1] for item in outputs))
             installed = json.loads(Path(payload["installed_path"]).read_text())
             self.assertEqual(installed["binding"]["owner"], "personal")
             self.assertNotIn(canary, json.dumps(installed))

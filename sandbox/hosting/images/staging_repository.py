@@ -727,6 +727,15 @@ class StageRepository:
             state = self._load_unlocked(target_identity)
             return state["generation"], state["ledger_revision"]
 
+    @contextmanager
+    def policy_provisioning_snapshot(self, target_identity: str):
+        """Hold an idle exact ledger snapshot while a stage policy is provisioned."""
+        with self.target_lock(target_identity):
+            state = self._load_unlocked(target_identity)
+            if state["active_owner"] is not None:
+                raise StageRepositoryError("target_busy")
+            yield state["generation"], state["ledger_revision"]
+
     def fence_possible_effect(self, request, *, code: str = "unknown_effect"):
         generation = self.transition(request, "uncertain")
         return self.commit(request, _failure_for(request, "uncertain", code, generation))

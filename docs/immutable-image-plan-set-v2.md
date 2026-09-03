@@ -124,6 +124,14 @@ adds `manifest-v2.json` in the same immutable digest-and-runtime-revision helper
 directory. Confirmed remote-service migration refreshes this authority before
 restarting the user service; it never rewrites an active revision's directory.
 
+Provisioning the same plan again may return `replayed` only while the retained
+owner-only bundle is structurally exact, its binding remains ready and unexpired,
+the credential-source opaque revision is unchanged, the target and measured helper
+still match, and the stage ledger has no active or uncertain owner. The replay
+returns the retained policy digest and the current idle stage generation; it does
+not mint replacement authority. Expired, malformed, mismatched, active, or uncertain
+evidence refuses without overwriting the retained file or opening a staging effect.
+
 The helper runs as an exact transient `systemd --user` unit. Its executable and
 manifests are owned by that authenticated Sandbox service user with directory,
 helper, and manifest modes `0700`, `0500`, and `0600`. Credential scratch space

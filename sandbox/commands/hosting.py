@@ -3608,7 +3608,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
         from sandbox.hosting.images.provisioning import (
             ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
             install_owner_only_json_pair,
-            prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
+            prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
+            prepare_stage_bundle, reuse_owner_only_stage_bundle,
         )
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -3698,7 +3699,6 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                 response["target"] = target.as_mapping()
                 if phase == "stage-bundle":
                     stage = StageRepository()
-                    stage_generation, stage_ledger_revision = stage.target_revision(target_id)
                     activation = ActivationRepository(
                         host_state_port=recovery.activation_host_state_port(),
                         stage_repository=stage,
@@ -3707,7 +3707,6 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         target_id)["generation"]
                     if args.expected_generation != activation_generation:
                         raise ProvisioningError("generation_mismatch")
-                    from sandbox.isolation.credential_binding import CredentialBinding
                     from sandbox.isolation.credential_resolver import SecretReferenceResolver
                     from sandbox.config.secrets import normalize_secret_config
                     from sandbox.secrets.sources import SourceRegistry
@@ -3725,34 +3724,32 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         if isinstance(source_descriptor, dict)
                         and isinstance(source_descriptor.get("owner"), str)
                         else registry.policy(source_alias).scope)
-                    binding_seed = json.dumps({"target": target.as_mapping(),
-                        "plan_set_digest": plan.plan_set_digest,
-                        "source_reference": args.credential_source_reference,
-                        "expires_at": args.credential_expires_at},
-                        sort_keys=True, separators=(",", ":")).encode()
-                    binding_hex = hashlib.sha256(
-                        b"sandbox-hosting-stage-binding-v2\0" + binding_seed).hexdigest()
-                    binding = CredentialBinding(
-                        binding_id="image-stage-" + binding_hex[:32],
-                        instance_id="host-" + hashlib.sha256(machine.encode()).hexdigest()[:32],
-                        source_reference=args.credential_source_reference,
-                        policy_digest=hashlib.sha256(b"policy\0" + binding_seed).hexdigest(),
-                        egress_digest=hashlib.sha256(b"egress\0" + binding_seed).hexdigest(),
-                        broker_digest=hashlib.sha256(b"broker\0" + binding_seed).hexdigest(),
-                        scheme="https", host="ghcr.io", port=443, method="GET",
-                        path="/token", auth_form="authorization_bearer",
-                        expires_at=args.credential_expires_at, owner=owner,
-                        version=1, state="ready")
                     resolver = SecretReferenceResolver(registry, owner=owner)
                     revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
-                    credential_revision = resolver.observe_reference_revision(
-                        binding, revision_key=revision_key)
-                    bundle = prepare_stage_bundle(plan=plan, target=target, helper=helper,
-                        binding=binding, credential_reference_revision=credential_revision,
-                        secret_sources=secrets)
                     path = _host_image_staging_policy_path(
                         selector, plan.plan_set_digest)
-                    disposition = install_owner_only_json(path, bundle)
+                    with stage.policy_provisioning_snapshot(target_id) as (
+                            stage_generation, stage_ledger_revision):
+                        binding = prepare_stage_binding(
+                            plan=plan, target=target, machine_identity=machine,
+                            source_reference=args.credential_source_reference,
+                            expires_at=args.credential_expires_at, owner=owner)
+                        credential_revision = resolver.observe_reference_revision(
+                            binding, revision_key=revision_key)
+                        bundle = reuse_owner_only_stage_bundle(
+                            path, plan=plan, target=target, helper=helper,
+                            machine_identity=machine,
+                            source_reference=args.credential_source_reference, owner=owner,
+                            credential_reference_revision=credential_revision,
+                            secret_sources=secrets)
+                        if bundle is None:
+                            bundle = prepare_stage_bundle(
+                                plan=plan, target=target, helper=helper, binding=binding,
+                                credential_reference_revision=credential_revision,
+                                secret_sources=secrets)
+                            disposition = install_owner_only_json(path, bundle)
+                        else:
+                            disposition = "replayed"
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,
                         staging_policy_digest=bundle["policy"]["policy_digest"],

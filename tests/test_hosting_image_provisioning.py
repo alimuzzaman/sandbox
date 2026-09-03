@@ -15,7 +15,7 @@ from sandbox.hosting.images.provisioning import (
     ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
     install_owner_only_json_pair,
     prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
-    prepare_stage_bundle, reuse_owner_only_stage_bundle,
+    prepare_stage_bundle, replace_expired_stage_bundle, reuse_owner_only_stage_bundle,
     target_policy_selector,
 )
 from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
@@ -79,15 +79,41 @@ class ProvisioningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
             root = Path(temp); root.chmod(0o700)
             plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
-            bundle["binding"]["expires_at"] = "2000-01-01T00:00:00Z"
+            expired_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2000-01-01T00:00:00Z", owner="personal")
+            bundle["binding"] = expired_binding.to_dict()
             path.unlink(); install_owner_only_json(path, bundle)
-            with self.assertRaises(ProvisioningError):
-                reuse_owner_only_stage_bundle(
-                    path, plan=plan, target=target, helper=helper,
-                    machine_identity="machine-a",
-                    source_reference="personal/GHCR_TOKEN", owner="personal",
-                    credential_reference_revision="credential-revision-a",
-                    secret_sources={})
+            self.assertIsNone(reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={}))
+
+    def test_stage_bundle_rotates_only_an_expired_ready_policy(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            expired_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2000-01-01T00:00:00Z", owner="personal")
+            bundle["binding"] = expired_binding.to_dict()
+            path.unlink(); install_owner_only_json(path, bundle)
+            fresh_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2999-01-01T00:00:00Z", owner="personal")
+            replacement = prepare_stage_bundle(
+                plan=plan, target=target, helper=helper, binding=fresh_binding,
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+            self.assertEqual(replace_expired_stage_bundle(path, replacement), "rotated")
+            self.assertEqual(json.loads(path.read_text()), replacement)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                replace_expired_stage_bundle(path, bundle)
 
     def test_stage_bundle_reuse_refuses_malformed_or_mismatched_authority(self):
         mutations = {

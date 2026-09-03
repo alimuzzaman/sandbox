@@ -1187,7 +1187,10 @@ opens the owner-only, mode-constrained helper directories, artifact, and manifes
 following symlinks. It hashes and executes the same already-open artifact inode through
 `/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
 helper or manifest evidence is never overwritten when it disagrees. The configured
-credential-source opaque revision must match before the helper launches.
+credential-source opaque revision must match before the helper launches. If a
+plan-keyed staging bundle is retained after its short ready binding expires,
+provisioning may rotate that one binding atomically for the same plan. Live,
+revoked, malformed, or uncertain authority remains non-overwritable.
 The wrapper does not open `/`: `ProtectControlGroups=yes` can deny that operation in the
 user manager. It instead opens the first absolute path component without following links.
 Only that component may report systemd's mapped UID `65534`; the service home and every

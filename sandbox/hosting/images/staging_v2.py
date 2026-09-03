@@ -155,7 +155,7 @@ class BatchImageObservation:
                       self.anonymous_exact_manifest, self.authenticated_exact_manifest):
             _text(value)
         _digest(self.config_digest); _digest(self.local_image_id)
-        if self.local_image_id != self.config_digest \
+        if self.local_image_id not in {self.config_digest, self.repo_digest} \
                 or self.anonymous_exact_manifest != "denied" \
                 or self.authenticated_exact_manifest != "succeeded":
             raise StagingContractError("observation_invalid")

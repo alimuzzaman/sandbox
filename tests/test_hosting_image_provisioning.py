@@ -56,6 +56,25 @@ class ProvisioningTests(unittest.TestCase):
                 secret_sources={})
         self.assertEqual(reused, bundle)
 
+    def test_stage_bundle_replays_legacy_millisecond_expiry_after_reload(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(
+                root, expires_at="2999-01-01T00:00:00.466Z")
+            # Reproduce a bundle written before timestamp hashing used the
+            # binding model's canonical form: the persisted field had six
+            # fractional digits while its binding id was derived from .466Z.
+            legacy = {**bundle, "binding": {
+                **bundle["binding"], "expires_at": "2999-01-01T00:00:00.466000Z"}}
+            path.unlink(); install_owner_only_json(path, legacy)
+            reused = reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+        self.assertEqual(reused, legacy)
+
     def test_stage_bundle_reuse_refuses_expired_policy(self):
         with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
             root = Path(temp); root.chmod(0o700)

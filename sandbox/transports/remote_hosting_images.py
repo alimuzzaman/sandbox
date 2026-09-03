@@ -342,6 +342,60 @@ class RegisteredRemoteImageTransport:
                 "unit_inactive": True, "cgroup_empty_or_removed": True,
                 "cleanup_complete": True}
 
+    def observe_posteffect_cleanup(self, remote_name: str, unit: str) -> dict:
+        """Prove post-effect process and workspace closure without mutation."""
+        if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None \
+                or type(unit) is not str \
+                or re.fullmatch(r"sandbox-image-stage-[0-9a-f]{32}\.service", unit) is None:
+            raise RemoteImageStageError("protocol_invalid")
+        remote = self._lookup(remote_name)
+        if type(remote) is not dict or remote.get("provisioned") is not True:
+            raise RemoteImageStageError("remote_unavailable")
+        uid_result = self._observe_unit(remote, "id -u", timeout=15)
+        uid_text = str(getattr(uid_result, "stdout", "")).strip()
+        if getattr(uid_result, "returncode", 1) != 0 or not uid_text.isascii() \
+                or not uid_text.isdecimal() or not 1 <= int(uid_text) <= 2**31 - 1:
+            raise RemoteImageStageError("helper_failed")
+        uid = int(uid_text)
+        expected_cgroup = (f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/"
+                           f"{unit}")
+        observed = self._observe_unit(
+            remote, "systemctl --user show " + _UNIT_SHOW + " " + shlex.quote(unit),
+            timeout=15)
+        values = self._closed_unit_properties(observed)
+        unit_closed = self._not_found_unit(values, unit) or (
+            values is not None and values["LoadState"] == "loaded"
+            and values["ActiveState"] == "inactive" and values["SubState"] == "dead"
+            and values["MainPID"] == "0" and values["ControlGroup"] == ""
+            and values["Result"] == "success" and values["ExecMainStatus"] == "0")
+        if not unit_closed:
+            raise RemoteImageStageError("helper_failed")
+        cgroup = self._observe_unit(
+            remote, "test ! -e " + shlex.quote("/sys/fs/cgroup" + expected_cgroup)
+            + " || grep -qx 'populated 0' "
+            + shlex.quote("/sys/fs/cgroup" + expected_cgroup + "/cgroup.events"), timeout=15)
+        if getattr(cgroup, "returncode", 1) != 0:
+            raise RemoteImageStageError("helper_failed")
+        workspace = f"/run/user/{uid}/sandbox-image-stage"
+        workspace_program = (
+            "import os,stat,sys\n"
+            "path=sys.argv[1]\n"
+            "try: info=os.lstat(path)\n"
+            "except FileNotFoundError: raise SystemExit(0)\n"
+            "except OSError: raise SystemExit(2)\n"
+            "if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode): raise SystemExit(3)\n"
+            "try:\n"
+            " with os.scandir(path) as entries:\n"
+            "  if next(entries,None) is not None: raise SystemExit(4)\n"
+            "except OSError: raise SystemExit(5)\n")
+        workspace_check = self._observe_unit(
+            remote, "python3 -c " + shlex.quote(workspace_program) + " "
+            + shlex.quote(workspace), timeout=15)
+        if getattr(workspace_check, "returncode", 1) != 0:
+            raise RemoteImageStageError("helper_failed")
+        return {"unit_inactive": True, "cgroup_empty_or_removed": True,
+                "workspace_absent": True}
+
     def prepare(self, remote_name: str, plan_frame: dict, *, timeout_seconds: int):
         if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None:
             raise RemoteImageStageError("remote_unavailable")

@@ -219,6 +219,54 @@ class TestImageStagingProcess(unittest.TestCase):
                                   "registry", "credential", "helper"):
                     self.assertNotIn(forbidden, rendered)
 
+    def test_posteffect_reconcile_observer_is_read_only_and_requires_full_cleanup(self):
+        from sandbox.transports.remote_hosting_images import (
+            RegisteredRemoteImageTransport, RemoteImageStageError,
+        )
+        unit = "sandbox-image-stage-" + "a" * 32 + ".service"
+        inactive = ("LoadState=loaded\nActiveState=inactive\nSubState=dead\n"
+                    "Description=old-attempt\nMainPID=0\nControlGroup=\n"
+                    "Result=success\nExecMainStatus=0\n")
+        not_found = ("LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                     f"Description={unit}\nMainPID=0\nControlGroup=\n"
+                     "Result=success\nExecMainStatus=0\n")
+        for name, unit_output, cgroup_rc, workspace_rc, accepted in (
+                ("closed", inactive, 0, 0, True),
+                ("not-found", not_found, 0, 0, True),
+                ("active", inactive.replace("ActiveState=inactive", "ActiveState=active"),
+                 0, 0, False),
+                ("populated", inactive, 1, 0, False),
+                ("workspace-present", inactive, 0, 4, False),
+                ("workspace-observer-error", inactive, 0, 2, False)):
+            with self.subTest(name=name):
+                commands = []
+                def observe(_remote, command, timeout):
+                    commands.append(command)
+                    if command == "id -u":
+                        return subprocess.CompletedProcess((), 0, stdout="1000\n")
+                    if command.startswith("systemctl --user show"):
+                        return subprocess.CompletedProcess((), 0, stdout=unit_output)
+                    if "cgroup.events" in command:
+                        return subprocess.CompletedProcess((), cgroup_rc, stdout="")
+                    if "sandbox-image-stage" in command:
+                        return subprocess.CompletedProcess((), workspace_rc, stdout="")
+                    return subprocess.CompletedProcess((), 1, stdout="")
+                transport = RegisteredRemoteImageTransport(
+                    remote_lookup=lambda _name: {"provisioned": True},
+                    ssh_private_frame=lambda *a, **k: None, unit_observer=observe,
+                    resolve_home=lambda _remote: "/home/alim/sandbox")
+                if accepted:
+                    self.assertEqual(transport.observe_posteffect_cleanup("remote-a", unit),
+                        {"unit_inactive": True, "cgroup_empty_or_removed": True,
+                         "workspace_absent": True})
+                else:
+                    with self.assertRaises(RemoteImageStageError):
+                        transport.observe_posteffect_cleanup("remote-a", unit)
+                rendered = " ".join(commands).lower()
+                for forbidden in (" kill ", " stop ", "reset-failed", "docker",
+                                  "registry", "cat "):
+                    self.assertNotIn(forbidden, rendered)
+
     def test_cancel_requires_exact_unit_inactive_and_exact_cgroup_empty(self):
         from sandbox.transports.remote_hosting_images import _PreparedRemoteStage
 

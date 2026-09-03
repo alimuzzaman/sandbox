@@ -89,6 +89,53 @@ class ImagePlanSetStagingService:
         except (StageRepositoryError, OSError):
             return terminal
 
+    def reconcile_posteffect_cleanup(self, request: StageRequestSet,
+                                     machine_policy, observer) -> StageResultSet:
+        """Close proven cleanup-only uncertainty without replaying any effect."""
+        policy, code = admit_stage_request_set(request, machine_policy)
+        if policy is None:
+            return self._failure(request, request.expected_generation, code, "refused")
+        current = self.repository.record_status(
+            request.target.target_identity, request.request_id)
+        terminal = self.repository.lookup_for_request(request)
+        if isinstance(terminal, StageResultSet) and terminal.result_class != "uncertain":
+            return terminal
+        if type(current) is not dict or type(terminal) is not StageResultSet \
+                or terminal.result_class != "uncertain" \
+                or current.get("phase") != "uncertain" \
+                or current.get("effect_entered") is not True \
+                or current.get("request_id") != request.request_id \
+                or current.get("request_digest") != request.request_digest \
+                or current.get("generation") != terminal.generation \
+                or type(current.get("ledger_revision")) is not int:
+            return terminal if isinstance(terminal, StageResultSet) else self._failure(
+                request, request.expected_generation, "acceptance_unknown", "uncertain")
+        try:
+            evidence = observer(request, dict(current))
+        except Exception:
+            return terminal
+        expected = {"unit_inactive": True, "cgroup_empty_or_removed": True,
+                    "workspace_absent": True}
+        if type(evidence) is not dict or evidence != expected:
+            return terminal
+        try:
+            return self.repository.close_posteffect_uncertain(
+                request, expected_ledger_revision=current["ledger_revision"])
+        except (StageRepositoryError, OSError):
+            return terminal
+
+    def reconcile_uncertain_failure(self, request: StageRequestSet, machine_policy,
+                                    precredential_observer,
+                                    posteffect_observer) -> StageResultSet:
+        """Select the close-only observer allowed by the durable effect fence."""
+        current = self.repository.record_status(
+            request.target.target_identity, request.request_id)
+        if type(current) is dict and current.get("effect_entered") is True:
+            return self.reconcile_posteffect_cleanup(
+                request, machine_policy, posteffect_observer)
+        return self.reconcile_precredential_failure(
+            request, machine_policy, precredential_observer)
+
     def _execute_accepted(self, request, policy, generation):
         prepared = None; broker_lease = None
         process = {"unit_inactive": True, "cgroup_empty_or_removed": True,

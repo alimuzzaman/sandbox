@@ -3275,7 +3275,12 @@ def _cmd_host_stage(args) -> None:
                     "request_digest": supplied_request.request_digest,
                     "generation": record["generation"],
                     "ledger_revision": record["ledger_revision"], **observed}
-            result = service.reconcile_precredential_failure(request, policy, observe_absence)
+            def observe_cleanup(supplied_request, _record):
+                from sandbox.hosting.images.staging_worker import unit_name
+                unit = unit_name(supplied_request.request_id, supplied_request.request_digest)
+                return transport.observe_posteffect_cleanup(args.remote, unit)
+            result = service.reconcile_uncertain_failure(
+                request, policy, observe_absence, observe_cleanup)
         else:
             binding = CredentialBinding.from_dict(private["binding"])
             registry = SourceRegistry(
@@ -3311,7 +3316,8 @@ def _cmd_host_stage(args) -> None:
     payload = result.as_mapping()
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     if not result.ok and result.result_class != "in_progress" \
-            and not (reconcile and result.code == "precredential_bootstrap_failed"):
+            and not (reconcile and result.code in {
+                "precredential_bootstrap_failed", "cleanup_reconciled"}):
         raise SystemExit(1)
 
 

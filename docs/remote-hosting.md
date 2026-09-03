@@ -1223,11 +1223,13 @@ capacity only after pulling.
 An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
 `--stage-status` reports the same authority without opening a credential source or helper.
 Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
-workspace, and no-effect evidence; possible-effect reconciliation observes or fences and
-never launches a duplicate helper.
+workspace, and no-effect evidence. Effect-entered reconciliation is close-only: it can
+release the fence only after read-only proof that the exact unit is inactive or absent,
+the exact cgroup is empty or removed, and the staging workspace has no operation entries.
+It never launches a duplicate helper.
 
-For a v2 request already retained as terminal `uncertain` before credentials, use the
-separate protected close-only intent with the exact original selectors and plan:
+For a v2 request already retained as terminal `uncertain`, use the separate protected
+close-only intent with the exact original selectors and plan:
 
 ```sh
 ./sb host stage --project-dir /absolute/project --environment production \
@@ -1236,10 +1238,14 @@ separate protected close-only intent with the exact original selectors and plan:
 ```
 
 This does not replay staging. It reads no secret or broker source and starts no helper. It
-only observes the derived deterministic user unit and exact cgroup. An exact absent-unit,
-empty-cgroup, no-effect result is atomically closed as
-`failed/precredential_bootstrap_failed`; every mismatch leaves the old uncertainty and
-single-flight fence unchanged. Exact replay returns the same terminal result.
+only observes the derived deterministic user unit, exact cgroup, and fixed volatile
+workspace. A pre-effect absent-unit, empty-cgroup, no-effect result is atomically closed as
+`failed/precredential_bootstrap_failed`. An effect-entered request is atomically closed as
+`failed/cleanup_reconciled` only when the unit is inactive or absent, the cgroup is empty or
+removed, and the workspace is absent or empty. Every partial, active, ambiguous, present-
+workspace, identity, plan, or policy mismatch leaves the old uncertainty and single-flight
+fence unchanged. Exact replay returns the same terminal result; a different request ID may
+retry only after the fully proven close releases ownership.
 
 Success requires unchanged machine and daemon epochs, exact RepoDigest, config digest,
 platform, image ID, and topology read from the digest-bound

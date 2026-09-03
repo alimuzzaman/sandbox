@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 import hashlib
 from io import StringIO
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -128,6 +129,46 @@ class SafeFailureWorker(FakeBatchWorker):
 
 
 class TestV2BatchStaging(unittest.TestCase):
+    def test_v2_remote_delivery_failure_is_not_misreported_as_broker_failure(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from sandbox.isolation.credential_resolver import BrokerLease, SecretReference
+        from sandbox.transports.remote_hosting_images import RemoteImageStageError
+
+        class Broker:
+            def prepare_for_stage(self, **_kwargs):
+                return BrokerLease(
+                    object(), SecretReference("personal", "GHCR_TOKEN", "personal"),
+                    binding_id="binding", binding_version=1,
+                    deadline=datetime.now(timezone.utc) + timedelta(minutes=1),
+                    lease_id="lease", material=b"synthetic-stage-canary",
+                    snapshot_bound=True,
+                )
+
+        class Prepared(FakePrepared):
+            def deliver(self, _credential):
+                raise RemoteImageStageError(
+                    "helper_failed",
+                    process={"unit_inactive": True, "cgroup_empty_or_removed": True},
+                    cleanup={"complete": True},
+                )
+
+            def cancel(self):
+                return {"unit_inactive": False, "cgroup_empty_or_removed": False,
+                        "cleanup_complete": False}
+
+        class Worker(FakeBatchWorker):
+            def prepare(self, request, policy):
+                self.prepares += 1
+                self.prepared = Prepared(request.plan_set, policy)
+                return self.prepared
+
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as directory:
+            result = ImagePlanSetStagingService(repository=StageRepository(Path(directory)),
+                broker=Broker(), worker=Worker()).stage(request, policy)
+        self.assertEqual((result.result_class, result.code), ("failed", "helper_failed"))
+
     @staticmethod
     def _uncertain(repository, request, *, effect_entered=False):
         from sandbox.hosting.images.staging_v2 import StageResultSet

@@ -8,7 +8,7 @@ from .staging_repository import StageRepositoryError
 from .staging_v2 import (
     StageRequestSet, StageResultSet, StagedImageProofSet, admit_stage_request_set,
 )
-from .staging_worker import StageWorkerError
+from .staging_worker import StageDeliveryFailure, StageWorkerError
 from .staging_worker import unit_name
 
 
@@ -152,10 +152,24 @@ class ImagePlanSetStagingService:
                 "cgroup_empty_or_removed": False})
 
             def consume(credential: bytes):
-                self.repository.transition(request, "pulling")
-                return prepared.deliver(credential)
+                try:
+                    self.repository.transition(request, "pulling")
+                    return prepared.deliver(credential)
+                except RemoteImageStageError as exc:
+                    return StageDeliveryFailure("remote", exc.code, exc.process, exc.cleanup)
+                except StageWorkerError as exc:
+                    return StageDeliveryFailure("worker", exc.code, exc.process, exc.cleanup)
 
-            observation, process, cleanup = broker_lease.consume(consume)
+            delivered = broker_lease.consume(consume)
+            if isinstance(delivered, StageDeliveryFailure):
+                process = delivered.process or process
+                cleanup = delivered.cleanup or cleanup
+                if delivered.kind == "remote":
+                    raise RemoteImageStageError(delivered.code,
+                        process=delivered.process, cleanup=delivered.cleanup)
+                raise StageWorkerError(delivered.code,
+                    process=delivered.process, cleanup=delivered.cleanup)
+            observation, process, cleanup = delivered
             broker_lease = None
             self.repository.transition(request, "cleanup_pending", process=process, cleanup=cleanup)
             if process.get("unit_inactive") is not True \

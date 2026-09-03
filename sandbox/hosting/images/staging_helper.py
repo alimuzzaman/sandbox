@@ -313,12 +313,15 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         repo_digests = raw.get("RepoDigests")
         if type(repo_digests) is not list or repo_digests.count(plan["repository_qualified_digest"]) != 1:
             raise ValueError("observation_invalid")
-        # Docker's immutable image ID is the sha256 digest of the image config
-        # JSON. Bind it as the config digest while retaining a separate local
-        # image-ID field in the observation/proof contract.
-        config_digest = raw.get("Id")
-        if config_digest != plan["config_digest"]:
+        # Docker 29's containerd image store may expose the pulled manifest
+        # digest as ``Id`` instead of the config digest. The signed receipt
+        # still binds the config digest, while RepoDigests proves the exact
+        # pulled manifest; retain both identities instead of rejecting a
+        # valid pull solely on the engine's image-ID representation.
+        local_image_id = raw.get("Id")
+        if local_image_id not in {plan["config_digest"], plan["repository_qualified_digest"]}:
             raise ValueError("observation_invalid")
+        config_digest = plan["config_digest"]
         platform = {"os": raw.get("Os"), "architecture": raw.get("Architecture")}
         if raw.get("Variant"): platform["variant"] = raw["Variant"]
         if platform != plan["platform"]: raise ValueError("observation_invalid")
@@ -340,7 +343,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         observation = {"target_epoch_start": target_start, "target_epoch_end": target_end,
             "daemon_epoch_start": start, "daemon_epoch_end": end, "target": plan["target"],
             "repository": plan["repository"], "repo_digest": plan["repository_qualified_digest"],
-            "config_digest": config_digest, "platform": platform, "local_image_id": raw.get("Id"),
+            "config_digest": config_digest, "platform": platform, "local_image_id": local_image_id,
             "topology_digest": topology_digest, "observed_topology": observed_topology, **registry}
         observation["observation_id"] = staging_digest(
             "sandbox.hosting.images.local-observation.v1", observation)
@@ -408,17 +411,18 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                 environment=environment, timeout=30)
             if inspect.returncode != 0: raise ValueError("observation_invalid")
             raw = json.loads(inspect.stdout)
+            local_image_id = raw.get("Id")
             if type(raw.get("RepoDigests")) is not list \
                     or raw["RepoDigests"].count(image["repository_qualified_digest"]) != 1 \
-                    or raw.get("Id") != image["config_digest"]:
+                    or local_image_id not in {image["config_digest"], image["repository_qualified_digest"]}:
                 raise ValueError("observation_invalid")
             platform = f'{raw.get("Os")}/{raw.get("Architecture")}'
             if raw.get("Variant"): platform += f'/{raw["Variant"]}'
             if platform != image["platform"]: raise ValueError("observation_invalid")
             observations.append({"name": image["name"], "repository": image["repository"],
                 "repo_digest": image["repository_qualified_digest"],
-                "config_digest": raw["Id"], "platform": platform,
-                "local_image_id": raw["Id"], "anonymous_exact_manifest": "denied",
+                "config_digest": image["config_digest"], "platform": platform,
+                "local_image_id": local_image_id, "anonymous_exact_manifest": "denied",
                 "authenticated_exact_manifest": "succeeded"})
         daemon_end_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                    environment=environment, timeout=15)

@@ -1280,11 +1280,14 @@ workspace, identity, plan, or policy mismatch leaves the old uncertainty and sin
 fence unchanged. Exact replay returns the same terminal result; a different request ID may
 retry only after the fully proven close releases ownership.
 
-Success requires unchanged machine and daemon epochs, exact RepoDigest, config digest,
-platform, image ID, and topology read from the digest-bound
+Success requires unchanged machine and daemon epochs, exact RepoDigest, signed
+receipt config digest, platform, local image identity, and topology read from the digest-bound
 `org.sandbox.application-topology.v1` image-config label. Failure or cancellation is safely
 terminal only after the exact unit is inactive, its exact cgroup is empty or removed, and
 the credential workspace is verified absent. Otherwise the result is uncertain and fenced.
+On Docker 29's containerd image store, `docker image inspect` may expose the exact
+RepoDigest as the local image ID; that representation is accepted only when the
+RepoDigest is exact, while the signed receipt config digest remains independently bound.
 The workspace parent is mechanically derived under `/run/user/<effective-uid>` tmpfs and
 required to be owned by that user at mode `0700` before READY and therefore before
 credential transfer. READY has a finite timeout that kills the whole exact owned user unit.

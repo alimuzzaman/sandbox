@@ -278,7 +278,7 @@ class LocalImageObservation:
             _text(value, identity=True)
         if self.target_epoch_start != self.target_epoch_end \
                 or self.daemon_epoch_start != self.daemon_epoch_end \
-                or self.local_image_id != self.config_digest \
+                or self.local_image_id not in {self.config_digest, self.repo_digest} \
                 or type(self.platform) is not dict or type(self.observed_topology) is not dict:
             raise StagingContractError("observation_invalid")
         if self.topology_digest != staging_digest(
@@ -388,7 +388,8 @@ class StagedImageProof:
                 or observed["repository"] != projection.image.repository \
                 or observed["repo_digest"] != projection.image.repository_qualified_digest \
                 or observed["config_digest"] != projection.image.config_digest \
-                or observed["local_image_id"] != observed["config_digest"] \
+                or observed["local_image_id"] not in {
+                    observed["config_digest"], observed["repo_digest"]} \
                 or observed["platform"] != projection.image.platform.as_mapping() \
                 or observed["observed_topology"] != projection.topology.as_mapping() \
                 or observed["topology_digest"] != staging_digest(

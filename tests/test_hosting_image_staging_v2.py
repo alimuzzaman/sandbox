@@ -765,7 +765,10 @@ class TestV2BatchStaging(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
                 image = next(item for item in frame["images"]
                              if item["repository_qualified_digest"] == command[3])
-                inspected = {"Id": image["config_digest"],
+                # Docker 29's containerd image store reports the pulled
+                # manifest as Image ID; the signed receipt still carries the
+                # independent config digest.
+                inspected = {"Id": image["repository_qualified_digest"],
                     "RepoDigests": [image["repository_qualified_digest"]],
                     "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {}}}
                 return subprocess.CompletedProcess(command, 0,
@@ -780,6 +783,9 @@ class TestV2BatchStaging(unittest.TestCase):
         self.assertEqual(sum(call[:2] == ("docker", "pull") for call in calls), 3)
         self.assertEqual([row["name"] for row in result["payload"]["observation"]["images"]],
                          ["queue", "web", "worker"])
+        for row, expected in zip(result["payload"]["observation"]["images"], frame["images"]):
+            self.assertEqual(row["config_digest"], expected["config_digest"])
+            self.assertEqual(row["local_image_id"], expected["repository_qualified_digest"])
 
 
 if __name__ == "__main__":

@@ -220,7 +220,9 @@ class TestImageStagingSecrets(unittest.TestCase):
                     if command[:2] == ("docker", "info"):
                         return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
                     topology = plan["topology"]
-                    inspect = {"Id": plan["config_digest"],
+                    # Docker 29 may expose the exact pulled manifest as the
+                    # local image ID; config_digest remains receipt-bound.
+                    inspect = {"Id": plan["repository_qualified_digest"],
                         "RepoDigests": [plan["repository_qualified_digest"]],
                         "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
                             staging_helper.TOPOLOGY_LABEL: json.dumps(topology,

@@ -78,8 +78,9 @@ class ImagePlanSetStagingService:
                 2, True, "success", "staged", request.request_id, generation, proof))
         except SecretBrokerError:
             code = "broker_unavailable"
-        except RemoteImageStageError:
+        except RemoteImageStageError as exc:
             code = "helper_failed"
+            process = exc.process or process; cleanup = exc.cleanup or cleanup
         except StageWorkerError as exc:
             code = exc.code if exc.code in {"pull_failed", "cleanup_unproven",
                 "observation_invalid", "process_unproven"} else "helper_failed"

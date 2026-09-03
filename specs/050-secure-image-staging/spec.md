@@ -147,14 +147,17 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-011**: Credentials MUST NOT enter argv, inherited environment, project files,
   persistent managed state, durable job payload/results, logs, diagnostics, proof,
   public output, activation, containers, or Compose.
-- **FR-012**: Temporary credential material MUST be volatile, owner-only, bounded,
-  helper-owned, and removed before safe completion.
+- **FR-012**: Temporary credential material MUST be volatile, service-user-owned,
+  bounded, helper-owned, derived below `/run/user/<effective-uid>` rather than from
+  caller input or environment, and removed before safe completion.
 - **FR-013**: Helper cleanup MUST run for success, failure, cancellation, signal,
   timeout, and recoverable crash paths; unproven cleanup MUST be non-success.
 - **FR-014**: Helper identity MUST bind canonical installed artifact, fixed entry,
   runtime revision, and closed invocation contract before credentials are resolved.
+  Its digest-and-runtime-revision directory MUST be immutable so migration cannot
+  rewrite authority held open by an active staging unit.
 - **FR-015**: Before credential resolution, staging MUST launch the measured helper in
-  one uniquely named transient systemd service backed by cgroup v2, with
+  one uniquely named transient systemd user service backed by cgroup v2, with
   `KillMode=control-group`, no delegation, and no capability to move processes out of
   the unit cgroup; the exact unit/cgroup identity MUST be ledger-bound.
 - **FR-016**: Kernel cgroup membership MUST be the descendant ownership authority.

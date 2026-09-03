@@ -120,7 +120,22 @@ outer fields remain `policy`, `binding`, and `secret_sources`; a v2 plan require
 a `StagingPolicySet` with capability
 `systemd-cgroup-v2-batch-stage-v2` and helper entry
 `sandbox-image-stage-helper-v2`. The installer retains v1 `manifest.json` and
-adds `manifest-v2.json` in the same content-addressed helper directory.
+adds `manifest-v2.json` in the same immutable digest-and-runtime-revision helper
+directory. Confirmed remote-service migration refreshes this authority before
+restarting the user service; it never rewrites an active revision's directory.
+
+The helper runs as an exact transient `systemd --user` unit. Its executable and
+manifests are owned by that authenticated Sandbox service user with directory,
+helper, and manifest modes `0700`, `0500`, and `0600`. Credential scratch space
+is derived internally as `/run/user/<effective-uid>/sandbox-image-stage`, proved
+owner-only on tmpfs before READY, and is never caller- or environment-selected.
+Before credential delivery, Sandbox proves the exact launch Description,
+effective-user cgroup path, `KillMode=control-group`, `Delegate=no`, and enabled
+`NoNewPrivileges`, `RestrictSUIDSGID`, and `ProtectControlGroups`. Normal completion
+accepts the exact loaded inactive attempt or systemd's exact not-found/inactive
+unloaded state, then checks the helper-reported launch cgroup is empty or removed.
+Cleanup of a running attempt first re-proves its launch Description. A colliding
+deterministic unit name with another launch Description is never killed or stopped.
 
 One credential lease and one measured helper stage all three exact images. The
 result proves stable machine and Docker-daemon epochs plus each RepoDigest,

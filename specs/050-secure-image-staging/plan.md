@@ -17,7 +17,7 @@ dependency on Compose, init, edge, activation, adoption, or rollback.
 **Language/Version**: Python 3.11+; fixed remote helper uses the installed Sandbox Python
 
 **Primary Dependencies**: Feature 049 models/projection; existing secret broker;
-registered remote transport; durable repository/locking; systemd transient services on
+registered remote transport; durable repository/locking; systemd user transient services on
 cgroup v2; Docker CLI only behind the measured helper
 
 **Storage**: Owner-only stage ledger under `$SANDBOX_HOME/runtime/`; volatile helper-owned
@@ -97,9 +97,11 @@ sandbox/secrets/
 sandbox/commands/
 └── hosting.py                    # public stage dispatch only
 
-scripts/install-remote.sh         # measured helper provisioning
+scripts/provision_image_stage_helper.py  # shared measured helper provisioning
+scripts/install-remote.sh                # remote bootstrap caller
 
 tests/
+├── test_image_stage_helper_provisioning.py
 ├── test_hosting_image_staging_policy.py
 ├── test_hosting_image_staging_repository.py
 ├── test_hosting_image_staging_service.py

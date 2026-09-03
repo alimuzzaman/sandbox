@@ -38,7 +38,8 @@ class TestImageStagingRepository(unittest.TestCase):
         decision, generation, _ = repository.accept(request)
         self.assertEqual(decision, "accepted")
         process = {"unit_name": "sandbox-image-stage-fixture.service",
-            "cgroup": "/system.slice/sandbox-image-stage-fixture.service",
+            "cgroup": ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       "sandbox-image-stage-fixture.service"),
             "delegated": False, "escape_allowed": False,
             "unit_inactive": True, "cgroup_empty_or_removed": True}
         repository.transition(request, "credential_pending")
@@ -250,7 +251,8 @@ class TestImageStagingRepository(unittest.TestCase):
                         repository.transition(request, "pulling")
                     if phase in {"cleanup_pending", "observing"}:
                         repository.transition(request, "cleanup_pending", process={
-                            "unit_name": "exact", "cgroup": "/system.slice/exact",
+                            "unit_name": "exact", "cgroup": (
+                                "/user.slice/user-1000.slice/user@1000.service/app.slice/exact"),
                             "delegated": False, "escape_allowed": False,
                             "unit_inactive": True, "cgroup_empty_or_removed": True},
                             cleanup={"complete": True})

@@ -128,6 +128,29 @@ with `--upload-timeout SECONDS` (1-7200); the local package budget remains fixed
 at 300 seconds. An upload timeout has unknown completion and is never retried
 automatically.
 
+After staging source, confirmed service migration refreshes the measured image
+staging helper with the controller-validated exact 40-character source revision
+before changing the service. Helper artifacts and manifests use an immutable
+digest-and-revision directory identity and owner-only modes. Any unsafe owner,
+mode, link count, digest, manifest, or revision refuses before service changes.
+
+The controller requires a clean checkout, packages the exact validated Git object
+(never live worktree bytes), and rechecks clean HEAD before first remote contact.
+The remote extracts into an owner-only same-filesystem staging directory, verifies
+the archive receipt's exact source SHA, archive digest, and precomputed runtime-record
+revision, then atomically exchanges that complete tree with
+`$HOME/sandbox/sb-src`. Failure rolls the prior tree back before the existing service
+is changed. A failed rollback, restored-service restart, or backup cleanup is reported
+as `remote_service_rollback_indeterminate`, never hidden as an ordinary install failure.
+Fresh provisioning uses the same handoff and never clones or activates a
+moving branch. The service unit and credential file are not changed until helper
+refresh succeeds.
+
+The provisioner removes group/other write permission from the existing Sandbox home
+and `runtime` directory without removing read or execute permission (for example,
+`0775` becomes `0755`). It then requires `runtime/helpers` and every helper authority
+directory below it to be owned by the authenticated service user at mode `0700`.
+
 If the managed remote branch has moved independently, deploy fails with the stable
 `remote_branch_diverged` error code. Sandbox never force-pushes that branch. Inspect
 the remote branch and explicitly reconcile it with the intended local source before
@@ -878,8 +901,9 @@ the JSON response includes the bounded candidate `workspace_ids`; retry with the
 chosen opaque ID using `--workspace-id` rather than guessing from a path.
 
 Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
-environments before stopping a proven legacy process, so a runtime refresh cannot leave
-the replacement service without its interpreter dependencies.
+environments and refreshes the revision-bound measured staging helper before stopping a
+proven legacy process, so a runtime refresh cannot leave the replacement service without
+its interpreter dependencies or image-stage authority.
 
 The migration archive intentionally excludes local-only generated payloads such as
 `node_modules`, Electron release/build output, `.cache`, and the existing runtime
@@ -1202,10 +1226,12 @@ platform, image ID, and topology read from the digest-bound
 `org.sandbox.application-topology.v1` image-config label. Failure or cancellation is safely
 terminal only after the exact unit is inactive, its exact cgroup is empty or removed, and
 the credential workspace is verified absent. Otherwise the result is uncertain and fenced.
-The workspace parent is mechanically required to be root-owned mode 0700 on `/run` tmpfs
-before READY and therefore before credential transfer. READY has a finite timeout that kills
-the whole unit. The transient unit remains inspectable until it is explicitly stopped,
-checked, and collected.
+The workspace parent is mechanically derived under `/run/user/<effective-uid>` tmpfs and
+required to be owned by that user at mode `0700` before READY and therefore before
+credential transfer. READY has a finite timeout that kills the whole exact owned user unit.
+Launch identity, security properties, and user-slice cgroup are proven before credential
+delivery. Normal completion accepts either the same loaded inactive unit or systemd's exact
+not-found/inactive unloaded state, then requires the launch cgroup removed or empty.
 
 ### Immutable staged-image activation
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -367,15 +368,21 @@ def _cmd_service(args, as_json: bool) -> None:
             # foreign during a routine migration.
             public_url = entry.get("control_url") if transport == "https" else None
             observed = sr.remote_mcp_service_status(entry)
+            source_revision = None
             if confirmed:
+                source_revision = _local_git_revision()
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
-                _upload_runtime_source(
-                    entry["ssh"], upload_timeout=upload_timeout
+                staged_source = _upload_runtime_source(
+                    entry["ssh"], source_revision=source_revision,
+                    upload_timeout=upload_timeout
                 )
+                _assert_clean_source_revision(source_revision)
             plan = sr.migrate_remote_mcp_service(
                 entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
                 public_url, confirm=confirmed,
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
+                source_revision=source_revision,
+                staged_source=staged_source if confirmed else None,
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
@@ -393,7 +400,9 @@ def _cmd_service(args, as_json: bool) -> None:
         if isinstance(exc, RemoteRuntimeSourceTimeout):
             code = RemoteRuntimeSourceTimeout.code
         else:
-            code = "remote_service_ownership_unknown" if str(exc) == "remote_service_ownership_unknown" else "remote_service_failed"
+            code = (str(exc) if str(exc) in {
+                "remote_service_ownership_unknown", "remote_service_rollback_indeterminate"}
+                else "remote_service_failed")
         payload = {"ok": False, "name": name, "status": "degraded", "data": {},
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
@@ -529,73 +538,147 @@ def _runtime_source_upload_timeout_arg(args) -> int:
     return _normalize_runtime_source_upload_timeout(value)
 
 
+def _assert_clean_source_revision(source_revision: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise RuntimeError("local Sandbox revision is unavailable or invalid")
+    clean_env = {key: value for key, value in os.environ.items()
+                 if not key.startswith("GIT_")}
+    for argv, dirty_check in (
+            (("git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"), False),
+            (("git", "-C", str(ROOT), "status", "--porcelain=v1", "-z",
+              "--untracked-files=all"), True)):
+        try:
+            result = subprocess.run(argv, capture_output=True, timeout=10, check=False,
+                                    env=clean_env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("could not verify the local Sandbox source") from exc
+        output = result.stdout or b""
+        if isinstance(output, str):
+            output = output.encode()
+        if result.returncode != 0:
+            raise RuntimeError("could not verify the local Sandbox source")
+        if dirty_check and output:
+            raise RuntimeError("local Sandbox source is dirty; refusing remote runtime upload")
+        if not dirty_check and output.decode(errors="replace").strip() != source_revision:
+            raise RuntimeError("local Sandbox revision changed during remote runtime upload")
+
+
+def _read_exact_source_file(source_revision: str, relative_path: str) -> bytes:
+    if (re.fullmatch(r"[0-9a-f]{40}", source_revision) is None
+            or relative_path not in {"scripts/install-remote.sh"}):
+        raise RuntimeError("exact Sandbox source file identity is invalid")
+    clean_env = {key: value for key, value in os.environ.items()
+                 if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(ROOT), "show", f"{source_revision}:{relative_path}"),
+            capture_output=True, timeout=10, check=False, env=clean_env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not read the exact Sandbox source file") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise RuntimeError("could not read the exact Sandbox source file")
+    return result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode()
+
+
 def _upload_runtime_source(
-        ssh_target: str, *, upload_timeout: int = _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT
-) -> None:
-    """Stage this checkout onto the VPS so provisioning never depends on
-    GitHub reachability or repo visibility. Fresh VPS validation caught that
-    cloning alimuzzaman/sandbox anonymously can fail for private/internal repos."""
+        ssh_target: str, *, source_revision: str,
+        upload_timeout: int = _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT,
+) -> dict[str, str]:
+    """Stage one clean exact Git object without reading mutable worktree bytes."""
     upload_timeout = _normalize_runtime_source_upload_timeout(upload_timeout)
-    excludes = [
-        ".git",
-        ".cli-venv",
-        "mcp/wp-server/.venv",
-        "runtime",
-        "tmp",
-        # The remote MCP service runs the Python CLI/server surface.  Local
-        # JavaScript dependency trees and packaged Electron artifacts are
-        # generated, large, and never imported by that service.  Excluding
-        # them keeps the supported migration archive small enough to finish
-        # within its bounded upload window (the checkout may contain hundreds
-        # of megabytes of release/node_modules output).
-        "node_modules",
-        "src/desktop/release",
-        "src/desktop/build",
-        "src/desktop/dist",
-        ".cache",
-        "__pycache__",
-        ".pytest_cache",
-    ]
-    # Keep the runtime archive's sidecar policy identical to dirty-overlay
-    # deployment: match only ``._*`` basenames at any depth, preserving normal
-    # dotfiles such as ``.env``.  Count-only diagnostics never include paths or
-    # file contents.
-    tar_excludes = [*excludes, *sr.appledouble_tar_exclude_patterns()]
-    tar_cmd = ["tar"]
-    for item in tar_excludes:
-        tar_cmd.extend(["--exclude", item])
-    tar_cmd.extend(["-czf", "-", "."])
-    remote_cmd = (
-        "set -e; sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
-        "mkdir -p \"$sandbox_home/sb-src\"; "
-        "tar -xzf - -C \"$sandbox_home/sb-src\""
-    )
-    skipped = sr.count_appledouble_files(ROOT, excluded_roots=excludes)
-    sr.emit_appledouble_skip_diagnostic(skipped, context="runtime-source")
+    _assert_clean_source_revision(source_revision)
+    runtime_revision = sr._remote_mcp_runtime_revision()
+    if re.fullmatch(r"[0-9a-f]{24}", runtime_revision) is None:
+        raise RuntimeError("local Sandbox runtime record revision is invalid")
+    archive_cmd = ("git", "-C", str(ROOT), "archive", "--format=tar.gz",
+                   source_revision)
     print(
-        "staging Sandbox runtime source archive "
+        f"staging exact Sandbox runtime source {source_revision} archive "
         f"(bounded {_RUNTIME_SOURCE_PACKAGE_TIMEOUT}s)...",
         file=sys.stderr,
     )
     try:
-        tar_res = subprocess.run(
-            tar_cmd, cwd=str(ROOT), capture_output=True,
+        archive_res = subprocess.run(
+            archive_cmd, capture_output=True,
             timeout=_RUNTIME_SOURCE_PACKAGE_TIMEOUT, check=False,
-            # BSD tar synthesizes AppleDouble members for macOS metadata unless
-            # this environment switch is set. GNU tar ignores it.
-            env={**os.environ, "COPYFILE_DISABLE": "1"},
+            env={key: value for key, value in os.environ.items()
+                 if not key.startswith("GIT_")},
         )
     except subprocess.TimeoutExpired as exc:
         raise RemoteRuntimeSourceTimeout(
             "runtime source packaging timed out after "
             f"{_RUNTIME_SOURCE_PACKAGE_TIMEOUT}s; the remote was not contacted"
         ) from exc
-    if tar_res.returncode != 0:
+    if archive_res.returncode != 0:
         raise RuntimeError(
             f"could not package the local sandbox runtime: "
-            f"{tar_res.stderr.decode(errors='replace').strip()[:500]}"
+            f"{archive_res.stderr.decode(errors='replace').strip()[:500]}"
         )
-    archive = tar_res.stdout or b""
+    archive = archive_res.stdout or b""
+    # Recheck after packaging and before first remote contact. The archive is
+    # already bound to the immutable object, while this guard rejects a dirty
+    # or moved controller checkout rather than mislabelling operator intent.
+    _assert_clean_source_revision(source_revision)
+    archive_digest = hashlib.sha256(archive).hexdigest()
+    stage_name = f".sb-src-stage-{source_revision[:12]}-{uuid.uuid4().hex}"
+    stage_receipt = json.dumps({"schema_version": 1, "source_revision": source_revision,
+                                "runtime_revision": runtime_revision,
+                                "archive_digest": f"sha256:{archive_digest}"},
+                               sort_keys=True, separators=(",", ":"))
+    extraction_program = r'''import os,pathlib,sys,tarfile
+archive=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve()
+with tarfile.open(archive,'r:gz') as bundle:
+ members=bundle.getmembers()
+ if len(members)>100000: raise SystemExit(74)
+ names=set(); links=set()
+ for member in members:
+  name=pathlib.PurePosixPath(member.name)
+  if name.is_absolute() or '..' in name.parts or member.name in names or member.isdev() or member.isfifo(): raise SystemExit(74)
+  names.add(member.name)
+  if any(str(parent) in links for parent in name.parents): raise SystemExit(74)
+  if member.issym() or member.islnk():
+   target=(name.parent/pathlib.PurePosixPath(member.linkname))
+   if pathlib.PurePosixPath(member.linkname).is_absolute() or '..' in target.parts: raise SystemExit(74)
+   if member.issym(): links.add(str(name))
+ bundle.extractall(root)
+for path in sorted(root.rglob('*')):
+ if path.is_symlink(): continue
+ fd=os.open(path,os.O_RDONLY|(os.O_DIRECTORY if path.is_dir() else 0))
+ try: os.fsync(fd)
+ finally: os.close(fd)
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+try: os.fsync(fd)
+finally: os.close(fd)'''
+    publish_program = r'''import ctypes,errno,os,sys
+source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
+fd=os.open(source,os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)
+if libc.renameat2(-100,os.fsencode(source),-100,os.fsencode(target),1)!=0:
+ error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
+fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)'''
+    remote_cmd = (
+        "set -eu; umask 077; sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
+        "mkdir -p \"$sandbox_home\"; test -d \"$sandbox_home\"; test ! -L \"$sandbox_home\"; "
+        "python3 -c 'import os,stat,sys; i=os.lstat(sys.argv[1]); "
+        "raise SystemExit(0 if stat.S_ISDIR(i.st_mode) and i.st_uid==os.geteuid() "
+        "and not stat.S_IMODE(i.st_mode)&2 else 69)' \"$sandbox_home\"; "
+        f"stage_name={shlex.quote(stage_name)}; expected_digest={archive_digest}; "
+        "stage=$sandbox_home/$stage_name; test ! -e \"$stage\"; "
+        "temporary=$(mktemp -d \"$sandbox_home/.sb-src-stage-tmp.XXXXXX\"); "
+        "cleanup() { rm -rf -- \"$temporary\"; }; trap cleanup EXIT; "
+        "archive=$temporary/archive.tar.gz; cat > \"$archive\"; "
+        "actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],\"rb\").read()).hexdigest())' \"$archive\"); "
+        "test \"$actual\" = \"$expected_digest\"; mkdir -m 0700 \"$temporary/tree\"; "
+        "python3 -c " + shlex.quote(extraction_program) + " \"$archive\" \"$temporary/tree\"; "
+        "rm -f -- \"$archive\"; test -f \"$temporary/tree/sb\"; "
+        "test ! -L \"$temporary/tree/sb\"; "
+        "test -f \"$temporary/tree/sandbox/hosting/images/staging_helper.py\"; "
+        "printf '%s' " + shlex.quote(stage_receipt) + " > \"$temporary/receipt.json\"; "
+        "chmod 0600 \"$temporary/receipt.json\"; "
+        "python3 -c 'import os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); os.fsync(fd); os.close(fd)' "
+        "\"$temporary/receipt.json\"; "
+        "python3 -c " + shlex.quote(publish_program) + " \"$temporary\" \"$stage\"; "
+        "trap - EXIT; "
+    )
     print(
         "runtime source archive ready "
         f"({len(archive)} bytes); uploading to remote "
@@ -616,6 +699,9 @@ def _upload_runtime_source(
     if ssh_res.returncode != 0:
         detail = (ssh_res.stderr or ssh_res.stdout or b"").decode(errors="replace")
         raise RuntimeError(f"could not upload sandbox runtime: {detail.strip()[:500]}")
+    return {"stage_name": stage_name, "source_revision": source_revision,
+            "runtime_revision": runtime_revision,
+            "archive_digest": f"sha256:{archive_digest}", "receipt": stage_receipt}
 
 
 def _arg_str(args, name: str) -> str | None:
@@ -660,14 +746,6 @@ def _cmd_provision(args, as_json: bool) -> None:
     if not entry:
         die(f"no remote named '{name}' — register it first with "
             f"`./sb remote add {name} <ssh-connection>`")
-    script_path = os.path.join(ROOT, "scripts", "install-remote.sh")
-    with open(script_path) as f:
-        script = f.read()
-    # bash -s reads the script from stdin; ssh_run's helper only runs a single
-    # command string (no stdin piping), so transfer the script inline as
-    # base64 over the SSH argument to avoid quoting issues with its content.
-    import base64
-    encoded = base64.b64encode(script.encode()).decode()
     ssh_target = entry.get("ssh") or ""
     if not ssh_target:
         die(f"remote '{name}' has no ssh connection string configured")
@@ -694,10 +772,18 @@ def _cmd_provision(args, as_json: bool) -> None:
     except ValueError as exc:
         die(str(exc))
     source_revision = _local_git_revision()
+    _assert_clean_source_revision(source_revision)
+    script = _read_exact_source_file(source_revision, "scripts/install-remote.sh")
+    # bash -s reads the script from stdin; ssh_run's helper only runs a single
+    # command string (no stdin piping), so transfer the exact committed script
+    # inline as base64 over the SSH argument to avoid quoting issues.
+    import base64
+    encoded = base64.b64encode(script).decode()
     journal = _new_provision_log(name, control_transport)
     try:
         _record_provision_event(journal, "runtime_staging")
-        _upload_runtime_source(ssh_target, upload_timeout=upload_timeout)
+        staged_source = _upload_runtime_source(
+            ssh_target, source_revision=source_revision, upload_timeout=upload_timeout)
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
@@ -706,6 +792,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     cmd = (
         f"echo {encoded} | base64 -d | "
         f"SANDBOX_CONTROL_TRANSPORT={shlex.quote(control_transport)} "
+        "SANDBOX_DEFER_RUNTIME_ACTIVATION=1 "
         f"SANDBOX_RUNTIME_REVISION={shlex.quote(source_revision)} bash -s"
     )
     try:
@@ -734,22 +821,27 @@ def _cmd_provision(args, as_json: bool) -> None:
             tailscale_ip = sr.resolve_tailscale_ip(entry)
             control_url = f"http://{tailscale_ip}:{port}"
             bind = tailscale_ip
-            sr.start_remote_mcp_server(entry, bind, port, token)
+            _assert_clean_source_revision(source_revision)
+            applied = sr.start_remote_mcp_server(
+                entry, bind, port, token, source_revision=source_revision,
+                staged_source=staged_source)
             sr.put_remote(name, control_transport="tailscale",
                           control_url=control_url, tailscale_host=tailscale_ip,
                           mcp_port=port, bearer_token=token, provisioned=True,
                           capabilities=["job.exec", "job.execution-policy.v1"],
-                          mcp_service=sr.remote_mcp_service_record(bind, port))
+                          mcp_service=applied["service"])
         else:
             control_url = f"https://{public_host}"
             sr.configure_https_proxy(entry, public_host, port)
-            sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
-                                       public_url=control_url)
+            _assert_clean_source_revision(source_revision)
+            applied = sr.start_remote_mcp_server(
+                entry, "127.0.0.1", port, token, public_url=control_url,
+                source_revision=source_revision, staged_source=staged_source)
             sr.put_remote(name, control_transport="https",
                           control_host=public_host, control_url=control_url,
                           mcp_port=port, bearer_token=token, provisioned=True,
                           capabilities=["job.exec", "job.execution-policy.v1"],
-                          mcp_service=sr.remote_mcp_service_record("127.0.0.1", port, control_url))
+                          mcp_service=applied["service"])
             tailscale_ip = None
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "control_service_failed", status="failed", detail=str(e))
@@ -798,14 +890,19 @@ def _cmd_up(args, as_json: bool) -> None:
         return
     try:
         upload_timeout = _runtime_source_upload_timeout_arg(args)
-        _upload_runtime_source(entry["ssh"], upload_timeout=upload_timeout)
+        source_revision = _local_git_revision()
+        staged_source = _upload_runtime_source(
+            entry["ssh"], source_revision=source_revision, upload_timeout=upload_timeout)
         observed = sr.remote_mcp_service_status(entry)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"
+            _assert_clean_source_revision(source_revision)
             plan = sr.migrate_remote_mcp_service(
                 entry, tailscale_ip, int(port), token, confirm=True,
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
+                source_revision=source_revision,
+                staged_source=staged_source,
             )
             sr.put_remote(name, mcp_service=plan["service"])
         else:
@@ -815,9 +912,12 @@ def _cmd_up(args, as_json: bool) -> None:
                     f"re-run `./sb remote provision {name} --control-host <host>`")
             control_url = control_url or f"https://{public_host}"
             sr.configure_https_proxy(entry, public_host, port)
+            _assert_clean_source_revision(source_revision)
             plan = sr.migrate_remote_mcp_service(
                 entry, "127.0.0.1", int(port), token, public_url=control_url,
                 confirm=True, legacy_pidfile=observed.get("legacy_pidfile") == "present",
+                source_revision=source_revision,
+                staged_source=staged_source,
             )
             sr.put_remote(name, mcp_service=plan["service"])
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:

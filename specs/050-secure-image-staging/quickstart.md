@@ -30,9 +30,12 @@ the fixed stage-ledger authority, and the exact committed record revision before
 admission. The stage lock stays held through admission, lease preparation, durable host
 acceptance, and pin promotion. Load rejects partial/corrupt proofs, overlapping tombstone and
 retained authority, or more than 64 records/proofs, 4096 tombstones, or 64 pins.
-The helper workspace parent must be a root-owned 0700 directory on the `/run` tmpfs,
-proved before READY. READY itself has a finite timeout and timeout kills the whole unit.
-The retained unit is stopped and its exact cgroup checked before explicit collection.
+The helper workspace parent is derived as
+`/run/user/<effective-uid>/sandbox-image-stage` and must be service-user-owned `0700`
+on tmpfs, proved without following links before READY. READY itself has a finite timeout
+and timeout kills the whole exact owned user unit. After normal success the user unit
+may already be unloaded; exact not-found/inactive state plus launch-cgroup removal is
+valid terminal evidence, while a retained loaded unit must be the same inactive attempt.
 
 ## Focused checks
 

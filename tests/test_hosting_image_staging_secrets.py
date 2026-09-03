@@ -245,7 +245,9 @@ class TestImageStagingSecrets(unittest.TestCase):
                 response = lease.consume(lambda credential: staging_helper.execute(
                     plan, credential, run_root=verified, runner=runner,
                     anonymous_probe=lambda *_args: True,
-                    cgroup_identity=lambda _unit: "/system.slice/" + plan["unit_name"],
+                    cgroup_identity=lambda _unit: (
+                        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                        + plan["unit_name"]),
                     machine_epoch_reader=lambda: "machine-a", remover=remover))
                 self.assertIsNone(lease._material)
                 captured_bytes = repr({"argv": captured["argv"],

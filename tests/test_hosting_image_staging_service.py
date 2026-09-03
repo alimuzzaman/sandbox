@@ -7,6 +7,64 @@ from tests.hosting_image_fixtures import FakeBroker, FakeWorker, stage_request, 
 
 
 class TestImageStagingService(unittest.TestCase):
+    def test_unproved_prepare_cleanup_is_fenced_and_never_relaunched_on_replay(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_service import ImageStagingService
+        from sandbox.transports.remote_hosting_images import RemoteImageStageError
+        class Worker:
+            def __init__(self): self.calls = 0
+            def prepare(self, _request, _policy):
+                self.calls += 1
+                raise RemoteImageStageError("helper_failed",
+                    process={"unit_inactive": False, "cgroup_empty_or_removed": False},
+                    cleanup={"complete": False})
+        with tempfile.TemporaryDirectory() as directory:
+            policy = staging_policy(); request = stage_request(policy=policy); worker = Worker()
+            service = ImageStagingService(
+                repository=StageRepository(Path(directory)), broker=FakeBroker(), worker=worker)
+            result = service.stage(request, policy)
+            replay = service.stage(request, policy)
+            self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(worker.calls, 1)
+
+    def test_proven_not_launched_prepare_failure_is_terminal_and_replayed(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_service import ImageStagingService
+        from sandbox.transports.remote_hosting_images import RemoteImageStageError
+        class Worker:
+            def __init__(self): self.calls = 0
+            def prepare(self, _request, _policy):
+                self.calls += 1
+                raise RemoteImageStageError("helper_failed",
+                    process={"unit_inactive": True, "cgroup_empty_or_removed": True,
+                             "not_launched": True}, cleanup={"complete": True})
+        with tempfile.TemporaryDirectory() as directory:
+            policy = staging_policy(); request = stage_request(policy=policy); worker = Worker()
+            service = ImageStagingService(
+                repository=StageRepository(Path(directory)), broker=FakeBroker(), worker=worker)
+            result = service.stage(request, policy); replay = service.stage(request, policy)
+            self.assertEqual((result.result_class, result.code), ("failed", "helper_failed"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(worker.calls, 1)
+
+    def test_real_description_drift_transport_fences_v1_without_touching_incumbent(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_service import ImageStagingService
+        from sandbox.hosting.images.staging_worker import StageWorker
+        from tests.hosting_image_fixtures import description_drift_transport
+        with tempfile.TemporaryDirectory() as directory:
+            policy = staging_policy(); request = stage_request(policy=policy)
+            transport, sender, commands = description_drift_transport(
+                policy.helper.as_mapping(), 1)
+            service = ImageStagingService(repository=StageRepository(Path(directory)),
+                broker=FakeBroker(), worker=StageWorker(transport))
+            result = service.stage(request, policy); replay = service.stage(request, policy)
+            self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(sender.prepares, 1)
+            self.assertFalse(any(" kill " in item or " stop " in item for item in commands))
+
     def test_exact_success_is_canonical_replay_and_has_zero_activation_capability(self):
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_service import ImageStagingService
@@ -277,7 +335,8 @@ class TestImageStagingService(unittest.TestCase):
                 observation_payload["target"] = observation.target
                 process = {
                     "unit_name": self.frame["unit_name"],
-                    "cgroup": f"/system.slice/{self.frame['unit_name']}",
+                    "cgroup": ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                               f"{self.frame['unit_name']}"),
                     "delegated": False, "escape_allowed": False,
                     "unit_inactive": True, "cgroup_empty_or_removed": True,
                 }

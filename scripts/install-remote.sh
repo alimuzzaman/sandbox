@@ -138,7 +138,9 @@ act --version >/dev/null
 # --- sandbox runtime -----------------------------------------------------
 SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}"
 mkdir -p "$SANDBOX_HOME"
-if [[ -x "$SANDBOX_HOME/sb-src/sb" ]]; then
+if [[ "${SANDBOX_DEFER_RUNTIME_ACTIVATION:-0}" == "1" ]]; then
+    ok "sandbox runtime activation deferred to the exact staged-source handoff"
+elif [[ -x "$SANDBOX_HOME/sb-src/sb" ]]; then
     ok "sandbox runtime already present at $SANDBOX_HOME/sb-src"
 elif [[ ! -d "$SANDBOX_HOME/sb-src/.git" ]]; then
     log "cloning the sandbox runtime into $SANDBOX_HOME/sb-src"
@@ -153,6 +155,7 @@ fi
 # ensure_cli_venv (implicit on first `./sb` invocation) then ensure_tools_venv.
 log "provisioning the CLI + visit tools venvs"
 export SANDBOX_HOME
+if [[ "${SANDBOX_DEFER_RUNTIME_ACTIVATION:-0}" != "1" ]]; then
 (
     cd "$SANDBOX_HOME/sb-src"
     test -f sandbox/hermes/cron-catalog.json
@@ -179,264 +182,23 @@ PY
     "$SANDBOX_HOME/sb-src/.cli-venv/bin/python" -c \
         "from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()"
 )
+fi
 ok "provisioning complete"
 
 # --- measured immutable image staging helper ----------------------------
 # Provision only. This does not contact a registry, start a helper, or stage an
-# image. Each source digest gets its own non-replaced directory and manifest.
+# image. Remote service migration calls the same owner-scoped installer after
+# staging a new runtime, so service and helper revision parity cannot diverge.
 log "provisioning measured image staging helper"
-STAGING_HELPER_SOURCE="$SANDBOX_HOME/sb-src/sandbox/hosting/images/staging_helper.py"
-STAGING_HELPER_DIGEST="$(sha256sum "$STAGING_HELPER_SOURCE" | awk '{print $1}')"
-STAGING_HELPER_ROOT="$SANDBOX_HOME/runtime/helpers/image-stage/sha256-$STAGING_HELPER_DIGEST"
-python3 - "$SANDBOX_HOME" "$STAGING_HELPER_ROOT" <<'PY'
-import os
-from pathlib import Path
-import stat
-import sys
-
-home = Path(sys.argv[1])
-target = Path(sys.argv[2])
-owner_uid = os.geteuid()
-if not home.is_absolute() or target.parent.parent != home / "runtime" / "helpers":
-    raise SystemExit("invalid staging helper directory identity")
-fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-try:
-    parts = target.parts[1:]
-    home_parts = home.parts[1:]
-    for index, part in enumerate(parts):
-        owned = index >= len(home_parts)
-        try:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        except FileNotFoundError:
-            if not owned:
-                raise SystemExit("staging helper parent directory is missing")
-            os.mkdir(part, 0o700, dir_fd=fd)
-            os.fsync(fd)
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        info = os.fstat(child)
-        # The pre-existing runtime directory may retain the user's legacy
-        # 0775 mode.  The helper namespace itself is the isolation boundary:
-        # every directory below `runtime/helpers` must be owner-only.
-        protected = owned and index > len(home_parts)
-        if owned and (info.st_uid != owner_uid or (protected and stat.S_IMODE(info.st_mode) & 0o077)):
-            raise SystemExit("staging helper directory ownership or mode is unsafe")
-        os.close(fd); fd = child
-finally:
-    os.close(fd)
-os.chmod(target.parent, 0o700)
-os.chmod(target, 0o700)
-PY
-if [[ -f "$STAGING_HELPER_ROOT/staging_helper.py" ]]; then
-    STAGING_INSTALLED_DIGEST="$(sha256sum "$STAGING_HELPER_ROOT/staging_helper.py" | awk '{print $1}')"
-    if [[ "$STAGING_INSTALLED_DIGEST" != "$STAGING_HELPER_DIGEST" ]]; then
-        fail "installed image staging helper digest mismatch at $STAGING_HELPER_ROOT"
-    fi
-else
-    install -m 0500 "$STAGING_HELPER_SOURCE" "$STAGING_HELPER_ROOT/staging_helper.py"
+if [[ "${SANDBOX_DEFER_RUNTIME_ACTIVATION:-0}" == "1" ]]; then
+    ok "image staging helper provisioning deferred to the exact staged-source handoff"
+    exit 0
 fi
-STAGING_INSTALLED_DIGEST="$(sha256sum "$STAGING_HELPER_ROOT/staging_helper.py" | awk '{print $1}')"
-if [[ "$STAGING_INSTALLED_DIGEST" != "$STAGING_HELPER_DIGEST" ]]; then
-    fail "installed image staging helper could not be measured exactly"
-fi
-python3 - "$STAGING_HELPER_ROOT/staging_helper.py" <<'PY'
-import os
-import stat
-import sys
-owner_uid = os.geteuid()
-info = os.lstat(sys.argv[1])
-if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid \
-        or stat.S_IMODE(info.st_mode) != 0o500 or info.st_nlink != 1:
-    raise SystemExit("installed staging helper artifact identity is unsafe")
-PY
 STAGING_RUNTIME_REVISION="${SANDBOX_RUNTIME_REVISION:-}"
 if [[ -z "$STAGING_RUNTIME_REVISION" && -d "$SANDBOX_HOME/sb-src/.git" ]]; then
     STAGING_RUNTIME_REVISION="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
         -u GIT_PREFIX git -C "$SANDBOX_HOME/sb-src" rev-parse --verify HEAD 2>/dev/null || true)"
 fi
-if [[ ! "$STAGING_RUNTIME_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
-    fail "Sandbox runtime revision is unavailable or invalid"
-fi
-python3 - "$STAGING_HELPER_ROOT/manifest.json" "$STAGING_HELPER_DIGEST" "$STAGING_RUNTIME_REVISION" <<'PY'
-import json
-import os
-from pathlib import Path
-import re
-import stat
-import sys
-import tempfile
-
-path = Path(sys.argv[1])
-payload = {
-    "schema_version": 1,
-    "artifact_digest": "sha256:" + sys.argv[2],
-    "entry": "sandbox-image-stage-helper-v1",
-    "runtime_revision": sys.argv[3],
-    "capability_revision": "systemd-cgroup-v2-stage-v1",
-}
-encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-if path.exists():
-    try:
-        info = path.lstat()
-        existing = path.read_bytes()
-        current = json.loads(existing)
-    except (OSError, ValueError, TypeError):
-        raise SystemExit("installed staging helper manifest mismatch")
-    if (path.is_symlink() or not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_nlink != 1 or not isinstance(current, dict)
-            or set(current) != set(payload)
-            or current.get("schema_version") != payload["schema_version"]
-            or current.get("artifact_digest") != payload["artifact_digest"]
-            or current.get("entry") != payload["entry"]
-            or current.get("capability_revision") != payload["capability_revision"]
-            or re.fullmatch(r"[0-9a-f]{40}", str(current.get("runtime_revision", ""))) is None):
-        raise SystemExit("installed staging helper manifest mismatch")
-    if existing == encoded:
-        raise SystemExit(0)
-    fd, temporary = tempfile.mkstemp(prefix=".manifest-update.", dir=path.parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY"))
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-    raise SystemExit(0)
-fd, temporary = tempfile.mkstemp(prefix=".manifest.", dir=path.parent)
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.link(temporary, path)
-    except FileExistsError:
-        if path.read_bytes() != encoded:
-            raise SystemExit("concurrent staging helper manifest mismatch")
-    parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
-finally:
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-PY
-python3 - "$STAGING_HELPER_ROOT/manifest-v2.json" "$STAGING_HELPER_DIGEST" "$STAGING_RUNTIME_REVISION" <<'PY'
-import json
-import os
-from pathlib import Path
-import re
-import stat
-import sys
-import tempfile
-
-path = Path(sys.argv[1])
-payload = {
-    "schema_version": 2,
-    "artifact_digest": "sha256:" + sys.argv[2],
-    "entry": "sandbox-image-stage-helper-v2",
-    "runtime_revision": sys.argv[3],
-    "capability_revision": "systemd-cgroup-v2-batch-stage-v2",
-}
-encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-if path.exists():
-    try:
-        info = path.lstat()
-        existing = path.read_bytes()
-        current = json.loads(existing)
-    except (OSError, ValueError, TypeError):
-        raise SystemExit("installed v2 staging helper manifest mismatch")
-    if (path.is_symlink() or not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_nlink != 1 or not isinstance(current, dict)
-            or set(current) != set(payload)
-            or current.get("schema_version") != payload["schema_version"]
-            or current.get("artifact_digest") != payload["artifact_digest"]
-            or current.get("entry") != payload["entry"]
-            or current.get("capability_revision") != payload["capability_revision"]
-            or re.fullmatch(r"[0-9a-f]{40}", str(current.get("runtime_revision", ""))) is None):
-        raise SystemExit("installed v2 staging helper manifest mismatch")
-    if existing == encoded:
-        raise SystemExit(0)
-    fd, temporary = tempfile.mkstemp(prefix=".manifest-update.", dir=path.parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY"))
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-    raise SystemExit(0)
-fd, temporary = tempfile.mkstemp(prefix=".manifest-v2.", dir=path.parent)
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.link(temporary, path)
-    except FileExistsError:
-        if path.read_bytes() != encoded:
-            raise SystemExit("concurrent v2 staging helper manifest mismatch")
-    parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
-finally:
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-PY
-python3 - "$STAGING_HELPER_ROOT" <<'PY'
-import os
-from pathlib import Path
-import stat
-import sys
-
-root = Path(sys.argv[1])
-owner_uid = os.geteuid()
-for path, expected_mode, expected_type in (
-    (root.parent, 0o700, "directory"), (root, 0o700, "directory"),
-    (root / "staging_helper.py", 0o500, "file"),
-    (root / "manifest.json", 0o600, "file"),
-    (root / "manifest-v2.json", 0o600, "file"),
-):
-    info = os.lstat(path)
-    valid_type = stat.S_ISDIR(info.st_mode) if expected_type == "directory" else stat.S_ISREG(info.st_mode)
-    if not valid_type or stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid \
-            or stat.S_IMODE(info.st_mode) != expected_mode \
-            or (expected_type == "file" and info.st_nlink != 1):
-        raise SystemExit(f"installed staging helper {expected_type} identity is unsafe")
-PY
-ok "image staging helper provisioned at sha256:$STAGING_HELPER_DIGEST revision $STAGING_RUNTIME_REVISION"
+python3 "$SANDBOX_HOME/sb-src/scripts/provision_image_stage_helper.py" \
+    --sandbox-home "$SANDBOX_HOME" --runtime-revision "$STAGING_RUNTIME_REVISION"
+ok "image staging helper provisioned"

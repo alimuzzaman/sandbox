@@ -160,19 +160,25 @@ def _cgroup_identity(unit_name: str) -> str:
         raise ValueError("capability_mismatch")
     lines = Path("/proc/self/cgroup").read_text().splitlines()
     unified = next((line.split("::", 1)[1] for line in lines if line.startswith("0::")), None)
-    if not unified or unit_name not in unified or ".." in unified:
+    uid = os.geteuid()
+    expected = (f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/"
+                f"{unit_name}")
+    if unified != expected:
         raise ValueError("process_unproven")
     return unified
 
 
-def _verify_workspace_parent(run_root: Path = Path("/run/sandbox-image-stage"), *,
+def _verify_workspace_parent(run_root: Path | None = None, *,
                              mountinfo_text: str | None = None,
-                             required_uid: int = 0) -> Path:
+                             required_uid: int | None = None) -> Path:
     """Prove the credential workspace is volatile before asking for bytes."""
+    required_uid = os.geteuid() if required_uid is None else required_uid
+    if run_root is None:
+        run_root = Path("/run/user") / str(required_uid) / "sandbox-image-stage"
     try:
         parent = os.lstat(run_root.parent)
         if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) \
-                or parent.st_uid != required_uid:
+                or parent.st_uid != required_uid or stat.S_IMODE(parent.st_mode) != 0o700:
             raise ValueError("capability_mismatch")
         mount_lines = (mountinfo_text if mountinfo_text is not None
                        else Path("/proc/self/mountinfo").read_text()).splitlines()
@@ -188,17 +194,28 @@ def _verify_workspace_parent(run_root: Path = Path("/run/sandbox-image-stage"), 
                     candidates.append((len(mount_point), mount_point, after[0]))
         if not candidates or max(candidates)[2] != "tmpfs":
             raise ValueError("capability_mismatch")
+        parent_fd = os.open(run_root.parent,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
         try:
-            existing = os.lstat(run_root)
-        except FileNotFoundError:
-            os.mkdir(run_root, 0o700)
-            existing = os.lstat(run_root)
-            parent_fd = os.open(run_root.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try: os.fsync(parent_fd)
-            finally: os.close(parent_fd)
-        if not stat.S_ISDIR(existing.st_mode) or stat.S_ISLNK(existing.st_mode) \
-                or existing.st_uid != required_uid or stat.S_IMODE(existing.st_mode) != 0o700:
-            raise ValueError("capability_mismatch")
+            try:
+                child_fd = os.open(run_root.name,
+                                   os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                                   dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(run_root.name, 0o700, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+                child_fd = os.open(run_root.name,
+                                   os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                                   dir_fd=parent_fd)
+            try:
+                existing = os.fstat(child_fd)
+                if (not stat.S_ISDIR(existing.st_mode) or existing.st_uid != required_uid
+                        or stat.S_IMODE(existing.st_mode) != 0o700):
+                    raise ValueError("capability_mismatch")
+            finally:
+                os.close(child_fd)
+        finally:
+            os.close(parent_fd)
     except (OSError, UnicodeError):
         raise ValueError("capability_mismatch") from None
     return run_root

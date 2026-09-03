@@ -83,7 +83,8 @@ class FakePrepared:
                 cleanup={"complete": False})
         return observation(self.plan, self.policy), {
             "unit_name": self.frame["unit_name"],
-            "cgroup": "/system.slice/" + self.frame["unit_name"],
+            "cgroup": ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       + self.frame["unit_name"]),
             "delegated": False, "escape_allowed": False,
             "unit_inactive": True, "cgroup_empty_or_removed": True}, {"complete": True}
 
@@ -105,6 +106,43 @@ class FakeBatchWorker:
 
 
 class TestV2BatchStaging(unittest.TestCase):
+    def test_v2_prepare_description_drift_is_fenced_and_replayed_without_launch(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from sandbox.transports.remote_hosting_images import RemoteImageStageError
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        class Worker:
+            def __init__(self): self.prepares = 0
+            def prepare(self, _request, _policy):
+                self.prepares += 1
+                raise RemoteImageStageError("helper_failed",
+                    process={"unit_inactive": False, "cgroup_empty_or_removed": False},
+                    cleanup={"complete": False})
+        with tempfile.TemporaryDirectory() as directory:
+            worker = Worker(); service = ImagePlanSetStagingService(
+                repository=StageRepository(Path(directory)), broker=FakeBroker(), worker=worker)
+            result = service.stage(request, policy); replay = service.stage(request, policy)
+            self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(worker.prepares, 1)
+
+    def test_real_description_drift_transport_fences_v2_without_touching_incumbent(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from sandbox.hosting.images.staging_worker import StageWorkerV2
+        from tests.hosting_image_fixtures import description_drift_transport
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as directory:
+            transport, sender, commands = description_drift_transport(
+                policy.helper.as_mapping(), 2)
+            service = ImagePlanSetStagingService(repository=StageRepository(Path(directory)),
+                broker=FakeBroker(), worker=StageWorkerV2(transport))
+            result = service.stage(request, policy); replay = service.stage(request, policy)
+            self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(sender.prepares, 1)
+            self.assertFalse(any(" kill " in item or " stop " in item for item in commands))
+
     def test_v2_cli_refusal_preserves_response_schema(self):
         from sandbox.commands.hosting import _cmd_host_stage
 
@@ -307,7 +345,8 @@ class TestV2BatchStaging(unittest.TestCase):
                     stdout=json.dumps(inspected).encode(), stderr=b"")
             result = staging_helper.execute_v2(frame, b"canary", run_root=run_root,
                 runner=runner, anonymous_probe=lambda *_: True,
-                cgroup_identity=lambda unit: "/system.slice/" + unit,
+                cgroup_identity=lambda unit: (
+                    "/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit),
                 machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
         self.assertTrue(result["ok"])
         self.assertEqual(sum(call[:2] == ("docker", "login") for call in calls), 1)

@@ -280,7 +280,8 @@ class FakePreparedWorker:
         self.calls.append(len(credential))
         return local_observation(self.policy), {
             "unit_name": self.frame["unit_name"],
-            "cgroup": "/system.slice/" + self.frame["unit_name"], "delegated": False,
+            "cgroup": ("/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       + self.frame["unit_name"]), "delegated": False,
             "escape_allowed": False, "unit_inactive": True, "cgroup_empty_or_removed": True,
         }, {"complete": True}
     def cancel(self):
@@ -295,3 +296,50 @@ class FakeWorker:
         self.calls.append((request.request_id, policy.policy_digest))
         self.prepared = FakePreparedWorker(policy)
         return self.prepared
+
+
+def description_drift_transport(helper_mapping, schema_version):
+    """Real registered transport seam with one active mismatched incumbent."""
+    import io
+    import json
+    import os
+    import subprocess
+    from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+    commands = []
+    class Process:
+        stdin = io.BytesIO(); stdout = io.BytesIO(); stderr = io.BytesIO()
+        def read_ready(self, _timeout): return b"READY\n"
+        def kill(self): self.killed = True
+    process = Process()
+    class Sender:
+        def __init__(self): self.prepares = 0
+        def prepare(self, _remote, argv, **_kwargs):
+            self.prepares += 1; process.argv = argv; return process
+    sender = Sender()
+    def observe(_remote, command, timeout):
+        commands.append(command)
+        if command == "id -u":
+            return subprocess.CompletedProcess((), 0, stdout=str(os.geteuid()) + "\n")
+        if command.startswith("sha256sum"):
+            return subprocess.CompletedProcess((), 0, stdout="9" * 64 + "  helper\n")
+        if "manifest" in command:
+            return subprocess.CompletedProcess((), 0, stdout=json.dumps(
+                {"schema_version": schema_version, **helper_mapping}))
+        unit = next((item.split("=", 1)[1] for item in getattr(process, "argv", ())
+                     if item.startswith("--unit=")), "unknown.service")
+        cgroup = (f"/user.slice/user-{os.geteuid()}.slice/user@{os.geteuid()}.service/"
+                  f"app.slice/{unit}")
+        if "--property=ProtectControlGroups" in command:
+            return subprocess.CompletedProcess((), 0, stdout=(
+                f"ActiveState=active\nDescription=incumbent\nControlGroup={cgroup}\n"
+                "KillMode=control-group\nDelegate=no\nNoNewPrivileges=yes\n"
+                "RestrictSUIDSGID=yes\nProtectControlGroups=yes\n"))
+        if "--property=LoadState" in command:
+            return subprocess.CompletedProcess((), 0, stdout=(
+                f"LoadState=loaded\nActiveState=active\nDescription=incumbent\n"
+                f"ControlGroup={cgroup}\n"))
+        return subprocess.CompletedProcess((), 0, stdout="")
+    transport = RegisteredRemoteImageTransport(
+        remote_lookup=lambda _name: {"provisioned": True}, ssh_private_frame=sender,
+        unit_observer=observe, resolve_home=lambda _remote: "/home/alim/sandbox")
+    return transport, sender, commands

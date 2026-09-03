@@ -83,6 +83,8 @@ class ImageStagingService:
             code = "broker_unavailable"
         except RemoteImageStageError as exc:
             code = exc.code if exc.code == "helper_failed" else "helper_failed"
+            process_evidence = exc.process or process_evidence
+            cleanup_evidence = exc.cleanup or cleanup_evidence
         except StageWorkerError as exc:
             code = exc.code if exc.code in {"pull_failed", "cleanup_unproven",
                 "observation_invalid", "process_unproven"} else "helper_failed"

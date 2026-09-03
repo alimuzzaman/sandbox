@@ -245,14 +245,15 @@ def prepare_stage_binding(*, plan: VerifiedImagePlanSet, target: StagingTarget,
         machine_identity: str, source_reference: str, expires_at: str,
         owner: str):
     """Mint the deterministic metadata-only credential binding for one plan."""
-    from sandbox.isolation.credential_binding import CredentialBinding
+    from sandbox.isolation.credential_binding import CredentialBinding, canonical_timestamp
     try:
         if type(plan) is not VerifiedImagePlanSet or type(target) is not StagingTarget \
                 or target.machine_identity != machine_identity:
             raise ValueError
+        canonical_expires_at = canonical_timestamp(expires_at)
         seed = json.dumps({"target": target.as_mapping(),
             "plan_set_digest": plan.plan_set_digest,
-            "source_reference": source_reference, "expires_at": expires_at},
+            "source_reference": source_reference, "expires_at": canonical_expires_at},
             sort_keys=True, separators=(",", ":")).encode()
         binding_hex = hashlib.sha256(
             b"sandbox-hosting-stage-binding-v2\0" + seed).hexdigest()
@@ -264,7 +265,7 @@ def prepare_stage_binding(*, plan: VerifiedImagePlanSet, target: StagingTarget,
             egress_digest=hashlib.sha256(b"egress\0" + seed).hexdigest(),
             broker_digest=hashlib.sha256(b"broker\0" + seed).hexdigest(),
             scheme="https", host="ghcr.io", port=443, method="GET", path="/token",
-            auth_form="authorization_bearer", expires_at=expires_at, owner=owner,
+            auth_form="authorization_bearer", expires_at=canonical_expires_at, owner=owner,
             version=1, state="ready")
     except (TypeError, ValueError):
         raise ProvisioningError("artifact_invalid") from None
@@ -300,7 +301,13 @@ def reuse_owner_only_stage_bundle(path: Path, *, plan: VerifiedImagePlanSet,
         plan=plan, target=target, helper=helper, binding=expected_binding,
         credential_reference_revision=credential_reference_revision,
         secret_sources=secret_sources)
-    if value != expected or policy.policy_digest != expected["policy"]["policy_digest"]:
+    # Older bundles may retain the pre-canonical serialized spelling (for
+    # example ``.466000Z``) even though the binding model normalizes it.  The
+    # binding identity and all authority fields above are still exact; compare
+    # a normalized view so equivalent timestamp spellings replay safely while
+    # returning the original owner-only document unchanged.
+    normalized_value = {**value, "binding": binding.to_dict()}
+    if normalized_value != expected or policy.policy_digest != expected["policy"]["policy_digest"]:
         raise ProvisioningError("conflict")
     return value
 

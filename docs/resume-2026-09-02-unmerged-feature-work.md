@@ -30,21 +30,13 @@ and production gates remain separate and open.
 ## Spec 033: agent-aware remote synchronization
 
 - Remote branch: `origin/codex/finish-spec033-local`
-- Safe checkpoint: `7424b8089e412fbe86e5e7a69dae314ea65b3e70`
-- Status: local/source implementation complete; independent Sol High review PASS
-- Evidence: 280 tests passed; five race/handoff tests passed 20 repeated runs
-  each; compile and `git diff --check` passed
-
-The checkpoint adds fail-closed generation projection and authority, durable
-pending-generation job binding, replay-safe launch ownership, bounded detached
-supervisor handoff, terminal pin cleanup, interruption recovery, redaction, and
-compatibility coverage.
-
-Do not merge yet. Remaining gates are the disposable remote and hosted-app
-acceptance, full recovery/credential/divergence/parity/cleanup quickstart,
-evidence-bound feedback reconciliation, and final merge only after those pass.
-Remote synchronized execution must remain fail-closed until the authoritative
-controller adapter is composed and the installed revision/capability is proven.
+- Final checkpoint: `67d7f9b` (merged into `latest`)
+- Status: **COMPLETE AND MERGED INTO LATEST**
+- Evidence: 117 focused sync, transport, and job tests passed; 2026-09-03 live
+  remote acceptance on `scaleway-sandbox` passed (generation acceptance, replay
+  idempotency, credential negative screening, mode transitions, CLI/MCP parity,
+  clean workspace release/destruction/purge). Detailed evidence recorded in
+  `specs/033-agent-aware-remote-sync/quickstart.md`. Tasks T001-T068 completed.
 
 ## Feature 052: owned storage authority
 

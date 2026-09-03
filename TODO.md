@@ -25,9 +25,9 @@ their exact remote SHAs, verification evidence, blockers, immutable OCI guard,
 and safe resume order are recorded in
 `docs/resume-2026-09-02-unmerged-feature-work.md`.
 
-- [ ] Complete Spec 033 disposable-remote and external evidence gates from
-  `origin/codex/finish-spec033-local` at `7424b8089e412fbe86e5e7a69dae314ea65b3e70`,
-  then independently review and merge only if all gates pass.
+- [X] Complete Spec 033 disposable-remote and external evidence gates from
+  `origin/codex/finish-spec033-local`; live acceptance on `scaleway-sandbox`
+  passed on 2026-09-03 and merged into `latest`.
 - [ ] Resolve Feature 052's public lifecycle-port blocker before regenerating
   tasks. The truthful planning checkpoint is
   `origin/codex/owned-storage-authority-planning-repair` at

@@ -308,6 +308,40 @@ class RegisteredRemoteImageTransport:
         return {"ok": True, "code": "ready", "process": process_evidence,
                 "cleanup": cleanup, "cgroup": cgroup}
 
+    def observe_precredential_absence(self, remote_name: str, unit: str) -> dict:
+        """Prove one deterministic v2 staging unit and cgroup are absent, read-only."""
+        if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None \
+                or type(unit) is not str \
+                or re.fullmatch(r"sandbox-image-stage-[0-9a-f]{32}\.service", unit) is None:
+            raise RemoteImageStageError("protocol_invalid")
+        remote = self._lookup(remote_name)
+        if type(remote) is not dict or remote.get("provisioned") is not True:
+            raise RemoteImageStageError("remote_unavailable")
+        uid_result = self._observe_unit(remote, "id -u", timeout=15)
+        uid_text = str(getattr(uid_result, "stdout", "")).strip()
+        if getattr(uid_result, "returncode", 1) != 0 or not uid_text.isascii() \
+                or not uid_text.isdecimal() or not 1 <= int(uid_text) <= 2**31 - 1:
+            raise RemoteImageStageError("helper_failed")
+        uid = int(uid_text)
+        expected_cgroup = (f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/"
+                           f"{unit}")
+        observed = self._observe_unit(
+            remote, "systemctl --user show " + _UNIT_SHOW + " " + shlex.quote(unit),
+            timeout=15)
+        values = self._closed_unit_properties(observed)
+        cgroup = self._observe_unit(
+            remote, "test ! -e " + shlex.quote("/sys/fs/cgroup" + expected_cgroup)
+            + " || grep -qx 'populated 0' "
+            + shlex.quote("/sys/fs/cgroup" + expected_cgroup + "/cgroup.events"), timeout=15)
+        if not self._not_found_unit(values, unit) or getattr(cgroup, "returncode", 1) != 0:
+            raise RemoteImageStageError("helper_failed")
+        return {"unit_name": unit, "load_state": values["LoadState"],
+                "active_state": values["ActiveState"], "sub_state": values["SubState"],
+                "description": values["Description"], "main_pid": values["MainPID"],
+                "control_group": values["ControlGroup"], "exact_effect": False,
+                "unit_inactive": True, "cgroup_empty_or_removed": True,
+                "cleanup_complete": True}
+
     def prepare(self, remote_name: str, plan_frame: dict, *, timeout_seconds: int):
         if type(remote_name) is not str or _REMOTE.fullmatch(remote_name) is None:
             raise RemoteImageStageError("remote_unavailable")

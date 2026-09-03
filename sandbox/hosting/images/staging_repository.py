@@ -642,6 +642,42 @@ class StageRepository:
             self._write_unlocked(target, state)
             return result
 
+    def close_precredential_uncertain(self, request, *, expected_ledger_revision: int):
+        """Atomically terminalize one exact v2 pre-effect uncertain owner."""
+        from .staging_v2 import StageRequestSet, StageResultSet
+        if type(request) is not StageRequestSet or type(expected_ledger_revision) is not int:
+            raise StageRepositoryError("request_conflict")
+        target = request.target.target_identity
+        with self.target_lock(target):
+            state = self._load_unlocked(target)
+            record = state["records"].get(request.request_id)
+            owner = state["active_owner"]
+            existing = self.lookup_result_unlocked(state, request.request_id)
+            if type(record) is not dict or type(owner) is not dict \
+                    or type(existing) is not StageResultSet \
+                    or existing.result_class != "uncertain" \
+                    or record["phase"] != "uncertain" \
+                    or record["effect_entered"] is not False \
+                    or record["request_digest"] != request.request_digest \
+                    or record["generation"] != state["generation"] \
+                    or record["ledger_revision"] != expected_ledger_revision \
+                    or owner != {key: record[key] for key in _OWNER_FIELDS}:
+                raise StageRepositoryError("request_conflict")
+            result = StageResultSet(2, False, "failed", "precredential_bootstrap_failed",
+                                    request.request_id, record["generation"])
+            record["phase"] = "failed"
+            record["process"] = {"unit_inactive": True,
+                                 "cgroup_empty_or_removed": True}
+            record["cleanup"] = {"complete": True}
+            record["result"] = self._stored_result(result)
+            self._advance_counter(state, "ledger_revision")
+            record["ledger_revision"] = state["ledger_revision"]
+            state["active_owner"] = None
+            state["reserved_terminal_bytes"] = 0
+            self._assert_reserved_bound(state)
+            self._write_unlocked(target, state)
+            return result
+
     def record_status(self, target_identity: str, request_id: str) -> dict | None:
         """Return private durable phase evidence for read-only reconciliation."""
         with self.target_lock(target_identity):

@@ -106,6 +106,36 @@ class FakeBatchWorker:
 
 
 class TestV2BatchStaging(unittest.TestCase):
+    @staticmethod
+    def _uncertain(repository, request, *, effect_entered=False):
+        from sandbox.hosting.images.staging_v2 import StageResultSet
+        repository.accept(request)
+        process = {"unit_inactive": False, "cgroup_empty_or_removed": False}
+        if effect_entered:
+            repository.transition(request, "credential_pending")
+            repository.transition(request, "helper_running", process={
+                "unit_name": "sandbox-image-stage-old.service",
+                "unit_inactive": False, "cgroup_empty_or_removed": False})
+            repository.transition(request, "pulling")
+        repository.transition(request, "uncertain", process=process,
+                              cleanup={"complete": False})
+        return repository.commit(request, StageResultSet(
+            2, False, "uncertain", "cleanup_unproven", request.request_id, 1))
+
+    @staticmethod
+    def _safe_close_evidence(request, record):
+        from sandbox.hosting.images.staging_worker import unit_name
+        unit = unit_name(request.request_id, request.request_digest)
+        return {"schema_version": 1, "request_id": request.request_id,
+                "request_digest": request.request_digest,
+                "generation": record["generation"],
+                "ledger_revision": record["ledger_revision"],
+                "unit_name": unit, "load_state": "not-found",
+                "active_state": "inactive", "sub_state": "dead",
+                "description": unit, "main_pid": "0", "control_group": "",
+                "exact_effect": False, "unit_inactive": True,
+                "cgroup_empty_or_removed": True, "cleanup_complete": True}
+
     def test_v2_prepare_description_drift_is_fenced_and_replayed_without_launch(self):
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
@@ -131,6 +161,103 @@ class TestV2BatchStaging(unittest.TestCase):
             self.assertEqual((status["process"]["bootstrap_phase"],
                               status["process"]["bootstrap_code"]),
                              ("inode", "inode_os"))
+
+    def test_v2_reconcile_safe_closes_old_precredential_uncertainty_without_replay(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        class Poison:
+            def __getattr__(self, name):
+                raise AssertionError(f"effect boundary opened: {name}")
+        with tempfile.TemporaryDirectory() as directory:
+            repository = StageRepository(Path(directory)); old = self._uncertain(repository, request)
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=Poison(), worker=Poison())
+            calls = []
+            result = service.reconcile_precredential_failure(request, policy,
+                lambda supplied, record: calls.append((supplied, record))
+                    or self._safe_close_evidence(supplied, record))
+            replay = service.reconcile_precredential_failure(request, policy,
+                lambda *_args: self.fail("terminal replay must not observe the host"))
+            self.assertEqual((old.result_class, result.result_class, result.code),
+                             ("uncertain", "failed", "precredential_bootstrap_failed"))
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual(len(calls), 1)
+            status = repository.record_status(request.target.target_identity, request.request_id)
+            self.assertEqual((status["effect_entered"], status["process"], status["cleanup"]),
+                (False, {"unit_inactive": True, "cgroup_empty_or_removed": True},
+                 {"complete": True}))
+            next_request = request_set(plan, policy, request_id="stage-set-next", generation=1)
+            self.assertEqual(repository.accept(next_request)[0], "accepted")
+
+    def test_v2_reconcile_refuses_every_identity_effect_and_observation_drift(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        mutations = (
+            lambda value: value.update(request_id="other"),
+            lambda value: value.update(request_digest="sha256:" + "f" * 64),
+            lambda value: value.update(generation=2),
+            lambda value: value.update(ledger_revision=999),
+            lambda value: value.update(unit_name="sandbox-image-stage-" + "f" * 32 + ".service"),
+            lambda value: value.update(load_state="loaded"),
+            lambda value: value.update(active_state="active"),
+            lambda value: value.update(main_pid="123"),
+            lambda value: value.update(control_group="foreign"),
+            lambda value: value.update(exact_effect=True),
+            lambda value: value.update(cgroup_empty_or_removed=False),
+            lambda value: value.pop("cleanup_complete"),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                repository = StageRepository(Path(directory)); old = self._uncertain(repository, request)
+                service = ImagePlanSetStagingService(
+                    repository=repository, broker=None, worker=None)
+                def observer(supplied, record):
+                    evidence = self._safe_close_evidence(supplied, record); mutate(evidence)
+                    return evidence
+                result = service.reconcile_precredential_failure(request, policy, observer)
+                self.assertEqual(result.as_mapping(), old.as_mapping())
+                other = request_set(plan, policy, request_id=f"other-{index}", generation=1)
+                self.assertEqual(repository.accept(other)[2].code, "target_busy")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = StageRepository(Path(directory)); old = self._uncertain(
+                repository, request, effect_entered=True)
+            observed = []
+            result = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None,
+            ).reconcile_precredential_failure(
+                request, policy, lambda *_args: observed.append(True))
+            self.assertEqual(result.as_mapping(), old.as_mapping())
+            self.assertEqual(observed, [])
+
+    def test_v2_reconcile_commit_and_owner_release_are_one_durable_write(self):
+        from unittest.mock import patch
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = StageRepository(Path(directory)); old = self._uncertain(repository, request)
+            service = ImagePlanSetStagingService(repository=repository, broker=None, worker=None)
+            original_write = repository._write_unlocked; observed_states = []
+            def capture(target, state):
+                observed_states.append(json.loads(json.dumps(state)))
+                return original_write(target, state)
+            with patch.object(repository, "_write_unlocked", side_effect=OSError("interrupted")):
+                result = service.reconcile_precredential_failure(request, policy,
+                    self._safe_close_evidence)
+            self.assertEqual(result.as_mapping(), old.as_mapping())
+            self.assertEqual(repository.lookup_for_request(request).as_mapping(), old.as_mapping())
+            with patch.object(repository, "_write_unlocked", side_effect=capture):
+                closed = service.reconcile_precredential_failure(request, policy,
+                    self._safe_close_evidence)
+            self.assertEqual(closed.code, "precredential_bootstrap_failed")
+            self.assertEqual(len(observed_states), 1)
+            state = observed_states[0]
+            self.assertIsNone(state["active_owner"])
+            self.assertEqual(state["records"][request.request_id]["result"]["code"],
+                             "precredential_bootstrap_failed")
 
     def test_real_description_drift_transport_fences_v2_without_touching_incumbent(self):
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -173,6 +300,64 @@ class TestV2BatchStaging(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual((payload["result_class"], payload["code"]),
                          ("refused", "policy_mismatch"))
+
+    def test_v2_cli_reconcile_is_confirmed_closed_and_opens_no_secret_or_worker(self):
+        from sandbox.commands.hosting import _cmd_host_stage
+        from sandbox.hosting.images.staging_v2 import StageResultSet
+        plan = plan_set(); policy = policy_set(plan); scope = plan.policy.target_scope
+        expected_request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); project = root / "project"; project.mkdir()
+            runtime = root / "runtime"; plan_path = root / "plan-set.json"
+            plan_path.write_text(json.dumps(plan.as_mapping()))
+            scope_id = hashlib.sha256(
+                f"{scope.remote}\0{scope.project}\0{scope.environment}".encode()).hexdigest()
+            policy_path = (runtime / "hosting" / "image-staging" / "policies"
+                           / f"{scope_id}.json")
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(json.dumps({"policy": policy.as_mapping(),
+                "binding": "must-not-open", "secret_sources": "must-not-open"}))
+            args = SimpleNamespace(project_dir=str(project), environment=scope.environment,
+                remote=scope.remote, request_id="stage-set-a", expected_generation=0,
+                verified_plan=str(plan_path), stage_status=False, reconcile=True, confirm=True)
+            observed = []
+            class Service:
+                def __init__(self, *, repository, broker, worker):
+                    self.repository = repository
+                    self.assertions = (broker, worker)
+                def reconcile_precredential_failure(self, request, supplied_policy, observer):
+                    self_outer.assertEqual(self.assertions, (None, None))
+                    self_outer.assertEqual(supplied_policy.as_mapping(), policy.as_mapping())
+                    observed.append(observer(request, {"ledger_revision": 7, "generation": 1}))
+                    return StageResultSet(2, False, "failed",
+                        "precredential_bootstrap_failed", request.request_id, 1)
+            self_outer = self
+            closed = {"unit_name": "exact", "load_state": "not-found",
+                "active_state": "inactive", "sub_state": "dead", "description": "exact",
+                "main_pid": "0", "control_group": "", "exact_effect": False,
+                "unit_inactive": True, "cgroup_empty_or_removed": True,
+                "cleanup_complete": True}
+            output = StringIO()
+            with patch("sandbox.core._paths.RUNTIME_DIR", runtime), \
+                 patch("sandbox.hosting.images.staging_v2_service.ImagePlanSetStagingService",
+                       Service), \
+                 patch("sandbox.transports.remote_hosting_images.RegisteredRemoteImageTransport.observe_precredential_absence",
+                       return_value=closed) as observer, \
+                 patch("sandbox.secrets.sources.SourceRegistry",
+                       side_effect=AssertionError("secret source opened")), \
+                 patch("sandbox.secrets.service.GHCRStagingCredentialAdapter",
+                       side_effect=AssertionError("broker opened")), \
+                 patch("sandbox.hosting.images.staging_worker.StageWorkerV2",
+                       side_effect=AssertionError("worker opened")), \
+                 redirect_stdout(output):
+                _cmd_host_stage(args)
+            payload = json.loads(output.getvalue())
+            self.assertEqual((payload["result_class"], payload["code"]),
+                             ("failed", "precredential_bootstrap_failed"))
+            self.assertEqual(observed, [{"schema_version": 1,
+                "request_id": "stage-set-a", "request_digest": expected_request.request_digest,
+                "generation": 1, "ledger_revision": 7, **closed}])
+            observer.assert_called_once()
 
     def test_one_lease_one_helper_persists_one_exhaustive_proof_and_replays(self):
         from sandbox.hosting.images.staging_repository import StageRepository

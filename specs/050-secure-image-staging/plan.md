@@ -131,6 +131,11 @@ Pre-READY refusal is reduced to one 512-byte maximum ASCII frame with fixed inod
 cgroup, or workspace phase/code values. The same measured wrapper can run a fixed
 credential-free self-check entry that proves only user-unit hardening, cgroup identity, and
 volatile workspace readiness; it cannot call the broker, registry, or Docker.
+The protected v2 reconcile intent never calls `_execute_accepted`. It validates the exact
+retained uncertain request and policy, observes only the derived deterministic unit and
+cgroup, and uses one repository write to replace uncertainty with the bounded terminal
+`precredential_bootstrap_failed` result and release ownership. A failed write leaves the old
+uncertain owner durable.
 
 Feature 051 proof custody is distinct from the broker credential lease and target effect
 lease. It uses this cross-store handoff:

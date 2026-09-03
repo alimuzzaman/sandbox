@@ -190,7 +190,11 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-022**: Ledger writes MUST use single-flight ownership, generation compare-and-
   set, atomic durable replacement, and immutable terminal results/tombstones.
 - **FR-023**: An exact pre-effect request MAY resume only with durable no-effect plus
-  complete process-termination/cleanup proof.
+  complete process-termination/cleanup proof. V2 reconciliation of a terminal uncertain
+  pre-credential request MUST NOT resume its plan: only an exact immutable request/policy,
+  `effect_entered=false`, fresh `exact_effect=false`, and closed absent deterministic-unit
+  plus empty-cgroup evidence may atomically commit `precredential_bootstrap_failed` and
+  release ownership. Every mismatch remains fenced.
 - **FR-024**: Possible pull/helper effect MUST be freshly reconciled; unproven outcome
   MUST return durable uncertainty, never optimistic replay.
 - **FR-025**: Success MUST emit one closed, versioned, canonical, secret-free,

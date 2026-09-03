@@ -88,6 +88,16 @@ Observed user-unit bootstrap recovery evidence (2026-09-03):
 - No live remote staging, registry access, secret use, deployment, or production mutation
   was performed. Those remain separate authorized gates.
 
+Observed v2 pre-credential convergence evidence (2026-09-03):
+
+- The two directly affected Feature 050 process and v2 staging modules ran **34 tests in
+  0.503s: OK**.
+- `compileall` passed for the changed production surfaces and `git diff --check` passed.
+- An independent Sol High source review returned **PASS with no P0-P2 findings**; it was
+  automated, not human review.
+- No ledger, remote, broker, secret, registry, Docker, helper, deployment, Lenzora, or
+  production mutation was performed.
+
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.
 

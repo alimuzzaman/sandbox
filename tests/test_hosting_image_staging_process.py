@@ -177,6 +177,48 @@ class TestImageStagingProcess(unittest.TestCase):
                 self.assertEqual(cleanup, {"complete": expected})
                 self.assertEqual(process["unit_inactive"], expected)
 
+    def test_precredential_reconcile_observer_is_read_only_and_accepts_only_exact_absence(self):
+        from sandbox.transports.remote_hosting_images import (
+            RegisteredRemoteImageTransport, RemoteImageStageError,
+        )
+        unit = "sandbox-image-stage-" + "a" * 32 + ".service"
+        exact = ("LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                 f"Description={unit}\nMainPID=0\nControlGroup=\n"
+                 "Result=success\nExecMainStatus=0\n")
+        for name, output, cgroup_rc, accepted in (
+                ("exact", exact, 0, True),
+                ("loaded", exact.replace("not-found", "loaded"), 0, False),
+                ("pid", exact.replace("MainPID=0", "MainPID=12"), 0, False),
+                ("duplicate", exact + "MainPID=0\n", 0, False),
+                ("populated", exact, 1, False)):
+            with self.subTest(name=name):
+                commands = []
+                def observe(_remote, command, timeout):
+                    commands.append(command)
+                    if command == "id -u":
+                        return subprocess.CompletedProcess((), 0, stdout="1000\n")
+                    if command.startswith("systemctl --user show"):
+                        return subprocess.CompletedProcess((), 0, stdout=output)
+                    return subprocess.CompletedProcess((), cgroup_rc, stdout="")
+                transport = RegisteredRemoteImageTransport(
+                    remote_lookup=lambda _name: {"provisioned": True},
+                    ssh_private_frame=lambda *a, **k: None, unit_observer=observe,
+                    resolve_home=lambda _remote: "/home/alim/sandbox")
+                if accepted:
+                    evidence = transport.observe_precredential_absence("remote-a", unit)
+                    self.assertEqual(evidence, {"unit_name": unit, "load_state": "not-found",
+                        "active_state": "inactive", "sub_state": "dead",
+                        "description": unit, "main_pid": "0", "control_group": "",
+                        "exact_effect": False, "unit_inactive": True,
+                        "cgroup_empty_or_removed": True, "cleanup_complete": True})
+                else:
+                    with self.assertRaises(RemoteImageStageError):
+                        transport.observe_precredential_absence("remote-a", unit)
+                rendered = " ".join(commands).lower()
+                for forbidden in (" kill ", " stop ", "reset-failed", "docker",
+                                  "registry", "credential", "helper"):
+                    self.assertNotIn(forbidden, rendered)
+
     def test_cancel_requires_exact_unit_inactive_and_exact_cgroup_empty(self):
         from sandbox.transports.remote_hosting_images import _PreparedRemoteStage
 

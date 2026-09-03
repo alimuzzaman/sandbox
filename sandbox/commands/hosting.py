@@ -3207,6 +3207,9 @@ def _cmd_host_stage(args) -> None:
         if getattr(args, "expected_generation", None) is None: missing.append("--expected-generation")
         die("host stage requires explicit " + ", ".join(missing) + "; no staging state was opened")
     status_only = getattr(args, "stage_status", False)
+    reconcile = getattr(args, "reconcile", False)
+    if status_only and reconcile:
+        die("host stage --stage-status cannot be combined with --reconcile")
     if not status_only and not getattr(args, "confirm", False):
         die("host stage is protected; pass --confirm after reviewing the exact verified plan")
     response_schema = 0
@@ -3245,7 +3248,6 @@ def _cmd_host_stage(args) -> None:
             raise ValueError("machine staging policy is invalid")
         policy = StagingPolicySet.from_mapping(private["policy"]) if is_v2 \
             else StagingPolicy.from_mapping(private["policy"])
-        binding = CredentialBinding.from_dict(private["binding"])
         request = (StageRequestSet.create(
             request_id=args.request_id, expected_generation=args.expected_generation,
             plan_set=plan, staging_policy_digest=policy.policy_digest, target=policy.target,
@@ -3257,7 +3259,24 @@ def _cmd_host_stage(args) -> None:
         if status_only:
             service_type = ImagePlanSetStagingService if is_v2 else ImageStagingService
             result = service_type(repository=repository, broker=None, worker=None).status(request)
+        elif reconcile:
+            if not is_v2:
+                raise ValueError("pre-credential reconciliation requires schema v2")
+            transport = RegisteredRemoteImageTransport()
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None)
+            def observe_absence(supplied_request, record):
+                from sandbox.hosting.images.staging_worker import unit_name
+                unit = unit_name(supplied_request.request_id, supplied_request.request_digest)
+                observed = transport.observe_precredential_absence(args.remote, unit)
+                return {"schema_version": 1,
+                    "request_id": supplied_request.request_id,
+                    "request_digest": supplied_request.request_digest,
+                    "generation": record["generation"],
+                    "ledger_revision": record["ledger_revision"], **observed}
+            result = service.reconcile_precredential_failure(request, policy, observe_absence)
         else:
+            binding = CredentialBinding.from_dict(private["binding"])
             registry = SourceRegistry(
                 project_root, private["secret_sources"],
                 personal_path=personal_secrets.secret_file(),
@@ -3290,7 +3309,9 @@ def _cmd_host_stage(args) -> None:
         raise SystemExit(1)
     payload = result.as_mapping()
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    if not result.ok and result.result_class != "in_progress": raise SystemExit(1)
+    if not result.ok and result.result_class != "in_progress" \
+            and not (reconcile and result.code == "precredential_bootstrap_failed"):
+        raise SystemExit(1)
 
 
 def _cmd_host_image_verify(args) -> None:

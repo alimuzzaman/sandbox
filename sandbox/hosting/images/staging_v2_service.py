@@ -9,6 +9,7 @@ from .staging_v2 import (
     StageRequestSet, StageResultSet, StagedImageProofSet, admit_stage_request_set,
 )
 from .staging_worker import StageWorkerError
+from .staging_worker import unit_name
 
 
 class ImagePlanSetStagingService:
@@ -45,6 +46,48 @@ class ImagePlanSetStagingService:
             return self._failure(request, generation,
                 "target_busy" if decision == "busy" else "request_conflict", "refused")
         return self._execute_accepted(request, policy, generation)
+
+    def reconcile_precredential_failure(self, request: StageRequestSet,
+                                        machine_policy, observer) -> StageResultSet:
+        """Safely close one exact pre-effect uncertainty; never replay its plan."""
+        policy, code = admit_stage_request_set(request, machine_policy)
+        if policy is None:
+            return self._failure(request, request.expected_generation, code, "refused")
+        current = self.repository.record_status(
+            request.target.target_identity, request.request_id)
+        terminal = self.repository.lookup_for_request(request)
+        if isinstance(terminal, StageResultSet) and terminal.result_class != "uncertain":
+            return terminal
+        if type(current) is not dict or type(terminal) is not StageResultSet \
+                or terminal.result_class != "uncertain" \
+                or current.get("phase") != "uncertain" \
+                or current.get("effect_entered") is not False \
+                or current.get("request_id") != request.request_id \
+                or current.get("request_digest") != request.request_digest \
+                or current.get("generation") != terminal.generation \
+                or type(current.get("ledger_revision")) is not int:
+            return terminal if isinstance(terminal, StageResultSet) else self._failure(
+                request, request.expected_generation, "acceptance_unknown", "uncertain")
+        try:
+            evidence = observer(request, dict(current))
+        except Exception:
+            return terminal
+        expected_unit = unit_name(request.request_id, request.request_digest)
+        expected = {"schema_version": 1, "request_id": request.request_id,
+            "request_digest": request.request_digest, "generation": current["generation"],
+            "ledger_revision": current["ledger_revision"], "unit_name": expected_unit,
+            "load_state": "not-found", "active_state": "inactive", "sub_state": "dead",
+            "description": expected_unit, "main_pid": "0", "control_group": "",
+            "exact_effect": False, "unit_inactive": True,
+            "cgroup_empty_or_removed": True, "cleanup_complete": True}
+        alternate = {**expected, "description": ""}
+        if type(evidence) is not dict or evidence not in (expected, alternate):
+            return terminal
+        try:
+            return self.repository.close_precredential_uncertain(
+                request, expected_ledger_revision=current["ledger_revision"])
+        except (StageRepositoryError, OSError):
+            return terminal
 
     def _execute_accepted(self, request, policy, generation):
         prepared = None; broker_lease = None

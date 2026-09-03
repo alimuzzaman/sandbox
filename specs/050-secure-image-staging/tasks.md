@@ -135,3 +135,16 @@ and the independent automated Sol High review do not supply those gates.
 - [X] T050 Prove the observed `ProtectControlGroups=yes` user-unit path with an accessible
   mapped-UID top-level inode anchor, closed bounded pre-credential bootstrap/self-check
   evidence, and exact dead-unit reset/absence cleanup regressions.
+
+## Phase 9: Convergence
+
+- [X] T051 Add a protected v2 reconciliation intent that may safely close and release only
+  an exact accepted `uncertain` request whose immutable request digest matches, whose
+  `effect_entered` and `exact_effect` evidence are both false, and whose fresh exact
+  attempt-unit observation proves the owned unit terminal with `MainPID=0`, empty
+  `ControlGroup`, and the expected cgroup absent or unpopulated; atomically commit one
+  bounded `precredential_bootstrap_failed` terminal result before releasing the active
+  owner, expose it only through the existing confirmed host-stage interface, and prove
+  that every identity drift, partial/possible-effect observation, or cleanup failure
+  remains fenced with zero broker, secret, registry, Docker, helper, or plan replay per
+  US3/AC3 and FR-017, FR-021-FR-024, FR-028, FR-032.

@@ -928,6 +928,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="exact active transaction digest for `host image recover`")
     host_p.add_argument("--stage-status", action="store_true",
         help="read the exact Feature 050 request status without helper or credential access")
+    host_p.add_argument("--reconcile", action="store_true",
+        help="with confirmed host stage, safely close only a proven pre-credential v2 uncertainty")
     host_p.add_argument("--job-id", default=None,
         help="failed durable host-apply job identity for recovery")
     host_p.add_argument("--original-request-id", default=None,

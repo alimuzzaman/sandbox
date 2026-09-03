@@ -250,12 +250,19 @@ class TestImageStagingSecrets(unittest.TestCase):
                     cgroup_identity=lambda _unit: (
                         "/user.slice/user-1000.slice/user@1000.service/app.slice/"
                         + plan["unit_name"]),
-                    machine_epoch_reader=lambda: "machine-a", remover=remover))
+                    machine_epoch_reader=lambda: "raw-machine-a",
+                    projected_identity_reader=lambda: "machine-a", remover=remover))
                 self.assertIsNone(lease._material)
                 captured_bytes = repr({"argv": captured["argv"],
                     "environment": captured["environment"], "logs": captured["logs"],
                     "frame": plan, "result": response}).encode()
                 self.assertNotIn(canary, captured_bytes)
+                self.assertNotIn(b"raw-machine-a", captured_bytes)
+                if branch == "success":
+                    self.assertTrue(response["ok"])
+                    observation = response["payload"]["observation"]
+                    self.assertEqual(observation["target_epoch_start"], "machine-a")
+                    self.assertEqual(observation["target_epoch_end"], "machine-a")
                 leftovers = tuple(verified.glob("operation-*"))
                 if branch == "final_cleanup_failure":
                     self.assertEqual(response["code"], "cleanup_unproven")

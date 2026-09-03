@@ -78,6 +78,16 @@ Observed retained-proof custody hardening evidence (2026-09-02):
 - A fresh independent Sol High post-hardening source-security review returned **GO** for
   source commit and merge into `latest`; it was automated, not human review.
 
+Observed user-unit bootstrap recovery evidence (2026-09-03):
+
+- The focused Feature 050 transport, cleanup, bootstrap parser, helper self-check,
+  mapped-anchor, and v1/v2 durable-evidence selector ran **83 tests in 8.680s: OK**.
+- `compileall` and `git diff --check` passed for the changed Feature 050 sources.
+- An independent Sol High source review returned **PASS with no P0-P2 findings**; it was
+  automated, not human review.
+- No live remote staging, registry access, secret use, deployment, or production mutation
+  was performed. Those remain separate authorized gates.
+
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.
 

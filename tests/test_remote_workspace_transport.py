@@ -121,6 +121,21 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
         self.assertNotIn("--project-dir", reconcile)
         self.assertNotIn("--path", reconcile)
 
+    def test_sync_publication_accepts_bytes_process_stdout(self):
+        transport = RemoteWorkspaceTransport(
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["workspace.index"]},
+            ssh_run=lambda *args, **kwargs: _Result(),
+            ssh_process=lambda remote, command, input_data, timeout: _Result(stdout=b'{"ok":true,"status":"accepted"}'),
+            remote_sb_path=lambda _remote: "/opt/sandbox/sb",
+        )
+        result = transport.publish_sync(
+            "remote-a", "ws-123", "project-identity", "gen-123",
+            "a" * 64, "b" * 64, 2, 12, 7,
+            b"archive",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "accepted")
+
     def test_reset_and_destroy_require_confirmation_and_workspace_id(self):
         for method in (self.transport.reset, self.transport.destroy):
             with self.subTest(method=method.__name__):

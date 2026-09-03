@@ -56,7 +56,9 @@ class WorkspaceCreateRequest:
 
 def _safe_detail(value: object, *, limit: int = 1024) -> str:
     """Bound remote diagnostics without forwarding credentials."""
-    if not isinstance(value, str):
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="replace")
+    elif not isinstance(value, str):
         return ""
     return redact_text(value.strip())[-limit:]
 
@@ -100,7 +102,12 @@ def _parse_envelope(stdout: object) -> dict[str, Any]:
     last JSON line.  A warning, nested envelope, or multiple documents makes
     the response ambiguous and is rejected as a protocol error.
     """
-    if not isinstance(stdout, str):
+    if isinstance(stdout, (bytes, bytearray)):
+        try:
+            stdout = stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is not text") from None
+    elif not isinstance(stdout, str):
         raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is not text")
     if len(stdout.encode("utf-8", errors="replace")) > _MAX_REMOTE_JSON_BYTES:
         raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is too large")

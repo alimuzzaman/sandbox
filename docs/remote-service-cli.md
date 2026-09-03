@@ -25,3 +25,9 @@ reports a bounded phase and numeric code; it does not echo archive paths or
 remote command output. An indeterminate publication cleanup must be inspected
 before retry; its bounded stage ID identifies the preserved reconciliation
 evidence without exposing a remote filesystem path.
+
+The runtime archive omits only the two repository-authoring links
+`skills/speckit-prd-refine/SKILL.md` and
+`skills/speckit-prd-validate/SKILL.md`. They point outside the repository and
+are not part of the installed runtime. Any other escaping archive link remains
+a hard failure.

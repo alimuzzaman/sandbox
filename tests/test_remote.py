@@ -1783,8 +1783,12 @@ class TestUploadRuntimeSource(unittest.TestCase):
         remote_cmd._upload_runtime_source(
             "ubuntu@1.2.3.4", source_revision=self.REVISION)
         argv = run.call_args.args[0]
-        self.assertEqual(argv, ("git", "-C", str(ROOT), "archive", "--format=tar.gz",
-                                self.REVISION))
+        self.assertEqual(argv, (
+            "git", "-C", str(ROOT), "archive", "--format=tar.gz", self.REVISION,
+            "--", ".",
+            ":(exclude,top,literal)skills/speckit-prd-refine/SKILL.md",
+            ":(exclude,top,literal)skills/speckit-prd-validate/SKILL.md",
+        ))
         self.assertEqual(clean.call_args_list,
                          [call(self.REVISION), call(self.REVISION)])
         self.assertEqual(ssh_process.call_args.kwargs["input_data"], b"archive")
@@ -1887,6 +1891,31 @@ class TestUploadRuntimeSource(unittest.TestCase):
             archive_bytes = ssh_process.call_args.kwargs["input_data"]
             with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
                 self.assertEqual(archive.extractfile("runtime.py").read(), b"exact-v1\n")
+
+    @patch.object(sr, "ssh_process")
+    @patch.object(remote_cmd, "_assert_clean_source_revision")
+    def test_current_git_archive_excludes_only_known_escaping_skill_links(
+            self, _clean, ssh_process):
+        ssh_process.return_value = _completed(returncode=0, stdout=b"", stderr=b"")
+        revision = run_test_process(
+            ("git", "-C", str(ROOT), "rev-parse", "HEAD"),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        remote_cmd._upload_runtime_source("host", source_revision=revision)
+        archive_bytes = ssh_process.call_args.kwargs["input_data"]
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+            names = set(archive.getnames())
+        self.assertTrue(set(remote_cmd._RUNTIME_SOURCE_ARCHIVE_EXCLUDES).isdisjoint(names))
+        self.assertTrue({
+            "sb",
+            "sandbox/__init__.py",
+            "sandbox/cli.py",
+            "sandbox/core/_remote.py",
+            "sandbox/services/runtime_revision.py",
+            "sandbox/hosting/images/staging_helper.py",
+            "scripts/install-remote.sh",
+            "scripts/provision_image_stage_helper.py",
+        }.issubset(names))
 
     @patch.object(sr, "ssh_process")
     def test_new_exact_archive_cannot_retain_a_deleted_stale_file(self, ssh_process):

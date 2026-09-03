@@ -32,6 +32,10 @@ _PROVISION_LOG_DETAIL_LIMIT = 1_000
 _RUNTIME_SOURCE_PACKAGE_TIMEOUT = 300
 _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT = 300
 _RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX = 7200
+_RUNTIME_SOURCE_ARCHIVE_EXCLUDES = (
+    "skills/speckit-prd-refine/SKILL.md",
+    "skills/speckit-prd-validate/SKILL.md",
+)
 
 
 _RUNTIME_SOURCE_EXTRACTION_PROGRAM = r'''import os,pathlib,posixpath,sys,tarfile
@@ -668,8 +672,12 @@ def _upload_runtime_source(
     runtime_revision = sr._remote_mcp_runtime_revision()
     if re.fullmatch(r"[0-9a-f]{24}", runtime_revision) is None:
         raise RuntimeError("local Sandbox runtime record revision is invalid")
-    archive_cmd = ("git", "-C", str(ROOT), "archive", "--format=tar.gz",
-                   source_revision)
+    archive_cmd = (
+        "git", "-C", str(ROOT), "archive", "--format=tar.gz", source_revision,
+        "--", ".",
+        *(f":(exclude,top,literal){path}"
+          for path in _RUNTIME_SOURCE_ARCHIVE_EXCLUDES),
+    )
     print(
         f"staging exact Sandbox runtime source {source_revision} archive "
         f"(bounded {_RUNTIME_SOURCE_PACKAGE_TIMEOUT}s)...",

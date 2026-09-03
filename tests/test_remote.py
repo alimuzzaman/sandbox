@@ -1676,6 +1676,89 @@ class TestCmdRemoteRemove(unittest.TestCase):
 class TestUploadRuntimeSource(unittest.TestCase):
     REVISION = "a" * 40
 
+    def _upload_archive_with_links(self, links):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            home = Path(directory) / "sandbox"
+            root.mkdir()
+            run_test_process(("git", "init", "-q", str(root)), check=True)
+            run_test_process(("git", "-C", str(root), "config", "user.email",
+                              "test@example.test"), check=True)
+            run_test_process(("git", "-C", str(root), "config", "user.name", "Test"),
+                             check=True)
+            (root / "sandbox/hosting/images").mkdir(parents=True)
+            (root / "sandbox/hosting/images/staging_helper.py").write_text("# helper\n")
+            (root / "skills").mkdir()
+            (root / "skills/SKILL.md").write_text("safe\n")
+            (root / "sb").write_text("#!/bin/sh\n")
+            for name, target in links:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(target)
+            run_test_process(("git", "-C", str(root), "add", "."), check=True)
+            run_test_process(("git", "-C", str(root), "commit", "-qm", "links"), check=True)
+            revision = run_test_process(
+                ("git", "-C", str(root), "rev-parse", "HEAD"),
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+            def execute_remote(_target, command, *, input_data, timeout):
+                return run_test_process(
+                    ("/bin/sh", "-c", command), input=input_data,
+                    capture_output=True, env={"SANDBOX_HOME": str(home)}, timeout=timeout,
+                )
+
+            portable_publish = (
+                "import os,sys; source,target=sys.argv[1:]; os.rename(source,target); "
+                "fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY); "
+                "os.fsync(fd); os.close(fd)"
+            )
+            with patch.object(remote_cmd, "ROOT", root), patch.object(
+                    sr, "ssh_process", side_effect=execute_remote), patch.object(
+                    remote_cmd, "_RUNTIME_SOURCE_PUBLISH_PROGRAM", portable_publish):
+                return remote_cmd._upload_runtime_source(
+                    "host", source_revision=revision,
+                )
+
+    def _exercise_publish_failure(self, publish_program, cleanup_program=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            home = Path(directory) / "sandbox"
+            root.mkdir()
+            run_test_process(("git", "init", "-q", str(root)), check=True)
+            run_test_process(("git", "-C", str(root), "config", "user.email",
+                              "test@example.test"), check=True)
+            run_test_process(("git", "-C", str(root), "config", "user.name", "Test"),
+                             check=True)
+            (root / "sandbox/hosting/images").mkdir(parents=True)
+            (root / "sandbox/hosting/images/staging_helper.py").write_text("# helper\n")
+            (root / "sb").write_text("#!/bin/sh\n")
+            run_test_process(("git", "-C", str(root), "add", "."), check=True)
+            run_test_process(("git", "-C", str(root), "commit", "-qm", "publish"), check=True)
+            revision = run_test_process(
+                ("git", "-C", str(root), "rev-parse", "HEAD"),
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+            def execute_remote(_target, command, *, input_data, timeout):
+                return run_test_process(
+                    ("/bin/sh", "-c", command), input=input_data,
+                    capture_output=True, env={"SANDBOX_HOME": str(home)}, timeout=timeout,
+                )
+
+            cleanup = (cleanup_program if cleanup_program is not None
+                       else remote_cmd._RUNTIME_SOURCE_CLEANUP_PROGRAM)
+            with patch.object(remote_cmd, "ROOT", root), \
+                    patch.object(sr, "ssh_process", side_effect=execute_remote), \
+                    patch.object(remote_cmd, "_RUNTIME_SOURCE_PUBLISH_PROGRAM",
+                                 publish_program), \
+                    patch.object(remote_cmd, "_RUNTIME_SOURCE_CLEANUP_PROGRAM", cleanup):
+                try:
+                    remote_cmd._upload_runtime_source("host", source_revision=revision)
+                except RuntimeError as exc:
+                    return exc, sorted(path.name for path in home.iterdir())
+            self.fail("synthetic publication failure unexpectedly succeeded")
+
     def test_upload_timeout_validation_is_exact_and_bounded(self):
         self.assertEqual(remote_cmd._normalize_runtime_source_upload_timeout(1), 1)
         self.assertEqual(remote_cmd._normalize_runtime_source_upload_timeout(7200), 7200)
@@ -1828,13 +1911,125 @@ class TestUploadRuntimeSource(unittest.TestCase):
                 self.assertIn("keep", archive.getnames())
                 self.assertNotIn("stale", archive.getnames())
 
+    def test_internal_parent_link_that_stays_in_archive_root_is_accepted(self):
+        staged = self._upload_archive_with_links(((".claude/skills", "../skills"),))
+        self.assertRegex(staged["stage_name"], r"^\.sb-src-stage-[0-9a-f]{12}-")
+
+    def test_parent_link_that_escapes_archive_root_is_rejected_with_phase(self):
+        with self.assertRaisesRegex(RuntimeError, r"phase=extract code=74"):
+            self._upload_archive_with_links((("escape", "../outside"),))
+
+    def test_absolute_link_is_rejected_with_phase(self):
+        with self.assertRaisesRegex(RuntimeError, r"phase=extract code=74"):
+            self._upload_archive_with_links((("absolute", "/private/target"),))
+
+    def test_link_chain_is_rejected_as_ambiguous_with_phase(self):
+        with self.assertRaisesRegex(RuntimeError, r"phase=extract code=74"):
+            self._upload_archive_with_links(
+                (("first", "skills/SKILL.md"), ("second", "first")),
+            )
+
+    def test_hardlink_target_is_archive_root_relative_not_link_parent_relative(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "archive.tar.gz"
+            extracted = Path(directory) / "tree"
+            extracted.mkdir()
+            with tarfile.open(archive_path, "w:gz") as archive:
+                for name, content in (
+                    ("target", b"root\n"),
+                    ("dir/target", b"nested\n"),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(content)
+                    archive.addfile(member, io.BytesIO(content))
+                hardlink = tarfile.TarInfo("dir/hard")
+                hardlink.type = tarfile.LNKTYPE
+                hardlink.linkname = "target"
+                archive.addfile(hardlink)
+            with patch.object(sys, "argv", ["extract", str(archive_path), str(extracted)]):
+                exec(remote_cmd._RUNTIME_SOURCE_EXTRACTION_PROGRAM, {})
+            self.assertEqual((extracted / "dir/hard").read_bytes(), b"root\n")
+            self.assertNotEqual((extracted / "dir/hard").read_bytes(),
+                                (extracted / "dir/target").read_bytes())
+
+    def test_publish_parent_fsync_failure_rolls_exact_stage_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            source = parent / "temporary"
+            target = parent / "stage"
+            source.mkdir(mode=0o700)
+            (source / "receipt.json").write_text("bound")
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_first_parent_fsync(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("synthetic parent fsync failure")
+                return real_fsync(fd)
+
+            class FakeRenameat2:
+                @staticmethod
+                def renameat2(_old_fd, old, _new_fd, new, _flags):
+                    os.rename(os.fsdecode(old), os.fsdecode(new))
+                    return 0
+
+            with patch.object(sys, "argv", ["publish", str(source), str(target)]), \
+                    patch("ctypes.CDLL", return_value=FakeRenameat2()), \
+                    patch("os.fsync", side_effect=fail_first_parent_fsync), \
+                    self.assertRaisesRegex(SystemExit, "74"):
+                exec(remote_cmd._RUNTIME_SOURCE_PUBLISH_PROGRAM, {})
+            self.assertTrue(source.is_dir())
+            self.assertEqual((source / "receipt.json").read_text(), "bound")
+            self.assertFalse(target.exists())
+
+    def test_publish_75_preserves_temporary_evidence(self):
+        error, entries = self._exercise_publish_failure("raise SystemExit(75)")
+        self.assertIsInstance(error, remote_cmd.RemoteRuntimeSourceIndeterminate)
+        self.assertIn("stage_id=.sb-src-stage-", str(error))
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0].startswith(".sb-src-stage-tmp."))
+
+    def test_publish_74_cleanup_failure_escalates_and_preserves_evidence(self):
+        error, entries = self._exercise_publish_failure(
+            "raise SystemExit(74)", "raise SystemExit(75)",
+        )
+        self.assertIsInstance(error, remote_cmd.RemoteRuntimeSourceIndeterminate)
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0].startswith(".sb-src-stage-tmp."))
+
+    @patch.object(remote_cmd, "_assert_clean_source_revision")
+    @patch("subprocess.run")
+    @patch.object(sr, "ssh_process")
+    def test_indeterminate_publish_cleanup_has_stable_classification(
+            self, ssh_process, run, _clean):
+        run.return_value = _completed(returncode=0, stdout=b"archive", stderr=b"")
+        ssh_process.return_value = _completed(
+            returncode=75, stdout=b"",
+            stderr=b"SB_RUNTIME_UPLOAD_ERROR phase=publish code=75\n",
+        )
+        with self.assertRaisesRegex(
+                remote_cmd.RemoteRuntimeSourceIndeterminate, "inspect the remote"):
+            remote_cmd._upload_runtime_source("host", source_revision=self.REVISION)
+
+    @patch.object(remote_cmd, "_assert_clean_source_revision")
+    @patch("subprocess.run")
+    @patch.object(sr, "ssh_process")
+    def test_negative_remote_signal_never_reports_success_code(
+            self, ssh_process, run, _clean):
+        run.return_value = _completed(returncode=0, stdout=b"archive", stderr=b"")
+        ssh_process.return_value = _completed(returncode=-9, stdout=b"", stderr=b"")
+        with self.assertRaisesRegex(RuntimeError, "phase=remote code=9"):
+            remote_cmd._upload_runtime_source("host", source_revision=self.REVISION)
+
     @patch.object(remote_cmd, "_assert_clean_source_revision")
     @patch("subprocess.run")
     @patch.object(sr, "ssh_process")
     def test_failed_remote_stage_never_returns_activation_authority(self, ssh_process, run, _clean):
         run.return_value = _completed(returncode=0, stdout=b"archive", stderr=b"")
         ssh_process.return_value = _completed(returncode=74, stdout=b"", stderr=b"stage refused")
-        with self.assertRaisesRegex(RuntimeError, "stage refused"):
+        with self.assertRaisesRegex(RuntimeError, "phase=remote code=74"):
             remote_cmd._upload_runtime_source("host", source_revision=self.REVISION)
 
     def test_failed_executable_stage_cleans_temporary_and_publishes_nothing(self):
@@ -1999,6 +2194,29 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertEqual(payload["events"][-1]["stage"], "runtime_staging_failed")
                 self.assertNotIn("private-value", journal.read_text())
                 self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+
+    def test_provision_preserves_indeterminate_runtime_source_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = types.SimpleNamespace(
+                    name="myvps", control="https",
+                    control_host="sandbox.example.com", confirm=True,
+                    upload_timeout=300,
+                )
+                failure = remote_cmd.RemoteRuntimeSourceIndeterminate(
+                    "publication state requires inspection")
+                error = StringIO()
+                with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
+                     patch.object(remote_cmd, "_assert_clean_source_revision"), \
+                     patch.object(remote_cmd, "_read_exact_source_file",
+                                  return_value=b"#!/bin/sh\nexit 0\n"), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  side_effect=failure), \
+                     redirect_stderr(error), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_provision(args, as_json=True)
+                self.assertIn("remote_runtime_source_indeterminate", error.getvalue())
 
     def test_next_plan_surfaces_an_incomplete_previous_provision_log(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2982,6 +3200,27 @@ class TestRemoteServiceCommand(unittest.TestCase):
             remote_cmd._cmd_down(args, as_json=True)
         stop.assert_not_called()
         self.assertEqual(json.loads(printed.call_args.args[0])["status"], "planned")
+
+    def test_up_preserves_indeterminate_runtime_source_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_host="sandbox.example.test",
+                    control_url="https://sandbox.example.test", mcp_port=9174,
+                    bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(
+                    name="myvps", confirm=True, upload_timeout=300,
+                )
+                error = StringIO()
+                with patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  side_effect=remote_cmd.RemoteRuntimeSourceIndeterminate(
+                                      "publication state requires inspection")), \
+                     redirect_stderr(error), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_up(args, as_json=True)
+                self.assertIn("remote_runtime_source_indeterminate", error.getvalue())
 
     def test_confirmed_up_uses_the_verified_migration_path(self):
         with tempfile.TemporaryDirectory() as d:

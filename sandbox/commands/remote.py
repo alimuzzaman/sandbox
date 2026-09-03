@@ -34,10 +34,88 @@ _RUNTIME_SOURCE_UPLOAD_TIMEOUT_DEFAULT = 300
 _RUNTIME_SOURCE_UPLOAD_TIMEOUT_MAX = 7200
 
 
+_RUNTIME_SOURCE_EXTRACTION_PROGRAM = r'''import os,pathlib,posixpath,sys,tarfile
+archive=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve()
+with tarfile.open(archive,'r:gz') as bundle:
+ members=bundle.getmembers()
+ if len(members)>100000: raise SystemExit(74)
+ names={}; links=set()
+ for member in members:
+  name=pathlib.PurePosixPath(member.name)
+  canonical=posixpath.normpath(member.name)
+  if name.is_absolute() or '..' in name.parts or canonical in ('','.','..') or canonical.startswith('../') or canonical in names or member.isdev() or member.isfifo(): raise SystemExit(74)
+  names[canonical]=member
+  if member.issym() or member.islnk(): links.add(canonical)
+ for name,member in names.items():
+  if any(str(parent) in links for parent in pathlib.PurePosixPath(name).parents): raise SystemExit(74)
+  if not (member.issym() or member.islnk()): continue
+  raw=pathlib.PurePosixPath(member.linkname)
+  target=posixpath.normpath(posixpath.join(posixpath.dirname(name),member.linkname)) if member.issym() else posixpath.normpath(member.linkname)
+  if raw.is_absolute() or target in ('','..') or target.startswith('../'): raise SystemExit(74)
+  target_path=pathlib.PurePosixPath(target)
+  if target in links or any(str(parent) in links for parent in target_path.parents): raise SystemExit(74)
+  if member.islnk():
+   target_member=names.get(target)
+   if target_member is None or not target_member.isfile() or target_member.issym() or target_member.islnk(): raise SystemExit(74)
+   member.linkname=target
+ bundle.extractall(root)
+for path in sorted(root.rglob('*')):
+ if path.is_symlink(): continue
+ fd=os.open(path,os.O_RDONLY|(os.O_DIRECTORY if path.is_dir() else 0))
+ try: os.fsync(fd)
+ finally: os.close(fd)
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+try: os.fsync(fd)
+finally: os.close(fd)'''
+
+
 class RemoteRuntimeSourceTimeout(RuntimeError):
     """The bounded runtime-source package or upload did not finish."""
 
     code = "remote_runtime_source_timeout"
+
+
+class RemoteRuntimeSourceIndeterminate(RuntimeError):
+    """A staged source may have published without durable cleanup proof."""
+
+    code = "remote_runtime_source_indeterminate"
+
+
+_RUNTIME_SOURCE_PUBLISH_PROGRAM = r'''import ctypes,errno,os,stat,sys
+source,target=sys.argv[1:]; parent=os.path.dirname(target); libc=ctypes.CDLL(None,use_errno=True)
+sfd=os.open(source,os.O_RDONLY|os.O_DIRECTORY); identity=os.fstat(sfd); os.fsync(sfd); os.close(sfd)
+if libc.renameat2(-100,os.fsencode(source),-100,os.fsencode(target),1)!=0:
+ error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
+try:
+ pfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+ try: os.fsync(pfd)
+ finally: os.close(pfd)
+except BaseException:
+ try:
+  current=os.lstat(target)
+  if not stat.S_ISDIR(current.st_mode) or (current.st_dev,current.st_ino)!=(identity.st_dev,identity.st_ino) or current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o700: raise SystemExit(75)
+  if libc.renameat2(-100,os.fsencode(target),-100,os.fsencode(source),1)!=0: raise SystemExit(75)
+  pfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+  try: os.fsync(pfd)
+  finally: os.close(pfd)
+ except SystemExit: raise
+ except BaseException: raise SystemExit(75)
+ raise SystemExit(74)'''
+
+
+_RUNTIME_SOURCE_CLEANUP_PROGRAM = r'''import os,shutil,stat,sys
+source,stage,expected=sys.argv[1:]
+try:
+ dev,ino=(int(value) for value in expected.split(':',1))
+ current=os.lstat(source)
+ if os.path.lexists(stage) or not stat.S_ISDIR(current.st_mode) or (current.st_dev,current.st_ino)!=(dev,ino) or current.st_uid!=os.geteuid() or stat.S_IMODE(current.st_mode)!=0o700: raise SystemExit(75)
+ shutil.rmtree(source)
+ if os.path.lexists(source): raise SystemExit(75)
+ fd=os.open(os.path.dirname(source),os.O_RDONLY|os.O_DIRECTORY)
+ try: os.fsync(fd)
+ finally: os.close(fd)
+except SystemExit: raise
+except BaseException: raise SystemExit(75)'''
 
 
 def _local_git_revision() -> str:
@@ -397,8 +475,8 @@ def _cmd_service(args, as_json: bool) -> None:
                 sr.stop_remote_mcp_server(entry)
                 payload = {"ok": True, "name": name, "status": "stopped", "data": {}, "error": None}
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        if isinstance(exc, RemoteRuntimeSourceTimeout):
-            code = RemoteRuntimeSourceTimeout.code
+        if isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
+            code = exc.code
         else:
             code = (str(exc) if str(exc) in {
                 "remote_service_ownership_unknown", "remote_service_rollback_indeterminate"}
@@ -625,59 +703,40 @@ def _upload_runtime_source(
                                 "runtime_revision": runtime_revision,
                                 "archive_digest": f"sha256:{archive_digest}"},
                                sort_keys=True, separators=(",", ":"))
-    extraction_program = r'''import os,pathlib,sys,tarfile
-archive=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve()
-with tarfile.open(archive,'r:gz') as bundle:
- members=bundle.getmembers()
- if len(members)>100000: raise SystemExit(74)
- names=set(); links=set()
- for member in members:
-  name=pathlib.PurePosixPath(member.name)
-  if name.is_absolute() or '..' in name.parts or member.name in names or member.isdev() or member.isfifo(): raise SystemExit(74)
-  names.add(member.name)
-  if any(str(parent) in links for parent in name.parents): raise SystemExit(74)
-  if member.issym() or member.islnk():
-   target=(name.parent/pathlib.PurePosixPath(member.linkname))
-   if pathlib.PurePosixPath(member.linkname).is_absolute() or '..' in target.parts: raise SystemExit(74)
-   if member.issym(): links.add(str(name))
- bundle.extractall(root)
-for path in sorted(root.rglob('*')):
- if path.is_symlink(): continue
- fd=os.open(path,os.O_RDONLY|(os.O_DIRECTORY if path.is_dir() else 0))
- try: os.fsync(fd)
- finally: os.close(fd)
-fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-try: os.fsync(fd)
-finally: os.close(fd)'''
-    publish_program = r'''import ctypes,errno,os,sys
-source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
-fd=os.open(source,os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)
-if libc.renameat2(-100,os.fsencode(source),-100,os.fsencode(target),1)!=0:
- error=ctypes.get_errno(); raise OSError(error,os.strerror(error),target)
-fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)'''
     remote_cmd = (
-        "set -eu; umask 077; sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
+        "set -eu; umask 077; phase=preflight; temporary=; stage=; publish_identity=; "
+        "finish() { rc=$?; trap - EXIT; "
+        "if [ \"$phase\" = publish ] && [ \"$rc\" -eq 75 ]; then :; "
+        "elif [ \"$phase\" = publish ] && [ \"$rc\" -eq 74 ]; then "
+        "if python3 -c " + shlex.quote(_RUNTIME_SOURCE_CLEANUP_PROGRAM) + " \"$temporary\" \"$stage\" \"$publish_identity\"; then temporary=; else rc=75; fi; "
+        "elif [ -n \"$temporary\" ]; then rm -rf -- \"$temporary\" || :; fi; "
+        "if [ \"$rc\" -ne 0 ]; then printf 'SB_RUNTIME_UPLOAD_ERROR phase=%s code=%s\\n' \"$phase\" \"$rc\" >&2; fi; "
+        "exit \"$rc\"; }; trap finish EXIT; "
+        "sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
         "mkdir -p \"$sandbox_home\"; test -d \"$sandbox_home\"; test ! -L \"$sandbox_home\"; "
         "python3 -c 'import os,stat,sys; i=os.lstat(sys.argv[1]); "
         "raise SystemExit(0 if stat.S_ISDIR(i.st_mode) and i.st_uid==os.geteuid() "
         "and not stat.S_IMODE(i.st_mode)&2 else 69)' \"$sandbox_home\"; "
         f"stage_name={shlex.quote(stage_name)}; expected_digest={archive_digest}; "
         "stage=$sandbox_home/$stage_name; test ! -e \"$stage\"; "
-        "temporary=$(mktemp -d \"$sandbox_home/.sb-src-stage-tmp.XXXXXX\"); "
-        "cleanup() { rm -rf -- \"$temporary\"; }; trap cleanup EXIT; "
+        "temporary=$(mktemp -d \"$sandbox_home/.sb-src-stage-tmp.XXXXXX\"); phase=receive; "
         "archive=$temporary/archive.tar.gz; cat > \"$archive\"; "
+        "phase=digest; "
         "actual=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],\"rb\").read()).hexdigest())' \"$archive\"); "
         "test \"$actual\" = \"$expected_digest\"; mkdir -m 0700 \"$temporary/tree\"; "
-        "python3 -c " + shlex.quote(extraction_program) + " \"$archive\" \"$temporary/tree\"; "
+        "phase=extract; "
+        "python3 -c " + shlex.quote(_RUNTIME_SOURCE_EXTRACTION_PROGRAM) + " \"$archive\" \"$temporary/tree\"; "
+        "phase=validate; "
         "rm -f -- \"$archive\"; test -f \"$temporary/tree/sb\"; "
         "test ! -L \"$temporary/tree/sb\"; "
         "test -f \"$temporary/tree/sandbox/hosting/images/staging_helper.py\"; "
-        "printf '%s' " + shlex.quote(stage_receipt) + " > \"$temporary/receipt.json\"; "
+        "phase=receipt; printf '%s' " + shlex.quote(stage_receipt) + " > \"$temporary/receipt.json\"; "
         "chmod 0600 \"$temporary/receipt.json\"; "
         "python3 -c 'import os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); os.fsync(fd); os.close(fd)' "
         "\"$temporary/receipt.json\"; "
-        "python3 -c " + shlex.quote(publish_program) + " \"$temporary\" \"$stage\"; "
-        "trap - EXIT; "
+        "phase=publish; publish_identity=$(python3 -c 'import os,sys; i=os.lstat(sys.argv[1]); print(f\"{i.st_dev}:{i.st_ino}\")' \"$temporary\"); "
+        "python3 -c " + shlex.quote(_RUNTIME_SOURCE_PUBLISH_PROGRAM) + " \"$temporary\" \"$stage\"; "
+        "temporary=; phase=complete; trap - EXIT; "
     )
     print(
         "runtime source archive ready "
@@ -698,7 +757,20 @@ fd=os.open(os.path.dirname(target),os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os
         ) from exc
     if ssh_res.returncode != 0:
         detail = (ssh_res.stderr or ssh_res.stdout or b"").decode(errors="replace")
-        raise RuntimeError(f"could not upload sandbox runtime: {detail.strip()[:500]}")
+        marker = re.search(
+            r"SB_RUNTIME_UPLOAD_ERROR phase=(preflight|receive|digest|extract|validate|receipt|publish) code=([0-9]{1,3})(?:\n|$)",
+            detail[:2000],
+        )
+        phase = marker.group(1) if marker else "remote"
+        code = marker.group(2) if marker else str(max(1, min(255, abs(ssh_res.returncode))))
+        if phase == "publish" and code == "75":
+            raise RemoteRuntimeSourceIndeterminate(
+                "runtime source publication cleanup is indeterminate; "
+                f"stage_id={stage_name}; inspect the remote before retrying"
+            )
+        raise RuntimeError(
+            f"could not upload sandbox runtime: phase={phase} code={code}"
+        )
     return {"stage_name": stage_name, "source_revision": source_revision,
             "runtime_revision": runtime_revision,
             "archive_digest": f"sha256:{archive_digest}", "receipt": stage_receipt}
@@ -787,7 +859,9 @@ def _cmd_provision(args, as_json: bool) -> None:
         _record_provision_event(journal, "runtime_staged")
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "runtime_staging_failed", status="failed", detail=str(e))
-        die(f"could not stage the sandbox runtime on '{name}': "
+        error_code = (f"{e.code}: " if isinstance(
+            e, RemoteRuntimeSourceIndeterminate) else "")
+        die(f"{error_code}could not stage the sandbox runtime on '{name}': "
             f"{sr.redact_ssh_connection(str(e), entry)}")
     cmd = (
         f"echo {encoded} | base64 -d | "
@@ -921,7 +995,9 @@ def _cmd_up(args, as_json: bool) -> None:
             )
             sr.put_remote(name, mcp_service=plan["service"])
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
-        die(f"could not start '{name}''s MCP server: "
+        error_code = (f"{e.code}: " if isinstance(
+            e, RemoteRuntimeSourceIndeterminate) else "")
+        die(f"{error_code}could not start '{name}''s MCP server: "
             f"{sr.redact_ssh_connection(str(e), entry)}")
         return
     result = {"ok": True, "name": name, "control_transport": control_transport,

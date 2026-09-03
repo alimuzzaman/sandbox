@@ -16,3 +16,12 @@ to apply either operation. A confirmed migration stages the current source, then
 refreshes the immutable, owner-scoped image staging helper for that exact source
 revision before it changes or restarts the user service. Helper validation failure
 therefore leaves the existing service untouched.
+
+Source archives may contain symlinks only when parent-relative lexical
+resolution stays inside the archive root. Tar hardlinks use archive-root
+semantics and must name a direct regular archived file. Absolute links,
+escaping links, and link chains fail before publication. Upload refusal
+reports a bounded phase and numeric code; it does not echo archive paths or
+remote command output. An indeterminate publication cleanup must be inspected
+before retry; its bounded stage ID identifies the preserved reconciliation
+evidence without exposing a remote filesystem path.

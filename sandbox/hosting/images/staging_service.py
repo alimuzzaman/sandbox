@@ -83,6 +83,8 @@ class ImageStagingService:
             code = "broker_unavailable"
         except RemoteImageStageError as exc:
             code = exc.code if exc.code == "helper_failed" else "helper_failed"
+            process_evidence = exc.process or process_evidence
+            cleanup_evidence = exc.cleanup or cleanup_evidence
         except StageWorkerError as exc:
             code = exc.code if exc.code in {"pull_failed", "cleanup_unproven",
                 "observation_invalid", "process_unproven"} else "helper_failed"
@@ -101,8 +103,25 @@ class ImageStagingService:
             except Exception:
                 cancelled = None
             if isinstance(cancelled, dict):
-                process_evidence = cancelled
-                cleanup_evidence = {"complete": cancelled.get("cleanup_complete") is True}
+                # A completed helper response already carries authoritative
+                # process and workspace-cleanup evidence.  Cancellation is a
+                # best-effort second observation; once systemd has unloaded a
+                # short-lived unit it may be unable to repeat that proof and
+                # must not downgrade an otherwise safe terminal response.
+                reported_safe = (
+                    isinstance(process_evidence, dict)
+                    and process_evidence.get("unit_inactive") is True
+                    and process_evidence.get("cgroup_empty_or_removed") is True
+                    and cleanup_evidence == {"complete": True}
+                )
+                cancelled_safe = (
+                    cancelled.get("unit_inactive") is True
+                    and cancelled.get("cgroup_empty_or_removed") is True
+                    and cancelled.get("cleanup_complete") is True
+                )
+                if cancelled_safe or not reported_safe:
+                    process_evidence = cancelled
+                    cleanup_evidence = {"complete": cancelled.get("cleanup_complete") is True}
         process_safe = isinstance(process_evidence, dict) \
             and process_evidence.get("unit_inactive") is True \
             and process_evidence.get("cgroup_empty_or_removed") is True

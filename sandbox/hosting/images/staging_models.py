@@ -40,7 +40,7 @@ _RESULT_CODES = frozenset({
     "process_unproven", "unknown_effect", "cancelled", "acceptance_unknown",
     "lease_conflict", "lease_capacity", "lease_expired", "acceptance_ambiguous",
     "holder_mismatch", "terminal_not_durable", "target_busy",
-    "accepted", "in_progress",
+    "precredential_bootstrap_failed", "cleanup_reconciled", "accepted", "in_progress",
 })
 
 

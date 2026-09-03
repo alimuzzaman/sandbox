@@ -306,7 +306,8 @@ class CrashHarness:
 
 class RaceHarness:
     CAPABILITIES = ("activate", "adopt", "rollback", "image-recover", "apply", "sync",
-                    "login-url", "edge-continue", "failed-apply-recover", "image-stage")
+                    "login-url", "edge-continue", "failed-apply-recover", "image-stage",
+                    "image-provision")
     def __init__(self): self.owner = None; self.effects = []
     @contextmanager
     def acquire(self, capability):

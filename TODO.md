@@ -18,6 +18,27 @@ Sources reconciled in this pass:
 - `docs/release-readiness.md`, `docs/future-roadmap.md`, `specs/README.md`,
   `todo/README.md`, and the three product briefs under `todo/`.
 
+## 2026-09-02 resume checkpoint
+
+The reviewed but unmerged Spec 033, Feature 052, and Feature 053 checkpoints,
+their exact remote SHAs, verification evidence, blockers, immutable OCI guard,
+and safe resume order are recorded in
+`docs/resume-2026-09-02-unmerged-feature-work.md`.
+
+- [ ] Complete Spec 033 disposable-remote and external evidence gates from
+  `origin/codex/finish-spec033-local` at `7424b8089e412fbe86e5e7a69dae314ea65b3e70`,
+  then independently review and merge only if all gates pass.
+- [ ] Resolve Feature 052's public lifecycle-port blocker before regenerating
+  tasks. The truthful planning checkpoint is
+  `origin/codex/owned-storage-authority-planning-repair` at
+  `e9111cfe14cfd88521289e8e39302b95cee0774c`; do not merge it as implemented.
+- [ ] Resume Feature 053 with the explicitly authorized T004 disposable
+  OpenLiteSpeed feasibility probe before T019–T108. The reviewed foundation is
+  `origin/codex/server-config-fragments` at
+  `a92272278bf94dd00d217491ea5de246e3bcc88c`.
+- [ ] Preserve Features 048–051 and their OCI hosting paths as immutable input;
+  do not rework, duplicate, or claim their separate human/live gates.
+
 ## Accepted slices integrated in this batch
 
 | Scope | Branch | Accepted SHA | Boundary |

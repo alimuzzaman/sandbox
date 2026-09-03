@@ -29,6 +29,16 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_test_routing_normalizer_does_not_rewrite_ci_job_named_test(self):
+        import sandbox.cli as cli
+
+        argv = [
+            "ci", "run", "ci.yml", "--job", "test",
+            "--label-prefix", "release-check", "--json",
+        ]
+
+        self.assertEqual(cli._normalize_test_routing_options(argv), argv)
+
     def test_explicit_config_requires_project_dir_on_supported_commands(self):
         for command in ("ensure", "apply", "test"):
             result = run_sb(command, "--config-file", "nested/sandbox.config.json")

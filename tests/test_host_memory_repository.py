@@ -82,6 +82,20 @@ class HostMemoryRepositoryTest(unittest.TestCase):
         with self.assertRaises(RepositoryError):
             repo.history_window(limit=3,budget_seconds=0)
 
+    def test_absent_fixed_history_does_not_require_shared_ancestor_ownership(self):
+        shared = Path(self.tmp.name) / "shared"
+        shared.mkdir(mode=0o777)
+        history = shared / "sandbox" / "host-memory.jsonl"
+        repo = HostMemoryRepository(
+            Path(self.tmp.name) / "state",
+            history_path=history,
+            history_ancestor_root=history.parent,
+        )
+        monitor = repo.status_monitor_evidence(now=NOW)
+        self.assertIsNone(monitor["latest_sample_at"])
+        self.assertEqual(monitor["retention"]["current_files"], 0)
+        self.assertTrue(monitor["history_complete"])
+
     def test_history_open_rejects_replacement_with_symlink_or_oversized_file(self):
         history=Path(self.tmp.name)/"safe/history.jsonl"
         repo=HostMemoryRepository(Path(self.tmp.name)/"state",history_path=history,

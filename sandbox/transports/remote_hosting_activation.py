@@ -52,6 +52,7 @@ class RegisteredRemoteActivationTransport:
         self._configuration_binding_key = configuration_binding_key
         self._init_environment_sources: dict[str, dict] = {}
         self._compose_selector: dict[str, object] = {}
+        self._compose_selector_v2: dict[str, object] = {}
 
     @staticmethod
     def _service(value: str) -> str:
@@ -98,6 +99,148 @@ class RegisteredRemoteActivationTransport:
 
     def render_topology(self, **selectors) -> dict:
         return self._render(**selectors)
+
+    def render_topology_v2(self, *, compose_files: tuple[str, ...], project_name: str,
+                           selected_services: tuple[str, ...],
+                           service_image_bindings: dict[str, str],
+                           environment_bindings: dict[str, str],
+                           topology_digest: str, private_compose_snapshot: dict) -> dict:
+        """Render through an opaque machine-local snapshot provider.
+
+        The snapshot descriptor contains no Compose values.  The registered
+        runner resolves it privately and returns only bounded HMAC identities.
+        """
+        self._compose_selector_v2 = {}
+        if (type(private_compose_snapshot) is not dict
+                or set(private_compose_snapshot) != {
+                    "schema_version", "snapshot_id", "provider_revision", "target",
+                    "plan_set_digest", "selected_services", "configuration_digest",
+                    "expires_at", "snapshot_digest"}
+                or private_compose_snapshot.get("schema_version") != 2
+                or tuple(private_compose_snapshot.get("selected_services", ())) != selected_services
+                or set(service_image_bindings) != set(selected_services)
+                or set(environment_bindings.values()) != set(service_image_bindings.values())
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", topology_digest or "") is None):
+            raise RemoteActivationError("topology_mismatch")
+        images = {self._service(name): self._image(image)
+                  for name, image in service_image_bindings.items()}
+        environment = {}
+        for variable, image in environment_bindings.items():
+            if type(variable) is not str or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", variable) is None \
+                    or image not in images.values():
+                raise RemoteActivationError("topology_mismatch")
+            environment[variable] = image
+        argv = ["docker", "compose"]
+        for path in compose_files:
+            argv.extend(("--file", path))
+        project_directory = os.path.dirname(os.path.abspath(compose_files[0]))
+        argv.extend(("--project-directory", project_directory,
+                     "--project-name", self._service(project_name),
+                     "config", "--format", "json"))
+        source = {"kind": "compose_snapshot_v2",
+                  "snapshot_id": private_compose_snapshot["snapshot_id"],
+                  "snapshot_digest": private_compose_snapshot["snapshot_digest"],
+                  "provider_revision": private_compose_snapshot["provider_revision"],
+                  "target": private_compose_snapshot["target"]}
+        result = self._invoke(tuple(argv), timeout_seconds=60, environment=environment,
+                              private_environment_source=source)
+        try:
+            rendered = json.loads(result["stdout"])
+        except (TypeError, json.JSONDecodeError):
+            raise RemoteActivationError("topology_mismatch") from None
+        services = rendered.get("services") if isinstance(rendered, dict) else None
+        if result["returncode"] != 0 or result["terminated"] is not True \
+                or not isinstance(services, dict):
+            raise RemoteActivationError("topology_mismatch")
+        render_digest = rendered.pop("x-sandbox-configuration-digest", None)
+        hashes = rendered.pop("x-sandbox-compose-config-hashes", None)
+        markers = tuple(rendered.pop(name, None) for name in (
+            "x-sandbox-has-configs", "x-sandbox-has-secrets",
+            "x-sandbox-has-external-networks"))
+        if (render_digest != private_compose_snapshot["configuration_digest"]
+                or type(hashes) is not dict or set(hashes) != set(services)
+                or any(re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") is None
+                       for value in hashes.values())
+                or markers[0] is not False or markers[2] is not False
+                or type(markers[1]) is not bool or set(rendered) != {"services"}
+                or set(services) != set(selected_services)):
+            raise RemoteActivationError("topology_mismatch")
+        normalized = {}
+        for name in selected_services:
+            value = services.get(name)
+            if not isinstance(value, dict) or value.get("image") != images[name] \
+                    or value.get("build") is not None \
+                    or value.get("pull_policy") not in {None, "never"} \
+                    or value.get("platform") not in {None, "linux/amd64"}:
+                raise RemoteActivationError("topology_mismatch")
+            dependencies = value.get("depends_on") or {}
+            normalized[name] = {"image": images[name], "build": None,
+                "pull_policy": "never", "platform": {"os": "linux", "architecture": "amd64"},
+                "dependencies": sorted(dependencies), "topology_identity": topology_digest,
+                "compose_config_hash": hashes[name],
+                "configuration_digest": "sha256:" + hashlib.sha256(json.dumps(
+                    value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        epoch = self._observe_default(kind="epoch", target={})
+        self._compose_selector_v2 = {
+            "compose_files": tuple(compose_files), "project_name": project_name,
+            "project_directory": project_directory, "environment": environment,
+            "service_images": images, "selected_services": selected_services,
+            "render_digest": render_digest, "runtime_epoch": epoch["runtime_epoch"],
+            "compose_config_hashes": {name: hashes[name] for name in selected_services},
+            "topology_digest": topology_digest, "private_source": source,
+            "snapshot_digest": private_compose_snapshot["snapshot_digest"]}
+        return {"services": normalized, "orphans": [],
+                "runtime_epoch": epoch["runtime_epoch"],
+                "configuration_digest": render_digest}
+
+    def prepare_compose_snapshot_v2(self, *, compose_files: tuple[str, ...],
+            project_name: str, selected_services: tuple[str, ...],
+            service_image_bindings: dict[str, str],
+            environment_bindings: dict[str, str], target: dict[str, str],
+            snapshot_id: str, provider_revision: str) -> str:
+        """Identify one registered private render through the target HMAC path."""
+        if (type(target) is not dict or set(target) != {
+                "machine_identity", "target_identity", "daemon_identity"}
+                or type(snapshot_id) is not str or not snapshot_id.startswith("compose-snapshot/")
+                or type(provider_revision) is not str or not provider_revision):
+            raise RemoteActivationError("topology_mismatch")
+        images = {self._service(name): self._image(image)
+                  for name, image in service_image_bindings.items()}
+        if set(images) != set(selected_services):
+            raise RemoteActivationError("topology_mismatch")
+        environment = {}
+        for variable, image in environment_bindings.items():
+            if type(variable) is not str or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", variable) is None \
+                    or image not in images.values():
+                raise RemoteActivationError("topology_mismatch")
+            environment[variable] = image
+        argv = ["docker", "compose"]
+        for path in compose_files: argv.extend(("--file", path))
+        directory = os.path.dirname(os.path.abspath(compose_files[0]))
+        argv.extend(("--project-directory", directory, "--project-name",
+                     self._service(project_name), "config", "--format", "json"))
+        source = {"kind": "compose_prepare_v2", "snapshot_id": snapshot_id,
+                  "provider_revision": provider_revision, "target": target}
+        result = self._invoke(tuple(argv), timeout_seconds=60, environment=environment,
+                              private_environment_source=source)
+        try: rendered = json.loads(result["stdout"])
+        except (TypeError, json.JSONDecodeError):
+            raise RemoteActivationError("topology_mismatch") from None
+        services = rendered.get("services") if isinstance(rendered, dict) else None
+        digest = rendered.get("x-sandbox-configuration-digest") \
+            if isinstance(rendered, dict) else None
+        if (result["returncode"] != 0 or result["terminated"] is not True
+                or type(services) is not dict or set(services) != set(selected_services)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest or "") is None):
+            raise RemoteActivationError("topology_mismatch")
+        for name in selected_services:
+            row = services.get(name)
+            if type(row) is not dict or row.get("image") != images[name] \
+                    or row.get("build") is not None \
+                    or row.get("pull_policy") not in {None, "never"} \
+                    or row.get("platform") not in {None, "linux/amd64"}:
+                raise RemoteActivationError("topology_mismatch")
+        return digest
 
     def _observed_target(self, runtime_epoch: str) -> dict:
         if not callable(self._target_identity):
@@ -463,8 +606,90 @@ class RegisteredRemoteActivationTransport:
         if self._compose_selector.get("render_digest") != expected_digest:
             raise RemoteActivationError("effect_unknown")
 
+    def replace_services_v2(self, *, compose_files: tuple[str, ...], project_name: str,
+                            services: tuple[str, ...], service_image_bindings: dict[str, str],
+                            environment_bindings: dict[str, str], snapshot_digest: str,
+                            timeout_seconds: int) -> None:
+        """Replace every selected service in one no-build/no-pull Compose effect."""
+        selector = self._compose_selector_v2
+        if (not selector or tuple(compose_files) != selector.get("compose_files")
+                or project_name != selector.get("project_name")
+                or services != selector.get("selected_services")
+                or service_image_bindings != selector.get("service_images")
+                or environment_bindings != selector.get("environment")
+                or snapshot_digest != selector.get("snapshot_digest")):
+            raise RemoteActivationError("topology_mismatch")
+        argv = ["docker", "compose", "--file", "-", "--project-directory",
+                str(selector["project_directory"]), "--project-name", project_name,
+                "up", "--detach", "--no-build", "--pull", "never", "--no-deps",
+                *map(self._service, services)]
+        source = {**selector["private_source"], "kind": "compose_replace_v2",
+                  "services": services, "render_digest": selector["render_digest"],
+                  "topology_digest": selector["topology_digest"]}
+        result = self._invoke(tuple(argv), timeout_seconds=timeout_seconds,
+                              environment=environment_bindings,
+                              private_environment_source=source)
+        if result.get("returncode") != 0 or result.get("terminated") is not True:
+            raise RemoteActivationError("effect_unknown")
+
     def observe_local_image(self, **selectors) -> dict:
         return self._observe(kind="local", **selectors)
 
     def observe_running(self, **selectors) -> dict:
         return self._observe(kind="running", **selectors)
+
+    def observe_running_v2(self, *, target: dict, services: tuple[str, ...],
+                           compose_project: str, topology_digest: str,
+                           compose_config_hashes: dict[str, str],
+                           snapshot_digest: str) -> dict:
+        """Observe against the retained private-render identity, not labels."""
+        selector = self._compose_selector_v2
+        if (not selector or services != selector.get("selected_services")
+                or compose_project != selector.get("project_name")
+                or topology_digest != selector.get("topology_digest")
+                or compose_config_hashes != selector.get("compose_config_hashes")
+                or snapshot_digest != selector.get("snapshot_digest")
+                or target != selector.get("private_source", {}).get("target")):
+            raise RemoteActivationError("runtime_mismatch")
+        start_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
+        start_target = self._observed_target(start_epoch)
+        if start_epoch != selector["runtime_epoch"] \
+                or start_epoch != target.get("daemon_identity"):
+            raise RemoteActivationError("runtime_mismatch")
+        source = {**selector["private_source"], "kind": "compose_observe_v2",
+                  "services": services, "render_digest": selector["render_digest"],
+                  "compose_config_hashes": compose_config_hashes,
+                  "topology_digest": topology_digest}
+        result = self._invoke(("sandbox-activation-observe-running-v2",
+                               self._service(compose_project),
+                               *map(self._service, services)), timeout_seconds=60,
+                              private_environment_source=source)
+        try:
+            rows = json.loads(result["stdout"])
+        except (TypeError, json.JSONDecodeError):
+            raise RemoteActivationError("runtime_mismatch") from None
+        if result["returncode"] != 0 or result["terminated"] is not True \
+                or type(rows) is not list or len(rows) != len(services):
+            raise RemoteActivationError("runtime_mismatch")
+        normalized = []
+        allowed = {"service", "compose_project", "runtime_identity", "declared_image",
+                   "repository_digest", "local_image_id", "config_digest", "platform",
+                   "healthy"}
+        for row in rows:
+            if type(row) is not dict or set(row) != allowed \
+                    or row.get("service") not in services \
+                    or row.get("compose_project") != compose_project:
+                raise RemoteActivationError("runtime_mismatch")
+            service = row["service"]
+            normalized.append({**row, "topology_identity": topology_digest,
+                               "compose_config_hash": compose_config_hashes[service]})
+        if {row["service"] for row in normalized} != set(services):
+            raise RemoteActivationError("runtime_mismatch")
+        end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
+        end_target = self._observed_target(end_epoch)
+        return {"target_epoch_start": start_target["machine_identity"],
+                "target_epoch_end": end_target["machine_identity"],
+                "target_identity_start": start_target["target_identity"],
+                "target_identity_end": end_target["target_identity"],
+                "runtime_epoch_start": start_epoch, "runtime_epoch_end": end_epoch,
+                "services": normalized}

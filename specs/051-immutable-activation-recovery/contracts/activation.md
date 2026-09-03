@@ -57,3 +57,12 @@ container identities. Never pull or select an older/fallback generation.
 Closed bounded results expose operation, request identity, starting/result generation,
 stable class, transaction/generation/observation digests, and safe phase summary.
 Exact terminal replay is immutable; uncertain results never claim success.
+
+## Supported activation-bundle provisioning
+
+`host image provision --provision-phase activation-bundle --confirm` consumes the exact
+plan and retained proof, expected activation generation, and future snapshot expiry.
+`ssh-keygen -Y sign -f PUBLIC_KEY` delegates the private operation to ssh-agent; CLI,
+config, and output never accept private-key bytes or paths. The verified bundle installs
+at `runtime/hosting/image-activation/policies/<selector>.json` mode `0600`; authority,
+key, ledger, generation, signature, or existing-byte conflicts refuse.

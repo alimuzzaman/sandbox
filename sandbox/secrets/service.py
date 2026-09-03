@@ -29,7 +29,8 @@ class GHCRStagingCredentialAdapter:
         from sandbox.isolation.credential_binding import CredentialBinding
         if type(binding) is not CredentialBinding:
             raise SecretBrokerError("binding_invalid", "staging credential binding is invalid")
-        if not isinstance(recipient, str) or not recipient.startswith("ghcr-repository-read:"):
+        if not isinstance(recipient, str) or not recipient.startswith(
+                ("ghcr-repository-read:", "ghcr-plan-set-read:")):
             raise SecretBrokerError("destination_denied", "staging recipient is invalid")
         if not isinstance(credential_reference_revision, str) or not credential_reference_revision:
             raise SecretBrokerError("binding_invalid", "credential reference revision is invalid")

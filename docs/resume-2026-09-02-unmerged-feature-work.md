@@ -41,24 +41,17 @@ and production gates remain separate and open.
 ## Feature 052: owned storage authority
 
 - Remote branch: `origin/codex/owned-storage-authority-planning-repair`
-- Safe checkpoint: `e9111cfe14cfd88521289e8e39302b95cee0774c`
-- Status: **NOT READY — PUBLIC PORT BLOCKED**
+- Safe checkpoint: `40b018c`
+- Status: **PLANNING REPAIRED (Option 2 Authorized)**
 - Evidence: `specs/052-owned-storage-authority/analysis.md` on the branch
 
-Independent analysis proved that the accepted Feature 051 public recovery ports
-cannot persist Feature 052 lifecycle state. The capability registry has no
-owned-storage lifecycle member, and the activation host-state port accepts only
-its closed `image_activation` value. Private-helper or direct-state workarounds
-are forbidden. The non-executable draft task list was removed.
-
-Resume only after an explicit design decision authorizes either:
-
-1. a bounded public lifecycle transaction-port extension, reviewed as a public
-   contract change without reworking accepted OCI behavior; or
-2. an FR-058 redesign that selects another durable semantic owner.
-
-After that decision, rerun the complete Spec Kit planning, task generation, and
-independent analysis flow. Do not merge the current checkpoint into `latest`.
+On 2026-09-04, the operator authorized Option 2: FR-058 was amended to establish
+a dedicated, crash-safe `StorageAuthorityLifecycleRepository` with generation CAS
+and advisory locking, completely decoupling owned storage lifecycle from OCI
+hosting infrastructure (`RecoveryRepository` / `hosts.json`). Specifications,
+data models, contracts, research notes, and plan were repaired and aligned.
+Protected paths (`sandbox/hosting/**`, `specs/048-051/**`) remain 100% immutable
+with 0 diff. Next step is Spec Kit task generation and consistency analysis.
 
 ## Feature 053: instance-scoped server configuration fragments
 

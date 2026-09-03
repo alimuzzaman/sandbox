@@ -17,9 +17,9 @@
 
 **Purpose**: Initialize directory structure and package manifests for owned storage and lifecycle modules.
 
-- [ ] T001 Create package directories and initialize `__init__.py` files in `sandbox/owned_storage/__init__.py`, `sandbox/owned_storage/adapters/__init__.py`, and `sandbox/owned_storage_lifecycle/__init__.py`
-- [ ] T002 [P] Create systemd service and socket template files in `config/systemd/sandbox-owned-storage.service`, `config/systemd/sandbox-owned-storage.socket`, `config/systemd/sandbox-owned-storage-controller.service`, `config/systemd/sandbox-owned-storage-controller.socket`, `config/systemd/sandbox-owned-storage-mount.service`, and `config/systemd/sandbox-owned-storage.sysusers`
-- [ ] T003 [P] Add architecture boundary test verifying zero import of `sandbox/hosting/**` from `sandbox/owned_storage/**` and `sandbox/owned_storage_lifecycle/**` in `tests/test_owned_storage_architecture.py`
+- [x] T001 Create package directories and initialize `__init__.py` files in `sandbox/owned_storage/__init__.py`, `sandbox/owned_storage/adapters/__init__.py`, and `sandbox/owned_storage_lifecycle/__init__.py`
+- [x] T002 [P] Create systemd service and socket template files in `config/systemd/sandbox-owned-storage.service`, `config/systemd/sandbox-owned-storage.socket`, `config/systemd/sandbox-owned-storage-controller.service`, `config/systemd/sandbox-owned-storage-controller.socket`, `config/systemd/sandbox-owned-storage-mount.service`, and `config/systemd/sandbox-owned-storage.sysusers`
+- [x] T003 [P] Add architecture boundary test verifying zero import of `sandbox/hosting/**` from `sandbox/owned_storage/**` and `sandbox/owned_storage_lifecycle/**` in `tests/test_owned_storage_architecture.py`
 
 ---
 
@@ -27,14 +27,14 @@
 
 **Purpose**: Core data models, serialization codecs, private journal repository, lifecycle repository, and Linux filesystem adapters required by all user stories.
 
-- [ ] T004 [P] Implement core storage and lifecycle dataclasses and enums in `sandbox/owned_storage/models.py` and `sandbox/owned_storage_lifecycle/models.py`
-- [ ] T005 [P] Implement strict protocol envelope and message codecs with fail-closed schema validation in `sandbox/owned_storage/protocol.py`
-- [ ] T006 Add unit tests for storage models and protocol serialization/deserialization in `tests/test_owned_storage_models.py` and `tests/test_owned_storage_protocol.py`
-- [ ] T007 Implement dedicated crash-safe `StorageAuthorityLifecycleRepository` with file locking (`fcntl.flock`), atomic replacement, and generation CAS in `sandbox/owned_storage_lifecycle/repository.py`
-- [ ] T008 Implement private storage authority SQLite repository with foreign keys, crash-safe transactions, and canonical request/operation journal in `sandbox/owned_storage/repository.py`
-- [ ] T009 Add unit and concurrency/CAS tests for storage and lifecycle repositories in `tests/test_owned_storage_repository.py`
-- [ ] T010 Implement Linux filesystem operations adapter (`openat2`, `dirfd`, `renameat2(RENAME_NOREPLACE)`, owner-only permissions) with synthetic fallback for non-Linux testing in `sandbox/owned_storage/adapters/linux.py`
-- [ ] T011 Add unit tests for Linux filesystem adapter and synthetic fallback mechanics in `tests/test_owned_storage_linux.py`
+- [x] T004 [P] Implement core storage and lifecycle dataclasses and enums in `sandbox/owned_storage/models.py` and `sandbox/owned_storage_lifecycle/models.py`
+- [x] T005 [P] Implement strict protocol envelope and message codecs with fail-closed schema validation in `sandbox/owned_storage/protocol.py`
+- [x] T006 Add unit tests for storage models and protocol serialization/deserialization in `tests/test_owned_storage_models.py` and `tests/test_owned_storage_protocol.py`
+- [x] T007 Implement dedicated crash-safe `StorageAuthorityLifecycleRepository` with file locking (`fcntl.flock`), atomic replacement, and generation CAS in `sandbox/owned_storage_lifecycle/repository.py`
+- [x] T008 Implement private storage authority SQLite repository with foreign keys, crash-safe transactions, and canonical request/operation journal in `sandbox/owned_storage/repository.py`
+- [x] T009 Add unit and concurrency/CAS tests for storage and lifecycle repositories in `tests/test_owned_storage_repository.py`
+- [x] T010 Implement Linux filesystem operations adapter (`openat2`, `dirfd`, `renameat2(RENAME_NOREPLACE)`, owner-only permissions) with synthetic fallback for non-Linux testing in `sandbox/owned_storage/adapters/linux.py`
+- [x] T011 Add unit tests for Linux filesystem adapter and synthetic fallback mechanics in `tests/test_owned_storage_linux.py`
 
 **Checkpoint**: Core models, codecs, repositories, and adapters complete and verified by unit tests.
 

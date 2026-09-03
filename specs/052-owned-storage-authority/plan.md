@@ -166,7 +166,7 @@ sandbox/
 │   └── workspace_service.py      # materialization/reference/policy integration
 ├── owned_storage_lifecycle/
 │   ├── models.py                 # candidate/review/promotion/revocation state
-│   ├── repository.py             # nested-value codec behind shared RecoveryRepository
+│   ├── repository.py             # crash-safe StorageAuthorityLifecycleRepository
 │   ├── service.py                # protected review/finalize/revoke reconciliation
 │   └── manifest.py               # explicit lifecycle component registration
 ├── sync/                         # existing relationship/capture policy remains owner

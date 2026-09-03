@@ -132,3 +132,6 @@ and the independent automated Sol High review do not supply those gates.
 - [X] T049 Add protected v2 stage-bundle preparation with registered source ownership,
   opaque source revision, exact repository generation, owner-only replay/conflict rules,
   and focused redaction/refusal tests.
+- [X] T050 Prove the observed `ProtectControlGroups=yes` user-unit path with an accessible
+  mapped-UID top-level inode anchor, closed bounded pre-credential bootstrap/self-check
+  evidence, and exact dead-unit reset/absence cleanup regressions.

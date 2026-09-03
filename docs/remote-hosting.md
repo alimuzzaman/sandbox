@@ -1188,6 +1188,11 @@ following symlinks. It hashes and executes the same already-open artifact inode 
 `/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
 helper or manifest evidence is never overwritten when it disagrees. The configured
 credential-source opaque revision must match before the helper launches.
+The wrapper does not open `/`: `ProtectControlGroups=yes` can deny that operation in the
+user manager. It instead opens the first absolute path component without following links.
+Only that component may report systemd's mapped UID `65534`; the service home and every
+descendant still require the exact service UID, with the protected helper namespace at its
+exact owner-only modes.
 Consume and invalidation share one lock. Invalidation can win first and wipe/refuse the
 snapshot, or consume can win first and atomically detach that exact snapshot before delivery.
 Once detached, later invalidation cannot replace or clear the delivered bytes. The detached
@@ -1232,6 +1237,17 @@ credential transfer. READY has a finite timeout that kills the whole exact owned
 Launch identity, security properties, and user-slice cgroup are proven before credential
 delivery. Normal completion accepts either the same loaded inactive unit or systemd's exact
 not-found/inactive unloaded state, then requires the launch cgroup removed or empty.
+Before READY, the only accepted output is `READY\n` or one closed ASCII failure frame of at
+most 512 bytes with a fixed inode, plan, cgroup, or workspace phase/code. Unknown, partial,
+or oversized output becomes `bootstrap_unavailable`; no credential is delivered. A fixed
+credential-free helper self-check exercises the measured wrapper, exact transient user-unit
+hardening, cgroup identity, and volatile workspace, then proves and clears its retained unit.
+It has no broker, registry, Docker, plan, pull, or activation capability.
+
+Cleanup observes a closed unit property set. An exact retained failed/dead attempt is reset
+only after its PID and cgroup are absent, and completion requires a successful reset plus an
+exact absent-unit recheck. A different Description, foreign cgroup, live PID, malformed
+property set, or populated cgroup remains uncertain and is never killed, stopped, or reset.
 
 ### Immutable staged-image activation
 

@@ -18,6 +18,7 @@ import urllib.request
 
 FIXED_ENTRY = "sandbox-image-stage-helper-v1"
 FIXED_ENTRY_V2 = "sandbox-image-stage-helper-v2"
+FIXED_CHECK_ENTRY = "sandbox-image-stage-helper-check-v1"
 MAX_STAGE_FRAME_BYTES = 1024 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
 TOPOLOGY_LABEL = "org.sandbox.application-topology.v1"
@@ -28,6 +29,27 @@ _REPOSITORY = re.compile(
 _SERVICE = re.compile(r"[a-z0-9](?:[a-z0-9_.-]{0,62}[a-z0-9])?\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 V2_CAPABILITY_REVISION = "systemd-cgroup-v2-batch-stage-v2"
+
+
+def _bootstrap_failure(phase: str, code: str) -> int:
+    allowed = {"plan": {"plan_invalid"}, "cgroup": {"cgroup_invalid"},
+               "workspace": {"workspace_invalid"}}
+    if phase not in allowed or code not in allowed[phase]:
+        phase, code = "plan", "plan_invalid"
+    frame = {"schema_version": 1, "ok": False, "phase": phase, "code": code}
+    output = b"BOOTSTRAP " + json.dumps(
+        frame, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    os.write(1, output)
+    return 0
+
+
+def _self_check_unit() -> str:
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    unified = next((line.split("::", 1)[1] for line in lines if line.startswith("0::")), "")
+    unit = unified.rsplit("/", 1)[-1]
+    if re.fullmatch(r"sandbox-image-stage-check-[0-9a-f]{32}\.service", unit) is None:
+        raise ValueError("process_unproven")
+    return unit
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -437,16 +459,47 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     response = None
     response_version = 2 if argv == [FIXED_ENTRY_V2] else 1
+    if argv == [FIXED_CHECK_ENTRY]:
+        try:
+            unit = _self_check_unit()
+            _cgroup_identity(unit)
+        except Exception:
+            return _bootstrap_failure("cgroup", "cgroup_invalid")
+        try:
+            _verify_workspace_parent()
+        except Exception:
+            return _bootstrap_failure("workspace", "workspace_invalid")
+        os.write(1, b"READY\n")
+        try:
+            if sys.stdin.buffer.read(6) != b"CHECK\n" or sys.stdin.buffer.read(1):
+                return 74
+        except Exception:
+            return 74
+        os.write(1, b"CHECKED\n")
+        # A fixed retained failed state lets the controller prove the exact
+        # terminal unit before reset-failed; success/inactive user units may
+        # be collected before that observation can be made.
+        return 74
     try:
-        if argv not in ([FIXED_ENTRY], [FIXED_ENTRY_V2]): raise ValueError("protocol_invalid")
+        if argv not in ([FIXED_ENTRY], [FIXED_ENTRY_V2]):
+            return _bootstrap_failure("plan", "plan_invalid")
         plan = json.loads(_read_frame(sys.stdin.buffer, MAX_STAGE_FRAME_BYTES))
         # This handshake proves the measured helper is already inside its
         # transient cgroup before the broker resolves credential bytes.
         if plan.get("schema_version") == 1 and argv == [FIXED_ENTRY]: _closed_plan(plan)
         elif plan.get("schema_version") == 2 and argv == [FIXED_ENTRY_V2]: _closed_plan_v2(plan)
         else: raise ValueError("protocol_invalid")
+    except Exception:
+        return _bootstrap_failure("plan", "plan_invalid")
+    try:
         _cgroup_identity(plan["unit_name"])
+    except Exception:
+        return _bootstrap_failure("cgroup", "cgroup_invalid")
+    try:
         _verify_workspace_parent()
+    except Exception:
+        return _bootstrap_failure("workspace", "workspace_invalid")
+    try:
         sys.stdout.buffer.write(b"READY\n"); sys.stdout.buffer.flush()
         credential = _read_frame(sys.stdin.buffer, MAX_CREDENTIAL_BYTES)
         if sys.stdin.buffer.read(1): raise ValueError("protocol_invalid")

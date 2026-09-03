@@ -16,7 +16,8 @@ class TestImageStagingService(unittest.TestCase):
             def prepare(self, _request, _policy):
                 self.calls += 1
                 raise RemoteImageStageError("helper_failed",
-                    process={"unit_inactive": False, "cgroup_empty_or_removed": False},
+                    process={"unit_inactive": False, "cgroup_empty_or_removed": False,
+                             "bootstrap_phase": "inode", "bootstrap_code": "inode_os"},
                     cleanup={"complete": False})
         with tempfile.TemporaryDirectory() as directory:
             policy = staging_policy(); request = stage_request(policy=policy); worker = Worker()
@@ -27,6 +28,12 @@ class TestImageStagingService(unittest.TestCase):
             self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
             self.assertEqual(replay.as_mapping(), result.as_mapping())
             self.assertEqual(worker.calls, 1)
+            status = service.repository.record_status(
+                request.target.target_identity, request.request_id)
+            self.assertFalse(status["effect_entered"])
+            self.assertEqual((status["process"]["bootstrap_phase"],
+                              status["process"]["bootstrap_code"]),
+                             ("inode", "inode_os"))
 
     def test_proven_not_launched_prepare_failure_is_terminal_and_replayed(self):
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -38,7 +45,9 @@ class TestImageStagingService(unittest.TestCase):
                 self.calls += 1
                 raise RemoteImageStageError("helper_failed",
                     process={"unit_inactive": True, "cgroup_empty_or_removed": True,
-                             "not_launched": True}, cleanup={"complete": True})
+                             "not_launched": True, "bootstrap_phase": "workspace",
+                             "bootstrap_code": "workspace_invalid"},
+                    cleanup={"complete": True})
         with tempfile.TemporaryDirectory() as directory:
             policy = staging_policy(); request = stage_request(policy=policy); worker = Worker()
             service = ImageStagingService(
@@ -47,6 +56,10 @@ class TestImageStagingService(unittest.TestCase):
             self.assertEqual((result.result_class, result.code), ("failed", "helper_failed"))
             self.assertEqual(replay.as_mapping(), result.as_mapping())
             self.assertEqual(worker.calls, 1)
+            status = service.repository.record_status(
+                request.target.target_identity, request.request_id)
+            self.assertFalse(status["effect_entered"])
+            self.assertEqual(status["process"]["bootstrap_code"], "workspace_invalid")
 
     def test_real_description_drift_transport_fences_v1_without_touching_incumbent(self):
         from sandbox.hosting.images.staging_repository import StageRepository

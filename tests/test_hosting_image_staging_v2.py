@@ -116,7 +116,8 @@ class TestV2BatchStaging(unittest.TestCase):
             def prepare(self, _request, _policy):
                 self.prepares += 1
                 raise RemoteImageStageError("helper_failed",
-                    process={"unit_inactive": False, "cgroup_empty_or_removed": False},
+                    process={"unit_inactive": False, "cgroup_empty_or_removed": False,
+                             "bootstrap_phase": "inode", "bootstrap_code": "inode_os"},
                     cleanup={"complete": False})
         with tempfile.TemporaryDirectory() as directory:
             worker = Worker(); service = ImagePlanSetStagingService(
@@ -125,6 +126,11 @@ class TestV2BatchStaging(unittest.TestCase):
             self.assertEqual((result.result_class, result.code), ("uncertain", "cleanup_unproven"))
             self.assertEqual(replay.as_mapping(), result.as_mapping())
             self.assertEqual(worker.prepares, 1)
+            status = service.repository.record_status(
+                request.target.target_identity, request.request_id)
+            self.assertEqual((status["process"]["bootstrap_phase"],
+                              status["process"]["bootstrap_code"]),
+                             ("inode", "inode_os"))
 
     def test_real_description_drift_transport_fences_v2_without_touching_incumbent(self):
         from sandbox.hosting.images.staging_repository import StageRepository

@@ -155,15 +155,22 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-014**: Helper identity MUST bind canonical installed artifact, fixed entry,
   runtime revision, and closed invocation contract before credentials are resolved.
   Its digest-and-runtime-revision directory MUST be immutable so migration cannot
-  rewrite authority held open by an active staging unit.
+  rewrite authority held open by an active staging unit. The measured wrapper MUST
+  traverse from an accessible absolute top-level component without following links;
+  user-manager UID mapping at that component MUST NOT weaken exact service-user
+  ownership below it.
 - **FR-015**: Before credential resolution, staging MUST launch the measured helper in
   one uniquely named transient systemd user service backed by cgroup v2, with
   `KillMode=control-group`, no delegation, and no capability to move processes out of
-  the unit cgroup; the exact unit/cgroup identity MUST be ledger-bound.
+  the unit cgroup; the exact unit/cgroup identity MUST be ledger-bound. Before READY,
+  the wrapper and helper MUST return only a closed, bounded, phase/code failure frame;
+  unknown output MUST become `bootstrap_unavailable` and MUST NOT open credential custody.
 - **FR-016**: Kernel cgroup membership MUST be the descendant ownership authority.
   Cancellation/timeout MUST stop the whole unit, and safe termination requires the unit
   inactive plus `cgroup.events populated=0` (or removed cgroup) from the exact unit.
   PID, process group, elapsed time, lock expiry, or parent exit alone MUST NOT suffice.
+  A retained exact failed/dead attempt is safe only after successful reset and a closed
+  absent-unit recheck. Description drift MUST never authorize kill, stop, or reset.
 - **FR-017**: Unproven process termination or cleanup MUST durably fence the target and
   refuse a different request.
 - **FR-018**: Pull MUST use only the exact repository-qualified target-platform
@@ -222,7 +229,9 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
   Feature 051 activation, Feature 048 observation recovery, and production proof.
 - **FR-034**: Local implementation validation MUST use synthetic credentials/fakes;
   live secrets, registry, remote mutation, deployment, and production need separate
-  authorization.
+  authorization. A credential-free measured-helper self-check MAY prove wrapper,
+  transient-user-unit, hardening, cgroup, and volatile-workspace prerequisites, but
+  MUST NOT read a broker source or contact a registry or container daemon.
 - **FR-035**: Feature 050 MUST expose an authenticated activation-handoff operation that,
   before Feature 051 proof verification, durably prepares a lease bound to the exact
   activation request/digest, stage request/digest, proof digest, target, and stage-ledger

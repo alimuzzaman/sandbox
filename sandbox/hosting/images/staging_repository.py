@@ -45,12 +45,15 @@ _RECORD_FIELDS = frozenset({
 })
 _OWNER_FIELDS = _RECORD_FIELDS - {"ledger_revision", "result"}
 _PROCESS_FIELDS = frozenset({"unit_inactive", "cgroup_empty_or_removed"})
+_BOOTSTRAP_FIELDS = frozenset({"bootstrap_phase", "bootstrap_code"})
 _PROCESS_VARIANTS = frozenset({
     _PROCESS_FIELDS,
     _PROCESS_FIELDS | {"not_launched"},
     _PROCESS_FIELDS | {"cleanup_complete"},
     _PROCESS_FIELDS | {"unit_name"},
     _PROCESS_FIELDS | {"unit_name", "cgroup", "delegated", "escape_allowed"},
+    _PROCESS_FIELDS | _BOOTSTRAP_FIELDS,
+    _PROCESS_FIELDS | {"not_launched"} | _BOOTSTRAP_FIELDS,
 })
 
 
@@ -77,6 +80,14 @@ def _validate_process(value: object) -> None:
         raise ValueError
     if "cleanup_complete" in value and type(value["cleanup_complete"]) is not bool:
         raise ValueError
+    if "bootstrap_phase" in value:
+        allowed = {"inode": {"inode_os", "inode_json", "inode_key", "inode_exec"},
+                   "plan": {"plan_invalid"}, "cgroup": {"cgroup_invalid"},
+                   "workspace": {"workspace_invalid"},
+                   "unknown": {"bootstrap_unavailable"}}
+        if value["bootstrap_phase"] not in allowed \
+                or value["bootstrap_code"] not in allowed[value["bootstrap_phase"]]:
+            raise ValueError
 
 
 def _validate_cleanup(value: object) -> None:

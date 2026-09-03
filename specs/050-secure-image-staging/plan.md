@@ -127,6 +127,10 @@ Every arrow is generation/request bound. The helper receives a closed non-secret
 and a separate bounded credential frame. Credentials are absent before broker lease and after
 cleanup. Proof observation begins only after cleanup. Repository commits never serialize
 frames, stdout/stderr, argv, environment, or private paths.
+Pre-READY refusal is reduced to one 512-byte maximum ASCII frame with fixed inode, plan,
+cgroup, or workspace phase/code values. The same measured wrapper can run a fixed
+credential-free self-check entry that proves only user-unit hardening, cgroup identity, and
+volatile workspace readiness; it cannot call the broker, registry, or Docker.
 
 Feature 051 proof custody is distinct from the broker credential lease and target effect
 lease. It uses this cross-store handoff:

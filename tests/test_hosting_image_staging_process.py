@@ -38,16 +38,144 @@ class TestImageStagingProcess(unittest.TestCase):
     def test_helper_rejects_unframed_input_with_closed_synthetic_environment(self):
         result = run_test_process(
             (sys.executable, "-m", "sandbox.hosting.images.staging_helper",
-             "sandbox-image-stage-helper-v1"),
+            "sandbox-image-stage-helper-v1"),
             input=b"unsafe", capture_output=True, env=synthetic_environment(), timeout=10)
-        payload = json.loads(result.stdout)
-        self.assertFalse(payload["ok"]); self.assertEqual(payload["code"], "protocol_invalid")
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout.removeprefix(b"BOOTSTRAP "))
+        self.assertEqual(payload, {"schema_version": 1, "ok": False,
+                                   "phase": "plan", "code": "plan_invalid"})
+
+    def test_helper_maps_each_pre_ready_phase_and_self_check_has_no_external_effect(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from sandbox.hosting.images import staging_helper
+
+        def invoke(*, cgroup_error=False, workspace_error=False):
+            output = []
+            with patch.object(staging_helper, "_read_frame", return_value=json.dumps({
+                    "schema_version": 1,
+                    "unit_name": "sandbox-image-stage-" + "a" * 32 + ".service"
+                 }).encode()), \
+                 patch.object(staging_helper, "_closed_plan", return_value=None), \
+                 patch.object(staging_helper, "_cgroup_identity",
+                              side_effect=ValueError if cgroup_error else None), \
+                 patch.object(staging_helper, "_verify_workspace_parent",
+                              side_effect=ValueError if workspace_error else None), \
+                 patch.object(staging_helper.os, "write",
+                              side_effect=lambda _fd, value: output.append(value) or len(value)):
+                code = staging_helper.main([staging_helper.FIXED_ENTRY])
+            return code, b"".join(output)
+
+        for kwargs, phase, code in (
+                ({"cgroup_error": True}, "cgroup", "cgroup_invalid"),
+                ({"workspace_error": True}, "workspace", "workspace_invalid")):
+            with self.subTest(phase=phase):
+                result, output = invoke(**kwargs)
+                self.assertEqual(result, 0)
+                self.assertEqual(json.loads(output.removeprefix(b"BOOTSTRAP ")),
+                    {"schema_version": 1, "ok": False, "phase": phase, "code": code})
+
+        output = []
+        stdin = SimpleNamespace(buffer=io.BytesIO(b"CHECK\n"))
+        with patch.object(staging_helper, "_self_check_unit",
+                          return_value="sandbox-image-stage-check-" + "a" * 32 + ".service"), \
+             patch.object(staging_helper, "_cgroup_identity", return_value="exact"), \
+             patch.object(staging_helper, "_verify_workspace_parent", return_value=None), \
+             patch.object(staging_helper.sys, "stdin", stdin), \
+             patch.object(staging_helper.os, "write",
+                          side_effect=lambda _fd, value: output.append(value) or len(value)), \
+             patch.object(staging_helper, "_run") as run, \
+             patch.object(staging_helper.urllib.request, "urlopen") as urlopen:
+            self.assertEqual(staging_helper.main([staging_helper.FIXED_CHECK_ENTRY]), 74)
+        self.assertEqual(output, [b"READY\n", b"CHECKED\n"])
+        run.assert_not_called(); urlopen.assert_not_called()
 
     def test_transport_requires_inactive_and_empty_cgroup_not_process_group(self):
         from pathlib import Path
         source = (Path(__file__).parent.parent / "sandbox/transports/remote_hosting_images.py").read_text()
         self.assertIn("cgroup.events", source); self.assertIn("populated 0", source)
         self.assertIn("ActiveState", source); self.assertNotIn("getpgid", source)
+
+    def test_failed_launch_cleanup_uses_closed_terminal_proof_and_never_touches_drift(self):
+        from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+        uid = 1000; unit = "sandbox-image-stage-" + "a" * 32 + ".service"
+        description = "sandbox-image-stage-attempt-" + "b" * 32
+        cgroup = (f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/{unit}")
+        def properties(**changes):
+            values = {"LoadState": "loaded", "ActiveState": "failed", "SubState": "failed",
+                      "Description": description, "MainPID": "0", "ControlGroup": "",
+                      "Result": "exit-code", "ExecMainStatus": "74"}
+            values.update(changes)
+            return "".join(f"{key}={value}\n" for key, value in values.items())
+        absent = properties(LoadState="not-found", ActiveState="inactive", SubState="dead",
+                            Description=unit, Result="success", ExecMainStatus="0")
+
+        scenarios = (
+            ("never-launched", [absent], True, False, True),
+            ("dead", [properties(), absent], True, False, False),
+            ("drift", [properties(ActiveState="active", SubState="running",
+                                  Description="incumbent", MainPID="123",
+                                  ControlGroup=cgroup, Result="success", ExecMainStatus="0")],
+             False, False, False),
+            ("active", [properties(ActiveState="active", SubState="running",
+                                   MainPID="123", ControlGroup=cgroup,
+                                   Result="success", ExecMainStatus="0"), properties(), absent],
+             True, True, False),
+            ("malformed", [properties() + "MainPID=0\n"], False, False, False),
+        )
+        for name, observations, expected_safe, expected_kill, expected_absent in scenarios:
+            with self.subTest(name=name):
+                commands = []; remaining = list(observations)
+                def observe(_remote, command, timeout):
+                    commands.append(command)
+                    if command.startswith("systemctl --user show"):
+                        return subprocess.CompletedProcess((), 0, stdout=remaining.pop(0))
+                    if "cgroup.events" in command:
+                        return subprocess.CompletedProcess((), 0, stdout="")
+                    if " kill " in command or " stop " in command:
+                        return subprocess.CompletedProcess((), 1, stdout="")
+                    return subprocess.CompletedProcess((), 0, stdout="")
+                transport = RegisteredRemoteImageTransport(
+                    remote_lookup=lambda _name: {}, ssh_private_frame=lambda *a, **k: None,
+                    unit_observer=observe, resolve_home=lambda _remote: "/home/alim/sandbox")
+                process, cleanup = transport._cleanup_failed_launch(
+                    {}, unit, description, uid)
+                self.assertEqual(cleanup, {"complete": expected_safe})
+                self.assertEqual(process, {"unit_inactive": expected_safe,
+                                           "cgroup_empty_or_removed": expected_safe,
+                                           **({"not_launched": True} if expected_absent else {})})
+                mutated = any(" kill " in item or " stop " in item for item in commands)
+                self.assertEqual(mutated, expected_kill)
+                reset = any("reset-failed" in item for item in commands)
+                self.assertEqual(reset, expected_safe and not expected_absent)
+
+    def test_failed_launch_cleanup_requires_successful_reset_and_absent_recheck(self):
+        from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
+        uid = 1000; unit = "sandbox-image-stage-" + "a" * 32 + ".service"
+        description = "sandbox-image-stage-attempt-" + "b" * 32
+        failed = ("LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                  f"Description={description}\nMainPID=0\nControlGroup=\n"
+                  "Result=exit-code\nExecMainStatus=74\n")
+        absent = ("LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                  f"Description={unit}\nMainPID=0\nControlGroup=\n"
+                  "Result=success\nExecMainStatus=0\n")
+        for reset_code, after, expected in ((1, absent, False), (0, failed, False),
+                                             (0, absent, True)):
+            with self.subTest(reset_code=reset_code, after=after[:20]):
+                shows = [failed, after]
+                def observe(_remote, command, timeout):
+                    if command.startswith("systemctl --user show"):
+                        return subprocess.CompletedProcess((), 0, stdout=shows.pop(0))
+                    if "reset-failed" in command:
+                        return subprocess.CompletedProcess((), reset_code, stdout="")
+                    return subprocess.CompletedProcess((), 0, stdout="")
+                transport = RegisteredRemoteImageTransport(
+                    remote_lookup=lambda _name: {}, ssh_private_frame=lambda *a, **k: None,
+                    unit_observer=observe, resolve_home=lambda _remote: "/home/alim/sandbox")
+                process, cleanup = transport._cleanup_failed_launch(
+                    {}, unit, description, uid)
+                self.assertEqual(cleanup, {"complete": expected})
+                self.assertEqual(process["unit_inactive"], expected)
 
     def test_cancel_requires_exact_unit_inactive_and_exact_cgroup_empty(self):
         from sandbox.transports.remote_hosting_images import _PreparedRemoteStage
@@ -214,7 +342,7 @@ class TestImageStagingProcess(unittest.TestCase):
         process = Process()
         class Sender:
             def prepare(self, _remote, argv, **_kwargs): process.argv = argv; return process
-        cleanup_observations = ["owned", "terminal"]
+        cleanup_observations = ["owned", "terminal", "collected"]
         def observe(_remote, command, timeout):
             commands.append(command)
             if command == "id -u":
@@ -232,12 +360,20 @@ class TestImageStagingProcess(unittest.TestCase):
                 phase = cleanup_observations.pop(0)
                 if phase == "owned":
                     return subprocess.CompletedProcess((), 0, stdout=(
-                        f"LoadState=loaded\nActiveState=active\nDescription={description}\n"
+                        f"LoadState=loaded\nActiveState=active\nSubState=running\n"
+                        f"Description={description}\nMainPID=123\n"
                         f"ControlGroup=/user.slice/user-{os.geteuid()}.slice/"
-                        f"user@{os.geteuid()}.service/app.slice/{unit}\n"))
+                        f"user@{os.geteuid()}.service/app.slice/{unit}\n"
+                        "Result=success\nExecMainStatus=0\n"))
+                if phase == "terminal":
+                    return subprocess.CompletedProcess((), 0, stdout=(
+                        f"LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                        f"Description={description}\nMainPID=0\nControlGroup=\n"
+                        "Result=exit-code\nExecMainStatus=74\n"))
                 return subprocess.CompletedProcess((), 0, stdout=(
-                    f"LoadState=not-found\nActiveState=inactive\nDescription={unit}\n"
-                    "ControlGroup=\n"))
+                    f"LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                    f"Description={unit}\nMainPID=0\nControlGroup=\n"
+                    "Result=success\nExecMainStatus=0\n"))
             if "cgroup.events" in command:
                 return subprocess.CompletedProcess((), 0, stdout="")
             return subprocess.CompletedProcess((), 0, stdout="")
@@ -248,6 +384,56 @@ class TestImageStagingProcess(unittest.TestCase):
             StageWorker(transport).prepare(request, policy)
         self.assertTrue(any("systemctl --user kill --kill-whom=all" in command for command in commands))
         self.assertTrue(any(command.startswith("systemctl --user stop") for command in commands))
+
+    def test_closed_pre_ready_failure_never_crosses_credential_boundary(self):
+        from sandbox.hosting.images.staging_worker import StageWorker
+        from sandbox.transports.remote_hosting_images import (
+            RegisteredRemoteImageTransport, RemoteImageStageError,
+        )
+        from tests.hosting_image_fixtures import staging_policy
+        policy = staging_policy(); request = stage_request(policy=policy); commands = []
+        class RecordingStdin(io.BytesIO):
+            def close(self): self.closed_by_transport = True
+        stdin = RecordingStdin()
+        class Process:
+            stdout = io.BytesIO(); stderr = io.BytesIO()
+            def __init__(self): self.stdin = stdin
+            def read_ready(self, _timeout):
+                return (b'BOOTSTRAP {"schema_version":1,"ok":false,'
+                        b'"phase":"inode","code":"inode_os"}\n')
+            def kill(self): self.killed = True
+        process = Process()
+        class Sender:
+            def prepare(self, _remote, argv, **_kwargs): process.argv = argv; return process
+        def observe(_remote, command, timeout):
+            commands.append(command)
+            if command == "id -u":
+                return subprocess.CompletedProcess((), 0, stdout="1000\n")
+            if command.startswith("sha256sum"):
+                return subprocess.CompletedProcess((), 0, stdout="9" * 64 + " helper\n")
+            if "manifest.json" in command:
+                return subprocess.CompletedProcess((), 0, stdout=json.dumps({
+                    "schema_version": 1, **policy.helper.as_mapping()}))
+            if command.startswith("systemctl --user show"):
+                unit = next(item.split("=", 1)[1] for item in process.argv
+                            if item.startswith("--unit="))
+                return subprocess.CompletedProcess((), 0, stdout=(
+                    "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                    f"Description={unit}\nMainPID=0\nControlGroup=\n"
+                    "Result=success\nExecMainStatus=0\n"))
+            return subprocess.CompletedProcess((), 0, stdout="")
+        transport = RegisteredRemoteImageTransport(
+            remote_lookup=lambda _name: {"provisioned": True}, ssh_private_frame=Sender(),
+            unit_observer=observe, resolve_home=lambda _remote: "/home/alim/sandbox")
+        with self.assertRaises(RemoteImageStageError) as caught:
+            StageWorker(transport).prepare(request, policy)
+        self.assertEqual((caught.exception.bootstrap_phase, caught.exception.bootstrap_code),
+                         ("inode", "inode_os"))
+        self.assertEqual(caught.exception.process,
+            {"unit_inactive": True, "cgroup_empty_or_removed": True,
+             "not_launched": True, "bootstrap_phase": "inode", "bootstrap_code": "inode_os"})
+        self.assertNotIn(b"credential-secret-value", stdin.getvalue())
+        self.assertFalse(any(" kill " in item or " stop " in item for item in commands))
 
     def test_same_request_launch_collision_never_kills_incumbent_unit(self):
         from sandbox.hosting.images.staging_worker import StageWorker

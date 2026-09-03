@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
+from typing import Literal
 
 from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
 
@@ -19,6 +21,23 @@ class StageWorkerError(RuntimeError):
         self.process = process
         self.cleanup = cleanup
         super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class StageDeliveryFailure:
+    """Secret-free delivery error returned through the broker callback seam.
+
+    ``BrokerLease.consume`` deliberately does not let callback exceptions cross
+    the credential boundary.  Staging still needs to distinguish a remote
+    helper failure from a broker failure, so the callback converts only these
+    known, already-bounded errors into a structured value.  No exception,
+    traceback, or helper output is retained here.
+    """
+
+    kind: Literal["remote", "worker"]
+    code: str
+    process: dict | None = None
+    cleanup: dict | None = None
 
 
 def unit_name(request_id: str, request_digest: str) -> str:

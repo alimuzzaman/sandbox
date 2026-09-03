@@ -678,8 +678,12 @@ class ActivationRepository:
 
     def snapshot(self, target: str) -> dict:
         with self.target_mutation.target_mutation_transaction(target):
-            with self.host_state.atomic_host_state_transaction(target):
-                return decode_activation_state(self.host_state.read_activation_nested(target))
+            return self.snapshot_under_target_mutation(target)
+
+    def snapshot_under_target_mutation(self, target: str) -> dict:
+        """Read state while the caller already holds shared target ownership."""
+        with self.host_state.atomic_host_state_transaction(target):
+            return decode_activation_state(self.host_state.read_activation_nested(target))
 
     def commit(self, target: str, request: ActivationRequest, result: ActivationResult,
                generation: dict | None = None) -> dict:

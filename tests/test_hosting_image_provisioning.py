@@ -184,18 +184,18 @@ class ProvisioningTests(unittest.TestCase):
 
     def test_stage_bundle_cli_mints_fixed_binding_without_printing_secret(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository
         with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
             root = Path(temp); root.chmod(0o700); project = root / "project"; project.mkdir()
             personal = root / ".env"; canary = "secret-stage-canary-never-output"
             personal.write_text(f"GHCR_TOKEN={canary}\n"); personal.chmod(0o600)
             plan = plan_set(); plan_path = root / "plan.json"
             plan_path.write_text(json.dumps(plan.as_mapping()))
-            class Port:
-                @contextmanager
-                def target_mutation_transaction(self, _target): yield
-            class Recovery:
-                def target_mutation_port(self, _name): return Port()
-                def activation_host_state_port(self): return object()
+            class ShortTimeoutRecoveryRepository(RecoveryRepository):
+                def target_mutation_port(self, capability, *, timeout_seconds=0.05):
+                    return super().target_mutation_port(
+                        capability, timeout_seconds=timeout_seconds)
             validated = {"project": "lenzora", "environment": "production",
                 "project_root": str(project), "compose": {}}
             args = SimpleNamespace(remote="production", environment="production",
@@ -205,6 +205,14 @@ class ProvisioningTests(unittest.TestCase):
             output = StringIO()
             runtime = root / "runtime"
             (runtime / "hosting").mkdir(parents=True, mode=0o700)
+            recovery = ShortTimeoutRecoveryRepository(
+                runtime / "hosts.json", runtime / "hosting" / "locks")
+            stage = StageRepository(runtime / "hosting" / "image-staging")
+            target_id = "production/lenzora/production"
+            with stage.target_lock(target_id):
+                state = stage._load_unlocked(target_id)
+                state.update(generation=1, ledger_revision=7)
+                stage._write_unlocked(target_id, state)
             # A retained policy from an earlier plan must not block this exact
             # v2 plan.  V2 storage is digest-scoped; the legacy target-scoped
             # filename remains inert evidence.
@@ -217,11 +225,7 @@ class ProvisioningTests(unittest.TestCase):
                     patch("sandbox.hosting.images.staging_repository.RUNTIME_DIR", runtime), \
                     patch("sandbox.commands.hosting.personal_secrets.secret_file",
                           return_value=personal), \
-                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()), \
-                    patch("sandbox.hosting.images.staging_repository.StageRepository.target_revision",
-                          return_value=(1, 7)), \
-                    patch("sandbox.hosting.images.activation.repository.ActivationRepository.snapshot",
-                          return_value={"generation": 0}), \
+                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=recovery), \
                     patch("sandbox.commands.hosting._authenticated_machine_identity",
                           return_value="machine-a"), \
                     patch("sandbox.transports.remote_hosting_images.RegisteredRemoteImageTransport.observe_authority",
@@ -231,7 +235,9 @@ class ProvisioningTests(unittest.TestCase):
                 except SystemExit: pass
             payload = json.loads(output.getvalue())
             self.assertTrue(payload["ok"], payload)
+            self.assertEqual(payload["target"]["target_identity"], target_id)
             self.assertEqual(payload["stage_generation"], 1)
+            self.assertEqual(payload["stage_ledger_revision"], 7)
             self.assertEqual(payload["activation_generation"], 0)
             self.assertNotIn(canary, output.getvalue())
             installed = json.loads(Path(payload["installed_path"]).read_text())

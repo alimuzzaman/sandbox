@@ -3697,7 +3697,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         host_state_port=recovery.activation_host_state_port(),
                         stage_repository=stage,
                         target_mutation_port=recovery.target_mutation_port("activate"))
-                    activation_generation = activation.snapshot(target_id)["generation"]
+                    activation_generation = activation.snapshot_under_target_mutation(
+                        target_id)["generation"]
                     if args.expected_generation != activation_generation:
                         raise ProvisioningError("generation_mismatch")
                     from sandbox.isolation.credential_binding import CredentialBinding

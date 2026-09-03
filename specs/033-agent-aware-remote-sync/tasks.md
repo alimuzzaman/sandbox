@@ -183,7 +183,7 @@ exercise each negative outcome without false acceptance or protected output.
 - [X] T058 [US5] Add typed recovery and unknown-acknowledgment envelopes to `sandbox/transports/remote_sync.py`.
 - [X] T059 [US5] Add redaction and sensitive-path/process-argument assertions at every public sync and job boundary in `sandbox/services/redaction.py` and `sandbox/sync/models.py`.
 - [X] T060 [US5] Add bounded metrics for aggregate counts/timestamps/bytes without source contents or filenames in `sandbox/sync/repository.py`.
-- [ ] T061 [US5] Run the full recovery, credential, divergence, parity, and cleanup acceptance in `specs/033-agent-aware-remote-sync/quickstart.md`.
+- [X] T061 [US5] Run the full recovery, credential, divergence, parity, and cleanup acceptance in `specs/033-agent-aware-remote-sync/quickstart.md`.
 
 **Checkpoint**: User Story 5 is complete only when every negative acceptance
 result is explicit and no failed or refused generation is reported current.
@@ -197,9 +197,9 @@ closure without claiming unverified remote behavior.
 - [X] T063 [P] Add command/MCP manifest coverage and package import checks in `tests/test_sync_cli.py` and `tests/test_mcp_composition.py`.
 - [X] T064 [P] Add regression tests proving existing deploy, host apply, and off-mode job paths remain unchanged in `tests/test_remote.py`, `tests/test_remote_job_transport.py`, and `tests/test_cli.py`.
 - [X] T065 Run focused sync tests, relevant existing remote/job tests, and `git diff --check` with bounded output.
-- [ ] T066 Run the disposable remote quickstart with finite timeouts and preserve job IDs, generation IDs, request IDs, timings, and cleanup evidence in `specs/033-agent-aware-remote-sync/`.
-- [ ] T067 Review the `fb17bb5c05c60ef78ce1e33e7a25685b` feedback record against the live evidence and mark it `verified` only if all stated success criteria pass; otherwise record the exact blocked condition.
-- [ ] T068 Rebuild `docs/feedback-priority-queue-2026-08-25.md` from a fresh paginated ledger and update only records supported by current evidence.
+- [X] T066 Run the disposable remote quickstart with finite timeouts and preserve job IDs, generation IDs, request IDs, timings, and cleanup evidence in `specs/033-agent-aware-remote-sync/`.
+- [X] T067 Review the `fb17bb5c05c60ef78ce1e33e7a25685b` feedback record against the live evidence and mark it `verified` only if all stated success criteria pass; otherwise record the exact blocked condition.
+- [X] T068 Rebuild `docs/feedback-priority-queue-2026-08-25.md` from a fresh paginated ledger and update only records supported by current evidence.
 - [ ] T069 Commit and push the completed non-`main` work to `latest` after required tests and remote acceptance pass.
 
 ## Dependencies & Execution Order

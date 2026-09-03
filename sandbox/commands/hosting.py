@@ -3610,6 +3610,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
             install_owner_only_json_pair,
             prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
             prepare_stage_bundle, reuse_owner_only_stage_bundle,
+            replace_expired_stage_bundle,
         )
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -3747,7 +3748,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                                 plan=plan, target=target, helper=helper, binding=binding,
                                 credential_reference_revision=credential_revision,
                                 secret_sources=secrets)
-                            disposition = install_owner_only_json(path, bundle)
+                            try:
+                                disposition = install_owner_only_json(path, bundle)
+                            except ProvisioningError as exc:
+                                if exc.code != "conflict":
+                                    raise
+                                disposition = replace_expired_stage_bundle(path, bundle)
                         else:
                             disposition = "replayed"
                     response.update(ok=True, result_class=disposition, code="prepared",

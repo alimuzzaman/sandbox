@@ -129,8 +129,10 @@ owner-only bundle is structurally exact, its binding remains ready and unexpired
 the credential-source opaque revision is unchanged, the target and measured helper
 still match, and the stage ledger has no active or uncertain owner. The replay
 returns the retained policy digest and the current idle stage generation; it does
-not mint replacement authority. Expired, malformed, mismatched, active, or uncertain
-evidence refuses without overwriting the retained file or opening a staging effect.
+not mint replacement authority. Expired ready evidence is rotated in place only
+after the same exact plan, owner-only file, and binding state are rechecked;
+malformed, mismatched, revoked, active, or uncertain evidence still refuses
+without overwriting the retained file or opening a staging effect.
 
 The helper runs as an exact transient `systemd --user` unit. Its executable and
 manifests are owned by that authenticated Sandbox service user with directory,

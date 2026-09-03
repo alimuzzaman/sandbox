@@ -141,6 +141,74 @@ def install_owner_only_json(path: Path, value: dict[str, Any]) -> str:
             except OSError: pass
 
 
+def replace_expired_stage_bundle(path: Path, value: dict[str, Any]) -> str:
+    """Rotate one expired stage binding without replacing live authority.
+
+    Stage bundles are keyed by the immutable image plan, so a retained bundle
+    can outlive its short credential lease.  The normal owner-only installer
+    must keep refusing overwrites; this narrow helper permits replacement only
+    when the existing document is a valid, ready binding whose expiry has
+    passed.  Revoked, malformed, live, or otherwise conflicting authority is
+    never replaced.
+    """
+    if not isinstance(path, Path) or type(value) is not dict:
+        raise ProvisioningError("artifact_invalid")
+    from sandbox.isolation.credential_binding import CredentialBinding
+
+    existing = _read_owner_only_json(path)
+    if existing is None:
+        return install_owner_only_json(path, value)
+    try:
+        binding_value = existing.get("binding")
+        binding = CredentialBinding.from_dict(binding_value)
+    except (AttributeError, TypeError, ValueError):
+        raise ProvisioningError("conflict") from None
+    if binding.state != "ready" or not binding.is_expired():
+        raise ProvisioningError("conflict")
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if len(data) > MAX_PROVISIONING_DOCUMENT_BYTES:
+        raise ProvisioningError("artifact_invalid")
+    _owned_directory(path.parent, create=False)
+    temporary = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(descriptor)
+            current = b""
+            while True:
+                chunk = os.read(descriptor, min(65536, MAX_PROVISIONING_DOCUMENT_BYTES + 1 - len(current)))
+                if not chunk:
+                    break
+                current += chunk
+                if len(current) > MAX_PROVISIONING_DOCUMENT_BYTES:
+                    raise ProvisioningError("artifact_invalid")
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ProvisioningError("path_unsafe")
+        finally:
+            os.close(descriptor)
+        if current != json.dumps(existing, sort_keys=True, separators=(",", ":")).encode() + b"\n":
+            raise ProvisioningError("conflict")
+        descriptor, temporary = tempfile.mkstemp(prefix=".provision-", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try: os.fsync(parent)
+        finally: os.close(parent)
+        return "rotated"
+    except ProvisioningError:
+        raise
+    except OSError:
+        raise ProvisioningError("path_unsafe") from None
+    finally:
+        if temporary is not None:
+            try: os.unlink(temporary)
+            except OSError: pass
+
+
 def install_owner_only_json_pair(entries: tuple[tuple[Path, dict[str, Any]], ...]) -> tuple[str, ...]:
     """Preflight a small authority set so known conflicts publish nothing."""
     if not entries or len(entries) > 4:
@@ -290,7 +358,11 @@ def reuse_owner_only_stage_bundle(path: Path, *, plan: VerifiedImagePlanSet,
         raise
     except (TypeError, ValueError):
         raise ProvisioningError("artifact_invalid") from None
+    # An expired ready lease is safe to rotate for this same immutable plan.
+    # Other non-ready or mismatched authority remains a hard conflict.
     if not binding.admits_use():
+        if binding.state == "ready" and binding.is_expired():
+            return None
         raise ProvisioningError("conflict")
     expected_binding = prepare_stage_binding(
         plan=plan, target=target, machine_identity=machine_identity,

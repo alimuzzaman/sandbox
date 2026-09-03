@@ -75,6 +75,7 @@ class RemoteSyncTransportTests(unittest.TestCase):
         self.assertEqual(result["accepted_generation"], "gen_fixture")
         self.assertEqual(result["request_id"], "request_fixture")
         self.assertEqual(calls, [])
+
     def test_transfer_stages_archive_and_publishes_only_after_upload(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -116,6 +117,11 @@ class RemoteSyncTransportTests(unittest.TestCase):
             self.assertEqual(len(publications), 1)
             self.assertGreater(len(publications[0][-1]), 0)
             self.assertEqual(commands, [])
+            with tarfile.open(fileobj=io.BytesIO(publications[0][-1]), mode="r:gz") as archive:
+                metadata = json.loads(
+                    archive.extractfile(".sandbox-sync-manifest.json").read()
+                )
+            self.assertEqual(metadata["generation_id"], "gen_fixture")
 
     def test_transfer_publication_rechecks_workspace_after_staging_upload(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -52,7 +52,13 @@ def _project_relative(project_root: Path, git_root: Path, path: str) -> str:
     return relative
 
 
-def _archive(project_root: Path, manifest: CaptureManifest, *, project_relative_manifest: bool = False) -> tuple[bytes, str]:
+def _archive(
+    project_root: Path,
+    manifest: CaptureManifest,
+    *,
+    project_relative_manifest: bool = False,
+    generation_id: str | None = None,
+) -> tuple[bytes, str]:
     """Build a bounded gzip archive from the already screened manifest."""
     output = io.BytesIO()
     canonical_entries: list[dict[str, object]] = []
@@ -84,7 +90,7 @@ def _archive(project_root: Path, manifest: CaptureManifest, *, project_relative_
         ).encode("utf-8")).hexdigest()
         manifest_data = json.dumps({
             "schema_version": 1,
-            "generation_id": manifest.generation_id,
+            "generation_id": generation_id or manifest.generation_id,
             "manifest_digest": manifest.manifest_digest,
             "archive_manifest_digest": archive_manifest_digest,
             "file_count": manifest.file_count,
@@ -212,6 +218,7 @@ class RemoteSyncTransport:
             archive, archive_digest = _archive(
                 Path(project_root).expanduser().resolve(), manifest,
                 project_relative_manifest=True,
+                generation_id=generation.generation_id,
             )
             if not callable(self.workspace_publish):
                 raise RemoteSyncTransportError(
@@ -345,6 +352,7 @@ class HostSourceSyncTransport:
             archive, archive_digest = _archive(
                 Path(project_root).expanduser().resolve(), manifest,
                 project_relative_manifest=True,
+                generation_id=generation_id,
             )
             prepare = (
                 f"set -eu; test -d {shlex.quote(source)} && "

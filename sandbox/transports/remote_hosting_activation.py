@@ -377,19 +377,35 @@ class RegisteredRemoteActivationTransport:
             return actual
         if observation_type == "local":
             image = selectors["repository_digest"]
+            expected_config_digest = selectors.get("config_digest")
             start_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             start_target = self._observed_target(start_epoch)
             result = self._invoke(("docker", "image", "inspect", image), timeout_seconds=30)
             try: raw = json.loads(result["stdout"])[0]
             except (TypeError, IndexError, json.JSONDecodeError):
                 raise RemoteActivationError("local_image_mismatch") from None
-            image_id = raw.get("Id"); repo_digests = raw.get("RepoDigests") or []
+            image_id = raw.get("Id"); repo_digests = raw.get("RepoDigests")
+            if (result["returncode"] != 0 or result["terminated"] is not True
+                    or not isinstance(image_id, str)
+                    or not isinstance(repo_digests, list)
+                    or repo_digests.count(image) != 1):
+                raise RemoteActivationError("local_image_mismatch")
+            # Docker 29's containerd image store may report the exact
+            # repository-qualified manifest as ``Id``. The signed receipt's
+            # config digest is a separate identity and must be supplied by
+            # the caller; never derive or overwrite it from Docker's Id.
+            if expected_config_digest is None:
+                expected_config_digest = image_id
+            if (not isinstance(expected_config_digest, str)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_config_digest)
+                    or image_id not in {expected_config_digest, image}):
+                raise RemoteActivationError("local_image_mismatch")
             end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             end_target = self._observed_target(end_epoch)
             platform = {"os": raw.get("Os"), "architecture": raw.get("Architecture")}
             if raw.get("Variant"): platform["variant"] = raw["Variant"]
             return {"repository": image.split("@", 1)[0].split("/", 1)[1],
-                    "repo_digest": image, "config_digest": image_id,
+                    "repo_digest": image, "config_digest": expected_config_digest,
                     "platform": platform,
                     "local_image_id": image_id,
                     "target_epoch_start": start_target["machine_identity"],
@@ -641,9 +657,28 @@ class RegisteredRemoteActivationTransport:
     def observe_running_v2(self, *, target: dict, services: tuple[str, ...],
                            compose_project: str, topology_digest: str,
                            compose_config_hashes: dict[str, str],
-                           snapshot_digest: str) -> dict:
+                           snapshot_digest: str,
+                           image_identities: dict[str, dict[str, str]]) -> dict:
         """Observe against the retained private-render identity, not labels."""
         selector = self._compose_selector_v2
+        if type(image_identities) is not dict or set(image_identities) != set(services):
+            raise RemoteActivationError("runtime_mismatch")
+        normalized_identities = {}
+        for service, identity in image_identities.items():
+            if (type(identity) is not dict
+                    or set(identity) != {"image_ref", "config_digest", "local_image_id"}
+                    or not isinstance(identity["image_ref"], str)
+                    or _DIGEST_REF.fullmatch(identity["image_ref"]) is None
+                    or not isinstance(identity["config_digest"], str)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity["config_digest"])
+                    or not isinstance(identity["local_image_id"], str)
+                    or (identity["local_image_id"] != identity["image_ref"]
+                        and not re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                              identity["local_image_id"]))
+                    or identity["local_image_id"] not in {
+                        identity["config_digest"], identity["image_ref"]}):
+                raise RemoteActivationError("runtime_mismatch")
+            normalized_identities[service] = dict(identity)
         if (not selector or services != selector.get("selected_services")
                 or compose_project != selector.get("project_name")
                 or topology_digest != selector.get("topology_digest")
@@ -659,7 +694,8 @@ class RegisteredRemoteActivationTransport:
         source = {**selector["private_source"], "kind": "compose_observe_v2",
                   "services": services, "render_digest": selector["render_digest"],
                   "compose_config_hashes": compose_config_hashes,
-                  "topology_digest": topology_digest}
+                  "topology_digest": topology_digest,
+                  "image_identities": normalized_identities}
         result = self._invoke(("sandbox-activation-observe-running-v2",
                                self._service(compose_project),
                                *map(self._service, services)), timeout_seconds=60,
@@ -681,6 +717,12 @@ class RegisteredRemoteActivationTransport:
                     or row.get("compose_project") != compose_project:
                 raise RemoteActivationError("runtime_mismatch")
             service = row["service"]
+            identity = normalized_identities[service]
+            if (row.get("declared_image") != identity["image_ref"]
+                    or row.get("repository_digest") != identity["image_ref"]
+                    or row.get("config_digest") != identity["config_digest"]
+                    or row.get("local_image_id") != identity["local_image_id"]):
+                raise RemoteActivationError("runtime_mismatch")
             normalized.append({**row, "topology_identity": topology_digest,
                                "compose_config_hash": compose_config_hashes[service]})
         if {row["service"] for row in normalized} != set(services):

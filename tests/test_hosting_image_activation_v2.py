@@ -30,7 +30,7 @@ TARGET = {"machine_identity": "machine-a", "target_identity": "target-a",
           "daemon_identity": "daemon-a"}
 
 
-def artifacts(release_offset=0):
+def artifacts(release_offset=0, *, docker29=False):
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp); receipt_digest = make_bundle(root)
         if release_offset:
@@ -71,7 +71,8 @@ def artifacts(release_offset=0):
         staging_policy_digest=stage_policy.policy_digest, target=target, confirmed=True)
     observed = tuple(BatchImageObservation(
         item.name, item.repository, item.image_ref, item.config_digest, item.platform,
-        item.config_digest, "denied", "succeeded") for item in plan.receipt.images)
+        item.image_ref if docker29 else item.config_digest, "denied", "succeeded")
+        for item in plan.receipt.images)
     observation_body = {"target_epoch_start": "machine-a", "target_epoch_end": "machine-a",
         "daemon_epoch_start": "daemon-a", "daemon_epoch_end": "daemon-a",
         "target": target.as_mapping(), "images": [item.as_mapping() for item in observed]}
@@ -226,9 +227,11 @@ class FakeRuntimeV2:
         self.crash_during_replace = False
         self.proof = proof
 
-    def observe_local_image(self, *, target, repository_digest):
+    def observe_local_image(self, *, target, repository_digest, config_digest=None):
         proof = self.proof or artifacts()[1]
         image = next(row for row in proof.observation.images if row.repo_digest == repository_digest)
+        if config_digest is not None and config_digest != image.config_digest:
+            raise ValueError("local_image_mismatch")
         return {"repository": image.repository.split("/", 1)[1], "repo_digest": image.repo_digest,
             "config_digest": image.config_digest, "local_image_id": image.local_image_id,
             "platform": {"os": "linux", "architecture": "amd64"},
@@ -254,12 +257,12 @@ class FakeRuntimeV2:
     def observe_running(self, *, target, services, compose_project):
         images = self.rendered["services"]
         proof = self.proof or artifacts()[1]
-        configs = {item.repo_digest: item.config_digest for item in proof.observation.images}
+        observed = {item.repo_digest: item for item in proof.observation.images}
         rows = [{"service": service, "compose_project": compose_project,
             "runtime_identity": f"container-{service}", "declared_image": images[service]["image"],
             "repository_digest": images[service]["image"],
-            "local_image_id": configs[images[service]["image"]],
-            "config_digest": configs[images[service]["image"]],
+            "local_image_id": observed[images[service]["image"]].local_image_id,
+            "config_digest": observed[images[service]["image"]].config_digest,
             "platform": {"os": "linux", "architecture": "amd64"},
             "topology_identity": images[service]["topology_identity"],
             "compose_config_hash": DIGEST_A, "healthy": True} for service in services]
@@ -324,6 +327,17 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(len(generation["images"]), 3)
         self.assertEqual(len(generation["service_image_bindings"]),
                          len(plan.policy.persistent_services))
+
+    def test_docker29_manifest_local_id_keeps_receipt_config_through_activation(self):
+        plan, proof, snapshot = artifacts(docker29=True)
+        grant = grant_for(plan, proof)
+        request = request_for(plan, proof, snapshot, grant)
+        repo = FakeRepositoryV2(); runtime = FakeRuntimeV2(proof)
+        result = execute(repo, runtime, FakeEdgeV2(), request, grant)
+        self.assertTrue(result["ok"], result)
+        for image in repo.state["current"]["images"]:
+            self.assertEqual(image["local_image_id"], image["image_ref"])
+            self.assertNotEqual(image["local_image_id"], image["config_digest"])
 
     def test_any_running_service_identity_mismatch_fences_without_commit(self):
         plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
@@ -891,7 +905,7 @@ class ActivationV2Tests(unittest.TestCase):
 class RemoteActivationTransportV2Tests(unittest.TestCase):
     def test_replace_is_one_no_build_no_pull_effect_and_secret_values_never_enter_argv(self):
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
-        plan, proof, snapshot = artifacts(); calls = []
+        plan, proof, snapshot = artifacts(docker29=True); calls = []
         images = {row["service"]: row["image_ref"] for row in plan.as_mapping()["service_image_bindings"]
                   if row["kind"] == "persistent"}
         by_name = {row["name"]: row["image_ref"] for row in plan.as_mapping()["images"]}
@@ -915,7 +929,7 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
                                  for item in plan.receipt.images}
                 stdout = json.dumps([{"service": name, "compose_project": "lenzora",
                     "runtime_identity": f"container-{name}", "declared_image": image,
-                    "repository_digest": image, "local_image_id": config_by_ref[image],
+                    "repository_digest": image, "local_image_id": image,
                     "config_digest": config_by_ref[image],
                     "platform": {"os": "linux", "architecture": "amd64"},
                     "healthy": True} for name, image in images.items()])
@@ -927,6 +941,13 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
             target_identity_observer=lambda: {
                 "machine_identity": "machine-a", "target_identity": "target-a"})
         selected = tuple(images)
+        image_identities = {
+            name: {"image_ref": image, "config_digest": next(
+                item.config_digest for item in proof.observation.images
+                if item.repo_digest == image), "local_image_id": next(
+                item.local_image_id for item in proof.observation.images
+                if item.repo_digest == image)}
+            for name, image in images.items()}
         transport.render_topology_v2(compose_files=("compose.yml",), project_name="lenzora",
             selected_services=selected, service_image_bindings=images,
             environment_bindings=environment,
@@ -940,7 +961,7 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
             target=TARGET, services=selected, compose_project="lenzora",
             topology_digest=proof.observation.observation_digest,
             compose_config_hashes={name: DIGEST_A for name in selected},
-            snapshot_digest=snapshot.snapshot_digest)
+            snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
         self.assertTrue(all(row["topology_identity"] == proof.observation.observation_digest
                             for row in observed["services"]))
         effects = [call for call in calls if "up" in call["argv"]]

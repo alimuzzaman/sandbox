@@ -20,6 +20,19 @@ from .models import (
 
 
 _ENVIRONMENT_VARIABLE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_REPOSITORY_DIGEST = re.compile(
+    r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z")
+
+
+def _local_image_id(value: object, image_ref: object) -> str:
+    """Accept the receipt config digest or Docker 29's manifest image ID."""
+    if (type(image_ref) is not str
+            or _REPOSITORY_DIGEST.fullmatch(image_ref) is None
+            or type(value) is not str
+            or (value != image_ref and _DIGEST.fullmatch(value) is None)):
+        raise ActivationContractError("local_image_mismatch")
+    return value
 
 
 def _target(value: object) -> dict[str, str]:
@@ -143,9 +156,11 @@ class ReplacementIntentV2:
             row = _closed(item, frozenset({
                 "name", "image_ref", "config_digest", "platform", "local_image_id"}))
             _text(row["name"], identity=True); _text(row["image_ref"])
-            _digest(row["config_digest"]); _digest(row["local_image_id"])
+            _digest(row["config_digest"])
+            _local_image_id(row["local_image_id"], row["image_ref"])
             if row["platform"] != {"os": "linux", "architecture": "amd64"} \
-                    or row["config_digest"] != row["local_image_id"]:
+                    or row["local_image_id"] not in {
+                        row["config_digest"], row["image_ref"]}:
                 raise ActivationContractError("local_image_mismatch")
             images[row["name"]] = row
         if len(images) != len(self.images):
@@ -442,8 +457,10 @@ class VerifiedActivationGenerationV2:
             row = _closed(item, frozenset({
                 "name", "image_ref", "config_digest", "platform", "local_image_id"}))
             _text(row["name"], identity=True); _text(row["image_ref"])
-            _digest(row["config_digest"]); _digest(row["local_image_id"])
-            if row["local_image_id"] != row["config_digest"] or row["platform"] != {
+            _digest(row["config_digest"])
+            _local_image_id(row["local_image_id"], row["image_ref"])
+            if row["local_image_id"] not in {row["config_digest"], row["image_ref"]} \
+                    or row["platform"] != {
                     "os": "linux", "architecture": "amd64"}:
                 raise ActivationContractError("local_image_mismatch")
             images[row["name"]] = row

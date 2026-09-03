@@ -13,7 +13,7 @@ from .models import (
 )
 from .v2_models import (
     ActivationRequestV2, GenerationBoundEdgeReceiptV2,
-    ReplacementIntentV2, VerifiedActivationGenerationV2,
+    ReplacementIntentV2, VerifiedActivationGenerationV2, _local_image_id,
 )
 
 
@@ -48,12 +48,14 @@ def _validate_service_projection(value: object, *, services: list[str],
                     "repository_digest"):
             _text(row[key], identity=(key in {
                 "service", "runtime_identity", "compose_project"}))
-        for key in ("local_image_id", "config_digest", "topology_identity",
-                    "compose_config_hash"):
+        for key in ("config_digest", "topology_identity", "compose_config_hash"):
             _digest(row[key])
+        _local_image_id(row["local_image_id"], row["repository_digest"])
         if (row["platform"] != _PLATFORM or row["healthy"] is not True
                 or row["compose_project"] != compose_project
-                or row["topology_identity"] != topology_digest):
+                or row["topology_identity"] != topology_digest
+                or row["local_image_id"] not in {
+                    row["config_digest"], row["repository_digest"]}):
             raise ActivationContractError()
         rows.append(row)
     if [row["service"] for row in rows] != services:
@@ -93,8 +95,10 @@ def _validate_subject_v2(value: object, *, request_digest: str, target: dict,
     for item in images_value:
         row = _closed(item, _IMAGE_FIELDS)
         _text(row["name"], identity=True); _text(row["image_ref"])
-        _digest(row["config_digest"]); _digest(row["local_image_id"])
-        if row["platform"] != _PLATFORM or row["local_image_id"] != row["config_digest"]:
+        _digest(row["config_digest"])
+        _local_image_id(row["local_image_id"], row["image_ref"])
+        if row["platform"] != _PLATFORM or row["local_image_id"] not in {
+                row["config_digest"], row["image_ref"]}:
             raise ActivationContractError()
         images[row["name"]] = row
     if len(images) != len(images_value):

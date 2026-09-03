@@ -3867,12 +3867,21 @@ def _host_image_v2_recovery_observation(state: dict, transport, intent: dict):
     services = tuple(snapshot["selected_services"])
     config_hashes = {row["service"]: row["compose_config_hash"]
                      for row in intent["compose_projection"]}
+    images = {row["name"]: row for row in intent["images"]}
+    image_identities = {
+        row["service"]: {
+            "image_ref": images[row["image"]]["image_ref"],
+            "config_digest": images[row["image"]]["config_digest"],
+            "local_image_id": images[row["image"]]["local_image_id"],
+        }
+        for row in intent["service_image_bindings"]
+    }
     observed = transport.observe_running_v2(
         target=intent["target"], services=services,
         compose_project=intent["compose_project"],
         topology_digest=intent["topology_digest"],
         compose_config_hashes=config_hashes,
-        snapshot_digest=snapshot["snapshot_digest"])
+        snapshot_digest=snapshot["snapshot_digest"], image_identities=image_identities)
     rows = observed.get("services") or []
     projection = activation_recovery_projection(
         state, observed_services=rows)
@@ -3916,7 +3925,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                          "provider_revision", "target"}
             v2_prepare = v2_common - {"snapshot_digest"}
             v2_effect = v2_common | {"services", "render_digest", "topology_digest"}
-            v2_observe = v2_effect | {"compose_config_hashes"}
+            v2_observe = v2_effect | {"compose_config_hashes", "image_identities"}
             source_fields = set(private_environment_source)
             is_v2 = frozenset(source_fields) in {
                 frozenset(v2_prepare), frozenset(v2_common),
@@ -3952,6 +3961,24 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                         or re.fullmatch(r"sha256:[0-9a-f]{64}",
                                         private_environment_source["topology_digest"] or "") is None):
                     raise ValueError("activation private source is invalid")
+                if kind == "compose_observe_v2":
+                    identities = private_environment_source["image_identities"]
+                    services = private_environment_source["services"]
+                    if type(identities) is not dict or set(identities) != set(services):
+                        raise ValueError("activation private source is invalid")
+                    for identity in identities.values():
+                        if (type(identity) is not dict
+                                or set(identity) != {"image_ref", "config_digest", "local_image_id"}
+                                or type(identity["image_ref"]) is not str
+                                or re.fullmatch(r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", identity["image_ref"]) is None
+                                or type(identity["config_digest"]) is not str
+                                or re.fullmatch(r"sha256:[0-9a-f]{64}", identity["config_digest"]) is None
+                                or type(identity["local_image_id"]) is not str
+                                or (identity["local_image_id"] != identity["image_ref"]
+                                    and re.fullmatch(r"sha256:[0-9a-f]{64}", identity["local_image_id"]) is None)
+                                or identity["local_image_id"] not in {
+                                    identity["config_digest"], identity["image_ref"]}):
+                            raise ValueError("activation private source is invalid")
                 trusted = {"compose_files", "project_name", "project_directory",
                            "environment_file", "render_digest"}
                 provider_fields = ((v2_prepare - {"kind"}) | (trusted - {"render_digest"})
@@ -4053,6 +4080,8 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " return out",
             "def observe_running(project,names):",
             " if configuration_key is None:raise ValueError('configuration_binding_unavailable')",
+            " identities=s.get('image_identities')",
+            " if identities is not None and (not isinstance(identities,dict) or set(identities)!=set(names)):raise ValueError('runtime_mismatch')",
             " p=subprocess.run(['docker','ps','--filter','label=com.docker.compose.project='+project,'--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             " if p.returncode!=0 or p.stderr:raise ValueError('runtime_mismatch')",
             " out=[]",
@@ -4064,13 +4093,18 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  cfg=raw.get('Config') or {};labels=cfg.get('Labels') or {};name=labels.get('com.docker.compose.service')",
             "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:continue",
-            "  image_id=raw.get('Image');ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
+            "  image_id=raw.get('Image');expected_identity=identities.get(name) if isinstance(identities,dict) else None",
+            "  if not isinstance(image_id,str) or (expected_identity is not None and cfg.get('Image')!=expected_identity.get('image_ref')):raise ValueError('runtime_mismatch')",
+            "  ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             "  try:ir=json.loads(ii.stdout)[0]",
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  if ii.returncode!=0 or ii.stderr or ir.get('Id')!=image_id:raise ValueError('runtime_mismatch')",
+            "  repo_digests=ir.get('RepoDigests')",
+            "  if expected_identity is not None and (not isinstance(repo_digests,list) or repo_digests.count(expected_identity['image_ref'])!=1 or image_id not in (expected_identity['config_digest'],expected_identity['image_ref'])):raise ValueError('runtime_mismatch')",
+            "  config_digest=expected_identity['config_digest'] if expected_identity is not None else image_id",
             "  platform={'os':ir.get('Os'),'architecture':ir.get('Architecture')}",
             "  if ir.get('Variant'):platform['variant']=ir['Variant']",
-            "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':image_id,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
+            "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':config_digest,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
             " return out",
             "vals=[];render=None;environment_fd=None;environment_before=None",
             "if s:",

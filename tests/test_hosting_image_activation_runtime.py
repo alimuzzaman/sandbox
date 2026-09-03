@@ -186,13 +186,16 @@ class ActivationRuntimeTests(unittest.TestCase):
         def runner(*, argv, environment, private_environment, private_environment_source,
                    redact_environment_keys, timeout_seconds, max_output_bytes):
             stdout = "daemon-a\n" if argv[:2] == ("docker", "info") else json.dumps([{
-                "Id": config, "Os": "linux", "Architecture": "arm64", "Variant": "v8",
+                "Id": image, "Os": "linux", "Architecture": "arm64", "Variant": "v8",
                 "RepoDigests": [image]}])
             return {"returncode": 0, "stdout": stdout, "stderr": "", "terminated": True}
         transport = RegisteredRemoteActivationTransport(argv_runner=runner,
             target_identity_observer=lambda: {"machine_identity": "machine-a",
                                                "target_identity": "target-a"})
-        observed = transport.observe_local_image(target={}, repository_digest=image)
+        observed = transport.observe_local_image(target={}, repository_digest=image,
+                                                 config_digest=config)
+        self.assertEqual(observed["config_digest"], config)
+        self.assertEqual(observed["local_image_id"], image)
         self.assertEqual(observed["platform"],
                          {"os": "linux", "architecture": "arm64", "variant": "v8"})
 

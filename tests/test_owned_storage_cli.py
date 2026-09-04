@@ -127,6 +127,22 @@ class TestOwnedStorageCLI(unittest.TestCase):
         self.assertTrue(reclaim_out["ok"])
         self.assertEqual(reclaim_out["status"], "completed")
 
+    def test_cli_capability_command(self):
+        args = self.parser.parse_args([
+            "authority", "capability",
+            "--remote", self.remote_id,
+            "--project-identity", self.project_id,
+            "--json",
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_storage(args)
+        cap_out = json.loads(buf.getvalue())
+        self.assertTrue(cap_out["ok"])
+        self.assertEqual(cap_out["capability"], "owned-storage-authority-v1")
+        self.assertEqual(cap_out["support_tier"], "implemented_unproven")
+        self.assertIn("checks", cap_out)
+
 
 if __name__ == "__main__":
     unittest.main()

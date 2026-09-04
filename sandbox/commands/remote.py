@@ -413,11 +413,11 @@ def _cmd_service(args, as_json: bool) -> None:
     # single positional remote name, treat it as ``service status <name>``.
     # Mutating and diagnostic operations still require their explicit verb so
     # an incomplete command cannot silently change remote state.
-    if name is None and operation not in {None, "status", "diagnostics", "migrate", "stop"}:
+    if name is None and operation not in {None, "status", "diagnostics", "migrate", "stop", "capability"}:
         name = operation
         operation = "status"
-    if operation not in {"status", "diagnostics", "migrate", "stop"} or not name:
-        die("usage: ./sb remote service <status|diagnostics|migrate|stop> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "migrate", "stop", "capability"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|migrate|stop|capability> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
@@ -427,7 +427,13 @@ def _cmd_service(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     confirmed = _arg_true(args, "confirm")
     try:
-        if operation == "status":
+        if operation == "capability":
+            from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
+            lifecycle_service = build_authority_lifecycle_service()
+            cap = lifecycle_service.evaluate_capability(remote_identity=name)
+            payload = {"ok": True, "name": name, "status": "observed",
+                       "data": cap, "error": None}
+        elif operation == "status":
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": sr.remote_mcp_service_status(entry), "error": None}
         elif operation == "diagnostics":

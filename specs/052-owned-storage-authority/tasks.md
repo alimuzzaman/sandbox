@@ -144,15 +144,15 @@
 
 ### Tests for User Story 6
 
-- [ ] T038 [P] [US6] Add unit tests for capability report generation, tier state machine transitions, and drift detection in `tests/test_owned_storage_review.py`
-- [ ] T039 [P] [US6] Add tests for CLI/MCP capability and status command parity in `tests/test_owned_storage_cli.py` and `tests/test_owned_storage_mcp.py`
+- [x] T038 [P] [US6] Add unit tests for capability report generation, tier state machine transitions, and drift detection in `tests/test_owned_storage_review.py`
+- [x] T039 [P] [US6] Add tests for CLI/MCP capability and status command parity in `tests/test_owned_storage_cli.py` and `tests/test_owned_storage_mcp.py`
 
 ### Implementation for User Story 6
 
-- [ ] T040 [US6] Implement capability evaluation probe and validation receipt verification in `sandbox/owned_storage_lifecycle/service.py`
-- [ ] T041 [US6] Implement prepared-binding registration and activation handshake in `sandbox/owned_storage/service.py`
-- [ ] T042 [US6] Implement CLI commands for capability inspection, review, and status in `sandbox/commands/owned_storage.py` and `sandbox/commands/remote.py`
-- [ ] T043 [US6] Implement MCP tool definitions for capability and status inspection in `mcp/wp-server/tools/owned_storage.py`
+- [x] T040 [US6] Implement capability evaluation probe and validation receipt verification in `sandbox/owned_storage_lifecycle/service.py`
+- [x] T041 [US6] Implement prepared-binding registration and activation handshake in `sandbox/owned_storage/service.py`
+- [x] T042 [US6] Implement CLI commands for capability inspection, review, and status in `sandbox/commands/owned_storage.py` and `sandbox/commands/remote.py`
+- [x] T043 [US6] Implement MCP tool definitions for capability and status inspection in `mcp/wp-server/tools/owned_storage.py`
 
 **Checkpoint**: User Story 6 complete. Truthful capability reporting and prepared-binding lifecycle fully integrated.
 

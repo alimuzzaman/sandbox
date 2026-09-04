@@ -220,3 +220,42 @@ class StorageAuthorityLifecycleRepository:
             if data.get("support_tier"):
                 data["support_tier"] = SupportTier(data["support_tier"])
             return CapabilityPromotion(**data)
+
+    def record_acceptance(self, acceptance: CapabilityAcceptance, expected_generation: int) -> int:
+        with self._lock():
+            state = self._read_state_locked()
+            current_gen = state.get("generation", 0)
+
+            existing = state.get("acceptances", {}).get(acceptance.acceptance_id)
+            if existing:
+                if existing.get("request_digest") == acceptance.request_digest:
+                    return current_gen
+                raise LifecycleConflictError(
+                    f"Acceptance {acceptance.acceptance_id} already exists with different digest"
+                )
+
+            if current_gen != expected_generation:
+                raise LifecycleCASError(
+                    f"Generation mismatch: expected {expected_generation}, found {current_gen}"
+                )
+
+            data = dataclasses.asdict(acceptance)
+            if isinstance(data.get("outcome"), AcceptanceOutcome):
+                data["outcome"] = data["outcome"].value
+
+            state["acceptances"][acceptance.acceptance_id] = data
+            state["generation"] = current_gen + 1
+            self._write_state_locked(state)
+            return state["generation"]
+
+    def get_acceptance(self, acceptance_id: str) -> Optional[CapabilityAcceptance]:
+        with self._lock():
+            state = self._read_state_locked()
+            data = state.get("acceptances", {}).get(acceptance_id)
+            if not data:
+                return None
+            data = dict(data)
+            if data.get("outcome"):
+                data["outcome"] = AcceptanceOutcome(data["outcome"])
+            return CapabilityAcceptance(**data)
+

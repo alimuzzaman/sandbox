@@ -12,6 +12,7 @@ from typing import Any, BinaryIO, Dict, Optional
 from sandbox.owned_storage.adapters.linux import LinuxFilesystemAdapter, RenameNoReplaceError
 from sandbox.owned_storage.models import (
     AdoptionBindingPhase,
+    AuthorityAdoptionBinding,
     AuthorityOwnedObject,
     CanonicalOperationRequest,
     CleanupOutcome,
@@ -425,3 +426,62 @@ class OwnedStorageService:
             "reason_code": None,
             "observed_at": accepted_time,
         }
+
+    def register_prepared_binding(
+        self,
+        binding: AuthorityAdoptionBinding,
+    ) -> Dict[str, Any]:
+        """Register a prepared adoption binding awaiting activation handshake."""
+        if binding.phase != AdoptionBindingPhase.PREPARED:
+            raise OwnedStorageServiceError(
+                f"Binding {binding.authority_binding_id} must be in prepared phase",
+                code="adoption_binding_mismatch",
+            )
+        self.repository.save_adoption_binding(binding)
+        return {
+            "ok": True,
+            "authority_binding_id": binding.authority_binding_id,
+            "phase": binding.phase.value,
+            "binding_generation": binding.binding_generation,
+        }
+
+    def activate_adoption_binding(
+        self,
+        *,
+        authority_binding_id: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        """Activate a prepared adoption binding through an explicit handshake."""
+        binding = self.repository.get_adoption_binding(authority_binding_id)
+        if binding is None:
+            raise OwnedStorageServiceError(
+                f"Binding {authority_binding_id} not found",
+                code="adoption_binding_missing",
+            )
+        if binding.phase == AdoptionBindingPhase.ACTIVE:
+            return {
+                "ok": True,
+                "authority_binding_id": authority_binding_id,
+                "phase": "active",
+                "binding_generation": binding.binding_generation,
+                "already_active": True,
+            }
+        if binding.phase != AdoptionBindingPhase.PREPARED:
+            raise OwnedStorageServiceError(
+                f"Binding {authority_binding_id} is {binding.phase.value}, cannot activate",
+                code="adoption_binding_mismatch",
+            )
+        import dataclasses
+        active_binding = dataclasses.replace(
+            binding,
+            phase=AdoptionBindingPhase.ACTIVE,
+        )
+        self.repository.save_adoption_binding(active_binding)
+        return {
+            "ok": True,
+            "authority_binding_id": authority_binding_id,
+            "phase": "active",
+            "binding_generation": binding.binding_generation,
+            "already_active": False,
+        }
+

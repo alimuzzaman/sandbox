@@ -22,6 +22,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     auth = subparsers.add_parser("authority", help="authority operations")
     auth_sub = auth.add_subparsers(dest="authority_action", required=True)
 
+    # capability
+    cp = auth_sub.add_parser("capability", help="inspect platform capability status")
+    cp.add_argument("--remote", required=True, help="remote identity")
+    cp.add_argument("--project-identity", help="optional project identity")
+    cp.add_argument("--json", action="store_true", help="output JSON format")
+
     # status
     st = auth_sub.add_parser("status", help="list bounded storage authority objects")
     st.add_argument("--remote", required=True, help="remote identity")
@@ -70,7 +76,13 @@ def cmd_storage(args: argparse.Namespace) -> None:
     service = build_owned_storage_application_service()
 
     try:
-        if action == "status":
+        if action == "capability":
+            from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
+            lifecycle_service = build_authority_lifecycle_service()
+            res = lifecycle_service.evaluate_capability(
+                remote_identity=args.remote,
+            )
+        elif action == "status":
             res = service.get_status(
                 remote_identity=args.remote,
                 project_identity=args.project_identity,

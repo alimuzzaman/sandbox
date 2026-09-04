@@ -22,8 +22,21 @@ def get_service() -> OwnedStorageApplicationService:
 
 
 def register(server: Any, dependencies: Any = None) -> None:
-    for tool in (owned_storage_status, owned_storage_preview, owned_storage_reclaim):
+    for tool in (owned_storage_capability, owned_storage_status, owned_storage_preview, owned_storage_reclaim):
         server.tool()(tool)
+
+
+def owned_storage_capability(
+    remote: str,
+    project_identity: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Inspect platform capability and truthful support status for owned storage authority."""
+    try:
+        from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
+        lifecycle_service = build_authority_lifecycle_service()
+        return lifecycle_service.evaluate_capability(remote_identity=remote)
+    except Exception as exc:
+        return {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
 
 
 def owned_storage_status(
@@ -96,6 +109,7 @@ def owned_storage_reclaim(
 
 __all__ = [
     "register",
+    "owned_storage_capability",
     "owned_storage_status",
     "owned_storage_preview",
     "owned_storage_reclaim",

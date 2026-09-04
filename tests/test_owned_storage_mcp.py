@@ -117,6 +117,16 @@ class TestOwnedStorageMCP(unittest.TestCase):
         self.assertTrue(rc_res["ok"])
         self.assertEqual(rc_res["status"], "completed")
 
+    def test_mcp_capability_tool(self):
+        cap_res = mcp_storage.owned_storage_capability(
+            remote=self.remote_id,
+            project_identity=self.project_id,
+        )
+        self.assertTrue(cap_res["ok"])
+        self.assertEqual(cap_res["capability"], "owned-storage-authority-v1")
+        self.assertEqual(cap_res["support_tier"], "implemented_unproven")
+        self.assertIn("checks", cap_res)
+
 
 if __name__ == "__main__":
     unittest.main()

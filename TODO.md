@@ -28,10 +28,10 @@ and safe resume order are recorded in
 - [X] Complete Spec 033 disposable-remote and external evidence gates from
   `origin/codex/finish-spec033-local`; live acceptance on `scaleway-sandbox`
   passed on 2026-09-03 and merged into `latest`.
-- [ ] Resolve Feature 052's public lifecycle-port blocker before regenerating
-  tasks. The truthful planning checkpoint is
-  `origin/codex/owned-storage-authority-planning-repair` at
-  `e9111cfe14cfd88521289e8e39302b95cee0774c`; do not merge it as implemented.
+- [X] Resolve Feature 052's public lifecycle-port blocker before regenerating
+  tasks. Repaired under authorized Option 2 (FR-058 amended to use dedicated
+  `StorageAuthorityLifecycleRepository`) at `origin/codex/owned-storage-authority-planning-repair`
+  (`40b018c`); ready for Spec Kit task generation.
 - [ ] Resume Feature 053 with the explicitly authorized T004 disposable
   OpenLiteSpeed feasibility probe before T019–T108. The reviewed foundation is
   `origin/codex/server-config-fragments` at

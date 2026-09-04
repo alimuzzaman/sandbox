@@ -16,10 +16,12 @@ from .staging_models import (
 
 class StageWorkerError(RuntimeError):
     def __init__(self, code: str, *, process: dict | None = None,
-                 cleanup: dict | None = None) -> None:
+                 cleanup: dict | None = None,
+                 pull_failure: dict | None = None) -> None:
         self.code = code
         self.process = process
         self.cleanup = cleanup
+        self.pull_failure = pull_failure
         super().__init__(code)
 
 
@@ -38,6 +40,7 @@ class StageDeliveryFailure:
     code: str
     process: dict | None = None
     cleanup: dict | None = None
+    pull_failure: dict | None = None
 
 
 def unit_name(request_id: str, request_digest: str) -> str:
@@ -167,7 +170,25 @@ class _PreparedWorkerV2:
         if cleanup != {"complete": True}:
             raise StageWorkerError("cleanup_unproven", process=process, cleanup=cleanup)
         if not response.ok:
-            raise StageWorkerError(response.code, process=process, cleanup=cleanup)
+            fields = {"process", "cleanup"}
+            pull_failure = None
+            if response.code == "pull_failed":
+                fields.add("pull_failure")
+                raw_failure = response.payload.get("pull_failure")
+                names = {item["name"] for item in self.frame["images"]}
+                if type(raw_failure) is not dict \
+                        or set(raw_failure) != {"image", "class"} \
+                        or type(raw_failure.get("image")) is not str \
+                        or raw_failure.get("image") not in names \
+                        or type(raw_failure.get("class")) is not str \
+                        or raw_failure.get("class") not in {
+                            "denied", "not_found", "network", "timeout", "no_space", "daemon"}:
+                    raise StageWorkerError("observation_invalid", process=process, cleanup=cleanup)
+                pull_failure = dict(raw_failure)
+            if set(response.payload) != fields:
+                raise StageWorkerError("observation_invalid", process=process, cleanup=cleanup)
+            raise StageWorkerError(response.code, process=process, cleanup=cleanup,
+                                   pull_failure=pull_failure)
         if set(response.payload) != {"observation", "process", "cleanup"}:
             raise StageWorkerError("observation_invalid")
         try:

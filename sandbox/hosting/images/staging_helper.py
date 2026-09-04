@@ -29,6 +29,35 @@ _REPOSITORY = re.compile(
 _SERVICE = re.compile(r"[a-z0-9](?:[a-z0-9_.-]{0,62}[a-z0-9])?\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 V2_CAPABILITY_REVISION = "systemd-cgroup-v2-batch-stage-v2"
+_PULL_FAILURE_CLASSES = frozenset({
+    "denied", "not_found", "network", "timeout", "no_space", "daemon",
+})
+
+
+def _classify_pull_failure(stdout: object, stderr: object) -> str:
+    """Reduce Docker output to one closed class without retaining its contents."""
+    def bounded(value: object) -> bytes:
+        if type(value) is str:
+            return value.encode("utf-8", "ignore")[-16384:]
+        if type(value) is bytes:
+            return value[-16384:]
+        return b""
+    detail = (bounded(stderr) + b"\n" + bounded(stdout)).lower()
+    rules = (
+        ("no_space", (b"no space left on device",)),
+        ("timeout", (b"context deadline exceeded", b"i/o timeout", b"timed out",
+                     b"timeout awaiting response", b"client.timeout exceeded")),
+        ("denied", (b"unauthorized", b"authentication required", b"access denied",
+                    b"pull access denied", b"requested access to the resource is denied",
+                    b"denied:")),
+        ("not_found", (b"manifest unknown", b"manifest not found", b"name unknown",
+                       b"repository does not exist", b"not found")),
+        ("network", (b"network is unreachable", b"no such host", b"connection refused",
+                     b"connection reset", b"tls handshake timeout", b"temporary failure in name",
+                     b"unexpected eof")),
+    )
+    return next((kind for kind, markers in rules if any(item in detail for item in markers)),
+                "daemon")
 
 
 def _bootstrap_failure(phase: str, code: str) -> int:
@@ -385,7 +414,7 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
     os.chmod(workspace, 0o700)
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
                    "HOME": str(workspace), "DOCKER_CONFIG": str(workspace / "docker")}
-    code = "staged"; observation = None
+    code = "staged"; observation = None; pull_failure = None
     try:
         for image in plan["images"]:
             if not anonymous_probe(image["repository"], image["manifest_digest"]):
@@ -400,9 +429,18 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
         if daemon_start_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_start = daemon_start_result.stdout.decode().strip()
         for image in plan["images"]:
-            pull = runner(("docker", "pull", image["repository_qualified_digest"]),
-                          environment=environment, timeout=600)
-            if pull.returncode != 0: raise ValueError("pull_failed")
+            try:
+                pull = runner(("docker", "pull", image["repository_qualified_digest"]),
+                              environment=environment, timeout=600)
+            except subprocess.TimeoutExpired:
+                pull_failure = {"image": image["name"], "class": "timeout"}
+                raise ValueError("pull_failed") from None
+            if pull.returncode != 0:
+                failure_class = _classify_pull_failure(pull.stdout, pull.stderr)
+                if failure_class not in _PULL_FAILURE_CLASSES:
+                    failure_class = "daemon"
+                pull_failure = {"image": image["name"], "class": failure_class}
+                raise ValueError("pull_failed")
         # Remove the one credential workspace before any image inspection/result.
         remover(workspace / "docker", ignore_errors=False)
         if (workspace / "docker").exists(): raise ValueError("cleanup_unproven")
@@ -460,6 +498,8 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
         payload["observation"] = observation
         return {"schema_version": 2, "ok": True, "code": "staged", "payload": payload}
     if not cleanup_complete: code = "cleanup_unproven"
+    if code == "pull_failed" and pull_failure is not None:
+        payload["pull_failure"] = pull_failure
     return {"schema_version": 2, "ok": False, "code": code, "payload": payload}
 
 

@@ -15,6 +15,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a validated project-relative path.
 
 ### Changed
+- Feature 050 v2 image staging now reports the failed image role and a closed,
+  redacted pull-failure class through terminal results and status replay without
+  retaining Docker output; v1 staging remains unchanged.
 - `sb apply --project-dir` / `apply_config` now reconcile WordPress core itself:
   a pinned `wpVersion` is installed exactly (`wp core update --version=<pin>
   --force`, upgrade or downgrade) and an UNPINNED project is moved to the

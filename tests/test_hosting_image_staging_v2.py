@@ -113,7 +113,8 @@ class SafeFailurePrepared(FakePrepared):
         from sandbox.hosting.images.staging_worker import StageWorkerError
         raise StageWorkerError("pull_failed",
             process={"unit_inactive": True, "cgroup_empty_or_removed": True},
-            cleanup={"complete": True})
+            cleanup={"complete": True},
+            pull_failure={"image": "worker", "class": "denied"})
 
     def cancel(self):
         # A transient systemd unit may already be unloaded by this point.
@@ -129,6 +130,207 @@ class SafeFailureWorker(FakeBatchWorker):
 
 
 class TestV2BatchStaging(unittest.TestCase):
+    def test_v2_pull_failure_classes_are_closed_and_redacted(self):
+        from sandbox.hosting.images.staging_helper import _classify_pull_failure
+        cases = {
+            "denied": b"unauthorized: token synthetic-secret rejected",
+            "not_found": b"manifest unknown: repository path missing",
+            "network": b"dial tcp: network is unreachable",
+            "timeout": b"context deadline exceeded",
+            "no_space": b"write layer: no space left on device",
+            "daemon": b"unexpected daemon response synthetic-secret",
+        }
+        for expected, stderr in cases.items():
+            with self.subTest(expected=expected):
+                self.assertEqual(_classify_pull_failure(b"", stderr), expected)
+
+    def test_v2_helper_emits_only_failed_image_and_normalized_class(self):
+        import shutil
+        import subprocess
+        from sandbox.hosting.images import staging_helper
+        from sandbox.hosting.images.staging_worker import StageWorkerV2
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        class Capture:
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                self.frame = frame; return object()
+        transport = Capture(); StageWorkerV2(transport).prepare(request, policy)
+        frame = transport.frame
+        frame["helper"]["artifact_digest"] = "sha256:" + hashlib.sha256(
+            Path(staging_helper.__file__).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temp:
+            def runner(argv, *, environment, input_data=None, timeout=300):
+                command = tuple(argv)
+                if command[:2] == ("docker", "login"):
+                    config = Path(environment["DOCKER_CONFIG"]); config.mkdir(parents=True)
+                    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                if command[:2] == ("docker", "info"):
+                    return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
+                return subprocess.CompletedProcess(command, 1,
+                    stdout=b"repository-url synthetic-secret", stderr=b"manifest unknown")
+            result = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
+                runner=runner, anonymous_probe=lambda *_: True,
+                cgroup_identity=lambda unit: "/app.slice/" + unit,
+                machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+        self.assertEqual(result["code"], "pull_failed")
+        self.assertEqual(result["payload"]["pull_failure"],
+                         {"image": "queue", "class": "not_found"})
+        self.assertEqual(set(result["payload"]), {"process", "cleanup", "pull_failure"})
+        self.assertNotIn("synthetic-secret", json.dumps(result))
+
+    def test_v2_timeout_propagates_through_helper_worker_ledger_and_status(self):
+        import shutil
+        import subprocess
+        from sandbox.hosting.images import staging_helper
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from sandbox.hosting.images.staging_worker import StageWorkerV2
+        from sandbox.transports.remote_hosting_images import RemoteStageResponse
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+
+        class Channel:
+            def __init__(self, frame, root): self.frame = frame; self.root = root
+            def deliver(self, _credential):
+                def runner(argv, *, environment, input_data=None, timeout=300):
+                    command = tuple(argv)
+                    if command[:2] == ("docker", "login"):
+                        Path(environment["DOCKER_CONFIG"]).mkdir(parents=True)
+                        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                    if command[:2] == ("docker", "info"):
+                        return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
+                    raise subprocess.TimeoutExpired(command, timeout)
+                response = staging_helper.execute_v2(self.frame, b"canary",
+                    run_root=self.root, runner=runner, anonymous_probe=lambda *_: True,
+                    cgroup_identity=lambda unit: "/app.slice/" + unit,
+                    machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+                response["payload"]["process"].update(
+                    unit_inactive=True, cgroup_empty_or_removed=True)
+                return RemoteStageResponse(response["ok"], response["code"],
+                                           response["payload"], 2)
+            def cancel(self):
+                return {"unit_inactive": False, "cgroup_empty_or_removed": False,
+                        "cleanup_complete": False}
+        class Transport:
+            def __init__(self, root): self.root = root
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                frame["helper"]["artifact_digest"] = "sha256:" + hashlib.sha256(
+                    Path(staging_helper.__file__).read_bytes()).hexdigest()
+                return Channel(frame, self.root)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); repository = StageRepository(root / "ledger")
+            service = ImagePlanSetStagingService(repository=repository, broker=FakeBroker(),
+                worker=StageWorkerV2(Transport(root / "run")))
+            (root / "run").mkdir()
+            result = service.stage(request, policy)
+            status = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None).status(request)
+        self.assertEqual((result.code, result.pull_failure.as_mapping()),
+                         ("pull_failed", {"image": "queue", "class": "timeout"}))
+        self.assertEqual(status.as_mapping(), result.as_mapping())
+
+    def test_v2_pull_failure_result_round_trips_through_ledger_and_status(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=SafeFailureWorker())
+            result = service.stage(request, policy)
+            status = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None).status(request)
+        expected = {"image": "worker", "class": "denied"}
+        self.assertEqual(result.as_mapping()["pull_failure"], expected)
+        self.assertEqual(status.as_mapping(), result.as_mapping())
+        self.assertNotIn("synthetic-secret", json.dumps(status.as_mapping()))
+
+    def test_legacy_v2_pull_failure_without_diagnostic_remains_readable(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            ImagePlanSetStagingService(repository=repository, broker=FakeBroker(),
+                worker=SafeFailureWorker()).stage(request, policy)
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["records"][request.request_id]["result"].pop("pull_failure")
+                repository._write_unlocked(policy.target.target_identity, state)
+            status = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None).status(request)
+        self.assertEqual((status.code, status.pull_failure), ("pull_failed", None))
+        self.assertNotIn("pull_failure", status.as_mapping())
+
+    def test_v2_worker_accepts_only_closed_pull_failure_diagnostic(self):
+        from sandbox.hosting.images.staging_worker import StageWorkerError, StageWorkerV2
+        from sandbox.transports.remote_hosting_images import RemoteStageResponse
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+
+        class Channel:
+            def __init__(self, payload): self.payload = payload
+            def deliver(self, _credential):
+                return RemoteStageResponse(False, "pull_failed", self.payload, 2)
+        class Transport:
+            def __init__(self, failure=None, extra_payload=None):
+                self.failure = failure
+                self.extra_payload = extra_payload
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                process = {"unit_name": frame["unit_name"],
+                    "cgroup": "/app.slice/" + frame["unit_name"],
+                    "delegated": False, "escape_allowed": False,
+                    "unit_inactive": True, "cgroup_empty_or_removed": True}
+                payload = {"process": process, "cleanup": {"complete": True}}
+                if self.failure is not None: payload["pull_failure"] = self.failure
+                if self.extra_payload is not None: payload["detail"] = self.extra_payload
+                return Channel(payload)
+        with self.assertRaises(StageWorkerError) as caught:
+            StageWorkerV2(Transport({"image": "queue", "class": "network"})).prepare(
+                request, policy).deliver(b"canary")
+        self.assertEqual((caught.exception.code, caught.exception.pull_failure),
+                         ("pull_failed", {"image": "queue", "class": "network"}))
+        malformed = (
+            (None, None),
+            ({"image": "api", "class": "network"}, None),
+            ({"image": "queue", "class": "other"}, None),
+            ({"image": 1, "class": "network"}, None),
+            ({"image": "queue", "class": ["network"]}, None),
+            ({"image": "queue", "class": "network"}, "forbidden"),
+        )
+        for failure, extra_payload in malformed:
+            with self.subTest(failure=failure, extra_payload=extra_payload), \
+                    self.assertRaises(StageWorkerError) as caught_malformed:
+                StageWorkerV2(Transport(failure, extra_payload)).prepare(
+                    request, policy).deliver(b"canary")
+            self.assertEqual((caught_malformed.exception.code,
+                              caught_malformed.exception.pull_failure),
+                             ("observation_invalid", None))
+
+    def test_malformed_ledger_pull_failure_and_v1_or_wrong_code_use_are_rejected(self):
+        from sandbox.hosting.images.staging_repository import StageRepositoryError, _result_from
+        base = {"schema_version": 2, "ok": False, "result_class": "failed",
+                "code": "pull_failed", "request_id": "stage-set-a", "generation": 1}
+        malformed = (
+            {**base, "pull_failure": None},
+            {**base, "pull_failure": {"image": "api", "class": "network"}},
+            {**base, "pull_failure": {"image": "queue", "class": "other"}},
+            {**base, "pull_failure": {"image": "queue", "class": "network", "raw": "x"}},
+            {**base, "schema_version": 1,
+             "pull_failure": {"image": "queue", "class": "network"}},
+            {**base, "code": "helper_failed",
+             "pull_failure": {"image": "queue", "class": "network"}},
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw), self.assertRaises(StageRepositoryError):
+                _result_from(raw, raw["request_id"])
+
+    def test_v1_pull_failure_result_envelope_is_unchanged(self):
+        from sandbox.hosting.images.staging_models import StageResult
+        from sandbox.hosting.images.staging_repository import _result_from
+        result = StageResult(1, False, "failed", "pull_failed", "stage-v1", 1)
+        expected = {"schema_version": 1, "ok": False, "result_class": "failed",
+                    "code": "pull_failed", "request_id": "stage-v1", "generation": 1}
+        self.assertEqual(result.as_mapping(), expected)
+        self.assertEqual(_result_from(expected, "stage-v1").as_mapping(), expected)
+
     def test_batch_observation_accepts_docker29_manifest_image_id(self):
         plan = plan_set(); item = plan.receipt.images[0]
         observed = BatchImageObservation(

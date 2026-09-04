@@ -46,16 +46,16 @@
 
 ### Tests for User Story 1
 
-- [ ] T012 [P] [US1] Add unit and contract tests for immutable generation staging, all-or-nothing publication, and non-mutation enforcement in `tests/test_sync_owned_storage.py`
-- [ ] T013 [P] [US1] Add integration test for end-to-end sync publication under `future` policy and fail-closed legacy fallback in `tests/test_owned_storage_application.py`
+- [x] T012 [P] [US1] Add unit and contract tests for immutable generation staging, all-or-nothing publication, and non-mutation enforcement in `tests/test_sync_owned_storage.py`
+- [x] T013 [P] [US1] Add integration test for end-to-end sync publication under `future` policy and fail-closed legacy fallback in `tests/test_owned_storage_application.py`
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Implement storage service staging and publication logic with directory-level fsync and atomic rename in `sandbox/owned_storage/service.py`
-- [ ] T015 [US1] Implement application-level owned storage publication port and authorization verification in `sandbox/application/owned_storage_service.py`
-- [ ] T016 [US1] Integrate `future` policy opt-in with remote sync generation workflow in `sandbox/application/sync_service.py`
-- [ ] T017 [US1] Implement remote transport client for owned storage publication protocol in `sandbox/transports/remote_owned_storage.py`
-- [ ] T018 [US1] Add standalone supervised service executable for owned storage in `tools/owned-storage-service.py`
+- [x] T014 [US1] Implement storage service staging and publication logic with directory-level fsync and atomic rename in `sandbox/owned_storage/service.py`
+- [x] T015 [US1] Implement application-level owned storage publication port and authorization verification in `sandbox/application/owned_storage_service.py`
+- [x] T016 [US1] Integrate `future` policy opt-in with remote sync generation workflow in `sandbox/application/sync_service.py`
+- [x] T017 [US1] Implement remote transport client for owned storage publication protocol in `sandbox/transports/remote_owned_storage.py`
+- [x] T018 [US1] Add standalone supervised service executable for owned storage in `tools/owned-storage-service.py`
 
 **Checkpoint**: User Story 1 complete. Screened generations publish immutably under dedicated authority with all-or-nothing atomicity.
 

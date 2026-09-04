@@ -31,13 +31,16 @@ and safe resume order are recorded in
 - [X] Resolve Feature 052's public lifecycle-port blocker before regenerating
   tasks. Repaired under authorized Option 2 (FR-058 amended to use dedicated
   `StorageAuthorityLifecycleRepository`) at `origin/codex/owned-storage-authority-planning-repair`
-  (`40b018c`); ready for Spec Kit task generation.
-- [ ] Resume Feature 053 with the explicitly authorized T004 disposable
-  OpenLiteSpeed feasibility probe before T019–T108. The reviewed foundation is
-  `origin/codex/server-config-fragments` at
-  `a92272278bf94dd00d217491ea5de246e3bcc88c`.
+  (`bc4ff51`); reviewed, tasks generated (53 tasks), and merged into `latest` (`b350374`).
+- [X] Resume Feature 053 with the explicitly authorized T004 disposable
+  OpenLiteSpeed feasibility probe before T019–T108. All phases (T001–T108)
+  completed, live acceptance passed, code review findings addressed, and merged
+  into `latest` (`5b7e132`).
 - [ ] Preserve Features 048–051 and their OCI hosting paths as immutable input;
   do not rework, duplicate, or claim their separate human/live gates.
+- [ ] Feature 046 (Host Swap Monitor / Host Memory): Phase 1–5 completed
+  (T001–T047). Controller-owned planning and fail-closed US3 safety gate GREEN
+  on `origin/codex/feat-046-us2-planning`. Next: Phase 6 (US2 apply implementation).
 
 ## Accepted slices integrated in this batch
 

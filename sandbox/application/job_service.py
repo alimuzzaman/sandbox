@@ -1104,6 +1104,16 @@ class JobService:
                     hasattr(self.workspace_registry, "retire_terminal_materialization") and
                     self.workspace_registry.retire_terminal_materialization(state)):
                 removed.append("workspace_materialization")
+            if (self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "release_terminal_job") and
+                    state.get("cleanup_state") != "completed"):
+                try:
+                    rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
+                    if rel_res.get("ok"):
+                        removed.append("workspace_cleanup")
+                except Exception:
+                    pass
+
         if metrics:
             metric_file = directory / "metrics.jsonl"
             metric_dir = directory / "metrics"

@@ -399,6 +399,23 @@ class StorageAuthorityRepository:
             ).fetchone()
             return self._row_to_object(row) if row else None
 
+    def find_object_by_workspace(self, workspace_id: str) -> Optional[AuthorityOwnedObject]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM authority_objects WHERE workspace_id = ? AND lifecycle != 'removed' ORDER BY created_at DESC LIMIT 1",
+                (workspace_id,),
+            ).fetchone()
+            return self._row_to_object(row) if row else None
+
+    def find_object_by_job(self, job_id: str) -> Optional[AuthorityOwnedObject]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM authority_objects WHERE job_id = ? AND lifecycle != 'removed' ORDER BY created_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            return self._row_to_object(row) if row else None
+
+
     def _row_to_object(self, row: sqlite3.Row) -> AuthorityOwnedObject:
         return AuthorityOwnedObject(
             object_id=row["object_id"],
@@ -575,4 +592,139 @@ class StorageAuthorityRepository:
                 request_digest=row["request_digest"],
                 admission_basis=json.loads(row["admission_basis_json"]) if row["admission_basis_json"] else None,
                 changed_at=row["changed_at"],
+            )
+
+    def save_cleanup_intent(self, intent: CleanupIntent) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO cleanup_intents (
+                    cleanup_id, operation_id, preview_id, object_id,
+                    expected_object_evidence_digest, expected_reference_digest,
+                    final_entry_evidence_digest, phase, outcome, reason_code,
+                    estimated_bytes, observed_reclaimed_bytes,
+                    job_result_digest_before, job_result_digest_after,
+                    created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    intent.cleanup_id,
+                    intent.operation_id,
+                    intent.preview_id,
+                    intent.object_id,
+                    intent.expected_object_evidence_digest,
+                    intent.expected_reference_digest,
+                    intent.final_entry_evidence_digest,
+                    intent.phase.value,
+                    intent.outcome.value if intent.outcome else None,
+                    intent.reason_code,
+                    intent.estimated_bytes,
+                    intent.observed_reclaimed_bytes,
+                    intent.job_result_digest_before,
+                    intent.job_result_digest_after,
+                    intent.created_at,
+                    intent.updated_at,
+                    intent.completed_at,
+                ),
+            )
+
+    def update_cleanup_intent(
+        self,
+        cleanup_id: str,
+        phase: CleanupPhase,
+        outcome: Optional[CleanupOutcome] = None,
+        reason_code: Optional[str] = None,
+        observed_bytes: Optional[int] = None,
+        completed_at: Optional[str] = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE cleanup_intents
+                SET phase = ?, outcome = COALESCE(?, outcome), reason_code = COALESCE(?, reason_code),
+                    observed_reclaimed_bytes = COALESCE(?, observed_reclaimed_bytes),
+                    completed_at = COALESCE(?, completed_at), updated_at = ?
+                WHERE cleanup_id = ?
+                """,
+                (
+                    phase.value,
+                    outcome.value if outcome else None,
+                    reason_code,
+                    observed_bytes,
+                    completed_at,
+                    completed_at or "now",
+                    cleanup_id,
+                ),
+            )
+
+    def get_cleanup_intent(self, cleanup_id: str) -> Optional[CleanupIntent]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM cleanup_intents WHERE cleanup_id = ?", (cleanup_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return CleanupIntent(
+                cleanup_id=row["cleanup_id"],
+                operation_id=row["operation_id"],
+                preview_id=row["preview_id"],
+                object_id=row["object_id"],
+                expected_object_evidence_digest=row["expected_object_evidence_digest"],
+                expected_reference_digest=row["expected_reference_digest"],
+                final_entry_evidence_digest=row["final_entry_evidence_digest"],
+                phase=CleanupPhase(row["phase"]),
+                outcome=CleanupOutcome(row["outcome"]) if row["outcome"] else None,
+                reason_code=row["reason_code"],
+                estimated_bytes=row["estimated_bytes"],
+                observed_reclaimed_bytes=row["observed_reclaimed_bytes"],
+                job_result_digest_before=row["job_result_digest_before"],
+                job_result_digest_after=row["job_result_digest_after"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                completed_at=row["completed_at"],
+            )
+
+    def save_lease(self, lease: MaterializationLease) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO materialization_leases (
+                    lease_id, object_id, job_id, workspace_id, lifecycle_generation,
+                    mount_identity_digest, state, opened_at, heartbeat_at, expires_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease.lease_id,
+                    lease.object_id,
+                    lease.job_id,
+                    lease.workspace_id,
+                    lease.lifecycle_generation,
+                    lease.mount_identity_digest,
+                    lease.state.value,
+                    lease.opened_at,
+                    lease.heartbeat_at,
+                    lease.expires_at,
+                    lease.closed_at,
+                ),
+            )
+
+    def get_lease(self, lease_id: str) -> Optional[MaterializationLease]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM materialization_leases WHERE lease_id = ?", (lease_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return MaterializationLease(
+                lease_id=row["lease_id"],
+                object_id=row["object_id"],
+                job_id=row["job_id"],
+                workspace_id=row["workspace_id"],
+                lifecycle_generation=row["lifecycle_generation"],
+                mount_identity_digest=row["mount_identity_digest"],
+                state=LeaseState(row["state"]),
+                opened_at=row["opened_at"],
+                heartbeat_at=row["heartbeat_at"],
+                expires_at=row["expires_at"],
+                closed_at=row["closed_at"],
             )

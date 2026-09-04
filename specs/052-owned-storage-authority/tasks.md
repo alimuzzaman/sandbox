@@ -67,14 +67,15 @@
 
 ### Tests for User Story 2
 
-- [ ] T019 [P] [US2] Add unit and contract tests for identity-bound workspace cleanup, zero-reference verification, and measured reclamation in `tests/test_workspace_owned_storage.py`
-- [ ] T020 [P] [US2] Add tests for immutable terminal job truth retention during cleanup failure in `tests/test_job_owned_storage.py`
+- [x] T019 [P] [US2] Add unit and contract tests for identity-bound workspace cleanup, zero-reference verification, and measured reclamation in `tests/test_workspace_owned_storage.py`
+- [x] T020 [P] [US2] Add tests for immutable terminal job truth retention during cleanup failure in `tests/test_job_owned_storage.py`
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] Implement quarantine and physical removal state machine with directory-FD verification in `sandbox/owned_storage/cleanup.py`
-- [ ] T022 [US2] Implement workspace release and cleanup application workflow in `sandbox/application/workspace_service.py`
-- [ ] T023 [US2] Connect terminal job completion to storage authority cleanup request without mutating job results in `sandbox/application/job_service.py`
+- [x] T021 [US2] Implement quarantine and physical removal state machine with directory-FD verification in `sandbox/owned_storage/cleanup.py`
+- [x] T022 [US2] Implement workspace release and cleanup application workflow in `sandbox/application/workspace_service.py`
+- [x] T023 [US2] Connect terminal job completion to storage authority cleanup request without mutating job results in `sandbox/application/job_service.py`
+
 
 **Checkpoint**: User Story 2 complete. Terminal CI workspaces and eligible artifacts are safely quarantined and removed by the authority.
 

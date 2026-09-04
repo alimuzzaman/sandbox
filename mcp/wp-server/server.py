@@ -181,21 +181,59 @@ def _host_memory_contract(payload: dict) -> dict:
     elif request["action"] == "host_memory_apply":
         try:
             plan = request["plan"]
+            op_id = request["operation_id"]
             if plan.get("target_identity") != target_identity:
                 result = {
                     "status": "refused",
-                    "operation_id": request["operation_id"],
+                    "operation_id": op_id,
                     "error": {"code": "ownership_unknown", "message": "plan targets a foreign host"},
                 }
             else:
-                if plan.get("operation") == "disable":
-                    apply_res = provider.disable(plan)
+                block = repository.active_operation_block()
+                if block is not None and block.get("operation_id") != op_id:
+                    result = {
+                        "status": "refused",
+                        "operation_id": op_id,
+                        "error": {"code": block.get("reason", "operation_in_progress"), "message": "active operation in progress"},
+                    }
                 else:
-                    apply_res = provider.enable(plan)
-                result = {
-                    "status": apply_res.get("status", "applied"),
-                    "operation_id": request["operation_id"],
-                }
+                    reconciled = repository.reconcile_operation(op_id)
+                    if reconciled is not None and reconciled.get("outcome") in {"applied", "already_current", "rollback_complete"}:
+                        result = {
+                            "status": reconciled["outcome"],
+                            "operation_id": op_id,
+                        }
+                    else:
+                        if plan.get("operation") == "disable":
+                            apply_res = provider.disable(plan)
+                        else:
+                            apply_res = provider.enable(plan)
+                        status_str = apply_res.get("status", "applied")
+                        result = {
+                            "status": status_str,
+                            "operation_id": op_id,
+                        }
+                        if "error" in apply_res:
+                            result["error"] = apply_res["error"]
+                        op_record = {
+                            "schema_version": 1,
+                            "operation_id": op_id,
+                            "plan_id": plan.get("plan_id", op_id),
+                            "phase": "terminal",
+                            "phase_evidence": [{"outcome": status_str}],
+                            "prior_state_digest": plan.get("observation_digest", "0" * 64),
+                            "last_observation_digest": plan.get("observation_digest", "0" * 64),
+                            "mutation_started": True,
+                            "rollback": None,
+                            "outcome": status_str,
+                            "unrelated_mutation_blocked": status_str == "rollback_incomplete",
+                        }
+                        try:
+                            repository.save_operation(op_record)
+                            if plan.get("operation") == "disable" and status_str == "applied":
+                                repository.record_disable_receipt(target_identity=target_identity, operation_id=op_id)
+                        except Exception:
+                            pass
         except Exception as exc:
             code = getattr(exc, "code", "failed")
             result = {

@@ -418,3 +418,25 @@ class HostMemoryProviderTest(unittest.TestCase):
         }
         res = provider.disable(plan)
         self.assertEqual(res["outcome"], "applied")
+
+    def test_fault_injection_and_owned_rollback_behavior(self):
+        calls = []
+        fail_on_cmd = "mkswap"
+        def run_with_fault(argv, timeout=5):
+            cmd_str = " ".join(argv)
+            calls.append(tuple(argv))
+            if fail_on_cmd in cmd_str:
+                raise OSError("simulated disk/io failure")
+            return command_result()
+
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=run_with_fault, target_identity=TARGET, now=lambda: NOW)
+        plan = self._enable_plan()
+        res = provider.enable(plan)
+        # Should catch failure and attempt rollback, yielding rollback_complete or rollback_incomplete
+        self.assertIn(res["status"], {"rollback_complete", "rollback_incomplete"})
+        self.assertIn("error", res)
+        # Verify foreign files were never targeted in any command
+        all_calls = " ".join(" ".join(c) for c in calls)
+        self.assertNotIn("/foreign", all_calls)
+        self.assertNotIn("/tmp/evil", all_calls)

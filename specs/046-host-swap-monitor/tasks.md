@@ -203,20 +203,20 @@
 
 ### Tests for User Story 6 - RED first
 
-- [ ] T077 [P] [US6] Add failing journal recovery tests for every enable/disable phase, duplicate operation IDs, stale in-progress records, terminal replay, and conflicting operation identity in `tests/test_host_memory_repository.py`
-- [ ] T078 [P] [US6] Add failing provider fault-injection tests for interruption before and after every side effect, read-back reconciliation, owned rollback, rollback failure, ambiguous ownership, and preserved disable history in `tests/test_host_memory_provider.py`
-- [ ] T079 [P] [US6] Add failing service tests for same-identity replay, ledger lookup before retry, reconcile-versus-rollback decisions, `refused` plus `operation_in_progress`, and `partial` plus `response_invalid` in `tests/test_host_memory_service.py`
-- [ ] T080 [P] [US6] Add failing transport tests for timeout, empty output, malformed output, lost response, bounded ledger lookup, normative outcomes/reason codes, and prohibition on a second operation identity in `tests/test_host_memory_remote.py` and `tests/test_resource_remote.py`
-- [ ] T081 [P] [US6] Add failing CLI tests for replay guidance, stable normative-outcome exit classes, no automatic retry under a new identity, and bounded JSON errors in `tests/test_resource_interfaces.py`
-- [ ] T082 [US6] Run `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the User Story 6 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T077 [P] [US6] Add failing journal recovery tests for every enable/disable phase, duplicate operation IDs, stale in-progress records, terminal replay, and conflicting operation identity in `tests/test_host_memory_repository.py`
+- [X] T078 [P] [US6] Add failing provider fault-injection tests for interruption before and after every side effect, read-back reconciliation, owned rollback, rollback failure, ambiguous ownership, and preserved disable history in `tests/test_host_memory_provider.py`
+- [X] T079 [P] [US6] Add failing service tests for same-identity replay, ledger lookup before retry, reconcile-versus-rollback decisions, `refused` plus `operation_in_progress`, and `partial` plus `response_invalid` in `tests/test_host_memory_service.py`
+- [X] T080 [P] [US6] Add failing transport tests for timeout, empty output, malformed output, lost response, bounded ledger lookup, normative outcomes/reason codes, and prohibition on a second operation identity in `tests/test_host_memory_remote.py` and `tests/test_resource_remote.py`
+- [X] T081 [P] [US6] Add failing CLI tests for replay guidance, stable normative-outcome exit classes, no automatic retry under a new identity, and bounded JSON errors in `tests/test_resource_interfaces.py`
+- [X] T082 [US6] Run `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the User Story 6 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 ### Implementation for User Story 6 - GREEN after T082
 
-- [ ] T083 [US6] Implement durable operation lookup, phase reconciliation, terminal replay, conflict detection, and bounded failure retention in `sandbox/resources/host_memory/repository.py`
-- [ ] T084 [US6] Implement phase-aware read-back reconciliation and owned-only rollback with incomplete-block and preserved-history evidence in `sandbox/resources/host_memory/provider.py`
-- [ ] T085 [US6] Implement replay orchestration, ambiguous-acceptance mapping to normative outcomes/reason codes, reconcile/rollback selection, and stable terminal results in `sandbox/resources/host_memory/service.py`
-- [ ] T086 [US6] Implement bounded ledger lookup and same-identity replay across `mcp/wp-server/server.py`, `sandbox/core/_remote.py`, and `sandbox/commands/resources.py`
-- [ ] T087 [US6] Run the User Story 6 tests in `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T083 [US6] Implement durable operation lookup, phase reconciliation, terminal replay, conflict detection, and bounded failure retention in `sandbox/resources/host_memory/repository.py`
+- [X] T084 [US6] Implement phase-aware read-back reconciliation and owned-only rollback with incomplete-block and preserved-history evidence in `sandbox/resources/host_memory/provider.py`
+- [X] T085 [US6] Implement replay orchestration, ambiguous-acceptance mapping to normative outcomes/reason codes, reconcile/rollback selection, and stable terminal results in `sandbox/resources/host_memory/service.py`
+- [X] T086 [US6] Implement bounded ledger lookup and same-identity replay across `mcp/wp-server/server.py`, `sandbox/core/_remote.py`, and `sandbox/commands/resources.py`
+- [X] T087 [US6] Run the User Story 6 tests in `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Interruptions and uncertain transport outcomes reconcile from durable evidence without duplicate mutation, non-normative statuses, unsafe cleanup, or history loss.
 

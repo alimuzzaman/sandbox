@@ -1081,6 +1081,26 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
 
 
 
+
+    def test_cli_replay_guidance_and_normative_exit_classes(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        # When swap-apply finishes with rollback_incomplete, it exits non-zero and displays guidance
+        payload = {
+            "schema_version": 1, "ok": False, "action": "swap-apply",
+            "status": "rollback_incomplete", "target": {"kind": "remote", "name": "scaleway"},
+            "data": {},
+            "error": {"code": "rollback_incomplete", "message": "prior state could not be verified", "retryable": False},
+        }
+        with patch("sandbox.resources.context.host_memory_apply", return_value=payload):
+            out = StringIO()
+            with redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+                resources.cmd_resources({}, self._args(["swap-apply", "--remote", "scaleway", "--plan-id", "a" * 64, "--confirm"]))
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("rollback_incomplete", out.getvalue())
+
     def test_swap_disable_requires_remote_and_confirmation(self):
         from sandbox.commands import resources
         args = self._args(["swap-disable", "--remote", "fixture", "--confirm"])

@@ -196,13 +196,33 @@ class HostMemoryRepository:
             raise RepositoryError("invalid operation identity")
         current = self.load_operation()
         if current is not None and current.get("operation_id") != operation_id:
-            raise RepositoryError("operation identity conflict")
+            if self.active_operation_block() is not None:
+                raise RepositoryError("operation identity conflict")
         self._atomic(self.root / "operation.json", operation)
+
     def load_operation(self):
         try: data = json.loads((self.root / "operation.json").read_text())
         except FileNotFoundError: return None
         except (OSError, ValueError): raise RepositoryError("operation evidence is corrupt") from None
         return bounded(data)
+
+    def active_operation_block(self):
+        op = self.load_operation()
+        if not op:
+            return None
+        phase = op.get("phase")
+        outcome = op.get("outcome")
+        if phase == "terminal":
+            if outcome == "rollback_incomplete":
+                return {"operation_id": op.get("operation_id"), "reason": "rollback_incomplete"}
+            return None
+        return {"operation_id": op.get("operation_id"), "reason": "operation_in_progress"}
+
+    def reconcile_operation(self, operation_id):
+        op = self.load_operation()
+        if op is not None and op.get("operation_id") == operation_id:
+            return op
+        return None
 
 
     def record_disable_receipt(self, *, target_identity, operation_id, prior_receipt=None):

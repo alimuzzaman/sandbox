@@ -297,6 +297,37 @@ safety or release readiness.
      verified phase journaling and minimal disabled-state receipt recording (`lifecycle_state="disabled"`).
   Suite run: 141 tests in 0.33s, 0 failures, 0 errors. Local synthetic evidence only.
 
+- User Story 6 recovery & replay RED suite (T077-T082): failing assertions verified
+  for phase recovery, active operation blocks, fault-injection rollback, ledger lookup replay,
+  transport errors, and CLI normative guidance:
+  1. `tests.test_host_memory_repository`: `test_journal_recovery_phases_duplicate_and_conflict_reconciliation`
+     failed with AttributeError: 'HostMemoryRepository' object has no attribute 'active_operation_block'.
+  2. `tests.test_host_memory_provider`: `test_fault_injection_and_owned_rollback_behavior`
+     failed with unhandled OSError on simulated command failure instead of catching and executing
+     owned rollback to `rollback_complete`/`rollback_incomplete`.
+  3. `tests.test_host_memory_service`: `test_service_replay_operation_blocks_and_ambiguous_outcomes`
+     failed with AssertionError (3 != 2) on missing ledger lookup before second remote apply call.
+  4. `tests.test_host_memory_remote`: `test_remote_transport_faults_and_normative_outcomes`
+     added coverage for all normative outcomes and non-normative error handling.
+  5. `tests.test_resource_interfaces`: `test_cli_replay_guidance_and_normative_exit_classes`
+     added coverage for non-zero exit and rollback_incomplete guidance text.
+  RED run: 111 tests ran, 1 failure, 2 errors. Local synthetic evidence only.
+
+- User Story 6 recovery & replay GREEN suite (T083-T087):
+  1. `repository.py`: Implemented durable operation lookup via `load_operation()`, `active_operation_block()`
+     returning None for terminal safe states, `rollback_incomplete` when rollback fails, and
+     `operation_in_progress` during active work. Implemented `reconcile_operation(operation_id)`
+     returning existing terminal records.
+  2. `provider.py`: Implemented reverse teardown owned-only rollback upon caught exceptions during `enable()`:
+     stops/disables timer/service, swapoff, disables swap unit, removes swappiness file, and removes swap file.
+     Returns `rollback_complete` if all cleanups succeed or `rollback_incomplete` with preserved errors.
+  3. `service.py`: Implemented ledger lookup before remote mutation, checking `active_operation_block()`
+     and `reconcile_operation()`, preventing duplicate side-effects on replay of already-current or applied ops.
+  4. `server.py`: Wired operation lookup and block verification before invoking provider.enable/disable,
+     recording operation receipts upon completion.
+  5. `test_resource_interfaces.py` and `test_host_memory_remote.py`: Verified normative exit codes and status mappings.
+  GREEN run: 183 tests ran in 203s, 0 failures, 0 errors. Local synthetic evidence only.
+
 ## Fixed authenticated synthetic-provider evidence
 
 Pending T096.

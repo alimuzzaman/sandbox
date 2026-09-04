@@ -420,12 +420,43 @@ class HostProvider:
             ("systemctl", "enable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
         ]
         for cmd in commands:
-            res = self.run(cmd)
-            if getattr(res, "returncode", 0) != 0:
-                raise RuntimeError(f"command failed: {' '.join(cmd)}")
+            try:
+                res = self.run(cmd)
+                if getattr(res, "returncode", 0) != 0:
+                    raise RuntimeError(f"command failed: {' '.join(cmd)}")
+            except Exception as exc:
+                rollback_res = self.rollback(plan, failed_phase=cmd[0])
+                return {
+                    "status": rollback_res["status"],
+                    "operation_id": plan.get("operation_id", plan_id),
+                    "error": {"code": rollback_res["status"], "message": str(exc)},
+                }
         self._active_plan_id = plan_id
         return {"status": "applied",
                 "operation_id": plan.get("operation_id", plan_id)}
+
+    def rollback(self, plan, failed_phase=None):
+        rollback_errors = []
+        cleanup_cmds = [
+            ("systemctl", "disable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+            ("systemctl", "stop", str(FIXED_ARTIFACTS["monitor_service"])),
+            ("swapoff", str(SWAP)),
+            ("systemctl", "disable", "--now", str(SWAP_UNIT)),
+            ("rm", "-f", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("rm", "-f", str(SWAP)),
+        ]
+        for cmd in cleanup_cmds:
+            try:
+                res = self.run(cmd)
+                if getattr(res, "returncode", 0) != 0:
+                    rollback_errors.append(f"cleanup failed: {' '.join(cmd)}")
+            except Exception as e:
+                rollback_errors.append(str(e))
+        if rollback_errors:
+            return {"status": "rollback_incomplete",
+                    "error": {"code": "rollback_incomplete", "message": "; ".join(rollback_errors)}}
+        return {"status": "rollback_complete",
+                "error": {"code": "rollback_complete", "message": "prior state verified restored"}}
 
 
     def disable(self, plan):

@@ -109,6 +109,21 @@ class HostMemoryRemoteTest(unittest.TestCase):
         with self.assertRaises(RemoteProtocolError):
             validate_request(self._apply_request(size_gib=4))
 
+
+    def test_remote_transport_faults_and_normative_outcomes(self):
+        envelope = {"resource_schema": 1, "host_memory_schema": 1, "transport": "control",
+                    "service": {"ownership_marker": MARKER, "runtime_revision": REVISION}}
+        normative = ("applied", "already_current", "refused", "partial", "failed", "rollback_complete", "rollback_incomplete")
+        for st in normative:
+            res = validate_response({**envelope, "result": {"status": st, "operation_id": "c" * 64}},
+                                    marker=MARKER, revision=REVISION, action="host_memory_apply")
+            self.assertEqual(res["status"], st)
+
+        # Non-normative or malformed results
+        for bad in ({"status": "ok"}, {"status": "success"}, {"status": "in_progress"}, {}):
+            with self.subTest(bad=bad), self.assertRaises(RemoteProtocolError):
+                validate_response({**envelope, "result": bad}, marker=MARKER, revision=REVISION, action="host_memory_apply")
+
     def test_apply_response_requires_normative_typed_result(self):
         envelope={"resource_schema":1,"host_memory_schema":1,"transport":"control",
                   "service":{"ownership_marker":MARKER,"runtime_revision":REVISION}}

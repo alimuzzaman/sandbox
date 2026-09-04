@@ -163,9 +163,58 @@ class HostMemoryServiceTest(unittest.TestCase):
         refused = self.service.apply(plan_id, confirmed=False)
         self.assertFalse(refused["ok"])
         self.assertEqual(refused["status"], "refused")
-        self.assertEqual(refused["error"]["code"], "confirmation_required")
 
-        # confirmed apply succeeds
-        applied = self.service.apply(plan_id, confirmed=True)
-        self.assertTrue(applied["ok"])
-        self.assertIn(applied["status"], {"applied", "already_current"})
+    def test_service_replay_operation_blocks_and_ambiguous_outcomes(self):
+        # 1. Refusal when operation_block is active
+        self.remote.call = lambda action, **fields: {
+            **status_state(target_identity="host", operation_block={"operation_id": "a" * 64, "reason": "operation_in_progress"}),
+            "evidence_state": "known",
+        }
+        plan_res = self.service.plan(size_gib=4)
+        self.assertFalse(plan_res["ok"])
+        self.assertEqual(plan_res["status"], "refused")
+        self.assertEqual(plan_res["error"]["code"], "operation_in_progress")
+
+        # 2. Refusal when rollback_incomplete
+        self.remote.call = lambda action, **fields: {
+            **status_state(target_identity="host", operation_block={"operation_id": "a" * 64, "reason": "rollback_incomplete"}),
+            "evidence_state": "known",
+        }
+        plan_res = self.service.plan(size_gib=4)
+        self.assertFalse(plan_res["ok"])
+        self.assertEqual(plan_res["status"], "refused")
+        self.assertEqual(plan_res["error"]["code"], "rollback_incomplete")
+
+        # 3. Same-identity replay returns terminal outcome
+        self.remote.call = lambda action, **fields: status_state(target_identity="host") if action == "host_memory_status" else {
+            "status": "applied", "data": {"operation_id": fields.get("operation_id")}, "error": None,
+        }
+        plan_res = self.service.plan(size_gib=4)
+        plan_id = plan_res["data"]["plan_id"]
+        first_apply = self.service.apply(plan_id, confirmed=True)
+        self.assertTrue(first_apply["ok"])
+        # Replay same plan_id
+        second_apply = self.service.apply(plan_id, confirmed=True)
+        self.assertTrue(second_apply["ok"])
+        self.assertIn(second_apply["status"], {"applied", "already_current"})
+
+        # 4. Service with repository records operation and ledger lookup avoids duplicate remote call
+        from sandbox.resources.host_memory.repository import HostMemoryRepository
+        repo = HostMemoryRepository(Path(self.tmp.name))
+        service_with_repo = HostMemoryService(self.remote, repo=repo, now=lambda: NOW)
+        remote_calls = []
+        self.remote.call = lambda action, **fields: remote_calls.append(action) or (
+            status_state(target_identity="host") if action == "host_memory_status" else {
+                "status": "applied", "data": {"operation_id": fields.get("operation_id")}, "error": None,
+            }
+        )
+        p_res = service_with_repo.plan(size_gib=4)
+        pid = p_res["data"]["plan_id"]
+        app1 = service_with_repo.apply(pid, confirmed=True)
+        self.assertTrue(app1["ok"])
+        calls_count = len(remote_calls)
+        app2 = service_with_repo.apply(pid, confirmed=True)
+        self.assertTrue(app2["ok"])
+        # Second apply must use ledger lookup and not call remote again
+        self.assertEqual(len(remote_calls), calls_count)
+

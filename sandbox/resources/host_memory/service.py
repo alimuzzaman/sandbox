@@ -206,6 +206,16 @@ class HostMemoryService:
             "target_identity": canonical_plan["target_identity"],
         })
 
+        if self._repo is not None:
+            block = self._repo.active_operation_block()
+            if block is not None and block.get("operation_id") != op_id:
+                reason = block.get("reason", "operation_in_progress")
+                return failure("swap-apply", PolicyRefusal(reason, f"blocked by operation: {reason}"), self.target)
+            existing = self._repo.reconcile_operation(op_id)
+            if existing is not None and existing.get("outcome") in {"applied", "already_current", "rollback_complete"}:
+                outcome = existing["outcome"]
+                return envelope("swap-apply", outcome, target=self.target, data={"operation_id": op_id, "status": outcome}, error=None)
+
         try:
             result = self._remote.call(
                 "host_memory_apply",
@@ -219,6 +229,26 @@ class HostMemoryService:
 
         outcome = result.get("status", "applied")
         err = result.get("error")
+
+        if self._repo is not None:
+            op_record = {
+                "schema_version": 1,
+                "operation_id": op_id,
+                "plan_id": plan["plan_id"],
+                "phase": "terminal",
+                "phase_evidence": [{"outcome": outcome}],
+                "prior_state_digest": plan.get("observation_digest", "0" * 64),
+                "last_observation_digest": plan.get("observation_digest", "0" * 64),
+                "mutation_started": True,
+                "rollback": None,
+                "outcome": outcome,
+                "unrelated_mutation_blocked": outcome == "rollback_incomplete",
+            }
+            try:
+                self._repo.save_operation(op_record)
+            except Exception:
+                pass
+
         return envelope("swap-apply", outcome, target=self.target, data=result, error=err)
 
     def history(self, *, since=None, until=None, limit=288, budget_seconds=15):

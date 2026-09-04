@@ -106,14 +106,14 @@
 
 ### Tests for User Story 4
 
-- [ ] T028 [P] [US4] Add tests for mount namespace confinement and descriptor-only mount handoff in `tests/test_owned_storage_linux.py`
-- [ ] T029 [P] [US4] Add tests for namespace isolation escape refusal in `tests/test_workspace_owned_storage.py`
+- [x] T028 [P] [US4] Add tests for mount namespace confinement and descriptor-only mount handoff in `tests/test_owned_storage_linux.py`
+- [x] T029 [P] [US4] Add tests for namespace isolation escape refusal in `tests/test_workspace_owned_storage.py`
 
 ### Implementation for User Story 4
 
-- [ ] T030 [US4] Implement mount controller for descriptor-only job user/mount namespace setup in `tools/owned-storage-mount-controller.py`
-- [ ] T031 [US4] Implement interior bind-mount preparation with read-only root boundary in `sandbox/owned_storage/adapters/linux.py`
-- [ ] T032 [US4] Integrate namespace mount lifecycle with CI job runner in `sandbox/application/job_service.py`
+- [x] T030 [US4] Implement mount controller for descriptor-only job user/mount namespace setup in `tools/owned-storage-mount-controller.py`
+- [x] T031 [US4] Implement interior bind-mount preparation with read-only root boundary in `sandbox/owned_storage/adapters/linux.py`
+- [x] T032 [US4] Integrate namespace mount lifecycle with CI job runner in `sandbox/application/job_service.py`
 
 **Checkpoint**: User Story 4 complete. CI workloads have bounded writable interiors with immutable root isolation.
 

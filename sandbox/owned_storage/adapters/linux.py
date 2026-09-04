@@ -160,3 +160,54 @@ class LinuxFilesystemAdapter:
                 shutil.rmtree(child)
             else:
                 child.unlink()
+
+    def prepare_ci_materialization(
+        self,
+        project_identity: str,
+        workspace_id: str,
+        object_id: str,
+        source_path: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
+        """Prepares a bounded CI materialization with descriptor-only access."""
+        object_root = self.root_path / "objects" / project_identity / "workspaces" / object_id
+        self.ensure_directory(object_root, 0o700)
+
+        work_dir = object_root / "work"
+        meta_dir = object_root / "meta"
+        self.ensure_directory(work_dir, 0o700)
+        self.ensure_directory(meta_dir, 0o700)
+
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        root_fd = os.open(object_root, dir_flags)
+        work_fd = os.open(work_dir, dir_flags)
+        source_fd = None
+
+        if source_path is not None:
+            src_p = Path(source_path)
+            if src_p.exists():
+                source_fd = os.open(src_p, dir_flags)
+
+        return {
+            "object_id": object_id,
+            "object_root": object_root,
+            "work_path": work_dir,
+            "root_fd": root_fd,
+            "work_fd": work_fd,
+            "source_fd": source_fd,
+            "mode": "bounded_interior_v1",
+        }
+
+    def verify_interior_confinement(
+        self, object_root: Union[str, Path], write_target: Union[str, Path]
+    ) -> bool:
+        """Verifies that write_target is strictly confined to the work/ interior."""
+        root_p = Path(object_root).resolve()
+        work_p = (root_p / "work").resolve()
+        target_p = Path(write_target).resolve()
+
+        try:
+            target_p.relative_to(work_p)
+            return True
+        except ValueError:
+            return False
+

@@ -114,7 +114,53 @@ class TestJobOwnedStorage(unittest.TestCase):
         self.assertEqual(after["exit_code"], original_exit_code)
         self.assertEqual(after.get("integrity_sha256"), original_digest)
 
+    def test_job_service_mount_controller_lifecycle(self):
+        from unittest.mock import MagicMock
+        from sandbox.application.job_service import JobService
+        from sandbox.jobs.storage import JobStorage
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        job_storage_dir = self.root / "jobs_storage"
+        job_storage_dir.mkdir(parents=True, exist_ok=True)
+        job_storage = JobStorage(job_storage_dir)
+
+        mount_ctrl = MagicMock()
+        mount_ctrl.mount_materialization.return_value = {
+            "ok": True,
+            "mount_identity_digest": "sha256:" + "a" * 64,
+        }
+        mount_ctrl.unmount_materialization.return_value = {"ok": True}
+
+        ws_reg = MagicMock()
+        ws_reg.terminal_cleanup_context.return_value = None
+        ws_mock = MagicMock()
+        ws_mock.workspace_id = "ws_" + "a" * 32
+        ws_mock.metadata = {"work_fd": 123, "ci_cleanup_authority": {"digest": "sha256:" + "d" * 64}}
+        ws_reg.ensure_submission.return_value = ws_mock
+        ws_reg.submission_guard.return_value = MagicMock()
+
+        svc = JobService(self.job_repo, job_storage, None, launcher=lambda _desc: None, workspace_registry=ws_reg, mount_controller=mount_ctrl)
+
+
+        submission = JobSubmission(
+            "ci", str(self.root / "proj"), "proj_1", "local", "ci_ws",
+            ("/bin/true",), 30, SourceIdentity("src_1"),
+            request_id="req_mount_test_1",
+            workspace_mode="isolated",
+            cleanup_policy="ephemeral",
+        )
+        res = svc.submit(submission)
+        job_row = self.job_repo.get(res["job_id"])
+        self.assertEqual(job_row["workspace_authority_digest"], "sha256:" + "a" * 64)
+
+
+        # Finalize terminal workspace
+        svc._finalize_terminal_workspace(res["job_id"])
+        mount_ctrl.unmount_materialization.assert_called_once_with("sha256:" + "a" * 64)
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -91,6 +91,85 @@ class TestLinuxFilesystemAdapter(unittest.TestCase):
         # The tree root itself remains or is cleaned up as required
         self.assertEqual(list(tree.iterdir()), [])
 
+    def test_prepare_ci_materialization_and_confinement(self):
+        proj_id = "proj_test_ci"
+        ws_id = "ws_test_ci"
+        obj_id = "obj_test_ci"
+
+        source_dir = self.root / "sources" / "src_1"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "read_only_seed.txt").write_text("immutable seed")
+
+        bundle = self.adapter.prepare_ci_materialization(
+            project_identity=proj_id,
+            workspace_id=ws_id,
+            object_id=obj_id,
+            source_path=source_dir,
+        )
+
+        self.assertIn("root_fd", bundle)
+        self.assertIn("work_fd", bundle)
+        self.assertIn("source_fd", bundle)
+        self.assertEqual(bundle["object_id"], obj_id)
+
+        # File descriptors must be valid open descriptors
+        self.assertIsInstance(os.fstat(bundle["root_fd"]).st_ino, int)
+        self.assertIsInstance(os.fstat(bundle["work_fd"]).st_ino, int)
+        self.assertIsInstance(os.fstat(bundle["source_fd"]).st_ino, int)
+
+        # Writable interior verification
+        obj_root = bundle["object_root"]
+        work_path = bundle["work_path"]
+        self.assertTrue(self.adapter.verify_interior_confinement(obj_root, work_path / "new_file.txt"))
+
+        # Writing outside work/ must be rejected
+        self.assertFalse(self.adapter.verify_interior_confinement(obj_root, obj_root / "escaped.txt"))
+        self.assertFalse(self.adapter.verify_interior_confinement(obj_root, obj_root / "meta" / "evil.txt"))
+        self.assertFalse(self.adapter.verify_interior_confinement(obj_root, self.root / "other_project" / "file.txt"))
+
+        # Clean up descriptors
+        os.close(bundle["root_fd"])
+        os.close(bundle["work_fd"])
+        os.close(bundle["source_fd"])
+
+    def test_mount_controller_descriptor_handoff(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import importlib
+        mc = importlib.import_module("tools.owned-storage-mount-controller")
+
+        controller = mc.MountController(runtime_root=self.root / "run")
+
+        bundle = self.adapter.prepare_ci_materialization(
+            project_identity="proj_mc",
+            workspace_id="ws_mc",
+            object_id="obj_mc",
+        )
+
+        res = controller.mount_materialization(
+            work_fd=bundle["work_fd"],
+            source_fd=bundle["source_fd"],
+        )
+
+        self.assertTrue(res["ok"])
+        self.assertIn("mount_identity_digest", res)
+        self.assertTrue(res["mount_identity_digest"].startswith("sha256:"))
+        self.assertEqual(res["work_access"], "read-write")
+        self.assertEqual(res["root_access"], "read-only")
+
+        # Invalid descriptor rejection
+        with self.assertRaises(mc.MountControllerError):
+            controller.mount_materialization(work_fd=99999)
+
+        # Release mount
+        unm = controller.unmount_materialization(res["mount_identity_digest"])
+        self.assertTrue(unm["ok"])
+
+        os.close(bundle["root_fd"])
+        os.close(bundle["work_fd"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

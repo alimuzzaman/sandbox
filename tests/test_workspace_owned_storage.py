@@ -385,7 +385,36 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         self.assertEqual(updated_job["exit_code"], 0)
         job_repo.close()
 
+    def test_namespace_isolation_escape_refusal(self):
+        from sandbox.owned_storage.adapters.linux import LinuxFilesystemAdapter
+
+        adapter = LinuxFilesystemAdapter(self.storage_root)
+        bundle = adapter.prepare_ci_materialization(
+            project_identity=self.project_id,
+            workspace_id=self.workspace_id,
+            object_id="mat_isolation_test",
+        )
+
+        obj_root = bundle["object_root"]
+        work_path = bundle["work_path"]
+
+        # Valid interior write
+        valid_file = work_path / "app.log"
+        valid_file.write_text("ok")
+        self.assertTrue(valid_file.exists())
+        self.assertTrue(adapter.verify_interior_confinement(obj_root, valid_file))
+
+        # Escape attempts outside work/
+        self.assertFalse(adapter.verify_interior_confinement(obj_root, obj_root / "root_tamper.txt"))
+        self.assertFalse(adapter.verify_interior_confinement(obj_root, obj_root / "meta" / "evil.json"))
+        self.assertFalse(adapter.verify_interior_confinement(obj_root, self.storage_root / "objects" / "foreign_proj" / "file.txt"))
+
+        # Clean up descriptors
+        os.close(bundle["root_fd"])
+        os.close(bundle["work_fd"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

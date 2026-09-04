@@ -447,14 +447,26 @@ class HistoryWindow:
     def __post_init__(self):
         if len(self.samples) > 1000:
             raise ValueError("history sample limit exceeded")
-        for row in self.samples: AggregateMemorySample.from_dict(row)
+        for row in self.samples:
+            AggregateMemorySample.from_dict(row)
+        for i in range(len(self.samples) - 1):
+            t1 = str(self.samples[i].get("sampled_at", ""))
+            t2 = str(self.samples[i + 1].get("sampled_at", ""))
+            if t1 < t2:
+                raise ValueError("unordered history samples")
         required_counts = {"returned", "valid", "partial", "failed", "malformed", "missing"}
         if set(self.counts) != required_counts or any(_non_negative(value, name) is None for name, value in self.counts.items()):
             raise ValueError("invalid history counts")
         if self.counts["returned"] != len(self.samples):
             raise ValueError("history count mismatch")
 
-    def to_dict(self): return bounded(asdict(self))
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]):
+        fields = ("requested_range", "observed_range", "samples", "counts", "freshness", "complete", "truncated")
+        _strict_mapping(value, fields=fields, label="history window")
+        return cls(**dict(value))
+
+    def to_dict(self): return bounded(asdict(self), 1024 * 1024)
 
 
 @dataclass(frozen=True)

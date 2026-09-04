@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .models import HostMemoryStatusProjection, RemoteSwapState
+from .models import HostMemoryStatusProjection, RemoteSwapState, parse_utc
 from .repository import RepositoryError
 
 
@@ -198,3 +198,29 @@ class HostMemoryService:
         outcome = result.get("status", "applied")
         err = result.get("error")
         return envelope("swap-apply", outcome, target=self.target, data=result, error=err)
+
+    def history(self, *, since=None, until=None, limit=288, budget_seconds=15):
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            err = {"code": "invalid_limit", "message": "limit must be between 1 and 1000", "retryable": False}
+            return envelope("swap-history", "refused", target=self.target, data={}, error=err)
+        try:
+            start = parse_utc(since) if since is not None else None
+            end = parse_utc(until) if until is not None else None
+        except (TypeError, ValueError):
+            err = {"code": "invalid_range", "message": "timestamps must be valid UTC", "retryable": False}
+            return envelope("swap-history", "refused", target=self.target, data={}, error=err)
+        if start is not None and end is not None and start > end:
+            err = {"code": "invalid_range", "message": "since cannot be after until", "retryable": False}
+            return envelope("swap-history", "refused", target=self.target, data={}, error=err)
+        try:
+            response = self._remote.call(
+                "host_memory_history",
+                since=since,
+                until=until,
+                limit=limit,
+                budget_seconds=budget_seconds,
+            )
+            status = "complete" if response.get("complete", True) else "partial"
+            return envelope("swap-history", status, target=self.target, data=response, error=None)
+        except Exception as exc:
+            return failure("swap-history", exc, target=self.target, status="failed")

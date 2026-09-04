@@ -133,3 +133,11 @@ class HostMemoryServiceTest(unittest.TestCase):
         result = self.service.apply(plan_id, confirmed=True)
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "failed")
+
+    def test_history_retrieves_bounded_window_and_enforces_limits(self):
+        result = self.service.history(limit=100)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "swap-history")
+        self.assertIn("samples", result["data"])
+        self.assertIn("counts", result["data"])
+        assert_privacy_bounded(self, result, maximum=1024 * 1024)

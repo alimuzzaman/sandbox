@@ -427,10 +427,47 @@ class HostProvider:
         return {"status": "applied",
                 "operation_id": plan.get("operation_id", plan_id)}
 
+    def collect_sample(self, *, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + 5.0
+        now_ts = time.monotonic()
+        if now_ts >= deadline:
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="partial",
+                memory={"total_bytes": 0, "available_bytes": 0},
+                swap={"total_bytes": 0, "free_bytes": 0, "used_bytes": 0},
+                errors=("collector_timeout",),
+            ).to_dict()
+        try:
+            state = self.observe(deadline=deadline)
+            memory = state.get("memory") or {}
+            areas = state.get("swap_areas") or []
+            complete = all(isinstance(memory.get(k), int) for k in ("total_bytes", "available_bytes"))
+            counters = {
+                key: value for key, value in memory.items()
+                if key in {"total_bytes", "available_bytes", "free_bytes", "buffers_bytes", "cached_bytes"}
+                and isinstance(value, int)
+            }
+            total_swap = sum(a.get("total_bytes", 0) for a in areas)
+            used_swap = sum(a.get("used_bytes", 0) for a in areas)
+            free_swap = total_swap - used_swap
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="valid" if complete else "partial",
+                memory=counters,
+                swap={"total_bytes": total_swap, "free_bytes": free_swap, "used_bytes": used_swap},
+                errors=() if complete else ("memory_evidence_partial",),
+            ).to_dict()
+        except Exception as exc:
+            code = getattr(exc, "code", "collector_timeout" if "timeout" in str(exc).lower() else "collector_failed")
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="failed",
+                memory={"total_bytes": 0, "available_bytes": 0},
+                swap={"total_bytes": 0, "free_bytes": 0, "used_bytes": 0},
+                errors=(code if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(code)) else "collector_failed",),
+            ).to_dict()
+
     def sample(self):
-        state=self.observe(); memory=state.get("memory") or {}; areas=state.get("swap_areas") or []
-        complete=all(isinstance(memory.get(k),int) for k in ("total_bytes","available_bytes"))
-        counters={key:value for key,value in memory.items() if key in {
-            "total_bytes","available_bytes","free_bytes","buffers_bytes","cached_bytes"}
-            and isinstance(value,int)}
-        return AggregateMemorySample(sampled_at=self.now().isoformat().replace("+00:00","Z"),status="valid" if complete else "partial",memory=counters,swap={"total_bytes":sum(a.get("total_bytes",0) for a in areas),"free_bytes":sum(a.get("total_bytes",0)-a.get("used_bytes",0) for a in areas),"used_bytes":sum(a.get("used_bytes",0) for a in areas)},errors=() if complete else ("memory_evidence_partial",)).to_dict()
+        return self.collect_sample()

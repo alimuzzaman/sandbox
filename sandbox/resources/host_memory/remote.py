@@ -7,7 +7,7 @@ import math
 import numbers
 from typing import Callable, Mapping
 
-from .models import HEX24, HEX64, RemoteSwapState, bounded, parse_utc
+from .models import HEX24, HEX64, HistoryWindow, RemoteSwapState, bounded, parse_utc
 
 ACTIONS = frozenset({"host_memory_status", "host_memory_history", "host_memory_apply"})
 
@@ -86,6 +86,8 @@ def validate_response(response, *, marker, revision, action):
             if set(result) & RAW_RESULT_KEYS:
                 raise RemoteProtocolError("response_invalid","apply result carries raw evidence")
             return bounded(result)
+        if action == "host_memory_history":
+            return HistoryWindow.from_dict(result).to_dict()
         return bounded(result)
     except (TypeError, ValueError):
         raise RemoteProtocolError("response_invalid", "remote evidence is invalid or oversized") from None

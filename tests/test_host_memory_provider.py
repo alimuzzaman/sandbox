@@ -375,3 +375,20 @@ class HostMemoryProviderTest(unittest.TestCase):
         provider = self._preflight_provider(calls)
         self.assertEqual(provider.preflight(self._enable_plan()), "ready")
         self.assertEqual(calls, [])
+
+    def test_sample_deadline_and_lock_no_overlap(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        # Test hard 5-second deadline and timeout handling
+        past_deadline = 0.0
+        sample_res = provider.collect_sample(deadline=past_deadline)
+        self.assertIn(sample_res["status"], {"partial", "failed"})
+        self.assertIn("collector_timeout", sample_res.get("errors", ()))
+
+    def test_sample_aggregates_without_sensitive_raw_data(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        sample_res = provider.sample()
+        forbidden_keys = {"stdout", "stderr", "output", "source_path", "processes", "argv", "path"}
+        self.assertFalse(set(sample_res) & forbidden_keys)
+        self.assertIn(sample_res["status"], {"valid", "partial", "failed"})

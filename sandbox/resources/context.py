@@ -146,3 +146,9 @@ def host_memory_plan(remote: str, *, size_gib: int = 4, budget_seconds: float = 
 def host_memory_apply(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
     """Execute confirmed host-memory apply with normative outcome envelope."""
     return _build_host_memory_service(remote).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)
+
+def host_memory_history(remote: str, *, since=None, until=None, limit: int = 288, budget_seconds: float = 15):
+    """Retrieve bounded aggregate history window for the remote host."""
+    return _build_host_memory_service(remote).history(
+        since=since, until=until, limit=limit, budget_seconds=budget_seconds,
+    )

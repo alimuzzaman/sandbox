@@ -148,22 +148,22 @@
 
 ### Tests for User Story 4 - RED first
 
-- [ ] T054 [P] [US4] Add failing sample, freshness, warning, serialization, ordering, and maximum-count tests in `tests/test_host_memory_models.py`
-- [ ] T055 [P] [US4] Add failing monitor collection tests for host/effective memory, swap totals, bounded warning transitions, unsupported evidence, and aggregate-only capture in `tests/test_host_memory_provider.py`
-- [ ] T056 [P] [US4] Add failing provider/service tests for the hard five-second sample deadline, timed-out collector termination, durable partial/failed samples, lock/timer no-overlap behavior, and recovery by the next scheduled run in `tests/test_host_memory_provider.py` and `tests/test_host_memory_service.py`
-- [ ] T057 [P] [US4] Add failing repository tests for atomic append, deterministic rotation, corrupt-tail handling, retention bounds, and no sensitive fields in `tests/test_host_memory_repository.py`
-- [ ] T058 [P] [US4] Add failing service, `host_memory_history`, transport, and `resources swap-history` tests for range, count, 1,000-sample, 1 MiB, normative outcome, and reason-code limits in `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`
-- [ ] T059 [US4] Run `tests/test_host_memory_models.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the User Story 4 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T054 [P] [US4] Add failing sample, freshness, warning, serialization, ordering, and maximum-count tests in `tests/test_host_memory_models.py`
+- [X] T055 [P] [US4] Add failing monitor collection tests for host/effective memory, swap totals, bounded warning transitions, unsupported evidence, and aggregate-only capture in `tests/test_host_memory_provider.py`
+- [X] T056 [P] [US4] Add failing provider/service tests for the hard five-second sample deadline, timed-out collector termination, durable partial/failed samples, lock/timer no-overlap behavior, and recovery by the next scheduled run in `tests/test_host_memory_provider.py` and `tests/test_host_memory_service.py`
+- [X] T057 [P] [US4] Add failing repository tests for atomic append, deterministic rotation, corrupt-tail handling, retention bounds, and no sensitive fields in `tests/test_host_memory_repository.py`
+- [X] T058 [P] [US4] Add failing service, `host_memory_history`, transport, and `resources swap-history` tests for range, count, 1,000-sample, 1 MiB, normative outcome, and reason-code limits in `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`
+- [X] T059 [US4] Run `tests/test_host_memory_models.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the User Story 4 assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 ### Implementation for User Story 4 - GREEN after T059
 
-- [ ] T060 [US4] Implement bounded sample, history, freshness, and warning serialization in `sandbox/resources/host_memory/models.py`
-- [ ] T061 [US4] Implement aggregate-only monitor sampling and warning derivation inputs in `sandbox/resources/host_memory/provider.py`
-- [ ] T062 [US4] Implement the hard five-second collector deadline, timed-out child termination, durable partial/failed result, fixed non-overlapping monitor lock/timer behavior, and next-run recovery in `sandbox/resources/host_memory/provider.py` and `sandbox/resources/host_memory/service.py`
-- [ ] T063 [US4] Implement atomic bounded sample append, rotation, ordering, and corrupt-data isolation in `sandbox/resources/host_memory/repository.py`
-- [ ] T064 [US4] Implement bounded history orchestration and register the strict authorized `host_memory_history` action in `sandbox/resources/host_memory/service.py` and `mcp/wp-server/server.py`
-- [ ] T065 [US4] Add typed history transport and `resources swap-history` text/JSON presentation with enforced limits in `sandbox/core/_remote.py` and `sandbox/commands/resources.py`
-- [ ] T066 [US4] Run the User Story 4 tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T060 [US4] Implement bounded sample, history, freshness, and warning serialization in `sandbox/resources/host_memory/models.py`
+- [X] T061 [US4] Implement aggregate-only monitor sampling and warning derivation inputs in `sandbox/resources/host_memory/provider.py`
+- [X] T062 [US4] Implement the hard five-second collector deadline, timed-out child termination, durable partial/failed result, fixed non-overlapping monitor lock/timer behavior, and next-run recovery in `sandbox/resources/host_memory/provider.py` and `sandbox/resources/host_memory/service.py`
+- [X] T063 [US4] Implement atomic bounded sample append, rotation, ordering, and corrupt-data isolation in `sandbox/resources/host_memory/repository.py`
+- [X] T064 [US4] Implement bounded history orchestration and register the strict authorized `host_memory_history` action in `sandbox/resources/host_memory/service.py` and `mcp/wp-server/server.py`
+- [X] T065 [US4] Add typed history transport and `resources swap-history` text/JSON presentation with enforced limits in `sandbox/core/_remote.py` and `sandbox/commands/resources.py`
+- [X] T066 [US4] Run the User Story 4 tests in `tests/test_host_memory_models.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Operators can inspect privacy-bounded aggregate history, and monitor overruns cannot overlap or fabricate samples.
 

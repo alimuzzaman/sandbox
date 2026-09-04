@@ -201,6 +201,60 @@ safety or release readiness.
      missing remote, missing plan ID, and invalid options. Local synthetic
      evidence only.
 
+- User Story 4 aggregate history RED (T059): failing tests added for bounded
+  history samples, 5-second sample collector deadline, lock non-overlap, service
+  history orchestration, remote history response schema validation, and CLI
+  swap-history dispatch:
+  1. `tests.test_host_memory_models`: `test_history_window_enforces_ordering_and_bounds`
+     failed with `AssertionError: ValueError not raised` when testing chronological
+     descending sample ordering enforcement and sample limit checks.
+  2. `tests.test_host_memory_provider`: `test_sample_deadline_and_lock_no_overlap`
+     failed with `AttributeError: 'HostProvider' object has no attribute 'collect_sample'`
+     before lock/deadline collector implementation.
+  3. `tests.test_host_memory_service`: `test_history_retrieves_bounded_window_and_enforces_limits`
+     failed with `AttributeError: 'HostMemoryService' object has no attribute 'history'`
+     before service history orchestration.
+  4. `tests.test_host_memory_remote`: `test_remote_history_response_validation_enforces_history_window_schema`
+     failed with `AssertionError: RemoteProtocolError not raised` when verifying
+     untyped/malformed history payloads.
+  5. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_history_cli_registered_and_parses_arguments` failed with
+     `argparse.ArgumentError: argument action: invalid choice: 'swap-history'`
+     before CLI registration.
+  Local synthetic evidence only.
+
+
+- User Story 4 aggregate history GREEN (T066):
+  1. `HistoryWindow` (T060) in `sandbox/resources/host_memory/models.py` implements
+     bounded sample and warning serialization, chronological descending sample ordering
+     enforcement, max 1,000 samples, and 1 MiB bounding with strict rejection of
+     sensitive raw paths/filesystems.
+  2. `HostProvider.collect_sample` (T061, T062) in `sandbox/resources/host_memory/provider.py`
+     implements aggregate-only monitor sampling with a hard 5-second deadline, durable
+     `partial` status with `collector_timeout` error on budget overrun, non-overlapping
+     execution locks, and automatic next-run recovery.
+  3. `HostMemoryRepository.record_sample` and `history_window` (T063) in
+     `sandbox/resources/host_memory/repository.py` provide atomic append, deterministic
+     retention and rotation (max 10,000 samples / 1 MiB), corrupt tail isolation, and
+     range/limit filtering.
+  4. `HostMemoryService.history` (T064) in `sandbox/resources/host_memory/service.py`
+     orchestrates range validation (`invalid_range`), limit bounding (`invalid_limit`),
+     remote control invocation, and normative outcome envelopes (`complete`, `partial`,
+     `refused`, `failed`). `mcp/wp-server/server.py` registers `host_memory_history`
+     alongside status and apply under `_resource_contract` and dispatches via repository.
+  5. `sandbox/core/_remote.py` and `sandbox/commands/resources.py` (T065) provide typed
+     history transport and `resources swap-history` CLI wiring with `--since`, `--until`,
+     `--limit`, `--budget`, and text/JSON envelope formatting. Rejection of invalid modes
+     and unconfirmed/conflicting options is verified.
+  6. Test verification (T066): 136 tests ran across all 8 host-memory suites
+     (`tests.test_host_memory_models`, `tests.test_host_memory_policy`,
+     `tests.test_host_memory_repository`, `tests.test_host_memory_provider`,
+     `tests.test_host_memory_service`, `tests.test_host_memory_remote`,
+     `tests.test_host_memory_interfaces`, `tests.test_resource_interfaces`, and
+     `tests.test_resource_remote.TestHostMemoryRemoteTransport`) and all passed in
+     0.440s. CLI invocations verified for refusal on missing remote, invalid options,
+     and invalid limits. Local synthetic evidence only.
+
 ## Fixed authenticated synthetic-provider evidence
 
 Pending T096.

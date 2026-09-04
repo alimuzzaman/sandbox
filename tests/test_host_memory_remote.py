@@ -120,3 +120,46 @@ class HostMemoryRemoteTest(unittest.TestCase):
             with self.subTest(result=result), self.assertRaises(RemoteProtocolError):
                 validate_response({**envelope,"result":result},marker=MARKER,
                                   revision=REVISION,action="host_memory_apply")
+
+    def test_remote_history_request_and_response_validation(self):
+        req = validate_request({
+            "action": "host_memory_history",
+            "remote_name": "scaleway",
+            "since": "2026-08-30T00:00:00Z",
+            "until": "2026-08-30T12:00:00Z",
+            "limit": 100,
+            "budget_seconds": 15,
+        })
+        self.assertEqual(req["action"], "host_memory_history")
+        self.assertEqual(req["limit"], 100)
+
+        # Invalid limits
+        for bad_limit in (0, 1001, -1, "100", True):
+            with self.assertRaises(RemoteProtocolError):
+                validate_request({
+                    "action": "host_memory_history",
+                    "remote_name": "scaleway",
+                    "limit": bad_limit,
+                    "budget_seconds": 15,
+                })
+
+        # Inverted range
+        with self.assertRaises(RemoteProtocolError):
+            validate_request({
+                "action": "host_memory_history",
+                "remote_name": "scaleway",
+                "since": "2026-08-30T12:00:00Z",
+                "until": "2026-08-30T00:00:00Z",
+                "budget_seconds": 15,
+            })
+
+    def test_remote_history_response_validation_enforces_history_window_schema(self):
+        envelope = {
+            "resource_schema": 1,
+            "host_memory_schema": 1,
+            "transport": "control",
+            "service": {"ownership_marker": MARKER, "runtime_revision": REVISION},
+            "result": {"requested_range": {}, "samples": "not_a_list"},
+        }
+        with self.assertRaises(RemoteProtocolError):
+            validate_response(envelope, marker=MARKER, revision=REVISION, action="host_memory_history")

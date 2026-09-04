@@ -990,8 +990,13 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertEqual(self._args(["swap-status","--remote","fixture"]).action,"swap-status")
         self.assertEqual(self._args(["swap-plan","--remote","fixture"]).action,"swap-plan")
         self.assertEqual(self._args(["swap-apply","--remote","fixture"]).action,"swap-apply")
-        for action in ("swap-history",):
-            with self.assertRaises(SystemExit): self._args([action,"--remote","fixture"])
+        self.assertEqual(self._args(["swap-history","--remote","fixture"]).action,"swap-history")
+
+    def test_swap_history_cli_registered_and_parses_arguments(self):
+        args = self._args(["swap-history", "--remote", "fixture", "--limit", "100", "--since", "2026-08-30T00:00:00Z"])
+        self.assertEqual(args.action, "swap-history")
+        self.assertEqual(args.limit, 100)
+        self.assertEqual(args.since, "2026-08-30T00:00:00Z")
 
     def test_remote_is_required_before_service_construction(self):
         from sandbox.commands.resources import _host_memory_cli

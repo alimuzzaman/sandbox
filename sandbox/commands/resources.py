@@ -328,7 +328,7 @@ def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
     parser.add_argument(
         "action", choices=("status", "plan", "cleanup", "monitor", "schedule",
-                           "swap-status", "swap-plan", "swap-apply")
+                           "swap-status", "swap-plan", "swap-apply", "swap-history")
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
@@ -391,6 +391,22 @@ def configure_parser(parser) -> None:
     parser.add_argument(
         "--node-store-family", default=None,
         help="exact canonical Compose family for named node-store plan/apply",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="swap-history only: ISO-8601 UTC start timestamp",
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="swap-history only: ISO-8601 UTC end timestamp",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="swap-history only: maximum number of samples (1-1000, default 288)",
     )
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument(
@@ -1186,6 +1202,63 @@ def cmd_swap_plan(args) -> dict:
 def cmd_swap_apply(args) -> dict:
     return _swap_apply_cli(args)
 
+def _swap_history_cli(args) -> dict:
+    remote = getattr(args, "remote", None)
+    action = "swap-history"
+    target = {"kind": "remote", "name": str(remote or "unknown")}
+    if not remote:
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "remote_required",
+                      "message": "--remote is required for host-memory operations",
+                      "retryable": False},
+        }
+    if any(getattr(args, name, None) for name in
+           ("scope", "tier", "node_store_family", "detach", "request_id", "size_gib", "confirm", "plan_id")):
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "invalid_mode",
+                      "message": "option is not valid for this host-memory action",
+                      "retryable": False},
+        }
+    limit = getattr(args, "limit", None)
+    if limit is None:
+        limit = 288
+    if not isinstance(limit, int) or limit < 1 or limit > 1000:
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "invalid_limit",
+                      "message": "--limit must be between 1 and 1000",
+                      "retryable": False},
+        }
+    budget = 15.0 if getattr(args, "budget", None) is None else float(args.budget)
+    try:
+        from sandbox.resources.context import host_memory_history
+        return host_memory_history(
+            remote,
+            since=getattr(args, "since", None),
+            until=getattr(args, "until", None),
+            limit=limit,
+            budget_seconds=budget,
+        )
+    except Exception as exc:
+        code = getattr(exc, "code", None) or str(exc)
+        if code not in {"unknown_remote", "remote_runtime_revision_mismatch",
+                        "remote_service_ownership_unknown"}:
+            code = "unknown_remote"
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": code, "message": str(exc)[:240], "retryable": False},
+        }
+
+
+def cmd_swap_history(args) -> dict:
+    return _swap_history_cli(args)
+
 
 def _emit_host_memory(payload, json_output):
     if json_output:
@@ -1261,8 +1334,13 @@ def cmd_resources(_cfg, args) -> None:
         if not payload.get("ok"):
             raise SystemExit(1)
         return
-    if action in {"swap-plan", "swap-apply"}:
-        payload = _swap_plan_cli(args) if action == "swap-plan" else _swap_apply_cli(args)
+    if action in {"swap-plan", "swap-apply", "swap-history"}:
+        if action == "swap-plan":
+            payload = _swap_plan_cli(args)
+        elif action == "swap-apply":
+            payload = _swap_apply_cli(args)
+        else:
+            payload = _swap_history_cli(args)
         _emit_host_memory(payload, bool(args.json))
         if not payload.get("ok"):
             raise SystemExit(1)

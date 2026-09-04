@@ -101,7 +101,7 @@ def _diagnostic_process_snapshot() -> dict:
 
 def _resource_contract(payload: dict) -> dict:
     """Execute only the fixed resource probe contract on the co-located host."""
-    if payload.get("action") in {"host_memory_status", "host_memory_apply"}:
+    if payload.get("action") in {"host_memory_status", "host_memory_apply", "host_memory_history"}:
         return _host_memory_contract(payload)
     from sandbox.resources.remote import LocalProbeAdapter
 
@@ -145,7 +145,7 @@ def _host_memory_contract(payload: dict) -> dict:
     request = validate_request(payload)
     marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
     revision = _live_runtime_revision()
-    if request["action"] not in {"host_memory_status", "host_memory_apply"}:
+    if request["action"] not in {"host_memory_status", "host_memory_apply", "host_memory_history"}:
         raise ValueError("host-memory action is not registered")
     try:
         machine_id = Path("/etc/machine-id").read_text().strip().lower()
@@ -198,6 +198,20 @@ def _host_memory_contract(payload: dict) -> dict:
             result = {
                 "status": "refused" if code != "failed" else "failed",
                 "operation_id": request["operation_id"],
+                "error": {"code": str(code), "message": str(exc)},
+            }
+    elif request["action"] == "host_memory_history":
+        try:
+            result = repository.history_window(
+                since=request.get("since"),
+                until=request.get("until"),
+                limit=request.get("limit", 288),
+                deadline=deadline,
+            )
+        except Exception as exc:
+            code = getattr(exc, "code", "history_unavailable")
+            result = {
+                "status": "failed",
                 "error": {"code": str(code), "message": str(exc)},
             }
     return {

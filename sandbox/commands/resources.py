@@ -1132,7 +1132,7 @@ def _swap_plan_cli(args):
 
 
 def _swap_apply_cli(args):
-    """Refuse apply until the protected apply path registers (T053)."""
+    """Execute confirmed host-memory apply or refuse invalid options."""
     action = args.action
     remote = getattr(args, "remote", None)
     target = {"kind": "remote", "name": remote} if remote else None
@@ -1144,17 +1144,39 @@ def _swap_apply_cli(args):
                       "message": "--remote is required for host-memory operations",
                       "retryable": False},
         }
+    if (getattr(args, "tier", None) is not None
+            or any(getattr(args, name, None) for name in
+                   ("scope", "tier", "node_store_family", "detach", "request_id", "size_gib"))):
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": "invalid_mode",
+                          "message": "option is not valid for this host-memory action",
+                          "retryable": False}}
     if not bool(getattr(args, "confirm", False)):
         return {"schema_version": 1, "ok": False, "action": action,
                 "status": "refused", "target": target, "data": {},
                 "error": {"code": "confirmation_required",
                           "message": "swap-apply requires explicit confirmation of a current plan",
                           "retryable": False}}
-    return {"schema_version": 1, "ok": False, "action": action,
-            "status": "refused", "target": target, "data": {},
-            "error": {"code": "apply_unavailable",
-                      "message": "protected apply is not registered until the US3 safety gate passes",
-                      "retryable": False}}
+    plan_id = getattr(args, "plan_id", None)
+    if not plan_id:
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": "plan_not_found",
+                          "message": "--plan-id is required for swap-apply",
+                          "retryable": False}}
+    budget = 300 if getattr(args, "budget", None) is None else args.budget
+    try:
+        from sandbox.resources.context import host_memory_apply
+        return host_memory_apply(remote, plan_id=plan_id, confirm=True, budget_seconds=budget)
+    except Exception as exc:
+        code = getattr(exc, "code", None) or str(exc)
+        if code not in {"unknown_remote", "remote_runtime_revision_mismatch",
+                        "remote_service_ownership_unknown"}:
+            code = "unknown_remote"
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
 
 
 def cmd_swap_plan(args) -> dict:

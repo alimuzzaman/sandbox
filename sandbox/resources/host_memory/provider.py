@@ -403,6 +403,30 @@ class HostProvider:
                                else "known")}
         return RemoteSwapState.from_dict(result).to_dict()
 
+    def enable(self, plan):
+        self.preflight(plan)
+        plan_id = plan.get("plan_id")
+        if getattr(self, "_active_plan_id", None) == plan_id:
+            return {"status": "already_current",
+                    "operation_id": plan.get("operation_id", plan_id)}
+        policy = plan.get("effective_policy") or {}
+        size_gib = int(policy.get("size_gib", 4))
+        commands = [
+            ("fallocate", "-l", f"{size_gib}G", str(SWAP)),
+            ("chmod", "0600", str(SWAP)),
+            ("mkswap", str(SWAP)),
+            ("systemctl", "enable", "--now", str(SWAP_UNIT)),
+            ("sysctl", "--load", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("systemctl", "enable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+        ]
+        for cmd in commands:
+            res = self.run(cmd)
+            if getattr(res, "returncode", 0) != 0:
+                raise RuntimeError(f"command failed: {' '.join(cmd)}")
+        self._active_plan_id = plan_id
+        return {"status": "applied",
+                "operation_id": plan.get("operation_id", plan_id)}
+
     def sample(self):
         state=self.observe(); memory=state.get("memory") or {}; areas=state.get("swap_areas") or []
         complete=all(isinstance(memory.get(k),int) for k in ("total_bytes","available_bytes"))

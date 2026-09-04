@@ -112,7 +112,15 @@ def _build_host_memory_service(remote: str | None = None):
         return _remote.remote_host_memory_request(selected, payload)
 
     adapter = HostMemoryRemote(remote, record, request)
-    return HostMemoryService(adapter)
+    from pathlib import Path
+    from .host_memory.repository import HostMemoryRepository
+    repo_root = Path.home() / ".sandbox" / "host-memory"
+    try:
+        repo_root.mkdir(parents=True, exist_ok=True)
+        repo = HostMemoryRepository(repo_root)
+    except OSError:
+        repo = None
+    return HostMemoryService(adapter, repo=repo)
 
 
 def host_memory_status(remote: str, *, budget_seconds: float = 15):
@@ -133,3 +141,8 @@ def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
 def host_memory_plan(remote: str, *, size_gib: int = 4, budget_seconds: float = 15):
     """Return one deterministic controller-owned enable plan without mutation."""
     return _build_host_memory_service(remote).plan(size_gib, budget_seconds)
+
+
+def host_memory_apply(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
+    """Execute confirmed host-memory apply with normative outcome envelope."""
+    return _build_host_memory_service(remote).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)

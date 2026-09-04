@@ -8,7 +8,7 @@ from sandbox.resources.host_memory.models import canonical_digest
 from tests.host_memory_assertions import assert_privacy_bounded
 from tests.host_memory_fixtures import (
     CGROUP_V1, CGROUP_V2, PROC_MEMINFO, PROC_SWAPS_EMPTY, SYSCTL_TEXT,
-    SWAP_UNIT_TEXT, TARGET, command_result, ownership_receipt,
+    NOW, SWAP_UNIT_TEXT, TARGET, command_result, ownership_receipt,
 )
 import json
 import stat as statmod
@@ -302,7 +302,7 @@ class HostMemoryProviderTest(unittest.TestCase):
         def run(argv, timeout=5):
             mutated.append(tuple(argv)); return command_result()
         provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
-                                run=run, target_identity=TARGET)
+                                run=run, target_identity=TARGET, now=lambda: NOW)
         result = provider.enable(self._enable_plan())
         self.assertEqual(result["status"], "applied")
         allowed = {str(STATE), str(RECEIPT), str(SWAP), str(SWAP_UNIT),
@@ -320,8 +320,10 @@ class HostMemoryProviderTest(unittest.TestCase):
         provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
                                 run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
                                 target_identity=TARGET, now=lambda: NOW)
-        stale = build_plan("enable", service_evidence(), eligible_state(),
-                           now=NOW - timedelta(minutes=16))
+        stale_time = NOW - timedelta(minutes=16)
+        stale = build_plan("enable", service_evidence(),
+                           eligible_state(observed_at=stale_time.isoformat().replace("+00:00", "Z")),
+                           now=stale_time)
         with self.assertRaises(PolicyRefusal) as refused:
             provider.enable(stale)
         self.assertEqual(refused.exception.code, "plan_expired")
@@ -332,7 +334,7 @@ class HostMemoryProviderTest(unittest.TestCase):
         calls = []
         provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
                                 run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
-                                target_identity=TARGET)
+                                target_identity=TARGET, now=lambda: NOW)
         plan = self._enable_plan()
         first = provider.enable(plan)
         calls_after_first = len(calls)

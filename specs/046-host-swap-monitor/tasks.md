@@ -129,12 +129,12 @@
 
 ### Protected apply implementation - GREEN only after T047
 
-- [ ] T048 [US2] Implement the fixed-path swap and monitor enable transaction behind the completed preflight gate, with restrictive permissions, policy-selected size, read-back verification, idempotent convergence, and owned rollback hooks in `sandbox/resources/host_memory/provider.py`
-- [ ] T049 [US2] Implement apply orchestration with authorization, exact confirmation, current plan/request identity, per-phase revalidation, journaling, reconciliation, normative outcomes, and bounded evidence in `sandbox/resources/host_memory/service.py`
-- [ ] T050 [US2] Register only the strict authorized `host_memory_apply` control action, accepting canonical effective policy but no top-level size, path, unit, or shell override, in `mcp/wp-server/server.py`
-- [ ] T051 [US2] Add typed apply transport, replay-safe operation identity, and ambiguous-output mapping to `partial` plus stable reason codes without direct-host fallback in `sandbox/core/_remote.py`
-- [ ] T052 [US2] Add confirmed `resources swap-apply` text/JSON flows with stable normative outcomes and reason-code exit classes in `sandbox/commands/resources.py`
-- [ ] T053 [US2] Run the complete User Story 2 tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T048 [US2] Implement the fixed-path swap and monitor enable transaction behind the completed preflight gate, with restrictive permissions, policy-selected size, read-back verification, idempotent convergence, and owned rollback hooks in `sandbox/resources/host_memory/provider.py`
+- [X] T049 [US2] Implement apply orchestration with authorization, exact confirmation, current plan/request identity, per-phase revalidation, journaling, reconciliation, normative outcomes, and bounded evidence in `sandbox/resources/host_memory/service.py`
+- [X] T050 [US2] Register only the strict authorized `host_memory_apply` control action, accepting canonical effective policy but no top-level size, path, unit, or shell override, in `mcp/wp-server/server.py`
+- [X] T051 [US2] Add typed apply transport, replay-safe operation identity, and ambiguous-output mapping to `partial` plus stable reason codes without direct-host fallback in `sandbox/core/_remote.py`
+- [X] T052 [US2] Add confirmed `resources swap-apply` text/JSON flows with stable normative outcomes and reason-code exit classes in `sandbox/commands/resources.py`
+- [X] T053 [US2] Run the complete User Story 2 tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; require GREEN and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: Eligible plans can be applied only through the completed safety layer; mutation is fixed-path, policy-sized, authorized, confirmed, owned, and replay-safe.
 

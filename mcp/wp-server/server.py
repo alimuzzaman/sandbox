@@ -101,9 +101,7 @@ def _diagnostic_process_snapshot() -> dict:
 
 def _resource_contract(payload: dict) -> dict:
     """Execute only the fixed resource probe contract on the co-located host."""
-    # Feature 046 exposes only the completed read-only MVP. Planning, history,
-    # and protected apply remain unreachable until their ordered gates are green.
-    if payload.get("action") in {"host_memory_status"}:
+    if payload.get("action") in {"host_memory_status", "host_memory_apply"}:
         return _host_memory_contract(payload)
     from sandbox.resources.remote import LocalProbeAdapter
 
@@ -147,7 +145,7 @@ def _host_memory_contract(payload: dict) -> dict:
     request = validate_request(payload)
     marker = os.environ.get("SANDBOX_REMOTE_MCP_MARKER", "")
     revision = _live_runtime_revision()
-    if request["action"] != "host_memory_status":
+    if request["action"] not in {"host_memory_status", "host_memory_apply"}:
         raise ValueError("host-memory action is not registered")
     try:
         machine_id = Path("/etc/machine-id").read_text().strip().lower()
@@ -163,22 +161,45 @@ def _host_memory_contract(payload: dict) -> dict:
         STATE, history_path=HISTORY, history_owner_uid=0,
         history_ancestor_root=HISTORY.parent,
     )
-    deadline=time.monotonic()+float(request["budget_seconds"])
-    try:
-        result = provider.observe(deadline=deadline)
-        history = repository.status_monitor_evidence(now=provider.now(),deadline=deadline)
-        history_complete = history.pop("history_complete")
-        result = dict(result)
-        result.pop("observation_digest", None)
-        result["monitor"] = {**result["monitor"], **history}
-        if not history_complete and result["evidence_state"] == "known":
-            result["evidence_state"] = "partial"
-        result = RemoteSwapState.from_dict(result).to_dict()
-    except Exception:
-        result = {"status": "failed", "data": {}, "error": {
-            "code": "response_invalid", "message": "bounded host evidence unavailable",
-            "retryable": True,
-        }}
+    deadline = time.monotonic() + float(request["budget_seconds"])
+    if request["action"] == "host_memory_status":
+        try:
+            result = provider.observe(deadline=deadline)
+            history = repository.status_monitor_evidence(now=provider.now(),deadline=deadline)
+            history_complete = history.pop("history_complete")
+            result = dict(result)
+            result.pop("observation_digest", None)
+            result["monitor"] = {**result["monitor"], **history}
+            if not history_complete and result["evidence_state"] == "known":
+                result["evidence_state"] = "partial"
+            result = RemoteSwapState.from_dict(result).to_dict()
+        except Exception:
+            result = {"status": "failed", "data": {}, "error": {
+                "code": "response_invalid", "message": "bounded host evidence unavailable",
+                "retryable": True,
+            }}
+    elif request["action"] == "host_memory_apply":
+        try:
+            plan = request["plan"]
+            if plan.get("target_identity") != target_identity:
+                result = {
+                    "status": "refused",
+                    "operation_id": request["operation_id"],
+                    "error": {"code": "ownership_unknown", "message": "plan targets a foreign host"},
+                }
+            else:
+                apply_res = provider.enable(plan)
+                result = {
+                    "status": apply_res.get("status", "applied"),
+                    "operation_id": request["operation_id"],
+                }
+        except Exception as exc:
+            code = getattr(exc, "code", "failed")
+            result = {
+                "status": "refused" if code != "failed" else "failed",
+                "operation_id": request["operation_id"],
+                "error": {"code": str(code), "message": str(exc)},
+            }
     return {
         "resource_schema": 1, "host_memory_schema": 1, "transport": "control",
         "service": {"ownership_marker": marker, "runtime_revision": revision},

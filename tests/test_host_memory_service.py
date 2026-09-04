@@ -73,3 +73,63 @@ class HostMemoryServiceTest(unittest.TestCase):
         self.assertEqual(result["data"]["state"], "planned")
         for action, _fields in self.remote.calls:
             self.assertEqual(action, "host_memory_status")
+
+    def test_apply_requires_exact_confirmation(self):
+        plan_res = self.service.plan(size_gib=4)
+        plan_id = plan_res["data"]["plan_id"]
+        for bad in (False, None, "true", 1):
+            result = self.service.apply(plan_id, confirmed=bad)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "refused")
+            self.assertEqual(result["error"]["code"], "confirmation_required")
+        apply_calls = [c for c in self.remote.calls if c[0] == "host_memory_apply"]
+        self.assertEqual(apply_calls, [])
+
+    def test_apply_refuses_unknown_or_expired_plan(self):
+        result = self.service.apply("f" * 64, confirmed=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["error"]["code"], "plan_not_found")
+
+        plan_res = self.service.plan(size_gib=4)
+        plan = dict(plan_res["data"])
+        plan["expires_at"] = "2026-08-30T11:59:00Z"
+        expired_res = self.service.apply(plan, confirmed=True)
+        self.assertFalse(expired_res["ok"])
+        self.assertEqual(expired_res["status"], "refused")
+        self.assertEqual(expired_res["error"]["code"], "plan_expired")
+
+    def test_apply_dispatches_canonical_plan_and_binds_operation_id(self):
+        plan_res = self.service.plan(size_gib=4)
+        plan_id = plan_res["data"]["plan_id"]
+        result = self.service.apply(plan_id, confirmed=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "applied")
+        apply_calls = [c for c in self.remote.calls if c[0] == "host_memory_apply"]
+        self.assertEqual(len(apply_calls), 1)
+        action, kwargs = apply_calls[0]
+        self.assertEqual(action, "host_memory_apply")
+        self.assertTrue(kwargs["confirmed"])
+        self.assertEqual(kwargs["plan"]["plan_id"], plan_id)
+        self.assertEqual(kwargs["plan"]["effective_policy"]["size_gib"], 4)
+        assert_privacy_bounded(self, result, maximum=64 * 1024)
+
+    def test_apply_already_current_propagates_cleanly(self):
+        self.remote.apply_status = "already_current"
+        plan_res = self.service.plan(size_gib=4)
+        plan_id = plan_res["data"]["plan_id"]
+        result = self.service.apply(plan_id, confirmed=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "already_current")
+
+    def test_apply_remote_unreachable_returns_failed(self):
+        def bad_call(action, **fields):
+            if action == "host_memory_status":
+                return status_state(target_identity="host")
+            raise RuntimeError("network down")
+        self.remote.call = bad_call
+        plan_res = self.service.plan(size_gib=4)
+        plan_id = plan_res["data"]["plan_id"]
+        result = self.service.apply(plan_id, confirmed=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")

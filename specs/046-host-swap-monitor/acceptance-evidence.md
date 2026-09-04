@@ -165,6 +165,42 @@ safety or release readiness.
   unregistered and fail-closed; no mutation is reachable. Local synthetic evidence
   only.
 
+- User Story 2 protected apply GREEN (T053): with the fail-closed safety gate
+  (Phase 5) fully green, the protected apply implementation is completed:
+  1. `HostProvider.enable(plan)` (T048) executes the fixed-path swap creation
+     and monitor enable transaction behind the completed preflight gate with
+     restrictive permissions (0600 on swap file, 0644 on units/configs),
+     policy-selected size, command validation restricted exclusively to fixed
+     artifact paths, and idempotent convergence (`already_current` without side
+     effects for identical plans).
+  2. `HostMemoryService.apply` (T049) orchestrates authorization, exact confirmation
+     requirement (`confirmation_required`), current plan and repository lookup
+     (`plan_not_found`), plan expiry checks against `expires_at` (`plan_expired`),
+     canonical plan envelope translation, replay-safe operation identity generation,
+     and mapping of normative outcomes (`applied`, `already_current`, `refused`,
+     `failed`).
+  3. `mcp/wp-server/server.py` (T050) registers `host_memory_apply` alongside
+     `host_memory_status`, rejecting any uncanonical or foreign-target payloads,
+     and dispatching through the provider's enable transaction.
+  4. `sandbox/core/_remote.py` (T051) validates request payloads, rejecting
+     arbitrary paths or shell overrides before control invocation, and routes
+     strictly over authenticated control with no direct SSH fallback.
+  5. `sandbox/commands/resources.py` (T052) provides `resources swap-apply`
+     CLI wiring with confirmation enforcement, `--plan-id` lookup, invalid-option
+     refusal (`invalid_mode`), and text/JSON envelope rendering.
+  6. Test verification (T053): the complete User Story 2 test suite
+     (`tests.test_host_memory_models`, `tests.test_host_memory_policy`,
+     `tests.test_host_memory_repository`, `tests.test_host_memory_provider`,
+     `tests.test_host_memory_service`, `tests.test_host_memory_remote`,
+     `tests.test_host_memory_interfaces`, and `tests.test_resource_interfaces`)
+     ran 126 tests and passed in 0.391s. Adjacent regression suites
+     (`test_storage_monitor_policy`, `test_storage_monitor_schedule`,
+     `test_storage_monitor_runner`, `test_mcp_resource_tier`,
+     `test_resource_service`, `test_workspace_contracts`) ran 146 tests and passed
+     in 0.239s. CLI end-to-end invocations verify refusal on missing confirmation,
+     missing remote, missing plan ID, and invalid options. Local synthetic
+     evidence only.
+
 ## Fixed authenticated synthetic-provider evidence
 
 Pending T096.

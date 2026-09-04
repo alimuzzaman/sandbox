@@ -20,15 +20,15 @@ class HostMemoryInterfacesTest(unittest.TestCase):
                      "receipt", "artifacts", "rollback_scope"}
         self.assertFalse(fields & forbidden)
 
-    def test_apply_is_not_registered_before_t047(self):
+    def test_apply_registers_strict_authorized_control_action(self):
         source=Path("mcp/wp-server/server.py").read_text()
         dispatch=source.split("def _resource_contract",1)[1].split("def _host_memory_contract",1)[0]
-        self.assertNotIn('"host_memory_apply"',dispatch)
+        self.assertIn('"host_memory_apply"',dispatch)
 
     def test_status_server_joins_repository_monitor_evidence_only(self):
         source=Path("mcp/wp-server/server.py").read_text()
         dispatch=source.split("def _resource_contract",1)[1].split("def _host_memory_contract",1)[0]
-        self.assertIn('{"host_memory_status"}',dispatch)
+        self.assertIn('{"host_memory_status", "host_memory_apply"}',dispatch)
         self.assertNotIn("host_memory_history",dispatch)
         contract=source.split("def _host_memory_contract",1)[1].split("def _remote_wp_error",1)[0]
         self.assertIn("status_monitor_evidence",contract)

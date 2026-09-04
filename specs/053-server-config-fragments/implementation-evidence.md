@@ -588,3 +588,87 @@ Result: **265 tests passed** across all 30 test suites:
    - Implemented `reconcile_restart_generation` restoring committed generation and observing container readiness before reporting ready.
    - Implemented `check_instance_mount_and_image_drift` failing closed on image or mount path divergence.
 
+## US6 RED checkpoint (T086)
+
+Recorded 2026-09-04 before exact content output and leak prevention hardening for User Story 6.
+
+### Failing content show, export, and leak test evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_content_show \
+  tests.test_server_config_content_export \
+  tests.test_server_config_content_leaks
+```
+
+Result: **15 tests ran, 5 failed/errored (100% expected)** across newly authored US6 test suites:
+- `tests/test_server_config_content_show.py` (T083): Fails on `show --content` not yet emitting raw bytes to stdout buffer, lack of pre-emission refusal on missing/degraded fragments.
+- `tests/test_server_config_content_export.py` (T084): Fails on missing `service.read_fragment_content()` method and missing `output_basename` in JSON output for `--output`.
+- `tests/test_server_config_content_leaks.py` (T085): 5 tests passed verifying that recognizable canary tokens never leak into list, show, revert, error messages, or phase evidence.
+
+Foundation (95) and US1/US2/US3/US4/US5 (170) baseline assertions continue to pass without regressions (265 passing).
+
+## US6 GREEN story checkpoint (T090)
+
+Recorded 2026-09-04 after completing T087-T090 for User Story 6.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_lifecycle_locking \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed \
+  tests.test_redaction_parity \
+  tests.test_server_config_transactions \
+  tests.test_server_config_recovery \
+  tests.test_server_config_rollback \
+  tests.test_server_config_concurrency \
+  tests.test_server_config_inspection \
+  tests.test_server_config_restart \
+  tests.test_server_config_control_instance \
+  tests.test_server_config_content_show \
+  tests.test_server_config_content_export \
+  tests.test_server_config_content_leaks
+```
+
+Result: **280 tests passed** across all 33 test suites in 10.948s:
+- `tests/test_server_config_content_show.py` (T083): 5 tests passed (exact raw bytes stdout mode without added newline/heading, pre-emission refusal on missing or degraded fragments, mutual exclusivity between `--content` and `--json`).
+- `tests/test_server_config_content_export.py` (T084): 5 tests passed (owner-only 0600 file export, refusal of symlink/world-writable/unsafe destinations, basename-only JSON output, zero state mutation during export).
+- `tests/test_server_config_content_leaks.py` (T085): 5 tests passed (canary leak scans verifying zero raw content disclosure across list, default show, revert, errors, and phase evidence).
+- Zero regressions across existing foundation (95), US1/US2/US3 (106), US4 (35), and US5 (43) tests (total 280 tests).
+
+### Summary of US6 implementations:
+
+1. **Exact Content Reads & Storage** (`sandbox/server_config/service.py`, `sandbox/server_config/models.py`):
+   - Stored immutable raw bytes in `fragments/<content_id>.fragment` upon commit.
+   - Added `service.read_fragment_content(name)` reading directly from content-addressed store.
+   - Preserved `hasattr(meta, "content") == False` on `ServerConfigFragment` to ensure metadata inspections never accidentally disclose raw content bytes.
+
+2. **Safe Export Boundary** (`sandbox/server_config/input.py`):
+   - Implemented `write_fragment_output()` with strict permission (0600), safe parent checks, symlink refusal, and atomic rename.
+   - Returned basename-only in public metadata/JSON responses.
+
+3. **CLI Show Enforcement** (`sandbox/commands/server.py`):
+   - `show --content` writes raw bytes directly to stdout buffer with zero trailing decorations.
+   - Pre-emission checks refuse missing fragments and degraded/recovery-needed instance states before outputting any bytes.
+   - Strictly enforced `--content` and `--json` incompatibility in CLI arguments.

@@ -254,17 +254,17 @@ receive exact bytes.
 
 ### RED tests for User Story 6
 
-- [ ] T083 [P] [US6] Write failing exact `show --content` stdout-only, no-added-newline/progress/heading, missing/degraded pre-emission refusal, and `--content --json` incompatibility tests in `tests/test_server_config_content_show.py`
-- [ ] T084 [P] [US6] Write failing owner-only regular destination, safe-parent, symlink/special/non-owner/type-swap, atomic replacement, basename-only JSON, and no-state-write tests in `tests/test_server_config_content_export.py`
-- [ ] T085 [P] [US6] Write failing recognizable-marker leak scans across list/default show/JSON/errors/phase evidence/log captures/native failures and synthetic subprocess environments in `tests/test_server_config_content_leaks.py`
-- [ ] T086 [US6] Run T083-T085 and record every expected content-output/leak failure before modifying exact-content behavior in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T083 [P] [US6] Write failing exact `show --content` stdout-only, no-added-newline/progress/heading, missing/degraded pre-emission refusal, and `--content --json` incompatibility tests in `tests/test_server_config_content_show.py`
+- [x] T084 [P] [US6] Write failing owner-only regular destination, safe-parent, symlink/special/non-owner/type-swap, atomic replacement, basename-only JSON, and no-state-write tests in `tests/test_server_config_content_export.py`
+- [x] T085 [P] [US6] Write failing recognizable-marker leak scans across list/default show/JSON/errors/phase evidence/log captures/native failures and synthetic subprocess environments in `tests/test_server_config_content_leaks.py`
+- [x] T086 [US6] Run T083-T085 and record every expected content-output/leak failure before modifying exact-content behavior in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 6
 
-- [ ] T087 [P] [US6] Implement healthy-committed-fragment exact reads and safe owner-only atomic export with no unproven candidate disclosure in `sandbox/server_config/input.py` and `sandbox/server_config/repository.py`
-- [ ] T088 [US6] Implement `show --content` stdout-only mode, JSON incompatibility, `--output` result metadata, and pre-emission error ordering in `sandbox/commands/server.py`
-- [ ] T089 [US6] Enforce content-free logs/exceptions/phase evidence/native diagnostics and safe basename-only output across `sandbox/server_config/service.py`, `sandbox/server_config/adapters/nginx.py`, and `sandbox/server_config/adapters/openlitespeed.py`
-- [ ] T090 [US6] Run all content tests plus CLI/policy/secret-leak regressions and record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T087 [P] [US6] Implement healthy-committed-fragment exact reads and safe owner-only atomic export with no unproven candidate disclosure in `sandbox/server_config/input.py` and `sandbox/server_config/repository.py`
+- [x] T088 [US6] Implement `show --content` stdout-only mode, JSON incompatibility, `--output` result metadata, and pre-emission error ordering in `sandbox/commands/server.py`
+- [x] T089 [US6] Enforce content-free logs/exceptions/phase evidence/native diagnostics and safe basename-only output across `sandbox/server_config/service.py`, `sandbox/server_config/adapters/nginx.py`, and `sandbox/server_config/adapters/openlitespeed.py`
+- [x] T090 [US6] Run all content tests plus CLI/policy/secret-leak regressions and record the green story checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Exact bytes appear only where explicitly requested; metadata inspection
 remains read-only.

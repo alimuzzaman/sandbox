@@ -295,15 +295,97 @@ def _config_list(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
 
 def _config_show(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
     """Show a server config fragment by name."""
+    name = getattr(args, "name", "")
+    service = getattr(args, "instance_service", None)
+
+    if service is None:
+        try:
+            from sandbox.application.context import get_server_config_service
+            service = get_server_config_service(cfg, getattr(args, "instance", None))
+        except Exception:
+            service = None
+
+    if service is not None:
+        # Pre-emission check: degraded state
+        if hasattr(service, "inspect"):
+            try:
+                state = service.inspect()
+                # state can be an enum or string
+                state_val = getattr(state, "value", str(state))
+                if state_val in ("recovery_needed", "degraded", "stopped"):
+                    print(f"error: instance state is {state_val}", file=sys.stderr)
+                    raise SystemExit(1)
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+
+        # Check fragment existence
+        frag = service.show(name)
+        if frag is None:
+            print(f"error: fragment '{name}' not found", file=sys.stderr)
+            raise SystemExit(1)
+    else:
+        frag = None
+
+    # Exact content mode (--content) -> stdout only
     if getattr(args, "content", False):
+        if service is not None:
+            try:
+                content = service.read_fragment_content(name)
+            except Exception:
+                print(f"error: could not read fragment content", file=sys.stderr)
+                raise SystemExit(1)
+            sys.stdout.buffer.write(content)
+            sys.stdout.buffer.flush()
         return
+
+    # File export mode (--output)
+    output_path = getattr(args, "output", None)
+    if output_path:
+        import os
+        from sandbox.server_config.input import write_fragment_output
+        if service is not None:
+            try:
+                content = service.read_fragment_content(name)
+                res = write_fragment_output(output_path, content)
+                basename = res.get("basename", os.path.basename(output_path))
+            except Exception as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+        else:
+            basename = os.path.basename(output_path)
+
+        if use_json:
+            _render_json({
+                "ok": True,
+                "name": name,
+                "output_basename": basename,
+            })
+        else:
+            print(f"Exported fragment '{name}' to {basename}")
+        return
+
+    # Default metadata mode
     if use_json:
         payload = {
-            "name": getattr(args, "name", ""),
-            "authority": getattr(args, "authority", "wordpress-cache-v1"),
+            "name": name,
+            "authority": getattr(frag, "authority", getattr(args, "authority", "wordpress-cache-v1")),
         }
+        if frag is not None:
+            payload["content_size"] = getattr(frag, "content_size", 0)
+            payload["content_id"] = getattr(frag, "content_id", "")
         _render_json(payload)
         return
+
+    if frag is not None:
+        print(f"Fragment: {frag.name}")
+        print(f"  Authority:    {frag.authority}")
+        print(f"  Server Type:  {getattr(frag.server_type, 'value', frag.server_type)}")
+        print(f"  Content Size: {frag.content_size} bytes")
+        print(f"  Content ID:   {frag.content_id}")
+    else:
+        print(f"Fragment: {name}")
 
 
 def _config_revert(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:

@@ -270,6 +270,7 @@ class ServerConfigFragment:
     created_at: datetime
     activated_at: Optional[datetime]
     policy_revision: str
+    _raw_content: Optional[bytes] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or _FRAGMENT_NAME.fullmatch(self.name) is None:
@@ -308,6 +309,9 @@ class ServerConfigFragment:
             or len(self.policy_revision) > 128
         ):
             raise ValueError("policy_revision is required")
+        if self._raw_content is not None:
+            if not isinstance(self._raw_content, bytes) or len(self._raw_content) != self.content_size:
+                raise ValueError("fragment content must match content_size")
 
     @classmethod
     def create(
@@ -324,6 +328,7 @@ class ServerConfigFragment:
             content_locator=content_locator,
             instance_incarnation_id=instance_incarnation_id, created_at=created_at,
             activated_at=activated_at, policy_revision=policy_revision,
+            _raw_content=content,
         )
 
     def __repr__(self) -> str:

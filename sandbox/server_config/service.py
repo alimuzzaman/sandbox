@@ -754,6 +754,10 @@ class ServerConfigService:
         tx = tx.transition(TransactionPhase.COMMITTED)
         mutation.write_transaction(tx.to_record())
 
+        raw_payload = getattr(frag, "_raw_content", None) or getattr(frag, "content", None)
+        if raw_payload:
+            mutation.store_fragment(raw_payload)
+
         state_repr = {
             "schema": 1,
             "instance_incarnation_id": self.repository.incarnation,
@@ -810,6 +814,12 @@ class ServerConfigService:
             if f.name == name:
                 return f
         return None
+
+    def read_fragment_content(self, name: str) -> bytes:
+        frag = self.show(name)
+        if frag is None or not frag.content_id:
+            raise ValueError("fragment_not_found")
+        return self.repository.read_fragment(frag.content_id)
 
     def revert(
         self,

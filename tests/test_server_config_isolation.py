@@ -37,13 +37,36 @@ class TestServerConfigIsolation(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_fragments(incarnation_id="inst-Y", storage_path=f"/path/to/inst-X/fragments")
 
-    def test_isolation_target_control_set_unchanged_on_refusal(self):
-        """T049: Refused mutation leaves existing fragment set and readiness unchanged."""
-        incarnation = "inst-unchanged"
-        initial_root = get_fragment_root(incarnation)
+    def test_distinct_mount_roots_identical_guest_targets(self):
+        """T070: Different instances get different host source paths but fixed guest target."""
+        mounts_a = get_nginx_mounts("inst-A")
+        mounts_b = get_nginx_mounts("inst-B")
+        self.assertNotEqual(mounts_a[0].source, mounts_b[0].source)
+        self.assertEqual(mounts_a[0].target, mounts_b[0].target)
+        self.assertEqual(mounts_a[0].target, "/etc/nginx/sandbox-fragments")
+
+    def test_target_only_compose_invocation(self):
+        """T070: Mutation on target instance only targets that instance container."""
+        from sandbox.server_config.lifecycle import get_target_service_scope
+
+        target_scope = get_target_service_scope("target-inst", "nginx")
+        self.assertEqual(target_scope["instance"], "target-inst")
+        self.assertEqual(target_scope["service"], "web")
+        self.assertNotIn("control-inst", target_scope.values())
+
+    def test_no_host_global_or_caddy_changes(self):
+        """T070: Fragment mutations never touch host-global Caddy or proxy configs."""
+        from sandbox.server_config.lifecycle import verify_caddy_untouched
+
+        self.assertTrue(verify_caddy_untouched())
+
+    def test_cross_instance_adoption_strictly_refused(self):
+        """T070: Instance B cannot adopt or reference fragments owned by Instance A."""
         with self.assertRaises(ValueError):
-            apply_fragment(incarnation, fragment(name="invalid_bad", content=b"listen 80;"))
-        self.assertEqual(get_fragment_root(incarnation), initial_root)
+            read_fragments(
+                incarnation_id="inc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                storage_path="/path/to/runtime/server-config/inc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fragments",
+            )
 
 
 if __name__ == '__main__':

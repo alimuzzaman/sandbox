@@ -72,6 +72,58 @@ class ServerConfigInstanceIdentityTests(unittest.TestCase):
         self.assertNotEqual(recreated.instance_incarnation_id, deleted.instance_incarnation_id)
         self.assertIsNone(recreated.server_config_mount_id)
 
+    def test_incarnation_preserved_on_apply_and_reconcile(self):
+        """T069: Existing incarnation must be preserved across apply/reconcile."""
+        from sandbox.core._instances import _server_config_registry_identity_fields
+
+        existing = {
+            "instance_incarnation_id": "inc_" + "a" * 32,
+            "server_config_mount_id": "sha256:" + "b" * 64,
+        }
+        reconciled = _server_config_registry_identity_fields(existing)
+        self.assertEqual(reconciled["instance_incarnation_id"], "inc_" + "a" * 32)
+        self.assertEqual(reconciled["server_config_mount_id"], "sha256:" + "b" * 64)
+
+    def test_incarnation_preserved_across_relocation(self):
+        """T069: Relocating an instance does not change its incarnation ID."""
+        from sandbox.server_config.lifecycle import relocate_instance_server_config
+
+        record = {
+            "instance_incarnation_id": "inc_" + "f" * 32,
+            "server_config_mount_id": "sha256:" + "c" * 64,
+        }
+        relocated = relocate_instance_server_config(record, "/new/sandbox/home")
+        self.assertEqual(relocated["instance_incarnation_id"], "inc_" + "f" * 32)
+        self.assertEqual(relocated["server_config_mount_id"], "sha256:" + "c" * 64)
+
+    def test_deletion_disassociates_incarnation_and_cleans_fragments(self):
+        """T069: Instance deletion cleans up fragment storage and disassociates incarnation."""
+        from sandbox.server_config.lifecycle import disassociate_instance_server_config
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            incarnation_id = "inc_" + "d" * 32
+            frag_dir = os.path.join(temp_dir, incarnation_id)
+            os.makedirs(frag_dir, exist_ok=True)
+            test_file = os.path.join(frag_dir, "test.fragment")
+            with open(test_file, "w") as f:
+                f.write("test")
+
+            disassociate_instance_server_config(
+                incarnation_id=incarnation_id,
+                storage_root=temp_dir,
+            )
+            self.assertFalse(os.path.exists(frag_dir))
+
+    def test_legacy_record_refuses_fragment_mutation(self):
+        """T069: Legacy instance records without incarnation ID fail closed on fragment mutation."""
+        from sandbox.server_config.lifecycle import check_instance_attachment
+
+        with self.assertRaises(RuntimeError) as ctx:
+            check_instance_attachment(incarnation_id=None)
+        self.assertIn("sb apply --instance", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

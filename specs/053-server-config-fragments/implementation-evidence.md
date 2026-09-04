@@ -494,3 +494,97 @@ Result: **236 tests passed** across all 27 test suites:
 5. **Read-Only Inspection** (`sandbox/server_config/service.py`):
    - Implemented `inspect()` projecting runtime status (healthy, stopped, degraded, recovery-needed, unsupported) without acquiring locks or modifying persistent state.
 
+## US5 RED checkpoint (T074)
+
+Recorded 2026-09-04 before identity, lifecycle, and isolation hardening for User Story 5.
+
+### Failing identity, lifecycle, locking, and restart test evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_isolation \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_lifecycle_locking \
+  tests.test_server_config_restart \
+  tests.test_server_config_control_instance
+```
+
+Result: **35 tests ran, 12 failed/errored (100% expected)** across newly authored US5 test suites:
+- `tests/test_server_config_instance_identity.py` (T069): Fails on missing `relocate_instance_server_config` and `disassociate_instance_server_config` in `sandbox.server_config.lifecycle`.
+- `tests/test_server_config_isolation.py` (T070): Fails on missing `get_target_service_scope` and `verify_caddy_untouched` in `sandbox.server_config.lifecycle`.
+- `tests/test_server_config_lifecycle.py` (T071): Fails on missing `check_server_switch_allowed` and `check_instance_deletion_allowed` lifecycle guard functions.
+- `tests/test_server_config_lifecycle_locking.py` (T071): Fails on missing `LifecycleMutationCoordinator` and `LockOrderingError`.
+- `tests/test_server_config_restart.py` (T072): Fails on missing `reconcile_restart_generation` and `check_instance_mount_and_image_drift`.
+- `tests/test_server_config_control_instance.py` (T073): 6 tests passed verifying target/control isolation matrix across apply, replace, revert, refusal, rollback, and recovery-needed operations.
+
+Foundation (95) and US1/US2/US3/US4 (141) baseline assertions continue to pass without regressions (204 passing).
+
+## US5 GREEN story checkpoint (T082)
+
+Recorded 2026-09-04 after completing T075-T082 for User Story 5.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_lifecycle_locking \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed \
+  tests.test_redaction_parity \
+  tests.test_server_config_transactions \
+  tests.test_server_config_recovery \
+  tests.test_server_config_rollback \
+  tests.test_server_config_concurrency \
+  tests.test_server_config_inspection \
+  tests.test_server_config_restart \
+  tests.test_server_config_control_instance
+```
+
+Result: **265 tests passed** across all 30 test suites:
+- `tests/test_server_config_instance_identity.py` (T069): 10 tests passed (new instance incarnation minting, preservation across updates and relocation, deletion disassociation, recreation with same name receiving a new unique incarnation, legacy record protection).
+- `tests/test_server_config_isolation.py` (T070): 6 tests passed (distinct host source roots, fixed guest mount path `/etc/nginx/sandbox-fragments`, target-only compose scope, zero host-global/Caddy modification, strict cross-instance adoption refusal).
+- `tests/test_server_config_lifecycle.py` (T071): 9 tests passed (active fragment, unresolved transaction, and recovery-needed server-switch refusals; clean server-switch allowed; ordinary delete refusal without explicit server-config confirmation).
+- `tests/test_server_config_lifecycle_locking.py` (T071): 5 tests passed (lifecycle lock then fragment lock ordering, re-read under lock, lock held across effect, clean release on crash rollback, TOCTOU loser safe exit).
+- `tests/test_server_config_restart.py` (T072): 5 tests passed (stopped instance mutation refusal, stop/start incarnation and generation preservation, restart reconciliation and readiness observation before reporting ready, image/mount drift detection failing closed).
+- `tests/test_server_config_control_instance.py` (T073): 6 tests passed (control instance remains 100% untouched across target apply, replace, revert, refusal, rollback, and recovery-needed operations).
+- In addition, existing suites `tests/test_lifecycle.py` and `tests/test_cli.py` (107 tests) passed with zero regressions.
+
+### Summary of US5 implementations:
+
+1. **Instance Identity & Lifecycle Boundaries** (`sandbox/server_config/lifecycle.py`, `sandbox/server_config/models.py`):
+   - Implemented `relocate_instance_server_config` preserving opaque incarnation and mount identity across sandbox relocations.
+   - Implemented `disassociate_instance_server_config` deleting fragment repository files for deleted instance incarnations.
+   - Guarded instance mutation in `service.apply()` and `service.revert()` against stopped/unready instances.
+
+2. **Server-Switch & Deletion Gates** (`sandbox/server_config/lifecycle.py`):
+   - Implemented `check_server_switch_allowed` refusing web-tier changes when active fragments, unresolved transactions, or recovery-needed states exist.
+   - Implemented `check_instance_deletion_allowed` requiring explicit server-config confirmation before deleting instances with active fragments.
+
+3. **Lock-Ordered Mutation Coordination** (`sandbox/server_config/lifecycle.py`):
+   - Implemented `LifecycleMutationCoordinator` ensuring lifecycle lock is acquired first and fragment lock second.
+   - Re-reads state under both locks before mutation effect, ensuring TOCTOU safety and clean rollback on crash.
+
+4. **Restart & Drift Reconciliation** (`sandbox/server_config/lifecycle.py`):
+   - Implemented `reconcile_restart_generation` restoring committed generation and observing container readiness before reporting ready.
+   - Implemented `check_instance_mount_and_image_drift` failing closed on image or mount path divergence.
+

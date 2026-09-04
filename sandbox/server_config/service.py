@@ -394,7 +394,14 @@ class ServerConfigService:
         name: str | None = None,
         content: bytes | None = None,
         authority: str = "wordpress-cache-v1",
+        instance_authority: object = None,
     ) -> OperationResult:
+        auth = instance_authority or self.instance_authority
+        if auth is not None and (getattr(auth, "is_running", True) is False or getattr(auth, "status", "ready") != "ready"):
+            status_text = getattr(auth, "status", None) or ("stopped" if getattr(auth, "is_running", True) is False else "not ready")
+            raise RuntimeError(
+                f"apply blocked for instance '{getattr(auth, 'instance_name', 'unknown')}': instance is {status_text}"
+            )
         if fragment is not None:
             frag_name = fragment.name
             frag = fragment
@@ -804,7 +811,18 @@ class ServerConfigService:
                 return f
         return None
 
-    def revert(self, name: str) -> OperationResult:
+    def revert(
+        self,
+        name: str,
+        *,
+        instance_authority: object = None,
+    ) -> OperationResult:
+        auth = instance_authority or self.instance_authority
+        if auth is not None and (getattr(auth, "is_running", True) is False or getattr(auth, "status", "ready") != "ready"):
+            status_text = getattr(auth, "status", None) or ("stopped" if getattr(auth, "is_running", True) is False else "not ready")
+            raise RuntimeError(
+                f"revert blocked for instance '{getattr(auth, 'instance_name', 'unknown')}': instance is {status_text}"
+            )
         op_deadline = self._operation_deadline()
         try:
             with self.repository.locked(

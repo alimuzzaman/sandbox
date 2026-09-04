@@ -37,5 +37,83 @@ class TestServerConfigLifecycle(unittest.TestCase):
         self.assertEqual(res.regenerations, 0)
         self.assertEqual(res.migrations, 0)
 
+    def test_server_switch_refused_when_active_fragments_exist(self):
+        """T071: Server-switch is refused if instance has active fragments."""
+        from sandbox.server_config.lifecycle import check_server_switch_allowed
+
+        with self.assertRaises(RuntimeError) as ctx:
+            check_server_switch_allowed(
+                instance_name="test-inst",
+                has_active_fragments=True,
+                has_pending_transaction=False,
+                is_recovery_needed=False,
+            )
+        self.assertIn("revert fragments", str(ctx.exception).lower())
+
+    def test_server_switch_refused_when_transaction_unresolved(self):
+        """T071: Server-switch is refused if instance has an unresolved transaction."""
+        from sandbox.server_config.lifecycle import check_server_switch_allowed
+
+        with self.assertRaises(RuntimeError) as ctx:
+            check_server_switch_allowed(
+                instance_name="test-inst",
+                has_active_fragments=False,
+                has_pending_transaction=True,
+                is_recovery_needed=False,
+            )
+        self.assertIn("unresolved", str(ctx.exception).lower())
+
+    def test_server_switch_refused_when_recovery_needed(self):
+        """T071: Server-switch is refused if instance is in recovery-needed state."""
+        from sandbox.server_config.lifecycle import check_server_switch_allowed
+
+        with self.assertRaises(RuntimeError) as ctx:
+            check_server_switch_allowed(
+                instance_name="test-inst",
+                has_active_fragments=False,
+                has_pending_transaction=False,
+                is_recovery_needed=True,
+            )
+        self.assertIn("recovery", str(ctx.exception).lower())
+
+    def test_server_switch_allowed_when_clean(self):
+        """T071: Server-switch is allowed when fragment state is empty and healthy."""
+        from sandbox.server_config.lifecycle import check_server_switch_allowed
+
+        # Should return cleanly without exception
+        check_server_switch_allowed(
+            instance_name="test-inst",
+            has_active_fragments=False,
+            has_pending_transaction=False,
+            is_recovery_needed=False,
+        )
+
+    def test_instance_deletion_refused_when_active_fragments_without_authorization(self):
+        """T071: Deleting an instance with active fragments requires explicit confirmation."""
+        from sandbox.server_config.lifecycle import check_instance_deletion_allowed
+
+        with self.assertRaises(RuntimeError) as ctx:
+            check_instance_deletion_allowed(
+                instance_name="test-inst",
+                has_active_fragments=True,
+                has_pending_transaction=False,
+                is_recovery_needed=False,
+                confirm_server_config=False,
+            )
+        self.assertIn("server-config", str(ctx.exception).lower())
+
+    def test_instance_deletion_allowed_when_confirmed(self):
+        """T071: Deleting an instance with active fragments is allowed when explicitly confirmed."""
+        from sandbox.server_config.lifecycle import check_instance_deletion_allowed
+
+        check_instance_deletion_allowed(
+            instance_name="test-inst",
+            has_active_fragments=True,
+            has_pending_transaction=False,
+            is_recovery_needed=False,
+            confirm_server_config=True,
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

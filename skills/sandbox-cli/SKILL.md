@@ -537,11 +537,47 @@ Use `sb mcp --project-dir .` only when an MCP client needs live tool calls.
 It remains runtime-scoped, so a generic project does not receive WordPress
 tools and a WordPress project does not receive generic container-exec tools.
 
-## Remote host memory
+## Server configuration fragments
 
-Use `sb resources swap-status --remote NAME`; never replace it with SSH or direct host access.
-The current MVP registers only the read-only `host_memory_status` action. Planning, apply,
-disable, and history commands are not available. Treat revision/protocol mismatch, partial
-cgroup evidence, ownership ambiguity, and unmanaged swap as non-authorizing. Live mutation,
-remote runtime updates, and reboot checks need their own approval; synthetic-provider
-evidence is not live proof.
+Use the CLI-first `sb server config` command family for web-tier fragments;
+never substitute raw Docker (`docker exec`, `docker cp`), SSH, or manual vhost
+editing:
+
+```sh
+# Apply a fragment from file or stdin
+sb server config apply --name page-cache --file /path/to/cache.conf
+cat rules.conf | sb server config apply --name rewrite-rules --stdin
+
+# List active fragments (bounded metadata only)
+sb server config list --json
+
+# Show fragment metadata (content is never emitted in default inspection)
+sb server config show page-cache
+
+# Deliberate exact content inspection (human stdout only; incompatible with --json)
+sb server config show page-cache --content
+
+# Export exact content to an owner-only (0600) file
+sb server config show page-cache --output ./exported.conf
+
+# Revert a fragment safely
+sb server config revert page-cache
+```
+
+### Exact-content warning
+
+`sb server config show` intentionally returns only bounded metadata by default.
+Routine channels (list, default show, JSON payloads, logs, error messages, phase
+evidence) never contain raw fragment bytes. To inspect exact content, operators
+must explicitly pass `--content` (which emits raw bytes directly to stdout buffer)
+or `--output <PATH>`. `--content` and `--json` are mutually exclusive.
+
+### Live evidence requirements
+
+When verifying server configuration changes:
+1. Prove live HTTP behavior before and after mutation using supported HTTP tools
+   (`http_fetch`, `curl` through instance URL).
+2. For cache fragments, demonstrate origin pass-through before apply, cache hit
+   after warming, and origin pass-through after revert.
+3. Compare target and control instances before and after every mutation to prove
+   the control instance remains 100% unchanged.

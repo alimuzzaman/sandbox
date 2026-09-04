@@ -672,3 +672,103 @@ Result: **280 tests passed** across all 33 test suites in 10.948s:
    - `show --content` writes raw bytes directly to stdout buffer with zero trailing decorations.
    - Pre-emission checks refuse missing fragments and degraded/recovery-needed instance states before outputting any bytes.
    - Strictly enforced `--content` and `--json` incompatibility in CLI arguments.
+
+## Phase 9 Local Verification & Static Quality Gate (T094–T098)
+
+Recorded 2026-09-04 following completion of documentation, quickstart focused suites, regression runs, and static checks.
+
+### T094: Exact public revisions, changed files, and test matrix
+
+- **Public CLI command family**: `sb server config {apply,list,show,revert}`
+- **Schema version**: `1`
+- **Policy revisions**: `wordpress-cache-v1/nginx-v1/1`, `wordpress-cache-v1/litespeed-v1/1`
+- **Renderer revisions**: `nginx/1`, `litespeed/1`
+- **Authority**: `wordpress-cache-v1`
+- **Changed source files**:
+  - `sandbox/server_config/models.py`: Bounded domain models, `ServerConfigFragment` (metadata only, no public raw content attribute), immutable transaction states, identity projections.
+  - `sandbox/server_config/input.py`: Safe regular-file / stdin bounded readers, permission checks, atomic 0600 file export.
+  - `sandbox/server_config/policy.py`: Deny-by-default directive parsing, secret classification, content-free error formatting.
+  - `sandbox/server_config/repository.py`: File-descriptor-relative atomic operations, `flock` transaction locks, CAS fragment store.
+  - `sandbox/server_config/service.py`: 180s monotonic deadline, two-phase prepared/validated/activating/reloading orchestration, automatic rollback, recovery-needed latching, exact content retrieval.
+  - `sandbox/server_config/lifecycle.py`: Lock-ordered lifecycle coordinator, incarnation preservation, server-switch and deletion gates, restart reconciliation.
+  - `sandbox/server_config/context.py` & `sandbox/application/context.py`: Dependency composition, service wiring.
+  - `sandbox/server_config/adapters/manifest.py`: Server-type dispatch (`nginx`, `litespeed` registered; `apache`, `herd` refused).
+  - `sandbox/server_config/adapters/nginx.py`: Nginx template renderer, exact-image isolated validation, reload and readiness observation.
+  - `sandbox/server_config/adapters/openlitespeed.py`: OLS vhost renderer, exact-image isolated validation (`--network none`, read-only root), reload and readiness observation.
+  - `sandbox/commands/server.py`: CLI command dispatcher for `server config`, argument validation, exact stdout mode, basename JSON export.
+  - `sandbox/core/_docker.py`, `sandbox/core/_instances.py`, `sandbox/core/_provision.py`: Incarnation-specific mount provisioning, drift detection.
+- **Documentation & Agent Skills**:
+  - `docs/sandbox-config-reference.md`: Comprehensive reference for `sb server config`, bounds, outcomes, lifecycle gates.
+  - `skills/sandbox-cli/SKILL.md` & `.agents/skills/sandbox-cli/SKILL.md`: CLI-first operating guidelines, exact-content warning, live evidence requirements.
+  - `README.md` & `CLAUDE.md`: Discoverability, security boundaries, non-negotiable rules.
+- **Known Unsupported Cases**:
+  - `apache`: Refused fail-closed with `server_unsupported`.
+  - `herd`: Refused fail-closed with `server_unsupported`.
+  - Legacy unattached instances without fragment mounts: Refused fail-closed with `mount_unattached`.
+  - Host-global directives (`upstream`, `resolver`, `ssl_*`, `caddy_*`, `module`, `admin`, `listener`, `extprocessor`): Refused fail-closed.
+  - Non-regular files (symlinks, devices, FIFOs, directories): Refused fail-closed.
+  - Files > 262,144 bytes: Refused fail-closed.
+  - Files matching high-confidence secret patterns: Refused fail-closed.
+
+### T095: Quickstart focused suites run
+
+Command:
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_cli \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_isolation \
+  tests.test_cli \
+  tests.test_modularity \
+  tests.test_lifecycle
+```
+Result: **Ran 213 tests in 120.781s: OK**. Zero failures or errors.
+
+### T096: Regression suites across Feature 048-051 and architecture contracts
+
+Command:
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_host_recovery_models \
+  tests.test_host_recovery_policy \
+  tests.test_host_recovery_repository \
+  tests.test_host_recovery_service \
+  tests.test_host_recovery_cli \
+  tests.test_hosting_image_trust \
+  tests.test_hosting_image_contracts \
+  tests.test_hosting_image_boundaries \
+  tests.test_hosting_image_staging_policy \
+  tests.test_hosting_image_staging_process \
+  tests.test_hosting_image_staging_repository \
+  tests.test_hosting_image_staging_secrets \
+  tests.test_hosting_image_staging_service \
+  tests.test_hosting_image_activation_models \
+  tests.test_hosting_image_activation_policy \
+  tests.test_hosting_image_activation_repository \
+  tests.test_hosting_image_activation_service \
+  tests.test_hosting_image_activation_cli \
+  tests.test_hosting_image_activation_recovery \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_clean_url_default_policy \
+  tests.test_redaction_parity
+```
+Result: **Ran 302 tests in 23.308s: OK**. Zero regressions. Feature 048-051 boundaries and contracts remain completely intact.
+
+### T097: Static quality gate & secret marker audit
+
+1. `py_compile`: Executed across all changed Python files. **0 syntax/compilation errors**.
+2. `git diff --check`: Clean exit code 0. Zero trailing whitespace, indentation errors, or EOF issues.
+3. Canary leak audit (`CANARY_TOKEN_ALPHA_774921`): Zero leakage across tracked codebase outside test definitions.
+
+### T098: Command help, JSON, and docs parity
+
+- Executed `./sb server config --help`, `apply --help`, `list --help`, `show --help`, `revert --help`.
+- All argument signatures, options, mutually exclusive groups (`--file`/`--stdin`, `--content`/`--output`), and defaults strictly match `specs/053-server-config-fragments/contracts/cli.md` and documentation in `docs/sandbox-config-reference.md`.

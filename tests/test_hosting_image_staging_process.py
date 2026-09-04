@@ -10,6 +10,14 @@ from tests.hosting_image_fixtures import stage_request
 
 
 class TestImageStagingProcess(unittest.TestCase):
+    def test_helper_recreates_authenticated_projected_machine_identity(self):
+        import hashlib
+        from unittest.mock import patch
+        from sandbox.hosting.images import staging_helper
+        with patch.object(staging_helper.platform, "node", return_value="stable-node-a"):
+            self.assertEqual(staging_helper._projected_machine_identity(),
+                hashlib.sha256(b"stable-node-a").hexdigest()[:24])
+
     def test_unit_identity_is_request_bound_not_pid_bound(self):
         from sandbox.hosting.images.staging_worker import unit_name
         request = stage_request(); first = unit_name(request.request_id, request.request_digest)

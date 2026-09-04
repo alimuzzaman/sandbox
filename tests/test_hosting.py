@@ -153,8 +153,9 @@ def _run_host_observer_fixture(services, rows, inspections, *, deadline=10,
             prefix, services, ["LENZORA_SOURCE_REVISION"], deadline,
             source_dir=str(ROOT),
         )
-        environment = dict(os.environ)
-        environment["PATH"] = str(root) + os.pathsep + environment.get("PATH", os.defpath)
+        from tests.subprocess_support import synthetic_environment
+
+        environment = synthetic_environment({"PATH": str(root) + os.pathsep + os.defpath})
         started = time.monotonic()
         result = subprocess.run(
             shlex.split(command), capture_output=True, text=True,

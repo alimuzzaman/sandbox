@@ -1,0 +1,32 @@
+[Unit]
+Description=Sandbox Owned Storage Mount Controller
+Documentation=https://github.com/alimuzzaman/sandbox
+After=sandbox-owned-storage.service
+
+[Service]
+Type=simple
+User=sandbox-owned-storage
+Group=sandbox-owned-storage
+ExecStart=/usr/bin/python3 /opt/sandbox/tools/owned-storage-mount-controller.py
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=30s
+
+# Namespace and mount isolation
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+StateDirectory=sandbox-owned-storage
+RuntimeDirectory=sandbox-owned-storage
+WorkingDirectory=/var/lib/sandbox-owned-storage
+
+[Install]
+WantedBy=multi-user.target

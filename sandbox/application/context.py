@@ -94,6 +94,103 @@ def runtime_neutral_dependencies(
     )
 
 
+def server_config_dependencies(
+    *, registry: Any, server_config_root: str | Path,
+    project_identity_resolver, clock=None, repository_factory=None,
+    adapters=None,
+):
+    """Compose server-config mechanisms from explicit local dependencies.
+
+    Construction performs no registry, repository, runtime, or environment
+    reads.  The feature package therefore remains independent of the legacy
+    compatibility facade and all host/remote activation authorities.
+    """
+    from sandbox.server_config.context import ServerConfigDependencies, SystemClock
+    from sandbox.server_config.adapters.manifest import default_adapter_registry
+    from sandbox.server_config.repository import ServerConfigRepository
+
+    root = Path(server_config_root)
+    if repository_factory is None:
+        def repository_factory(incarnation):
+            return ServerConfigRepository(root, incarnation)
+    return ServerConfigDependencies(
+        registry=registry,
+        server_config_root=root,
+        project_identity_resolver=project_identity_resolver,
+        repository_factory=repository_factory,
+        adapters=adapters or default_adapter_registry(),
+        clock=clock or SystemClock(),
+    )
+
+
+def get_server_config_service(cfg: Any = None, instance_name: str | None = None, **overrides) -> Any:
+    """Compose ServerConfigService for an instance without exposing OCI or host authority."""
+    import sandbox_core as sc
+    from sandbox.server_config.context import SystemClock, project_instance_context
+    from sandbox.server_config.gateway import LocalDockerServerConfigGateway
+    from sandbox.server_config.models import ServerType
+    from sandbox.server_config.repository import ServerConfigRepository
+    from sandbox.server_config.service import ServerConfigService
+    from sandbox.server_config.adapters.nginx import NginxAdapter
+    from sandbox.server_config.adapters.openlitespeed import OpenLiteSpeedAdapter
+
+    if overrides.get("service") is not None:
+        return overrides["service"]
+
+    record = None
+    if instance_name:
+        record = sc.registry_find_instance(instance_name)
+    else:
+        root = sc.find_project_root()
+        if root:
+            record = sc.registry_get(root)
+    if not record:
+        return None
+
+    incarnation = record.get("instance_incarnation_id")
+    if not incarnation:
+        return None
+
+    raw_server = record.get("server") or "nginx"
+    try:
+        server_type = ServerType(raw_server)
+    except (TypeError, ValueError):
+        return None
+
+    server_config_root = overrides.get("server_config_root") or (sc.sandbox_base() / "runtime" / "server-config")
+    clock = overrides.get("clock") or SystemClock()
+    repo = overrides.get("repository") or ServerConfigRepository(server_config_root, incarnation)
+
+    context = project_instance_context(
+        record=record,
+        project_identity=record.get("identity") or f"project:{record.get('instance')}",
+        server_config_root=server_config_root,
+    )
+
+    gateway = overrides.get("gateway")
+    if gateway is None:
+        gateway = LocalDockerServerConfigGateway(
+            instance_name=str(record.get("instance")),
+            server_type=server_type,
+            incarnation_id=incarnation,
+            server_config_root=server_config_root,
+        )
+
+    if server_type == ServerType.NGINX:
+        adapter = overrides.get("adapter") or NginxAdapter(gateway=gateway)
+    elif server_type == ServerType.LITESPEED:
+        adapter = overrides.get("adapter") or OpenLiteSpeedAdapter(gateway=gateway)
+    else:
+        return None
+
+    return ServerConfigService(
+        repository=repo,
+        adapter=adapter,
+        clock=clock,
+        instance_authority=context.authority,
+    )
+
+
 def domain_service(cfg, **overrides):
     """Compose scoped naming policy without importing a compatibility facade."""
     import platform as host_platform

@@ -137,6 +137,35 @@ def audit_metrics() -> dict[str, int]:
 
 
 class TestModularityInventory(unittest.TestCase):
+    def test_server_config_uses_only_typed_composition_boundaries(self):
+        package = ROOT / "sandbox/server_config"
+        violations = []
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    imported = {item.name for item in node.names}
+                    if module == "sandbox.registry" and "COMMANDS" in imported:
+                        violations.append(str(path.relative_to(ROOT)))
+                    if module in {
+                        "sandbox.hermes.facade",
+                        "sandbox_core",
+                        "mcp.wp-server.app",
+                    }:
+                        violations.append(str(path.relative_to(ROOT)))
+                elif isinstance(node, ast.Import):
+                    if any(
+                        item.name in {
+                            "sandbox_core",
+                            "sandbox.hermes.facade",
+                            "mcp.wp-server.app",
+                        }
+                        for item in node.names
+                    ):
+                        violations.append(str(path.relative_to(ROOT)))
+        self.assertEqual(violations, [])
+
     def test_instance_delete_declares_legacy_compose_helper(self):
         # The delete compatibility path still needs the canonical compose-file
         # resolver after wildcard imports are removed from instances_cmd.
@@ -148,10 +177,10 @@ class TestModularityInventory(unittest.TestCase):
         self.assertEqual(
             audit_metrics(),
             {
-                "cli_commands": 90,
+                "cli_commands": 91,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "kind_referencing_conditionals": 212,
+                "kind_referencing_conditionals": 237,
             },
         )
 

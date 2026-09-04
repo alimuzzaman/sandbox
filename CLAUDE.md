@@ -57,6 +57,14 @@ store and keep one dependency-tree child per canonical runtime. Reclaim requires
 read-only exact-family plan plus confirmed apply; never infer a family, emit wildcard/broad
 reclaim, take unapproved remote action, or turn estimates into measurement claims.
 
+**Server configuration fragments.** Web-tier fragments must use `./sb server config`
+(`apply`, `list`, `show`, `revert`). Never substitute raw Docker (`docker exec`, `docker cp`),
+SSH, or manual vhost editing. Fragments are instance-scoped, validated in isolated containers
+(`--network none`, read-only root), and bound to instance incarnation; Apache and Herd are
+unsupported. Default show/list/error channels never emit raw fragment content; exact bytes are
+emitted only upon explicit `--content` or `--output`. Server config has no unconstrained MCP
+tool to protect against unauthorized web-tier routing mutation.
+
 ---
 
 ## Plugin code rules

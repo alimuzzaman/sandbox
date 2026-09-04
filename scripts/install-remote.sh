@@ -202,3 +202,37 @@ fi
 python3 "$SANDBOX_HOME/sb-src/scripts/provision_image_stage_helper.py" \
     --sandbox-home "$SANDBOX_HOME" --runtime-revision "$STAGING_RUNTIME_REVISION"
 ok "image staging helper provisioned"
+
+# --- owned storage authority assets -------------------------------------
+# Stage and optionally deploy systemd unit and tool assets for the owned storage
+# authority. First-time remote provisioning verifies unit and script assets in
+# the staged runtime without starting unapproved services or mutating privilege.
+log "staging owned storage authority assets"
+if [[ -d "$SANDBOX_HOME/sb-src/config/systemd" ]]; then
+    for unit in sandbox-owned-storage.service sandbox-owned-storage.socket \
+                sandbox-owned-storage-controller.service sandbox-owned-storage-controller.socket \
+                sandbox-owned-storage-mount.service sandbox-owned-storage.sysusers; do
+        if [[ ! -f "$SANDBOX_HOME/sb-src/config/systemd/$unit" ]]; then
+            echo "missing required owned storage systemd unit template: $unit" >&2
+            exit 1
+        fi
+    done
+    ok "owned storage authority units verified in staged runtime"
+fi
+
+if [[ "${SANDBOX_DEPLOY_OWNED_STORAGE:-0}" == "1" ]]; then
+    log "deploying owned storage systemd units and sysusers"
+    if [[ -f "$SANDBOX_HOME/sb-src/config/systemd/sandbox-owned-storage.sysusers" ]]; then
+        $SUDO cp "$SANDBOX_HOME/sb-src/config/systemd/sandbox-owned-storage.sysusers" /etc/sysusers.d/sandbox-owned-storage.conf 2>/dev/null || true
+    fi
+    for unit in sandbox-owned-storage.service sandbox-owned-storage.socket \
+                sandbox-owned-storage-controller.service sandbox-owned-storage-controller.socket \
+                sandbox-owned-storage-mount.service; do
+        $SUDO cp "$SANDBOX_HOME/sb-src/config/systemd/$unit" "/etc/systemd/system/$unit" 2>/dev/null || true
+    done
+    if command -v systemctl >/dev/null 2>&1; then
+        $SUDO systemctl daemon-reload 2>/dev/null || true
+    fi
+    ok "owned storage authority units deployed"
+fi
+

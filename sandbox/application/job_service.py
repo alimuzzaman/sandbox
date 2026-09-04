@@ -53,6 +53,7 @@ class JobService:
     runtime_selector: Any = None
     workspace_registry: Any = None
     sync_gateway: Any = None
+    mount_controller: Any = None
 
     def submit(self, submission: JobSubmission):
         pending_sync = False
@@ -108,7 +109,19 @@ class JobService:
                     "ci_cleanup_authority")
                 if isinstance(authority, dict):
                     workspace_authority_digest = authority.get("digest")
+                if self.mount_controller is not None and getattr(workspace, "metadata", {}).get("work_fd") is not None:
+                    meta = workspace.metadata
+                    try:
+                        mount_res = self.mount_controller.mount_materialization(
+                            work_fd=meta["work_fd"],
+                            source_fd=meta.get("source_fd"),
+                        )
+                        if mount_res.get("ok") and mount_res.get("mount_identity_digest"):
+                            workspace_authority_digest = mount_res["mount_identity_digest"]
+                    except Exception:
+                        pass
             row, replay = self.repository.accept(
+
                 submission, workspace_id=workspace_id,
                 workspace_authority_digest=workspace_authority_digest,
                 request_digest=request_digest)
@@ -567,8 +580,16 @@ class JobService:
                 self.repository, job_id, context,
                 workspace_service=self.workspace_registry)
         finally:
+            if self.mount_controller is not None:
+                job_row = self.repository.get(job_id)
+                if job_row and job_row.get("workspace_authority_digest"):
+                    try:
+                        self.mount_controller.unmount_materialization(job_row["workspace_authority_digest"])
+                    except Exception:
+                        pass
             if self.sync_gateway is not None:
                 self.sync_gateway.release_job(job_id)
+
 
     @staticmethod
     def _supervisor_is_owned(snapshot: dict) -> bool:
@@ -1104,6 +1125,16 @@ class JobService:
                     hasattr(self.workspace_registry, "retire_terminal_materialization") and
                     self.workspace_registry.retire_terminal_materialization(state)):
                 removed.append("workspace_materialization")
+            if (self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "release_terminal_job") and
+                    state.get("cleanup_state") != "completed"):
+                try:
+                    rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
+                    if rel_res.get("ok"):
+                        removed.append("workspace_cleanup")
+                except Exception:
+                    pass
+
         if metrics:
             metric_file = directory / "metrics.jsonl"
             metric_dir = directory / "metrics"

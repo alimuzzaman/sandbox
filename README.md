@@ -552,7 +552,33 @@ Projects whose service startup bootstraps dependencies can declare a bounded
 into `compose.recreateOnEnsure` to rerun that bootstrap after each deployed
 source revision while retaining named volumes.
 If the health deadline expires, the durable result includes a bounded tail of
-the declared service's Compose logs for diagnosis.
+### Instance-scoped server configuration fragments
+
+Use the CLI-first `sb server config` command family to apply, inspect, list, and
+revert web server configuration fragments without manual container or SSH edits:
+
+```bash
+./sb server config apply --name page-cache --file ./page-cache.conf
+./sb server config list --json
+./sb server config show page-cache
+./sb server config show page-cache --content   # deliberate exact stdout; incompatible with --json
+./sb server config show page-cache --output ./exported.conf
+./sb server config revert page-cache
+```
+
+- **Scope & boundary**: Strictly instance-scoped. Modifies only the instance-specific
+  container configuration mount; host Caddy, host DNS, and global server settings are
+  never modified.
+- **Safety & validation**: Input is parsed and validated in an isolated exact-image container
+  (`--network none`, read-only root) before activation. Post-validation reload failures
+  automatically restore the prior generation.
+- **Content protection**: Default inspection channels (`list`, `show`, `--json`, logs,
+  error messages) emit bounded metadata only. Exact bytes are emitted only upon explicit
+  `--content` or `--output`.
+- **Compatibility**: Supports `nginx` and `litespeed`. Unsupported web servers (`apache`,
+  `herd`) are refused fail-closed with `server_unsupported`. Server configuration is
+  CLI-first and intentionally not exposed as an unconstrained MCP tool to avoid unauthorized
+  web-tier mutations.
 
 Use the same runtime operations without an MCP client:
 

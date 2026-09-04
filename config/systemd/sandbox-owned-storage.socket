@@ -1,0 +1,14 @@
+[Unit]
+Description=Sandbox Owned Storage Authority Socket
+Documentation=https://github.com/alimuzzaman/sandbox
+
+[Socket]
+ListenStream=/run/sandbox-owned-storage/authority.sock
+SocketUser=sandbox-owned-storage
+SocketGroup=sandbox-owned-storage
+SocketMode=0660
+DirectoryMode=0755
+Service=sandbox-owned-storage.service
+
+[Install]
+WantedBy=sockets.target

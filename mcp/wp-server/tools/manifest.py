@@ -11,11 +11,11 @@ BUILTIN_TOOL_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
     "resources", "feedback",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs", "secrets",
-    "plugin_check", "remote", "hermes", "recovery", "sync",
+    "plugin_check", "remote", "hermes", "recovery", "sync", "owned_storage",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources", "feedback", "sync",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources", "feedback", "sync", "owned_storage",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -24,10 +24,10 @@ DEFAULT_MCP_GROUPS = (
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
-    "resources", "feedback", "sync",
+    "resources", "feedback", "sync", "owned_storage",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "net", "remote", "resources", "feedback", "sync",
+    "instances", "domains", "runtime", "jobs", "net", "remote", "resources", "feedback", "sync", "owned_storage",
 )
 
 
@@ -65,6 +65,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "feedback": ("feedback_service_factory",),
     "secrets": ("secret_service_factory",),
     "sync": ("sync_service",),
+    "owned_storage": (),
 }
 
 # Exact registration ownership and order, kept separate from implementation
@@ -99,6 +100,12 @@ BUILTIN_TOOL_NAMES = {
     "sync": ("sync_once", "sync_status", "sync_start", "sync_stop", "sync_resolve"),
     "secrets": (
         "secret_source_info", "secret_inspect", "secret_validate", "secret_use_profile",
+    ),
+    "owned_storage": (
+        "owned_storage_capability",
+        "owned_storage_status",
+        "owned_storage_preview",
+        "owned_storage_reclaim",
     ),
 }
 

@@ -246,7 +246,7 @@ target.update(imported_parent.values())
         load_builtin_commands()
         # The request-activation command is now part of the explicit built-in
         # manifest; keep this inventory tied to the shipped command set.
-        self.assertEqual(len(COMMANDS), 90)
+        self.assertEqual(len(COMMANDS), 91)
         self.assertEqual(validate_builtin_command_coverage(), ())
 
         import sys
@@ -254,12 +254,12 @@ target.update(imported_parent.values())
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 25)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 26)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 134)
+            self.assertEqual(len(tool_names), 138)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))

@@ -28,6 +28,8 @@ MAX_STAGE_FRAME_BYTES = 1024 * 1024
 MAX_PERSISTED_LEDGER_COUNTER = 9007199254740991
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_REPOSITORY_DIGEST = re.compile(
+    r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _UTC_DEADLINE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _HOST_ACCEPTANCE_RECEIPT = re.compile(r"host-acceptance/[0-9a-f]{64}\Z")
@@ -40,7 +42,7 @@ _RESULT_CODES = frozenset({
     "process_unproven", "unknown_effect", "cancelled", "acceptance_unknown",
     "lease_conflict", "lease_capacity", "lease_expired", "acceptance_ambiguous",
     "holder_mismatch", "terminal_not_durable", "target_busy",
-    "accepted", "in_progress",
+    "precredential_bootstrap_failed", "cleanup_reconciled", "accepted", "in_progress",
 })
 
 
@@ -63,6 +65,16 @@ def _text(value: object, *, identity: bool = False) -> str:
 def _digest(value: object) -> str:
     if type(value) is not str or _DIGEST.fullmatch(value) is None:
         raise StagingContractError()
+    return value
+
+
+def _local_image_id(value: object, repository_digest: str) -> str:
+    """Accept Docker's config digest or Docker 29's manifest image ID."""
+    if type(value) is not str or (
+            value != repository_digest and _DIGEST.fullmatch(value) is None):
+        raise StagingContractError("observation_invalid")
+    if _REPOSITORY_DIGEST.fullmatch(repository_digest) is None:
+        raise StagingContractError("observation_invalid")
     return value
 
 
@@ -271,14 +283,15 @@ class LocalImageObservation:
     observation_digest: str
 
     def __post_init__(self) -> None:
-        _digest(self.observation_id); _digest(self.config_digest); _digest(self.local_image_id)
+        _digest(self.observation_id); _digest(self.config_digest)
+        _local_image_id(self.local_image_id, self.repo_digest)
         _digest(self.topology_digest); _digest(self.observation_digest)
         for value in (self.target_epoch_start, self.target_epoch_end,
                       self.daemon_epoch_start, self.daemon_epoch_end):
             _text(value, identity=True)
         if self.target_epoch_start != self.target_epoch_end \
                 or self.daemon_epoch_start != self.daemon_epoch_end \
-                or self.local_image_id != self.config_digest \
+                or self.local_image_id not in {self.config_digest, self.repo_digest} \
                 or type(self.platform) is not dict or type(self.observed_topology) is not dict:
             raise StagingContractError("observation_invalid")
         if self.topology_digest != staging_digest(
@@ -388,7 +401,8 @@ class StagedImageProof:
                 or observed["repository"] != projection.image.repository \
                 or observed["repo_digest"] != projection.image.repository_qualified_digest \
                 or observed["config_digest"] != projection.image.config_digest \
-                or observed["local_image_id"] != observed["config_digest"] \
+                or observed["local_image_id"] not in {
+                    observed["config_digest"], observed["repo_digest"]} \
                 or observed["platform"] != projection.image.platform.as_mapping() \
                 or observed["observed_topology"] != projection.topology.as_mapping() \
                 or observed["topology_digest"] != staging_digest(

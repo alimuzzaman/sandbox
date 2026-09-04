@@ -37,7 +37,7 @@ class JobRegistryTests(unittest.TestCase):
 
     def test_schema_uses_wal_foreign_keys_and_version(self):
         repo = self.repository()
-        self.assertEqual(repo.schema_version(), 6)
+        self.assertEqual(repo.schema_version(), 7)
         self.assertEqual(repo.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(repo.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         names = {row[0] for row in repo.connection.execute(
@@ -292,7 +292,7 @@ class JobRegistryTests(unittest.TestCase):
                 connection.execute("ALTER TABLE jobs DROP COLUMN submission_json")
             connection.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
         reopened = self.repository()
-        self.assertEqual(reopened.schema_version(), 6)
+        self.assertEqual(reopened.schema_version(), 7)
         self.assertIsNone(reopened.submission_snapshot(row["job_id"]))
         self.assertEqual(reopened.get(row["job_id"])["lifecycle"], "accepted")
 

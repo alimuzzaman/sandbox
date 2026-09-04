@@ -220,7 +220,9 @@ class TestImageStagingSecrets(unittest.TestCase):
                     if command[:2] == ("docker", "info"):
                         return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
                     topology = plan["topology"]
-                    inspect = {"Id": plan["config_digest"],
+                    # Docker 29 may expose the exact pulled manifest as the
+                    # local image ID; config_digest remains receipt-bound.
+                    inspect = {"Id": plan["repository_qualified_digest"],
                         "RepoDigests": [plan["repository_qualified_digest"]],
                         "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
                             staging_helper.TOPOLOGY_LABEL: json.dumps(topology,
@@ -245,7 +247,9 @@ class TestImageStagingSecrets(unittest.TestCase):
                 response = lease.consume(lambda credential: staging_helper.execute(
                     plan, credential, run_root=verified, runner=runner,
                     anonymous_probe=lambda *_args: True,
-                    cgroup_identity=lambda _unit: "/system.slice/" + plan["unit_name"],
+                    cgroup_identity=lambda _unit: (
+                        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                        + plan["unit_name"]),
                     machine_epoch_reader=lambda: "machine-a", remover=remover))
                 self.assertIsNone(lease._material)
                 captured_bytes = repr({"argv": captured["argv"],

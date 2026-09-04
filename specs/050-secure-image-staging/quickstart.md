@@ -30,9 +30,12 @@ the fixed stage-ledger authority, and the exact committed record revision before
 admission. The stage lock stays held through admission, lease preparation, durable host
 acceptance, and pin promotion. Load rejects partial/corrupt proofs, overlapping tombstone and
 retained authority, or more than 64 records/proofs, 4096 tombstones, or 64 pins.
-The helper workspace parent must be a root-owned 0700 directory on the `/run` tmpfs,
-proved before READY. READY itself has a finite timeout and timeout kills the whole unit.
-The retained unit is stopped and its exact cgroup checked before explicit collection.
+The helper workspace parent is derived as
+`/run/user/<effective-uid>/sandbox-image-stage` and must be service-user-owned `0700`
+on tmpfs, proved without following links before READY. READY itself has a finite timeout
+and timeout kills the whole exact owned user unit. After normal success the user unit
+may already be unloaded; exact not-found/inactive state plus launch-cgroup removal is
+valid terminal evidence, while a retained loaded unit must be the same inactive attempt.
 
 ## Focused checks
 
@@ -75,8 +78,49 @@ Observed retained-proof custody hardening evidence (2026-09-02):
 - A fresh independent Sol High post-hardening source-security review returned **GO** for
   source commit and merge into `latest`; it was automated, not human review.
 
+Observed user-unit bootstrap recovery evidence (2026-09-03):
+
+- The focused Feature 050 transport, cleanup, bootstrap parser, helper self-check,
+  mapped-anchor, and v1/v2 durable-evidence selector ran **83 tests in 8.680s: OK**.
+- `compileall` and `git diff --check` passed for the changed Feature 050 sources.
+- An independent Sol High source review returned **PASS with no P0-P2 findings**; it was
+  automated, not human review.
+- No live remote staging, registry access, secret use, deployment, or production mutation
+  was performed. Those remain separate authorized gates.
+
+Observed v2 pre-credential convergence evidence (2026-09-03):
+
+- The two directly affected Feature 050 process and v2 staging modules ran **34 tests in
+  0.503s: OK**.
+- `compileall` passed for the changed production surfaces and `git diff --check` passed.
+- An independent Sol High source review returned **PASS with no P0-P2 findings**; it was
+  automated, not human review.
+- No ledger, remote, broker, secret, registry, Docker, helper, deployment, Lenzora, or
+  production mutation was performed.
+
+Observed staging/activation generation separation evidence (2026-09-03):
+
+- The focused stage-bundle provisioning regression ran **1 test in 0.106s: OK**.
+- It proves activation generation `0` can safely provision a new stage bundle while the
+  independent staging ledger is already at generation `1`; the returned stage generation
+  remains the exact fence for the later `host stage` request.
+- `compileall` and `git diff --check` passed for the changed source and test surfaces.
+- This local regression is source evidence only. It does not claim staging, registry,
+  activation, deployment, edge, or production success.
+
 All subprocess fixtures use `tests.subprocess_support.synthetic_environment`; no test
 copies/enumerates the parent environment.
+
+Observed bounded v2 pull-diagnostic source evidence (2026-09-03):
+
+- The focused v2 staging module ran **29 tests in 0.444s: OK**.
+- The adjacent v1 staging, repository, secret-cleanup, process, and remote-transport
+  modules ran **84 tests in 8.824s: OK**.
+- Focused tests cover all six closed classes, helper redaction, malformed-field refusal,
+  terminal ledger/status replay, legacy v2 records without the optional diagnostic, and
+  unchanged v1 behavior. `compileall` and `git diff --check` passed.
+- No remote migration, registry access, secret use, deployment, production retry, or
+  production mutation was performed.
 
 ## Later authorized acceptance
 
@@ -92,7 +136,7 @@ before any Feature 051 activation work.
 | Stage ledger durability | Current Feature 048 repository durability concepts | Independently implemented in a separate per-target ledger; component-wise no-follow creation, owner/mode/type validation and creation fsync; never reads/writes/parses `hosts.json` and does not reuse the Feature 048 target lock |
 | Stage ownership/capacity | Feature 050 spec and data model | Durable per-target owner/phase/effect/process identity; 1-MiB proof plus envelope reserved before effects; exact 16-MiB serialization checked; uncertainty remains fenced |
 | Credential delivery | Current `sandbox/isolation/credential_resolver.py` `BrokerLease.consume` callback and registered source revision APIs | One atomic source snapshot derives both opaque revision and one-use lease bytes before helper launch; consume atomically detaches or loses to invalidation, never reopens/falls back, and wipes detached material after every callback path; generic leases remain separate |
-| Remote execution | Current registered `sandbox.core._remote` lookup/SSH argument seams | Root-owned regular artifact/manifest and directory chain are opened no-follow; the verified helper descriptor is hashed then executed through `/proc/self/fd`; finite READY timeout and retained-unit verification; no generic transport or activation path |
+| Remote execution | Current registered `sandbox.core._remote` lookup/SSH argument seams | Service-user-owned regular artifact/manifest and protected helper namespace are opened no-follow; traversal starts at an accessible absolute top-level directory and accepts a user-manager mapped UID only there, while the home and descendants remain exact service-user ownership; the verified helper descriptor is hashed then executed through `/proc/self/fd`; finite closed pre-READY protocol and retained-unit verification; no generic transport or activation path |
 | Process ownership | Feature 050 specification and current systemd/cgroup-v2 platform contract | Exact transient unit, `KillMode=control-group`, no delegation/escape, inactive plus empty/removed cgroup; no PID/process-group authority |
 | Local image evidence | Docker immutable image ID/config digest, RepoDigests, platform fields, and digest-bound `org.sandbox.application-topology.v1` config label | Machine and daemon start/end epochs, registry observation, topology, local observation, and final proof digests are recomputed at model boundaries |
 | Proof custody | Feature 050 proof lease contract | Reachable only under target mutation -> atomic host state -> stage ledger lock; transaction-authenticated evidence drives promote/cancel/release; retained proof generation and commit ledger revision remain stable across later stages |
@@ -114,3 +158,14 @@ The user-required independent Sol High source/security review was automated, not
 the repair rounds its final verdict reported no critical, high, or medium findings. Live secret
 use, live GHCR access, live remote mutation, deployment, and production evidence were explicitly
 unattempted and remain separately authorized gates.
+
+## Provision the v2 staging bundle
+
+Run `./sb host image provision --provision-phase stage-bundle --project-dir PROJECT
+--environment ENV --remote REMOTE --verified-plan PLAN_SET --expected-generation GENERATION
+--credential-source-reference SOURCE/KEY --credential-expires-at RFC3339 --confirm --json`.
+`GENERATION` is the exact current activation/hosting generation. The command separately reads
+and returns the exact stage generation and stage-ledger revision for the later staging request;
+the two counters are intentionally independent. Output is limited to target identity, exact
+activation/stage generation and ledger revision, plan/policy digests, disposition, and installed
+path. Existing protected `host stage` remains the sole staging effect.

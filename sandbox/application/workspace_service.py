@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -14,12 +15,12 @@ import tarfile
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from sandbox.workspaces import WorkspaceIndexError, WorkspaceRepository
 from sandbox.jobs.process import ProcessIdentity, capture_process_identity, verify_process_identity
@@ -33,6 +34,8 @@ class WorkspaceServiceProtocol(Protocol):
     def migration_apply(self, request): ...
     def reset(self, request): ...
     def destroy(self, request): ...
+    def publish_sync(self, request): ...
+    def reconcile_sync(self, request): ...
 
 
 _INCOMPLETE = {"unresolved", "conflict", "incomplete", "invalid", "indeterminate"}
@@ -47,6 +50,76 @@ _REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
 _REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
 _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
 _LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
+_SYNC_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_SYNC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_SYNC_MAX_BYTES = 512 * 1024 * 1024
+_SYNC_MAX_FILES = 1_000_000
+
+
+@dataclass(frozen=True)
+class SyncPublishRequest:
+    """Opaque, path-free request for one controller-owned sync publication."""
+
+    workspace_id: str
+    project_identity: str
+    generation_id: str
+    manifest_digest: str
+    archive_manifest_digest: str
+    file_count: int
+    byte_count: int
+    expected_index_generation: int
+    archive_bytes: bytes = b""
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.workspace_id, "workspace id"),
+            (self.project_identity, "project identity"),
+            (self.generation_id, "generation id"),
+        ):
+            if not isinstance(value, str) or _SYNC_ID.fullmatch(value) is None:
+                raise ValueError(f"{label} is invalid")
+        for value, label in (
+            (self.manifest_digest, "manifest digest"),
+            (self.archive_manifest_digest, "archive manifest digest"),
+        ):
+            if not isinstance(value, str) or _SYNC_DIGEST.fullmatch(value) is None:
+                raise ValueError(f"{label} is invalid")
+        for value, label in (
+            (self.file_count, "file count"),
+            (self.byte_count, "byte count"),
+            (self.expected_index_generation, "expected index generation"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{label} must be a non-negative integer")
+        if self.file_count > _SYNC_MAX_FILES or self.byte_count > _SYNC_MAX_BYTES:
+            raise ValueError("synchronization generation exceeds its bound")
+        if not isinstance(self.archive_bytes, bytes):
+            raise ValueError("synchronization archive is invalid")
+        if len(self.archive_bytes) > self.byte_count + 16 * 1024 * 1024:
+            raise ValueError("synchronization archive exceeds its bound")
+
+
+@dataclass(frozen=True)
+class SyncReconcileRequest:
+    workspace_id: str
+    project_identity: str
+    generation_id: str
+    manifest_digest: str
+    file_count: int
+    byte_count: int
+    expected_index_generation: int
+
+    def __post_init__(self) -> None:
+        SyncPublishRequest(
+            workspace_id=self.workspace_id,
+            project_identity=self.project_identity,
+            generation_id=self.generation_id,
+            manifest_digest=self.manifest_digest,
+            archive_manifest_digest="0" * 64,
+            file_count=self.file_count,
+            byte_count=self.byte_count,
+            expected_index_generation=self.expected_index_generation,
+        )
 MAX_CI_MATERIALIZATION_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_CI_MATERIALIZATION_ENTRIES = 100_000
 MIN_CI_MATERIALIZATION_FREE_RESERVE_BYTES = 1024 * 1024 * 1024
@@ -460,6 +533,29 @@ def _public_record(record, repository: WorkspaceRepository, *,
         )
         if isinstance(record.metadata.get(key), str)
     }
+    def live_directory(locator_key: str, digest: str | None) -> bool:
+        locator = record.metadata.get(locator_key)
+        if (
+            not isinstance(locator, str)
+            or not isinstance(digest, str)
+            or "sha256:" + hashlib.sha256(locator.encode()).hexdigest() != digest
+        ):
+            return False
+        try:
+            details = Path(locator).lstat()
+        except OSError:
+            return False
+        return stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode)
+
+    checkout_present = live_directory("checkout_locator", checkout_digest)
+    source_present = live_directory(
+        "source_checkout_locator", source_checkout_digest,
+    )
+    source_binding = {
+        "checkout_present": checkout_present,
+        "source_present": source_present,
+        "healthy": checkout_present and source_present,
+    }
     migration = repository.migration_summary(record.workspace_id)
     legacy_digest = record.metadata.get("legacy_source_digest")
     if (migration["total"] == 0 and record.source == "legacy" and
@@ -496,8 +592,744 @@ def _public_record(record, repository: WorkspaceRepository, *,
         "index": {"generation": generation, "complete": complete},
         "migration": migration,
         "deployment_proof": deployment or None,
+        "source_binding": source_binding,
         "error": None if complete else "workspace_index_incomplete",
     }
+
+
+def _assert_sync_ready(record, repository: WorkspaceRepository,
+                       project_identity: str, expected_generation: int) -> None:
+    """Re-attest the canonical workspace proof while its operation lock is held."""
+    if record.project_identity != project_identity:
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "workspace ownership changed before synchronization publication",
+        )
+    if record.lifecycle in {"destroyed", "tombstoned"}:
+        raise WorkspaceIndexError("workspace_not_found", "workspace was destroyed")
+    evidence = _public_record(record, repository)
+    index = evidence.get("index")
+    checkout = evidence.get("checkout")
+    locator_digests = evidence.get("locator_digests")
+    deployment = evidence.get("deployment_proof")
+    binding = evidence.get("source_binding")
+    ready = (
+        evidence.get("lifecycle") == "ready"
+        and evidence.get("state") == "ready"
+        and evidence.get("status") == "ready"
+        and evidence.get("error") is None
+        and isinstance(index, Mapping)
+        and index.get("complete") is True
+        and index.get("generation") == expected_generation
+        and isinstance(checkout, Mapping)
+        and checkout.get("present") is True
+        and isinstance(checkout.get("identity"), str)
+        and isinstance(locator_digests, Mapping)
+        and locator_digests.get("checkout") == checkout.get("identity")
+        and isinstance(locator_digests.get("source_checkout"), str)
+        and isinstance(deployment, Mapping)
+        and deployment.get("checkout_locator_digest") == checkout.get("identity")
+        and isinstance(deployment.get("source_identity"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", deployment["source_identity"])
+        and isinstance(deployment.get("source_commit"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", deployment["source_commit"])
+        and isinstance(binding, Mapping)
+        and binding.get("checkout_present") is True
+        and binding.get("source_present") is True
+        and binding.get("healthy") is True
+    )
+    if not ready:
+        code = (
+            "workspace_ownership_drift"
+            if isinstance(index, Mapping)
+            and index.get("generation") != expected_generation
+            else "workspace_recovery_required"
+        )
+        raise WorkspaceIndexError(
+            code,
+            "workspace ownership or live source binding changed before synchronization publication",
+        )
+
+
+def _sync_manifest(
+    root_fd: int, request: SyncPublishRequest,
+) -> tuple[list[dict[str, Any]], tuple[Any, ...]]:
+    """Read the manifest through a no-follow directory handle."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(".sandbox-sync-manifest.json", flags, dir_fd=root_fd)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise WorkspaceIndexError("sync_manifest_invalid", "generation manifest is invalid")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        manifest_identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_size,
+            before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if manifest_identity != (
+            after.st_dev, after.st_ino, after.st_mode, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        ):
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation manifest changed during validation")
+        manifest_bytes = b"".join(chunks)
+        document = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "generation manifest is invalid") from exc
+    finally:
+        os.close(descriptor)
+    expected_keys = {
+        "schema_version", "generation_id", "manifest_digest",
+        "archive_manifest_digest", "file_count", "byte_count", "entries",
+    }
+    entries = document.get("entries") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected_keys
+        or document.get("schema_version") != 1
+        or document.get("generation_id") != request.generation_id
+        or document.get("manifest_digest") != request.manifest_digest
+        or document.get("archive_manifest_digest") != request.archive_manifest_digest
+        or document.get("file_count") != request.file_count
+        or document.get("byte_count") != request.byte_count
+        or not isinstance(entries, list)
+        or len(entries) != request.file_count
+    ):
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "generation manifest binding is invalid")
+    canonical = json.dumps(
+        entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()
+    if hashlib.sha256(canonical).hexdigest() != request.archive_manifest_digest:
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "generation manifest digest is invalid")
+    return entries, (*manifest_identity, hashlib.sha256(manifest_bytes).hexdigest())
+
+
+def _scan_sync_tree(root_fd: int, request: SyncPublishRequest) -> tuple[Any, ...]:
+    """Scan one exact tree through an already-bound directory handle."""
+    root_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                  | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        root_details = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_details.st_mode):
+            raise WorkspaceIndexError("sync_staging_unsafe", "generation root is unsafe")
+        entries, manifest_identity = _sync_manifest(root_fd, request)
+        expected: dict[str, dict[str, Any]] = {}
+        expected_directories: set[str] = set()
+        for item in entries:
+            if not isinstance(item, dict) or set(item) != {
+                "path", "size", "sha256", "executable",
+            }:
+                raise WorkspaceIndexError("sync_manifest_invalid", "manifest entry is invalid")
+            path = item["path"]
+            parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+            if (not isinstance(path, str) or not path or path.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or path in expected):
+                raise WorkspaceIndexError("sync_manifest_invalid", "manifest path is invalid")
+            expected[path] = item
+            for index in range(1, len(parts)):
+                expected_directories.add(PurePosixPath(*parts[:index]).as_posix())
+
+        observed: dict[str, tuple[Any, ...]] = {}
+        observed_directories: dict[str, tuple[Any, ...]] = {}
+        total = 0
+
+        def walk(directory_fd: int, prefix: str = "") -> None:
+            nonlocal total
+            with os.scandir(directory_fd) as iterator:
+                names = sorted(entry.name for entry in iterator)
+            directory_details = os.fstat(directory_fd)
+            observed_directories[prefix or "."] = (
+                directory_details.st_dev, directory_details.st_ino,
+                directory_details.st_mode, tuple(names),
+            )
+            for name in names:
+                relative = f"{prefix}/{name}" if prefix else name
+                details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if relative == ".sandbox-sync-manifest.json" and not prefix:
+                    if not stat.S_ISREG(details.st_mode):
+                        raise WorkspaceIndexError(
+                            "sync_manifest_invalid", "generation manifest is invalid")
+                    continue
+                if stat.S_ISLNK(details.st_mode):
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation contains an unlisted entry")
+                if stat.S_ISDIR(details.st_mode):
+                    if relative not in expected_directories:
+                        raise WorkspaceIndexError(
+                            "sync_manifest_invalid", "generation contains an unlisted entry")
+                    child_fd = os.open(name, root_flags, dir_fd=directory_fd)
+                    try:
+                        walk(child_fd, relative)
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(details.st_mode) or relative not in expected:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation contains an unlisted entry")
+                item = expected[relative]
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    before = os.fstat(descriptor)
+                    digest = hashlib.sha256()
+                    size = 0
+                    while True:
+                        chunk = os.read(descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        size += len(chunk)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+                identity = (
+                    before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns,
+                )
+                if identity != (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns,
+                ) or (
+                    isinstance(item["size"], bool) or item["size"] != size
+                    or not isinstance(item["sha256"], str)
+                    or digest.hexdigest() != item["sha256"]
+                    or not isinstance(item["executable"], bool)
+                    or bool(before.st_mode & stat.S_IXUSR) != item["executable"]
+                ):
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation member mismatch")
+                observed[relative] = (*identity, digest.hexdigest())
+                total += size
+
+        walk(root_fd)
+        if set(observed) != set(expected) or total != request.byte_count:
+            raise WorkspaceIndexError(
+                "sync_manifest_invalid", "generation inventory mismatch")
+        return (
+            (".sandbox-sync-manifest.json", *manifest_identity),
+            *(("directory", path, *observed_directories[path])
+              for path in sorted(observed_directories)),
+            *((path, *observed[path]) for path in sorted(observed)),
+        )
+    except WorkspaceIndexError:
+        raise
+
+
+def _snapshot_sync_fd(root_fd: int, request: SyncPublishRequest) -> tuple[Any, ...]:
+    """Produce an immutable exact snapshot by repeating the complete FD scan."""
+    first = _scan_sync_tree(root_fd, request)
+    second = _scan_sync_tree(root_fd, request)
+    if first != second:
+        raise WorkspaceIndexError(
+            "sync_manifest_invalid", "generation changed during exact-tree snapshot")
+    return first
+
+
+_DIRECTORY_FLAGS = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+
+
+def _child_directory(parent_fd: int, name: str, *, create: bool = True) -> int:
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+    descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    details = os.fstat(descriptor)
+    if not stat.S_ISDIR(details.st_mode):
+        os.close(descriptor)
+        raise WorkspaceIndexError("sync_staging_unsafe", "publication namespace is unsafe")
+    return descriptor
+
+
+def _remove_tree_at(parent_fd: int, name: str) -> None:
+    descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    try:
+        bound = os.fstat(descriptor)
+        with os.scandir(descriptor) as iterator:
+            names = [entry.name for entry in iterator]
+        for child in names:
+            details = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode):
+                _remove_tree_at(descriptor, child)
+            else:
+                os.unlink(child, dir_fd=descriptor)
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode)
+                or (observed.st_dev, observed.st_ino, observed.st_mode)
+                != (bound.st_dev, bound.st_ino, bound.st_mode)):
+            raise WorkspaceIndexError(
+                "sync_namespace_changed", "cleanup directory changed concurrently")
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(descriptor)
+
+
+def _write_archive_file(root_fd: int, path: PurePosixPath, content: bytes, mode: int) -> None:
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in path.parts[:-1]:
+            child = _child_directory(directory_fd, part)
+            os.close(directory_fd)
+            directory_fd = child
+        descriptor = os.open(
+            path.parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            mode, dir_fd=directory_fd,
+        )
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short synchronization archive write")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _extract_sync_archive(staging_fd: int, request: SyncPublishRequest) -> tuple[int, str]:
+    if not request.archive_bytes:
+        raise WorkspaceIndexError("sync_archive_invalid", "synchronization archive is missing")
+    incoming = ".incoming-" + uuid.uuid4().hex
+    os.mkdir(incoming, 0o700, dir_fd=staging_fd)
+    incoming_fd = _child_directory(staging_fd, incoming, create=False)
+    try:
+        try:
+            archive = tarfile.open(fileobj=io.BytesIO(request.archive_bytes), mode="r:gz")
+        except (OSError, tarfile.TarError):
+            raise WorkspaceIndexError("sync_archive_invalid", "synchronization archive is invalid")
+        with archive:
+            members = archive.getmembers()
+            seen: set[str] = set()
+            expanded = 0
+            for member in members:
+                path = PurePosixPath(member.name)
+                if (not member.isfile() or not member.name or member.name.startswith("/")
+                        or any(part in {"", ".", ".."} for part in path.parts)
+                        or member.name in seen):
+                    raise WorkspaceIndexError(
+                        "sync_archive_invalid", "synchronization archive member is invalid")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise WorkspaceIndexError(
+                        "sync_archive_invalid", "synchronization archive member is invalid")
+                content = stream.read()
+                expanded += len(content)
+                if expanded > request.byte_count + 16 * 1024 * 1024:
+                    raise WorkspaceIndexError(
+                        "sync_archive_invalid", "synchronization archive exceeds its bound")
+                mode = 0o600 if member.name == ".sandbox-sync-manifest.json" else (
+                    0o755 if member.mode & stat.S_IXUSR else 0o644)
+                _write_archive_file(incoming_fd, path, content, mode)
+                seen.add(member.name)
+        os.fsync(incoming_fd)
+        snapshot = _snapshot_sync_fd(incoming_fd, request)
+        return incoming_fd, incoming
+    except Exception:
+        os.close(incoming_fd)
+        try:
+            _remove_tree_at(staging_fd, incoming)
+        except OSError:
+            pass
+        raise
+
+
+def _snapshot_digest(snapshot: tuple[Any, ...]) -> str:
+    return hashlib.sha256(json.dumps(
+        snapshot, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _read_receipt(receipts_fd: int, generation_id: str) -> dict[str, Any] | None:
+    try:
+        descriptor = os.open(
+            generation_id + ".json",
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=receipts_fd,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or details.st_size > 8192:
+            raise WorkspaceIndexError("sync_receipt_invalid", "generation receipt is invalid")
+        payload = os.read(descriptor, 8193)
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise WorkspaceIndexError("sync_receipt_invalid", "generation receipt is invalid")
+    return value if isinstance(value, dict) else None
+
+
+def _write_receipt(receipts_fd: int, request: SyncPublishRequest,
+                   snapshot: tuple[Any, ...]) -> dict[str, Any]:
+    receipt = {
+        "schema_version": 1,
+        "workspace_id": request.workspace_id,
+        "project_identity": request.project_identity,
+        "generation_id": request.generation_id,
+        "manifest_digest": request.manifest_digest,
+        "archive_manifest_digest": request.archive_manifest_digest,
+        "file_count": request.file_count,
+        "byte_count": request.byte_count,
+        "fingerprint_digest": _snapshot_digest(snapshot),
+    }
+    existing = _read_receipt(receipts_fd, request.generation_id)
+    if existing is not None:
+        if existing != receipt:
+            raise WorkspaceIndexError("sync_generation_conflict", "generation receipt conflicts")
+        return receipt
+    temporary = ".receipt-" + uuid.uuid4().hex
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600, dir_fd=receipts_fd,
+    )
+    try:
+        encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short generation receipt write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    final_name = request.generation_id + ".json"
+    try:
+        os.link(temporary, final_name, src_dir_fd=receipts_fd,
+                dst_dir_fd=receipts_fd, follow_symlinks=False)
+    except FileExistsError:
+        existing = _read_receipt(receipts_fd, request.generation_id)
+        if existing != receipt:
+            raise WorkspaceIndexError(
+                "sync_generation_conflict", "generation receipt conflicts") from None
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=receipts_fd)
+        except FileNotFoundError:
+            pass
+    os.fsync(receipts_fd)
+    return receipt
+
+
+def _observe_current(workspace_fd: int) -> tuple[Any, ...] | None:
+    try:
+        details = os.stat("current", dir_fd=workspace_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(details.st_mode):
+        raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
+    return (details.st_dev, details.st_ino, details.st_mode,
+            os.readlink("current", dir_fd=workspace_fd))
+
+
+@dataclass(frozen=True)
+class _CurrentCommit:
+    committed: tuple[Any, ...]
+    previous_name: str | None
+
+
+def _commit_current(workspace_fd: int, generation_id: str,
+                    observed: tuple[Any, ...] | None) -> _CurrentCommit:
+    temporary = ".current-" + uuid.uuid4().hex
+    previous = ".previous-" + uuid.uuid4().hex
+    target = "generations/" + generation_id
+    os.symlink(target, temporary, dir_fd=workspace_fd)
+    temporary_observed = _observe_named_pointer(workspace_fd, temporary)
+    if temporary_observed is None:
+        try:
+            os.unlink(temporary, dir_fd=workspace_fd)
+        except OSError:
+            pass
+        raise WorkspaceIndexError("sync_pointer_unsafe", "current generation pointer is unsafe")
+    saved_previous = False
+    committed = False
+    try:
+        if _observe_current(workspace_fd) != observed:
+            raise WorkspaceIndexError(
+                "sync_pointer_conflict", "current generation pointer changed concurrently")
+        if observed is not None:
+            os.link("current", previous, src_dir_fd=workspace_fd,
+                    dst_dir_fd=workspace_fd, follow_symlinks=False)
+            saved_previous = True
+            if _observe_named_pointer(workspace_fd, previous) != observed:
+                raise WorkspaceIndexError(
+                    "sync_pointer_conflict", "current generation pointer changed concurrently")
+            if _observe_current(workspace_fd) != observed:
+                raise WorkspaceIndexError(
+                    "sync_pointer_conflict", "current generation pointer changed concurrently")
+            os.replace(temporary, "current", src_dir_fd=workspace_fd,
+                       dst_dir_fd=workspace_fd)
+            committed = True
+        else:
+            try:
+                os.link(temporary, "current", src_dir_fd=workspace_fd,
+                        dst_dir_fd=workspace_fd, follow_symlinks=False)
+            except FileExistsError:
+                raise WorkspaceIndexError(
+                    "sync_pointer_conflict",
+                    "current generation pointer changed concurrently") from None
+            os.unlink(temporary, dir_fd=workspace_fd)
+            committed = True
+        current = _observe_current(workspace_fd)
+        if current != temporary_observed:
+            raise WorkspaceIndexError(
+                "sync_pointer_conflict", "current generation pointer changed concurrently")
+        return _CurrentCommit(current, previous if saved_previous else None)
+    except Exception:
+        if committed:
+            try:
+                if _observe_current(workspace_fd) == temporary_observed:
+                    if saved_previous:
+                        os.replace(previous, "current", src_dir_fd=workspace_fd,
+                                   dst_dir_fd=workspace_fd)
+                        saved_previous = False
+                    else:
+                        os.unlink("current", dir_fd=workspace_fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(temporary, dir_fd=workspace_fd)
+        except OSError:
+            pass
+        if saved_previous:
+            try:
+                if _observe_current(workspace_fd) == temporary_observed:
+                    os.replace(previous, "current", src_dir_fd=workspace_fd,
+                               dst_dir_fd=workspace_fd)
+                else:
+                    os.unlink(previous, dir_fd=workspace_fd)
+            except OSError:
+                pass
+        raise
+
+
+def _finish_current(workspace_fd: int, commit: _CurrentCommit, *, rollback: bool) -> None:
+    if rollback:
+        if _observe_current(workspace_fd) != commit.committed:
+            raise WorkspaceIndexError(
+                "sync_pointer_conflict", "current generation pointer changed concurrently")
+        if commit.previous_name is None:
+            os.unlink("current", dir_fd=workspace_fd)
+        else:
+            os.replace(commit.previous_name, "current", src_dir_fd=workspace_fd,
+                       dst_dir_fd=workspace_fd)
+    elif commit.previous_name is not None:
+        os.unlink(commit.previous_name, dir_fd=workspace_fd)
+
+
+def _observe_named_pointer(workspace_fd: int, name: str) -> tuple[Any, ...] | None:
+    try:
+        details = os.stat(name, dir_fd=workspace_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(details.st_mode):
+        return None
+    return (details.st_dev, details.st_ino, details.st_mode,
+            os.readlink(name, dir_fd=workspace_fd))
+
+
+def _sync_namespace(root: Path, request, *, create: bool = True) -> tuple[
+    ExitStack, int, int, int, int, tuple[tuple[int, str, int], ...],
+]:
+    stack = ExitStack()
+    try:
+        root_parent_fd = os.open(root.parent, _DIRECTORY_FLAGS)
+        stack.callback(os.close, root_parent_fd)
+        root_fd = os.open(root.name, _DIRECTORY_FLAGS, dir_fd=root_parent_fd)
+        stack.callback(os.close, root_fd)
+        sync_fd = _child_directory(root_fd, "sync", create=create)
+        stack.callback(os.close, sync_fd)
+        project_hash = hashlib.sha256(request.project_identity.encode()).hexdigest()[:32]
+        project_fd = _child_directory(sync_fd, project_hash, create=create)
+        stack.callback(os.close, project_fd)
+        workspace_fd = _child_directory(
+            project_fd, request.workspace_id, create=create)
+        stack.callback(os.close, workspace_fd)
+        staging_fd = _child_directory(workspace_fd, "staging", create=create)
+        stack.callback(os.close, staging_fd)
+        generations_fd = _child_directory(
+            workspace_fd, "generations", create=create)
+        stack.callback(os.close, generations_fd)
+        receipts_fd = _child_directory(workspace_fd, "receipts", create=create)
+        stack.callback(os.close, receipts_fd)
+        bindings = (
+            (root_parent_fd, root.name, root_fd),
+            (root_fd, "sync", sync_fd),
+            (sync_fd, project_hash, project_fd),
+            (project_fd, request.workspace_id, workspace_fd),
+            (workspace_fd, "staging", staging_fd),
+            (workspace_fd, "generations", generations_fd),
+            (workspace_fd, "receipts", receipts_fd),
+        )
+        return stack, workspace_fd, staging_fd, generations_fd, receipts_fd, bindings
+    except Exception:
+        stack.close()
+        raise
+
+
+def _published_generation_fd(generations_fd: int, generation_id: str) -> int | None:
+    try:
+        return os.open(generation_id, _DIRECTORY_FLAGS, dir_fd=generations_fd)
+    except FileNotFoundError:
+        return None
+
+
+def _assert_namespace_bindings(bindings: tuple[tuple[int, str, int], ...]) -> None:
+    for parent_fd, name, child_fd in bindings:
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        bound = os.fstat(child_fd)
+        if (not stat.S_ISDIR(observed.st_mode)
+                or stat.S_ISLNK(observed.st_mode)
+                or (observed.st_dev, observed.st_ino, observed.st_mode) !=
+                (bound.st_dev, bound.st_ino, bound.st_mode)):
+            raise WorkspaceIndexError(
+                "sync_namespace_changed", "publication namespace changed concurrently")
+
+
+def _receipt_matches_request(receipt: Mapping[str, Any], request) -> bool:
+    return (
+        receipt.get("schema_version") == 1
+        and receipt.get("workspace_id") == request.workspace_id
+        and receipt.get("project_identity") == request.project_identity
+        and receipt.get("generation_id") == request.generation_id
+        and receipt.get("manifest_digest") == request.manifest_digest
+        and receipt.get("file_count") == request.file_count
+        and receipt.get("byte_count") == request.byte_count
+        and isinstance(receipt.get("archive_manifest_digest"), str)
+        and _SYNC_DIGEST.fullmatch(receipt["archive_manifest_digest"]) is not None
+        and isinstance(receipt.get("fingerprint_digest"), str)
+        and _SYNC_DIGEST.fullmatch(receipt["fingerprint_digest"]) is not None
+    )
+
+
+def _publish_sync_archive(root: Path, request: SyncPublishRequest) -> None:
+    stack, workspace_fd, staging_fd, generations_fd, receipts_fd, bindings = _sync_namespace(
+        root, request)
+    with stack:
+        _assert_namespace_bindings(bindings)
+        generation_fd = _published_generation_fd(generations_fd, request.generation_id)
+        incoming_name = None
+        if generation_fd is None:
+            generation_fd, incoming_name = _extract_sync_archive(staging_fd, request)
+        try:
+            _assert_namespace_bindings(bindings)
+            snapshot = _snapshot_sync_fd(generation_fd, request)
+            if incoming_name is not None:
+                if _snapshot_sync_fd(generation_fd, request) != snapshot:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation changed before publication")
+                bound_generation = os.fstat(generation_fd)
+                os.rename(incoming_name, request.generation_id,
+                          src_dir_fd=staging_fd, dst_dir_fd=generations_fd)
+                incoming_name = None
+                published_fd = _published_generation_fd(
+                    generations_fd, request.generation_id)
+                if published_fd is None:
+                    raise WorkspaceIndexError(
+                        "sync_namespace_changed", "published generation changed concurrently")
+                published = os.fstat(published_fd)
+                if ((published.st_dev, published.st_ino, published.st_mode)
+                        != (bound_generation.st_dev, bound_generation.st_ino,
+                            bound_generation.st_mode)):
+                    os.close(published_fd)
+                    raise WorkspaceIndexError(
+                        "sync_namespace_changed", "published generation changed concurrently")
+                os.close(generation_fd)
+                generation_fd = published_fd
+            _assert_namespace_bindings(bindings)
+            if _snapshot_sync_fd(generation_fd, request) != snapshot:
+                raise WorkspaceIndexError(
+                    "sync_manifest_invalid", "generation changed during publication")
+            _write_receipt(receipts_fd, request, snapshot)
+            _assert_namespace_bindings(bindings)
+            observed = _observe_current(workspace_fd)
+            if observed is not None and observed[-1] == "generations/" + request.generation_id:
+                if _snapshot_sync_fd(generation_fd, request) != snapshot:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "published generation changed")
+                return
+            commit = _commit_current(workspace_fd, request.generation_id, observed)
+            try:
+                _assert_namespace_bindings(bindings)
+                if _snapshot_sync_fd(generation_fd, request) != snapshot:
+                    raise WorkspaceIndexError(
+                        "sync_manifest_invalid", "generation changed during current commit")
+            except Exception:
+                _finish_current(workspace_fd, commit, rollback=True)
+                raise
+            _finish_current(workspace_fd, commit, rollback=False)
+            os.fsync(workspace_fd)
+        finally:
+            os.close(generation_fd)
+            if incoming_name is not None:
+                try:
+                    _remove_tree_at(staging_fd, incoming_name)
+                except OSError:
+                    pass
+
+
+def _reconcile_sync_receipt(root: Path, request: SyncReconcileRequest) -> bool:
+    try:
+        namespace = _sync_namespace(root, request, create=False)
+    except FileNotFoundError:
+        return False
+    stack, workspace_fd, _staging_fd, generations_fd, receipts_fd, bindings = namespace
+    with stack:
+        _assert_namespace_bindings(bindings)
+        receipt = _read_receipt(receipts_fd, request.generation_id)
+        if receipt is None or not _receipt_matches_request(receipt, request):
+            return False
+        generation_fd = _published_generation_fd(generations_fd, request.generation_id)
+        if generation_fd is None:
+            return False
+        try:
+            publish_request = SyncPublishRequest(
+                workspace_id=request.workspace_id,
+                project_identity=request.project_identity,
+                generation_id=request.generation_id,
+                manifest_digest=request.manifest_digest,
+                archive_manifest_digest=receipt["archive_manifest_digest"],
+                file_count=request.file_count,
+                byte_count=request.byte_count,
+                expected_index_generation=request.expected_index_generation,
+            )
+            snapshot = _snapshot_sync_fd(generation_fd, publish_request)
+            _assert_namespace_bindings(bindings)
+            if _snapshot_digest(snapshot) != receipt["fingerprint_digest"]:
+                return False
+            observed = _observe_current(workspace_fd)
+            if observed is None or observed[-1] != "generations/" + request.generation_id:
+                return False
+            result = _snapshot_sync_fd(generation_fd, publish_request) == snapshot
+            _assert_namespace_bindings(bindings)
+            return result
+        finally:
+            os.close(generation_fd)
 
 
 def _is_remote_target(target) -> bool:
@@ -1669,6 +2501,73 @@ class WorkspaceService:
                     "workspace": _public_record(record, self._repo()),
                     "recovery_command": _LOCAL_WORKSPACE_RECOVERY}
         return {"ok": True, **_public_record(record, self._repo())}
+
+    def publish_sync(self, request: SyncPublishRequest) -> dict[str, Any]:
+        """Authorize and publish staged sync bytes under one workspace lock."""
+        if not isinstance(request, SyncPublishRequest):
+            raise TypeError("sync publication request is invalid")
+        if self.storage is None or not isinstance(getattr(self.storage, "root", None), Path):
+            raise WorkspaceIndexError(
+                "sync_publication_unsupported",
+                "synchronization publication storage is unavailable",
+            )
+        repo = self._repo()
+        with repo.operation_lock(request.workspace_id):
+            current = repo.get(request.workspace_id)
+            if current is None or current.lifecycle in {"destroyed", "tombstoned"}:
+                raise WorkspaceIndexError("workspace_not_found", "workspace is unavailable")
+            _assert_sync_ready(
+                current, repo, request.project_identity,
+                request.expected_index_generation,
+            )
+            try:
+                _publish_sync_archive(self.storage.root, request)
+            except WorkspaceIndexError:
+                raise
+            except (OSError, UnicodeError, ValueError, tarfile.TarError):
+                raise WorkspaceIndexError(
+                    "sync_publication_failed", "generation publication failed safely") from None
+            return {
+                "ok": True,
+                "status": "accepted",
+                "accepted_generation": request.generation_id,
+                "manifest_digest": request.manifest_digest,
+                "file_count": request.file_count,
+                "byte_count": request.byte_count,
+                "workspace_id": request.workspace_id,
+                "project_identity": request.project_identity,
+            }
+
+    def reconcile_sync(self, request: SyncReconcileRequest) -> dict[str, Any]:
+        if not isinstance(request, SyncReconcileRequest):
+            raise TypeError("sync reconciliation request is invalid")
+        if self.storage is None or not isinstance(getattr(self.storage, "root", None), Path):
+            raise WorkspaceIndexError(
+                "sync_publication_unsupported", "synchronization storage is unavailable")
+        repo = self._repo()
+        with repo.operation_lock(request.workspace_id):
+            current = repo.get(request.workspace_id)
+            if current is None or current.lifecycle in {"destroyed", "tombstoned"}:
+                return {"ok": True, "status": "unknown"}
+            _assert_sync_ready(
+                current, repo, request.project_identity,
+                request.expected_index_generation,
+            )
+            try:
+                accepted = _reconcile_sync_receipt(self.storage.root, request)
+            except WorkspaceIndexError as exc:
+                if exc.code.startswith("sync_"):
+                    accepted = False
+                else:
+                    raise
+            except (OSError, UnicodeError, ValueError):
+                raise WorkspaceIndexError(
+                    "sync_reconciliation_failed", "generation reconciliation failed safely") from None
+            return {
+                "ok": True,
+                "status": "accepted" if accepted else "unknown",
+                "accepted_generation": request.generation_id if accepted else None,
+            }
 
     def migration_plan(self, request):
         target = self._target(request)

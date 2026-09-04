@@ -147,20 +147,30 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-011**: Credentials MUST NOT enter argv, inherited environment, project files,
   persistent managed state, durable job payload/results, logs, diagnostics, proof,
   public output, activation, containers, or Compose.
-- **FR-012**: Temporary credential material MUST be volatile, owner-only, bounded,
-  helper-owned, and removed before safe completion.
+- **FR-012**: Temporary credential material MUST be volatile, service-user-owned,
+  bounded, helper-owned, derived below `/run/user/<effective-uid>` rather than from
+  caller input or environment, and removed before safe completion.
 - **FR-013**: Helper cleanup MUST run for success, failure, cancellation, signal,
   timeout, and recoverable crash paths; unproven cleanup MUST be non-success.
 - **FR-014**: Helper identity MUST bind canonical installed artifact, fixed entry,
   runtime revision, and closed invocation contract before credentials are resolved.
+  Its digest-and-runtime-revision directory MUST be immutable so migration cannot
+  rewrite authority held open by an active staging unit. The measured wrapper MUST
+  traverse from an accessible absolute top-level component without following links;
+  user-manager UID mapping at that component MUST NOT weaken exact service-user
+  ownership below it.
 - **FR-015**: Before credential resolution, staging MUST launch the measured helper in
-  one uniquely named transient systemd service backed by cgroup v2, with
+  one uniquely named transient systemd user service backed by cgroup v2, with
   `KillMode=control-group`, no delegation, and no capability to move processes out of
-  the unit cgroup; the exact unit/cgroup identity MUST be ledger-bound.
+  the unit cgroup; the exact unit/cgroup identity MUST be ledger-bound. Before READY,
+  the wrapper and helper MUST return only a closed, bounded, phase/code failure frame;
+  unknown output MUST become `bootstrap_unavailable` and MUST NOT open credential custody.
 - **FR-016**: Kernel cgroup membership MUST be the descendant ownership authority.
   Cancellation/timeout MUST stop the whole unit, and safe termination requires the unit
   inactive plus `cgroup.events populated=0` (or removed cgroup) from the exact unit.
   PID, process group, elapsed time, lock expiry, or parent exit alone MUST NOT suffice.
+  A retained exact failed/dead attempt is safe only after successful reset and a closed
+  absent-unit recheck. Description drift MUST never authorize kill, stop, or reset.
 - **FR-017**: Unproven process termination or cleanup MUST durably fence the target and
   refuse a different request.
 - **FR-018**: Pull MUST use only the exact repository-qualified target-platform
@@ -180,7 +190,11 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-022**: Ledger writes MUST use single-flight ownership, generation compare-and-
   set, atomic durable replacement, and immutable terminal results/tombstones.
 - **FR-023**: An exact pre-effect request MAY resume only with durable no-effect plus
-  complete process-termination/cleanup proof.
+  complete process-termination/cleanup proof. V2 reconciliation of a terminal uncertain
+  pre-credential request MUST NOT resume its plan: only an exact immutable request/policy,
+  `effect_entered=false`, fresh `exact_effect=false`, and closed absent deterministic-unit
+  plus empty-cgroup evidence may atomically commit `precredential_bootstrap_failed` and
+  release ownership. Every mismatch remains fenced.
 - **FR-024**: Possible pull/helper effect MUST be freshly reconciled; unproven outcome
   MUST return durable uncertainty, never optimistic replay.
 - **FR-025**: Success MUST emit one closed, versioned, canonical, secret-free,
@@ -214,12 +228,17 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - **FR-031**: Existing non-opt-in hosting, secret broker, durable-job, remote, and
   Feature 048 interfaces MUST remain compatible.
 - **FR-032**: Public results MUST use stable bounded success/refusal/failure/cancelled/
-  uncertain classes and MUST not include private paths or arbitrary helper output.
+  uncertain classes and MUST not include private paths or arbitrary helper output. A v2
+  per-image pull failure MUST expose only the closed image role (`queue`, `web`, or
+  `worker`) and one normalized class (`denied`, `not_found`, `network`, `timeout`,
+  `no_space`, or `daemon`); raw stdout/stderr and provider detail MUST not be retained.
 - **FR-033**: Documentation MUST distinguish Feature 049 trust, Feature 050 staging,
   Feature 051 activation, Feature 048 observation recovery, and production proof.
 - **FR-034**: Local implementation validation MUST use synthetic credentials/fakes;
   live secrets, registry, remote mutation, deployment, and production need separate
-  authorization.
+  authorization. A credential-free measured-helper self-check MAY prove wrapper,
+  transient-user-unit, hardening, cgroup, and volatile-workspace prerequisites, but
+  MUST NOT read a broker source or contact a registry or container daemon.
 - **FR-035**: Feature 050 MUST expose an authenticated activation-handoff operation that,
   before Feature 051 proof verification, durably prepares a lease bound to the exact
   activation request/digest, stage request/digest, proof digest, target, and stage-ledger
@@ -289,3 +308,10 @@ daemon context, stale generation, and legacy receipts refuse without broker/help
 - Supported targets expose a measurable immutable helper and coherent Docker observation.
 - Feature 051 consumes plan/proof plus the narrow authenticated proof-custody repository
   port; it does not access stage policy, broker, credential, helper, pull, or effects.
+
+## First-activation provisioning requirement
+
+- **FR-050**: After exact v2 verification, protected stage preparation MUST authenticate
+  machine/target, observe the exact daemon and measured v2 helper, derive binding ownership
+  from the registered secret source, retain only its opaque revision, prove current stage
+  generation/revision, and install the closed bundle owner-only.

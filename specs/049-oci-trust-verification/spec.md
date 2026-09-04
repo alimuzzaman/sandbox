@@ -230,3 +230,11 @@ or unknown plans fail without invoking the trust decision again.
 - Feature 050 and Feature 051 validate the complete plan and do not reinterpret it.
 - Live artifact, registry, remote, deployment, and production proof occur only in
   later authorized phases.
+
+## First-activation provisioning requirement
+
+- **FR-029**: Protected `host image provision --provision-phase machine-policy` MUST
+  derive the exact v2 policy only from the closed receipt, complete explicit bindings,
+  and public machine authority. It atomically installs the policy and public activation
+  companion owner-only; replay is idempotent, conflict refuses, and private keys are
+  never accepted or exposed.

@@ -263,3 +263,7 @@ The MVP is exact activation plus inspectable init and truthful recovery (Phases 
 Zero-init adoption and one-generation rollback remain in the same state machine and follow
 only after the core invariants pass. No task authorizes live credentials, registry access,
 remote mutation, edge change, deployment, or production use.
+
+- [X] T062 Add protected post-stage v2 activation-bundle preparation, target-scoped
+  Compose identity, ssh-agent public-key signing, immediate verification, owner-only
+  replay/conflict handling, and focused refusal tests.

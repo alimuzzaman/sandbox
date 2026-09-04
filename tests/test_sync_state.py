@@ -3,15 +3,18 @@ import os
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from sandbox.config.facade import resolve_project_identity
 from sandbox.sync.models import DivergenceRecord, Participant, SynchronizationRelationship
 from sandbox.sync.repository import (
     RelationshipConflict,
     RequestDigestConflict,
     SyncJournalCorruption,
     SyncRepository,
+    SyncRepositoryError,
 )
 
 
@@ -41,6 +44,64 @@ class SyncStateTests(unittest.TestCase):
             created_at="2026-08-26T00:00:01Z",
         )
 
+    def test_generation_pin_release_keeps_immutable_source_identity(self):
+        self.repo.put_relationship(relationship())
+        generation, _ = self.reserve()
+        self.repo.claim_generation_transfer(generation.generation_id)
+        self.repo.transition_generation(
+            generation.generation_id, "accepted",
+            accepted_at="2026-08-26T00:00:02Z",
+        )
+        active = self.repo.pin_job(
+            job_id="job_fixture", relationship_id="rel_fixture",
+            generation_id=generation.generation_id,
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        released = self.repo.release_job(active.job_id)
+        self.assertEqual(released.generation_id, active.generation_id)
+        self.assertEqual(released.relationship_id, active.relationship_id)
+        self.assertEqual(released.source_access, "managed_read_only")
+        self.assertEqual(self.repo.active_pins("rel_fixture"), ())
+
+    def test_generation_pin_refuses_stale_acceptance_after_new_pending_reservation(self):
+        self.repo.put_relationship(relationship())
+        accepted, _ = self.reserve("request-a", "a" * 64)
+        self.repo.claim_generation_transfer(accepted.generation_id)
+        self.repo.transition_generation(
+            accepted.generation_id, "accepted",
+            accepted_at="2026-08-26T00:00:02Z",
+        )
+        self.reserve("request-b", "b" * 64)
+        with self.assertRaisesRegex(SyncRepositoryError, "not newest"):
+            self.repo.pin_job(
+                job_id="job-stale", relationship_id="rel_fixture",
+                generation_id=accepted.generation_id,
+                source_access="managed_read_only", parallel_safe=True,
+            )
+
+    def test_interrupted_transfer_replay_is_bounded_and_stop_preserves_pending(self):
+        self.repo.put_relationship(replace(
+            relationship(), mode="live", lifecycle="active",
+        ))
+        generation, replay = self.reserve("request-interrupted")
+        self.assertFalse(replay)
+        transferring, claimed = self.repo.claim_generation_transfer(
+            generation.generation_id)
+        self.assertTrue(claimed)
+        stopped = self.repo.set_mode(
+            "rel_fixture", "off", lifecycle="stopped",
+        )
+        self.assertEqual(stopped.pending_generation_id, generation.generation_id)
+        self.assertEqual(
+            self.repo.lookup_request("rel_fixture", "request-interrupted").lifecycle,
+            "transferring",
+        )
+        replayed, claimed_again = self.repo.claim_generation_transfer(
+            generation.generation_id)
+        self.assertFalse(claimed_again)
+        self.assertEqual(replayed.generation_id, transferring.generation_id)
+        self.assertEqual(len(self.repo.list_generations("rel_fixture")), 1)
+
     def test_relationship_crud_is_owner_only_and_atomic(self):
         self.repo.put_relationship(relationship())
 
@@ -52,6 +113,37 @@ class SyncStateTests(unittest.TestCase):
         self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.repo.lock_path.stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_relationship_without_conflict_identity_loads_compatibly(self):
+        legacy = relationship().as_dict()
+        legacy.pop("conflict_code")
+        legacy.pop("conflict_request_id")
+        legacy.pop("conflict_generation_id")
+        loaded = SynchronizationRelationship.from_dict(legacy)
+        self.assertIsNone(loaded.conflict_code)
+        self.assertIsNone(loaded.conflict_request_id)
+        self.assertIsNone(loaded.conflict_generation_id)
+
+    def test_conflict_persistence_keeps_schema_v1_relationship_rollback_readable(self):
+        self.repo.put_relationship(relationship())
+        generation, _ = self.reserve()
+        self.repo.transition_generation(generation.generation_id, "transferring")
+        self.repo.transition_generation(
+            generation.generation_id, "refused", refusal_code="ownership_conflict")
+        document = json.loads(self.path.read_text())
+        old_relationship_fields = {
+            "relationship_id", "project_identity", "remote_name", "workspace_id",
+            "mode", "lifecycle", "owner_generation", "accepted_generation_id",
+            "pending_generation_id", "updated_at",
+        }
+        self.assertEqual(set(document["relationships"]["rel_fixture"]),
+                         old_relationship_fields)
+        self.assertEqual(document["conflicts"]["rel_fixture"], {
+            "code": "ownership_conflict", "request_id": "request-1",
+            "generation_id": generation.generation_id,
+        })
+        loaded = SyncRepository(self.path).get_relationship("rel_fixture")
+        self.assertEqual(loaded.conflict_code, "ownership_conflict")
 
     def test_default_journal_is_scoped_below_sandbox_home_runtime_sync(self):
         with patch.dict(os.environ, {"SANDBOX_HOME": self.temporary.name}):
@@ -184,6 +276,29 @@ class SyncStateTests(unittest.TestCase):
         owner = self.repo.find_workspace_owner("remote-fixture", "workspace_fixture")
         self.assertEqual(owner.project_identity, "project_fixture")
         self.assertIsNone(self.repo.find_workspace_owner("other", "workspace_fixture"))
+
+    def test_resolved_identity_coalesces_symlinks_and_separates_unadopted_roots(self):
+        project = Path(self.temporary.name) / "project"
+        project.mkdir()
+        symlink = Path(self.temporary.name) / "project-link"
+        symlink.symlink_to(project, target_is_directory=True)
+        relocated = Path(self.temporary.name) / "relocated"
+        relocated.mkdir()
+        fresh_clone = Path(self.temporary.name) / "fresh-clone"
+        fresh_clone.mkdir()
+
+        def load(root, label=None):
+            return {"root": root, "kind": "wordpress", "label": label or "default"}
+
+        canonical = resolve_project_identity(project, config_loader=load)
+        through_symlink = resolve_project_identity(symlink, config_loader=load)
+        moved_without_adoption = resolve_project_identity(relocated, config_loader=load)
+        independent_clone = resolve_project_identity(fresh_clone, config_loader=load)
+
+        self.assertEqual(through_symlink["identity"], canonical["identity"])
+        self.assertEqual(through_symlink["canonical_root"], canonical["canonical_root"])
+        self.assertNotEqual(moved_without_adoption["identity"], canonical["identity"])
+        self.assertNotEqual(independent_clone["identity"], canonical["identity"])
 
     def test_participant_heartbeat_is_bounded_and_replaces_same_session(self):
         self.repo.put_relationship(relationship())

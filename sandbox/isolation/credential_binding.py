@@ -140,7 +140,15 @@ def canonical_timestamp(value: Any) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("credential expiry must include a timezone")
     parsed = parsed.astimezone(timezone.utc)
-    timespec = "microseconds" if parsed.microsecond else "seconds"
+    # Keep millisecond precision when that is all the caller supplied.  This
+    # avoids turning an equivalent ``.466Z`` value into ``.466000Z`` during a
+    # deserialize/replay cycle while retaining full microseconds when needed.
+    if not parsed.microsecond:
+        timespec = "seconds"
+    elif parsed.microsecond % 1000 == 0:
+        timespec = "milliseconds"
+    else:
+        timespec = "microseconds"
     return parsed.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 

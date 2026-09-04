@@ -72,11 +72,36 @@ ordered relationship. Symlink locators may share that identity. A fresh clone
 or unresolved relocation is a different owner and is refused before source
 transfer until the existing lifecycle adoption flow explicitly preserves the
 durable identity. Ownership errors expose opaque IDs only, never checkout paths.
+Immediately before staging a disposable-workspace generation, the source
+transport rechecks the durable workspace ID and project identity through the
+workspace controller. A mismatch returns `ownership_conflict` before any source
+bytes are uploaded; CLI and MCP expose the same bounded code. Transfer also
+requires a complete ready workspace record whose checkout locator and exact-tree
+deployment receipt provide the canonical source binding; destroyed, incomplete,
+unhealthy, ambiguous, or unbound records remain unavailable. The controller
+also attests that both protected checkout directories still exist as real
+directories at status time; stored locator digests alone are not acceptance.
+Publication keeps the workspace operation lock while it binds every staging and
+generation directory to an opened filesystem identity, validates the complete
+tree, and atomically changes the `current` pointer. A renamed or cleanup entry
+whose identity changes is refused. If the final validation fails after the
+pointer change, the controller restores the exact prior pointer (or removes the
+new pointer when there was no prior generation) before returning failure.
 
 Lost acknowledgments reconcile with the original request identity. Remote
 divergence is never adopted or overwritten automatically; `sync resolve
 --resolution keep-local --confirm` clears the conflict gate and leaves sync off
 so the next explicit request repeats normal ownership checks.
+
+Generation-aware jobs pin the newest accepted generation before durable launch.
+If a newer generation is pending, a new durable job queues against that generation
+and follows any still-newer pending generation before launch. Parallel-
+safe jobs may share only the same accepted `managed_read_only` projection. A job
+that needs source writes must request `isolated_copy`, declare retained artifact
+paths, and receives no authority to change the managed generation. Job acceptance
+and status expose only the relationship ID, generation ID, and source-access
+policy. Out-of-band source change records bounded divergence and blocks another
+projection until the explicit sync resolution boundary runs.
 
 ## 1. What this is
 
@@ -127,6 +152,29 @@ Runtime source uploads used by confirmed `remote provision`, `remote up`, and
 with `--upload-timeout SECONDS` (1-7200); the local package budget remains fixed
 at 300 seconds. An upload timeout has unknown completion and is never retried
 automatically.
+
+After staging source, confirmed service migration refreshes the measured image
+staging helper with the controller-validated exact 40-character source revision
+before changing the service. Helper artifacts and manifests use an immutable
+digest-and-revision directory identity and owner-only modes. Any unsafe owner,
+mode, link count, digest, manifest, or revision refuses before service changes.
+
+The controller requires a clean checkout, packages the exact validated Git object
+(never live worktree bytes), and rechecks clean HEAD before first remote contact.
+The remote extracts into an owner-only same-filesystem staging directory, verifies
+the archive receipt's exact source SHA, archive digest, and precomputed runtime-record
+revision, then atomically exchanges that complete tree with
+`$HOME/sandbox/sb-src`. Failure rolls the prior tree back before the existing service
+is changed. A failed rollback, restored-service restart, or backup cleanup is reported
+as `remote_service_rollback_indeterminate`, never hidden as an ordinary install failure.
+Fresh provisioning uses the same handoff and never clones or activates a
+moving branch. The service unit and credential file are not changed until helper
+refresh succeeds.
+
+The provisioner removes group/other write permission from the existing Sandbox home
+and `runtime` directory without removing read or execute permission (for example,
+`0775` becomes `0755`). It then requires `runtime/helpers` and every helper authority
+directory below it to be owned by the authenticated service user at mode `0700`.
 
 If the managed remote branch has moved independently, deploy fails with the stable
 `remote_branch_diverged` error code. Sandbox never force-pushes that branch. Inspect
@@ -878,8 +926,9 @@ the JSON response includes the bounded candidate `workspace_ids`; retry with the
 chosen opaque ID using `--workspace-id` rather than guessing from a path.
 
 Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
-environments before stopping a proven legacy process, so a runtime refresh cannot leave
-the replacement service without its interpreter dependencies.
+environments and refreshes the revision-bound measured staging helper before stopping a
+proven legacy process, so a runtime refresh cannot leave the replacement service without
+its interpreter dependencies or image-stage authority.
 
 The migration archive intentionally excludes local-only generated payloads such as
 `node_modules`, Electron release/build output, `.cache`, and the existing runtime
@@ -976,6 +1025,9 @@ machine ID makes the projection non-authorizing. Recovery
 resolves registration only after target ownership and holds the shared registration guard
 through durable commit; supported registration updates use that same guard. If apply
 cannot measure Feature 046 identity, apply may continue but no recovery authority is kept.
+Immutable image staging uses the same authenticated Feature 046 machine identity
+even when the optional resource monitor reports partial evidence; capacity and
+swap authority remain fail-closed until that monitor is complete.
 Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
 and Cloudflare preconditions from the entry held under that guard. Recovery authority
 stores a canonical non-secret desired edge intent plus digest; observation and immediate
@@ -1156,11 +1208,28 @@ those values.
 
 The broker first takes one safe source snapshot: its opaque revision and the one-use lease
 bytes come from that same snapshot, and consume never reopens the source. The transport then
-opens the root-owned, mode-constrained helper directories, artifact, and manifest without
+opens the owner-only, mode-constrained helper directories, artifact, and manifest without
 following symlinks. It hashes and executes the same already-open artifact inode through
 `/proc/self/fd`, binding the closed artifact/entry/runtime/capability manifest. Existing
 helper or manifest evidence is never overwritten when it disagrees. The configured
-credential-source opaque revision must match before the helper launches.
+credential-source opaque revision must match before the helper launches. If a
+plan-keyed staging bundle is retained after its short ready binding expires,
+provisioning may rotate that one binding atomically for the same plan. Live,
+revoked, malformed, or uncertain authority remains non-overwritable.
+The staging callback crosses the broker boundary as a secret-free structured
+value: bounded helper, pull, and observation failures remain their own public
+stage codes. `broker_unavailable` therefore means lease preparation or source
+resolution failed; it is not used to hide a failure returned by the remote
+staging helper.
+For a v2 `pull_failed` result, `host stage` and `--stage-status` include only
+`pull_failure: {"image":"queue|web|worker","class":"denied|not_found|network|timeout|no_space|daemon"}`.
+The helper uses bounded Docker output only to choose that class; raw stdout,
+stderr, registry detail, and credentials are never placed in the result or ledger.
+The wrapper does not open `/`: `ProtectControlGroups=yes` can deny that operation in the
+user manager. It instead opens the first absolute path component without following links.
+Only that component may report systemd's mapped UID `65534`; the service home and every
+descendant still require the exact service UID, with the protected helper namespace at its
+exact owner-only modes.
 Consume and invalidation share one lock. Invalidation can win first and wipe/refuse the
 snapshot, or consume can win first and atomically detach that exact snapshot before delivery.
 Once detached, later invalidation cannot replace or clear the delivered bytes. The detached
@@ -1191,18 +1260,55 @@ capacity only after pulling.
 An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
 `--stage-status` reports the same authority without opening a credential source or helper.
 Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
-workspace, and no-effect evidence; possible-effect reconciliation observes or fences and
-never launches a duplicate helper.
+workspace, and no-effect evidence. Effect-entered reconciliation is close-only: it can
+release the fence only after read-only proof that the exact unit is inactive or absent,
+the exact cgroup is empty or removed, and the staging workspace has no operation entries.
+It never launches a duplicate helper.
 
-Success requires unchanged machine and daemon epochs, exact RepoDigest, config digest,
-platform, image ID, and topology read from the digest-bound
+For a v2 request already retained as terminal `uncertain`, use the separate protected
+close-only intent with the exact original selectors and plan:
+
+```sh
+./sb host stage --project-dir /absolute/project --environment production \
+  --remote production-host --verified-plan /absolute/verified-plan-set.json \
+  --request-id exact-original-id --expected-generation 0 --reconcile --confirm --json
+```
+
+This does not replay staging. It reads no secret or broker source and starts no helper. It
+only observes the derived deterministic user unit, exact cgroup, and fixed volatile
+workspace. A pre-effect absent-unit, empty-cgroup, no-effect result is atomically closed as
+`failed/precredential_bootstrap_failed`. An effect-entered request is atomically closed as
+`failed/cleanup_reconciled` only when the unit is inactive or absent, the cgroup is empty or
+removed, and the workspace is absent or empty. Every partial, active, ambiguous, present-
+workspace, identity, plan, or policy mismatch leaves the old uncertainty and single-flight
+fence unchanged. Exact replay returns the same terminal result; a different request ID may
+retry only after the fully proven close releases ownership.
+
+Success requires unchanged machine and daemon epochs, exact RepoDigest, signed
+receipt config digest, platform, local image identity, and topology read from the digest-bound
 `org.sandbox.application-topology.v1` image-config label. Failure or cancellation is safely
 terminal only after the exact unit is inactive, its exact cgroup is empty or removed, and
 the credential workspace is verified absent. Otherwise the result is uncertain and fenced.
-The workspace parent is mechanically required to be root-owned mode 0700 on `/run` tmpfs
-before READY and therefore before credential transfer. READY has a finite timeout that kills
-the whole unit. The transient unit remains inspectable until it is explicitly stopped,
-checked, and collected.
+On Docker 29's containerd image store, `docker image inspect` may expose the exact
+RepoDigest as the local image ID; that representation is accepted only when the
+RepoDigest is exact, while the signed receipt config digest remains independently bound.
+The workspace parent is mechanically derived under `/run/user/<effective-uid>` tmpfs and
+required to be owned by that user at mode `0700` before READY and therefore before
+credential transfer. READY has a finite timeout that kills the whole exact owned user unit.
+Launch identity, security properties, and user-slice cgroup are proven before credential
+delivery. Normal completion accepts either the same loaded inactive unit or systemd's exact
+not-found/inactive unloaded state, then requires the launch cgroup removed or empty.
+Before READY, the only accepted output is `READY\n` or one closed ASCII failure frame of at
+most 512 bytes with a fixed inode, plan, cgroup, or workspace phase/code. Unknown, partial,
+or oversized output becomes `bootstrap_unavailable`; no credential is delivered. A fixed
+credential-free helper self-check exercises the measured wrapper, exact transient user-unit
+hardening, cgroup identity, and volatile workspace, then proves and clears its retained unit.
+It has no broker, registry, Docker, plan, pull, or activation capability.
+
+Cleanup observes a closed unit property set. An exact retained failed/dead attempt is reset
+only after its PID and cgroup are absent, and completion requires a successful reset plus an
+exact absent-unit recheck. A different Description, foreign cgroup, live PID, malformed
+property set, or populated cgroup remains uncertain and is never killed, stopped, or reset.
 
 ### Immutable staged-image activation
 

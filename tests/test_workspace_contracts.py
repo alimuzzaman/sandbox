@@ -6,6 +6,7 @@ import sys
 import unittest
 from argparse import ArgumentParser
 from io import StringIO
+import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -151,6 +152,34 @@ class WorkspaceContractTests(unittest.TestCase):
         configure_parser(parser)
         self.assertTrue(parser.parse_args(["create", "--ensure"]).ensure)
         self.assertTrue(parser.parse_args(["reset", "--yes"]).confirm)
+
+    def test_cli_sync_publication_builds_path_free_controller_request(self):
+        parser = ArgumentParser()
+        configure_parser(parser)
+        args = parser.parse_args([
+            "publish-sync", "--workspace-id", "ws-sync",
+            "--project-identity", "project:test",
+            "--generation-id", "gen-sync",
+            "--manifest-digest", "a" * 64,
+            "--archive-manifest-digest", "b" * 64,
+            "--file-count", "2", "--byte-count", "12",
+            "--expected-index-generation", "7", "--json",
+        ])
+        requests = []
+
+        class PublishService:
+            def publish_sync(self, request):
+                requests.append(request)
+                return {"ok": True, "status": "accepted"}
+
+        with patch("sandbox.commands.workspaces.durable_job_dependencies",
+                   return_value={"workspace_service": PublishService()}), \
+                patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b"archive"))), \
+                patch("sys.stdout", StringIO()):
+            cmd_workspace(None, args)
+        self.assertEqual(requests[0].workspace_id, "ws-sync")
+        self.assertEqual(requests[0].expected_index_generation, 7)
+        self.assertFalse(hasattr(requests[0], "project_dir"))
 
     def test_cli_reset_and_destroy_require_explicit_confirmation(self):
         service = _WorkspaceService()

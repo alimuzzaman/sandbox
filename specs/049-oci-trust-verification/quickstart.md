@@ -87,3 +87,14 @@ RED evidence. The user-required independent Sol High security/source review comp
 with no critical, high, or medium finding; this was not a human review. Registry,
 artifact, remote, staging, runtime, deployment, edge, and production evidence were not
 attempted.
+
+## Provision the v2 machine policy
+
+Run `./sb host image provision --provision-phase machine-policy --project-dir PROJECT
+--environment ENV --remote REMOTE --signed-receipt-directory RECEIPTS
+--policy-authority-id ID --policy-revision REVISION --service-image-binding SERVICE=IMAGE
+--activation-environment-binding IMAGE=ENV_VAR --rollback-public-key OWNER_ONLY_PUBLIC_KEY
+--rollback-authority-id ID --rollback-authority-revision REVISION
+--compose-provider-revision REVISION --confirm --json`, repeating both binding flags until
+the `sandbox.hosting.yml` topology and receipt images are complete. Output is limited to
+target, receipt/policy digests, dispositions, and installed owner-only paths.

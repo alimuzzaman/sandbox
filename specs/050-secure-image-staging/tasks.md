@@ -128,3 +128,31 @@ not claim that an implementation-free RED run occurred.
 MVP is Setup + the waived RED-gate record + US1. Do not begin Feature 051 activation until
 separately authorized live acceptance and human credential/process review pass. Local checks
 and the independent automated Sol High review do not supply those gates.
+
+- [X] T049 Add protected v2 stage-bundle preparation with registered source ownership,
+  opaque source revision, exact repository generation, owner-only replay/conflict rules,
+  and focused redaction/refusal tests.
+- [X] T050 Prove the observed `ProtectControlGroups=yes` user-unit path with an accessible
+  mapped-UID top-level inode anchor, closed bounded pre-credential bootstrap/self-check
+  evidence, and exact dead-unit reset/absence cleanup regressions.
+
+## Phase 9: Convergence
+
+- [X] T051 Add a protected v2 reconciliation intent that may safely close and release only
+  an exact accepted `uncertain` request whose immutable request digest matches, whose
+  `effect_entered` and `exact_effect` evidence are both false, and whose fresh exact
+  attempt-unit observation proves the owned unit terminal with `MainPID=0`, empty
+  `ControlGroup`, and the expected cgroup absent or unpopulated; atomically commit one
+  bounded `precredential_bootstrap_failed` terminal result before releasing the active
+  owner, expose it only through the existing confirmed host-stage interface, and prove
+  that every identity drift, partial/possible-effect observation, or cleanup failure
+  remains fenced with zero broker, secret, registry, Docker, helper, or plan replay per
+  US3/AC3 and FR-017, FR-021-FR-024, FR-028, FR-032.
+- [X] T052 Keep the Feature 050 staging-ledger generation independent from the Feature 051
+  activation generation when provisioning a v2 stage bundle: fence the caller's exact
+  activation generation, return the current staging generation and ledger revision for the
+  subsequent stage request, and prove that a safely terminalized earlier stage attempt does
+  not block a new first production activation or weaken either generation check.
+- [X] T053 Normalize each v2 per-image Docker pull failure to one closed image/class
+  diagnostic, carry it through the terminal result, ledger replay, and public stage status,
+  preserve legacy v1 and older v2 ledger reads, and add focused redaction/schema tests.

@@ -31,6 +31,7 @@ TARGET_MUTATION_CAPABILITIES = {
     "edge-continue": "hosting.edge-continue.v1",
     "failed-apply-recover": "hosting.failed-apply-recover.v1",
     "image-stage": "hosting.image-stage.v1",
+    "image-provision": "hosting.image-provision.v2",
     "activate": "hosting.image-activate.v1",
     "adopt": "hosting.image-adopt.v1",
     "rollback": "hosting.image-rollback.v1",

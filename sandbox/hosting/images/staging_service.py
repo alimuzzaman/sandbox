@@ -6,7 +6,7 @@ from sandbox.transports.remote_hosting_images import RemoteImageStageError
 from .staging_models import LocalImageObservation, StageRequest, StageResult, StagedImageProof
 from .staging_policy import admit_stage_request
 from .staging_repository import StageRepository, StageRepositoryError
-from .staging_worker import StageWorker, StageWorkerError
+from .staging_worker import StageDeliveryFailure, StageWorker, StageWorkerError
 
 
 class ImageStagingService:
@@ -64,10 +64,24 @@ class ImageStagingService:
                 "unit_inactive": False, "cgroup_empty_or_removed": False})
 
             def consume(credential: bytes):
-                self.repository.transition(request, "pulling")
-                return prepared.deliver(credential)
+                try:
+                    self.repository.transition(request, "pulling")
+                    return prepared.deliver(credential)
+                except RemoteImageStageError as exc:
+                    return StageDeliveryFailure("remote", exc.code, exc.process, exc.cleanup)
+                except StageWorkerError as exc:
+                    return StageDeliveryFailure("worker", exc.code, exc.process, exc.cleanup)
 
-            observation, process, cleanup = broker_lease.consume(consume)
+            delivered = broker_lease.consume(consume)
+            if isinstance(delivered, StageDeliveryFailure):
+                process_evidence = delivered.process or process_evidence
+                cleanup_evidence = delivered.cleanup or cleanup_evidence
+                if delivered.kind == "remote":
+                    raise RemoteImageStageError(delivered.code,
+                        process=delivered.process, cleanup=delivered.cleanup)
+                raise StageWorkerError(delivered.code,
+                    process=delivered.process, cleanup=delivered.cleanup)
+            observation, process, cleanup = delivered
             broker_lease = None
             process_evidence = process; cleanup_evidence = cleanup
             self.repository.transition(request, "cleanup_pending", process=process, cleanup=cleanup)
@@ -83,6 +97,8 @@ class ImageStagingService:
             code = "broker_unavailable"
         except RemoteImageStageError as exc:
             code = exc.code if exc.code == "helper_failed" else "helper_failed"
+            process_evidence = exc.process or process_evidence
+            cleanup_evidence = exc.cleanup or cleanup_evidence
         except StageWorkerError as exc:
             code = exc.code if exc.code in {"pull_failed", "cleanup_unproven",
                 "observation_invalid", "process_unproven"} else "helper_failed"
@@ -101,8 +117,25 @@ class ImageStagingService:
             except Exception:
                 cancelled = None
             if isinstance(cancelled, dict):
-                process_evidence = cancelled
-                cleanup_evidence = {"complete": cancelled.get("cleanup_complete") is True}
+                # A completed helper response already carries authoritative
+                # process and workspace-cleanup evidence.  Cancellation is a
+                # best-effort second observation; once systemd has unloaded a
+                # short-lived unit it may be unable to repeat that proof and
+                # must not downgrade an otherwise safe terminal response.
+                reported_safe = (
+                    isinstance(process_evidence, dict)
+                    and process_evidence.get("unit_inactive") is True
+                    and process_evidence.get("cgroup_empty_or_removed") is True
+                    and cleanup_evidence == {"complete": True}
+                )
+                cancelled_safe = (
+                    cancelled.get("unit_inactive") is True
+                    and cancelled.get("cgroup_empty_or_removed") is True
+                    and cancelled.get("cleanup_complete") is True
+                )
+                if cancelled_safe or not reported_safe:
+                    process_evidence = cancelled
+                    cleanup_evidence = {"complete": cancelled.get("cleanup_complete") is True}
         process_safe = isinstance(process_evidence, dict) \
             and process_evidence.get("unit_inactive") is True \
             and process_evidence.get("cgroup_empty_or_removed") is True

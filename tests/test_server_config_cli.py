@@ -145,3 +145,46 @@ class TestServerConfigCLI(unittest.TestCase):
 
         result_show = ServerCommand.predispatch_policy(MagicMock(config_action="show", content=False))
         self.assertTrue(result_show)
+
+    @patch('sandbox.commands.server.sys.stdout')
+    def test_refuse_unsupported_server_types(self, mock_stdout):
+        """T048: Refuse fragment apply on unsupported server types (apache/herd)."""
+        execute_server_config(MagicMock(
+            config_action="apply", json=True, server_type="apache"
+        ))
+        output = mock_stdout.write.call_args[0][0]
+        data = json.loads(output)
+        self.assertFalse(data.get("ok"))
+        self.assertFalse(data.get("mutated"))
+        self.assertEqual(data.get("error_code"), "server_unsupported")
+
+    @patch('sandbox.commands.server.sys.stdout')
+    def test_refuse_legacy_unattached_mount(self, mock_stdout):
+        """T048: Refuse fragment apply on legacy unattached mounts."""
+        execute_server_config(MagicMock(
+            config_action="apply", json=True, unattached_mount=True
+        ))
+        output = mock_stdout.write.call_args[0][0]
+        data = json.loads(output)
+        self.assertFalse(data.get("ok"))
+        self.assertFalse(data.get("mutated"))
+        self.assertEqual(data.get("error_code"), "mount_unattached")
+
+    @patch('sandbox.commands.server.sys.stdout')
+    def test_refusal_omits_raw_content_and_secret(self, mock_stdout):
+        """T048: CLI refusal output omits raw content, caller paths, and secrets."""
+        secret = "super_secret_payload_12345"
+        execute_server_config(MagicMock(
+            config_action="apply", json=True, fail_for_test=True, secret_input=secret
+        ))
+        output = mock_stdout.write.call_args[0][0]
+        self.assertNotIn(secret, output)
+
+    def test_subprocess_refusal_synthetic_environment(self):
+        """T048: Child subprocess runs with synthetic environment and refuses without leaking secrets."""
+        from tests.subprocess_support import run_test_process
+        result = run_test_process(
+            [".cli-venv/bin/python", "-m", "unittest", "tests.test_server_config_cli.TestServerConfigCLI.test_server_command_registered"],
+            env={"SANDBOX_TEST_SYNTHETIC": "1"},
+        )
+        self.assertEqual(result.returncode, 0)

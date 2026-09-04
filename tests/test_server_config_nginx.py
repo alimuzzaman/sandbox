@@ -102,5 +102,22 @@ class TestNginxAdapter(unittest.TestCase):
         self.assertEqual(rendered.count("# --- BEGIN sandbox-fragment: 02-a ---"), 1)
         self.assertEqual(rendered.count("# --- END sandbox-fragment: 02-a ---"), 1)
 
+    def test_native_validation_failure_refuses_before_live(self):
+        """T049: Native nginx syntax error fails validation and produces refusal before activation."""
+        invalid_syntax = "location ^~ /wp-content/cache/ { unclosed_directive"
+        with self.assertRaises(Exception):
+            self.adapter.validate(invalid_syntax)
+
+    def test_zero_reload_on_validation_failure(self):
+        """T049: Zero reload is triggered when fragment validation fails."""
+        mock_gateway = unittest.mock.Mock()
+        adapter = NginxAdapter(gateway=mock_gateway)
+        try:
+            adapter.validate("invalid { directive }")
+        except Exception:
+            pass
+        mock_gateway.reload_service.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

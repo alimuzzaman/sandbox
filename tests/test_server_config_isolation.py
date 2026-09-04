@@ -37,5 +37,14 @@ class TestServerConfigIsolation(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_fragments(incarnation_id="inst-Y", storage_path=f"/path/to/inst-X/fragments")
 
+    def test_isolation_target_control_set_unchanged_on_refusal(self):
+        """T049: Refused mutation leaves existing fragment set and readiness unchanged."""
+        incarnation = "inst-unchanged"
+        initial_root = get_fragment_root(incarnation)
+        with self.assertRaises(ValueError):
+            apply_fragment(incarnation, fragment(name="invalid_bad", content=b"listen 80;"))
+        self.assertEqual(get_fragment_root(incarnation), initial_root)
+
+
 if __name__ == '__main__':
     unittest.main()

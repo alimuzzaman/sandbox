@@ -157,19 +157,19 @@ set, bounded reason, and no content/path leak.
 
 ### RED tests for User Story 3
 
-- [ ] T046 [US3] Extend `tests/test_server_config_policy.py` with failing empty/262144/262145-byte, stdin deadline, symlink/directory/device/socket/FIFO, unstable-read, BOM/NUL/control/non-UTF8, conflicting-source, invalid/traversal, credential-like-name, high-confidence secret-like-content, clean near-match, and content-free classification-error cases
-- [ ] T047 [US3] Extend `tests/test_server_config_policy.py` with failing listener/vhost/include/proxy/upstream/process/module/program/TLS/DNS/Caddy/autologin/health/login/outside-docroot/header/log/unknown-directive and combined-conflict cases for both adapters
-- [ ] T048 [US3] Extend `tests/test_server_config_cli.py` with failing wrong-server, unsupported apache/herd, legacy unattached mount, bounded basename-only error, raw-content/native-stderr/path/secret omission, and `mutated:false` refusal cases using synthetic subprocess environments
-- [ ] T049 [US3] Extend `tests/test_server_config_nginx.py`, `tests/test_server_config_openlitespeed.py`, and `tests/test_server_config_isolation.py` with failing invalid-native/ignored-rule refusal, zero validator-to-live leakage, zero reload, unchanged target/control set/runtime/readiness cases
-- [ ] T050 [US3] Run T046-T049 and record the newly failing adversarial assertions before policy/input/adapter hardening in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T046 [US3] Extend `tests/test_server_config_policy.py` with failing empty/262144/262145-byte, stdin deadline, symlink/directory/device/socket/FIFO, unstable-read, BOM/NUL/control/non-UTF8, conflicting-source, invalid/traversal, credential-like-name, high-confidence secret-like-content, clean near-match, and content-free classification-error cases
+- [x] T047 [US3] Extend `tests/test_server_config_policy.py` with failing listener/vhost/include/proxy/upstream/process/module/program/TLS/DNS/Caddy/autologin/health/login/outside-docroot/header/log/unknown-directive and combined-conflict cases for both adapters
+- [x] T048 [US3] Extend `tests/test_server_config_cli.py` with failing wrong-server, unsupported apache/herd, legacy unattached mount, bounded basename-only error, raw-content/native-stderr/path/secret omission, and `mutated:false` refusal cases using synthetic subprocess environments
+- [x] T049 [US3] Extend `tests/test_server_config_nginx.py`, `tests/test_server_config_openlitespeed.py`, and `tests/test_server_config_isolation.py` with failing invalid-native/ignored-rule refusal, zero validator-to-live leakage, zero reload, unchanged target/control set/runtime/readiness cases
+- [x] T050 [US3] Run T046-T049 and record the newly failing adversarial assertions before policy/input/adapter hardening in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 3
 
-- [ ] T051 [US3] Harden stable input and output-source validation to satisfy every boundary without TOCTOU adoption or shell/environment interpretation in `sandbox/server_config/input.py`
-- [ ] T052 [US3] Complete common deny-by-default authority, high-confidence name/content secret classification with fail-closed false-positive behavior, content-free refusal, protected-route/path/header/log rules, and deterministic combined-set conflict refusal in `sandbox/server_config/policy.py`
-- [ ] T053 [US3] Complete native unknown/context/server mismatch and ignored-directive refusal before live activation in `sandbox/server_config/adapters/nginx.py` and `sandbox/server_config/adapters/openlitespeed.py`
-- [ ] T054 [US3] Enforce bounded content-free refusals, phase evidence, structured output, and zero-reload/zero-commit semantics in `sandbox/commands/server.py` and `sandbox/server_config/service.py`
-- [ ] T055 [US3] Run the full adversarial matrix plus existing `tests/test_redaction_parity.py` and `tests/test_clean_url_default_policy.py`; record the green refusal checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T051 [US3] Harden stable input and output-source validation to satisfy every boundary without TOCTOU adoption or shell/environment interpretation in `sandbox/server_config/input.py`
+- [x] T052 [US3] Complete common deny-by-default authority, high-confidence name/content secret classification with fail-closed false-positive behavior, content-free refusal, protected-route/path/header/log rules, and deterministic combined-set conflict refusal in `sandbox/server_config/policy.py`
+- [x] T053 [US3] Complete native unknown/context/server mismatch and ignored-directive refusal before live activation in `sandbox/server_config/adapters/nginx.py` and `sandbox/server_config/adapters/openlitespeed.py`
+- [x] T054 [US3] Enforce bounded content-free refusals, phase evidence, structured output, and zero-reload/zero-commit semantics in `sandbox/commands/server.py` and `sandbox/server_config/service.py`
+- [x] T055 [US3] Run the full adversarial matrix plus existing `tests/test_redaction_parity.py` and `tests/test_clean_url_default_policy.py`; record the green refusal checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Unsafe input is refused before activation. Syntax-invalid refusal is not
 misreported as automatic rollback.

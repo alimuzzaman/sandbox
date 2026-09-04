@@ -328,3 +328,76 @@ runtime verification, lifecycle/isolation, CLI contracts, modularity, architectu
    - Preserves plugin/WordPress `.htaccess` without overwrite.
 
 Both minimum adapters (nginx and litespeed) now satisfy local contracts and pass all 173 tests.
+
+## US3 RED checkpoint (T050)
+
+Recorded 2026-09-04 before input and CLI hardening for User Story 3.
+
+### Failing adversarial test evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_policy \
+  tests.test_server_config_cli \
+  tests.test_server_config_nginx \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_isolation
+```
+
+Result: **3 tests failed (100% expected)** across extended suites due to missing deadline parameter on stdin reader and unhardened CLI refusal handlers:
+- `tests/test_server_config_policy.py`: `test_stdin_deadline_timeout` fails (`TypeError: read_fragment_stdin() got an unexpected keyword argument 'deadline'`)
+- `tests/test_server_config_cli.py`: `test_refuse_unsupported_server_types` fails (`ok: false, mutated: false, error_code: server_unsupported` not emitted)
+- `tests/test_server_config_cli.py`: `test_refuse_legacy_unattached_mount` fails (`ok: false, mutated: false, error_code: mount_unattached` not emitted)
+
+Foundation (95) and US1/US2 (78) baseline assertions continue to pass without regressions.
+
+## US3 GREEN story checkpoint (T055)
+
+Recorded 2026-09-04 after completing T046-T055 for User Story 3.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed \
+  tests.test_redaction_parity
+```
+
+Result: **201 tests passed** across all foundation, Nginx, OpenLiteSpeed, policy, isolation, CLI, modularity, redaction parity, and clean-URL policy suites.
+
+### Summary of US3 implementations:
+
+1. **Hardened input boundaries** (`sandbox/server_config/input.py`):
+   - Added finite `deadline` enforcement to `read_fragment_stdin`.
+   - Bounded regular file reading refusing character/block devices (`/dev/null`, `/dev/zero`), FIFOs, symlinks, directories, and empty inputs.
+   - Mid-read mutation detection (`fragment_source_changed`) comparing file facts before and after stream read.
+
+2. **Common policy and secret classification** (`sandbox/server_config/policy.py`):
+   - Deny-by-default rejection for forbidden directives (`upstream`, `resolver`, `ssl_*`, `caddy_*`, `module`, `admin`, `listener`, `extprocessor`, etc.).
+   - High-confidence secret pattern classification (`fragment_secret_like_input`) refusing credentials, private keys, authorization headers, tokens.
+   - Content-free error messages ensuring exceptions never leak raw user input, secrets, or caller file paths.
+
+3. **CLI and service refusal enforcement** (`sandbox/commands/server.py`, `sandbox/server_config/service.py`):
+   - Structured JSON error output with `ok: false`, `mutated: false`, and bounded error codes (`server_unsupported`, `mount_unattached`).
+   - Refusal of unattached legacy instances and unsupported server types (`apache`, `herd`).
+   - Clean subprocess execution with synthetic environments ensuring zero environment leakage.

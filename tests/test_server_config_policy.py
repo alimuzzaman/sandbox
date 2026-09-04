@@ -71,6 +71,53 @@ class ServerConfigInputTests(unittest.TestCase):
                 write_fragment_output(link, b"replacement")
             self.assertEqual(target.read_bytes(), b"unchanged")
 
+    def test_stdin_deadline_timeout(self):
+        """T046: Stdin read enforces deadline and fails closed on stall."""
+        from sandbox.server_config.input import read_fragment_stdin
+        import time
+
+        class StallingStream(io.BytesIO):
+            def read(self, size=-1):
+                time.sleep(0.05)
+                return super().read(size)
+
+        stream = StallingStream(b"set $x 1;\n")
+        with self.assertRaisesRegex(ValueError, "stdin_deadline_exceeded"):
+            read_fragment_stdin(stream, deadline=0.01)
+
+    def test_file_reader_refuses_device_and_socket(self):
+        """T046: File reader refuses character/block devices and special files."""
+        from sandbox.server_config.input import read_fragment_file
+
+        with self.assertRaisesRegex(ValueError, "fragment_source_unsafe"):
+            read_fragment_file("/dev/null")
+        with self.assertRaisesRegex(ValueError, "fragment_source_unsafe"):
+            read_fragment_file("/dev/zero")
+
+    def test_unstable_read_detects_mutation(self):
+        """T046: Unstable read detects file mutation mid-flight and fails closed."""
+        from sandbox.server_config.input import read_fragment_file
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mutating.conf"
+            path.write_bytes(b"initial content\n")
+            orig_fstat = os.fstat
+            calls = [0]
+            def side_effect(fd):
+                res = orig_fstat(fd)
+                calls[0] += 1
+                if calls[0] > 1:
+                    return os.stat_result((res.st_mode, res.st_ino, res.st_dev, res.st_nlink,
+                                           res.st_uid, res.st_gid, res.st_size + 10,
+                                           res.st_atime, res.st_mtime + 5, res.st_ctime))
+                return res
+
+            with patch("os.fstat", side_effect=side_effect):
+                with self.assertRaisesRegex(ValueError, "fragment_source_changed"):
+                    read_fragment_file(path)
+
+
 
 class ServerConfigPolicyTests(unittest.TestCase):
     def test_name_boundary_is_exact_and_credential_like_names_fail_closed(self):
@@ -176,6 +223,82 @@ class ServerConfigPolicyTests(unittest.TestCase):
             validate_set_conflicts(({"variable": ("xspeed",)},))
         with self.assertRaisesRegex(ValueError, "fragment_set_conflict"):
             validate_set_conflicts((alpha, {"name": "beta-cache", "variable": ("xspeed_alpha",)}))
+
+    def test_adversarial_forbidden_directives_matrix(self):
+        """T047: Deny-by-default rejects upstream, resolver, tls, caddy, autologin, health, login, outside-docroot for both adapters."""
+        from sandbox.server_config.policy import validate_common_authority
+
+        forbidden_nginx = [
+            "upstream backend { server 127.0.0.1:8080; }",
+            "resolver 1.1.1.1;",
+            "ssl_certificate /etc/ssl/cert.pem;",
+            "ssl_certificate_key /etc/ssl/key.pem;",
+            "caddy_directive on;",
+            "location /autologin { return 200; }",
+            "location /health { return 200; }",
+            "location /wp-login.php { return 200; }",
+            "location ^~ /outside/ { root /var/www; }",
+            "add_header Set-Cookie 'session=1';",
+            "access_log /var/log/nginx/access.log;",
+            "auth_basic 'Restricted';",
+        ]
+        for config in forbidden_nginx:
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    validate_common_authority(config, server_type="nginx")
+
+        forbidden_ols = [
+            "listener HTTP { address *:80 }",
+            "admin { allow 127.0.0.1 }",
+            "extprocessor lsphp { type lsapi }",
+            "virtualhost other { docRoot /var/www/ }",
+            "vhTemplate docker { templateFile conf/docker.conf }",
+            "accessControl { allow * }",
+            "module cache { ls_enabled 1 }",
+            "context /autologin/ { allowBrowse 1 }",
+            "context /health/ { allowBrowse 1 }",
+            "context /wp-login.php/ { allowBrowse 1 }",
+        ]
+        for config in forbidden_ols:
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    validate_common_authority(config, server_type="litespeed")
+
+    def test_high_confidence_secret_like_content_and_clean_near_match(self):
+        """T046: High-confidence secrets fail closed while clean near-matches pass."""
+        from sandbox.server_config.policy import validate_fragment_bytes
+
+        # Secrets that must fail closed
+        secret_payloads = [
+            b"AKIAIOSFODNN7EXAMPLE",
+            b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...",
+            b"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0...",
+            b"db_password=mysecretpassword123",
+        ]
+        for payload in secret_payloads:
+            with self.subTest(payload=payload[:10]):
+                with self.assertRaisesRegex(ValueError, "fragment_secret_like_input"):
+                    validate_fragment_bytes(payload)
+
+        # Clean near-match that must pass
+        clean_config = b"set $xspeed_cache_hit 1;\n"
+        self.assertEqual(validate_fragment_bytes(clean_config), "set $xspeed_cache_hit 1;\n")
+
+    def test_content_free_classification_errors(self):
+        """T046: Exceptions never echo raw fragment bytes, caller paths, or secrets."""
+        from sandbox.server_config.policy import validate_fragment_bytes, validate_fragment_name
+
+        secret_str = "super_secret_token_value_xyz"
+        with self.assertRaises(ValueError) as ctx:
+            validate_fragment_bytes(f"token={secret_str}\n".encode("utf-8"))
+        self.assertNotIn(secret_str, str(ctx.exception))
+
+        input_name = "custom-auth-token-secret"
+        with self.assertRaises(ValueError) as ctx:
+            validate_fragment_name(input_name)
+        self.assertNotIn(input_name, str(ctx.exception))
+        self.assertEqual(str(ctx.exception), "fragment_secret_like_input")
+
 
 
 if __name__ == "__main__":

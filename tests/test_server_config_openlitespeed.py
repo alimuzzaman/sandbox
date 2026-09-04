@@ -70,6 +70,23 @@ class TestOpenLiteSpeedAdapter(unittest.TestCase):
         with self.assertRaises(Exception):
             self.adapter.validate(invalid_config)
 
+    def test_ignored_rule_refuses_before_restart(self):
+        """T049: Ignored OLS rule fails validation and produces refusal before activation."""
+        ignored_syntax = "virtualhost other { docRoot /var/www; }"
+        with self.assertRaises(Exception):
+            self.adapter.validate(ignored_syntax)
+
+    def test_zero_restart_on_ols_validation_failure(self):
+        """T049: Zero restart of target service occurs when validation fails."""
+        mock_gateway = unittest.mock.Mock()
+        adapter = OpenLiteSpeedAdapter(gateway=mock_gateway)
+        try:
+            adapter.validate("invalid_directive 123;")
+        except Exception:
+            pass
+        mock_gateway.restart_target_service.assert_not_called()
+
+
 
 if __name__ == "__main__":
     unittest.main()

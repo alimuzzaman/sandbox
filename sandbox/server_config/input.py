@@ -63,9 +63,18 @@ def read_fragment_file(path: str | os.PathLike[str], *, maximum: int = MAX_FRAGM
     return payload
 
 
-def read_fragment_stdin(stream: BinaryIO, *, maximum: int = MAX_FRAGMENT_BYTES) -> bytes:
-    """Read at most one byte beyond the supported stdin boundary."""
+def read_fragment_stdin(
+    stream: BinaryIO, *, maximum: int = MAX_FRAGMENT_BYTES, deadline: float | None = None
+) -> bytes:
+    """Read at most one byte beyond the supported stdin boundary within deadline."""
+    import time
+
+    start = time.monotonic()
+    if deadline is not None and deadline <= 0:
+        _raise("stdin_deadline_exceeded")
     payload = stream.read(maximum + 1)
+    if deadline is not None and (time.monotonic() - start) > deadline:
+        _raise("stdin_deadline_exceeded")
     if not isinstance(payload, bytes):
         _raise("fragment_source_unsafe")
     if not payload:

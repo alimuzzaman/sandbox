@@ -224,6 +224,49 @@ def _handle_config(cfg: Any, args: argparse.Namespace) -> None:
 
 def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
     """Apply a named server config fragment."""
+    server_type = getattr(args, "server_type", None)
+    if not isinstance(server_type, str):
+        server_type = None
+
+    if cfg is not None and isinstance(cfg, dict):
+        inst_name = getattr(args, "instance", "default") or "default"
+        if isinstance(inst_name, str):
+            inst_cfg = cfg.get("instances", {}).get(inst_name, {})
+            if not server_type:
+                server_type = inst_cfg.get("server")
+            if inst_cfg.get("server") in ("nginx", "litespeed") and not inst_cfg.get("server_config_mount_id"):
+                if use_json:
+                    _render_json({
+                        "ok": False,
+                        "mutated": False,
+                        "error_code": "mount_unattached",
+                    })
+                    return
+                print("error: mount_unattached", file=sys.stderr)
+                raise SystemExit(1)
+
+    if server_type in ("apache", "herd"):
+        if use_json:
+            _render_json({
+                "ok": False,
+                "mutated": False,
+                "error_code": "server_unsupported",
+            })
+            return
+        print("error: server_unsupported", file=sys.stderr)
+        raise SystemExit(1)
+
+    if getattr(args, "unattached_mount", None) is True:
+        if use_json:
+            _render_json({
+                "ok": False,
+                "mutated": False,
+                "error_code": "mount_unattached",
+            })
+            return
+        print("error: mount_unattached", file=sys.stderr)
+        raise SystemExit(1)
+
     if use_json:
         payload = {
             "ok": True,

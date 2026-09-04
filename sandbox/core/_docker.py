@@ -375,7 +375,12 @@ def _server_config_nginx_mount(inst_cfg: dict) -> str:
     if not incarnation:
         return ""
     try:
-        (Path(RUNTIME_DIR) / "server-config" / incarnation).mkdir(parents=True, exist_ok=True)
+        base_dir = Path(RUNTIME_DIR) / "server-config"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base_dir.chmod(0o700)
+        inc_dir = base_dir / incarnation
+        inc_dir.mkdir(parents=True, exist_ok=True)
+        inc_dir.chmod(0o700)
     except OSError:
         pass
     return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/etc/nginx/sandbox-fragments:ro"
@@ -420,7 +425,12 @@ def _server_config_ols_mount(inst_cfg: dict) -> str:
     if not incarnation:
         return ""
     try:
-        (Path(RUNTIME_DIR) / "server-config" / incarnation).mkdir(parents=True, exist_ok=True)
+        base_dir = Path(RUNTIME_DIR) / "server-config"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base_dir.chmod(0o700)
+        inc_dir = base_dir / incarnation
+        inc_dir.mkdir(parents=True, exist_ok=True)
+        inc_dir.chmod(0o700)
     except OSError:
         pass
     return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/usr/local/lsws/conf/vhosts-include:ro"

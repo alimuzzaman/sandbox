@@ -149,6 +149,10 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             value = inst.get(extension_key, runtime.get(extension_key))
             if value is not None:
                 resolved[extension_key] = _json_safe_php_extensions(value)
+        if inst.get("instance_incarnation_id") is not None:
+            resolved["instance_incarnation_id"] = inst.get("instance_incarnation_id")
+        if inst.get("server_config_mount_id") is not None:
+            resolved["server_config_mount_id"] = inst.get("server_config_mount_id")
         return resolved
 
     # Per-project model: the authoritative instance list is the on-disk registry
@@ -159,7 +163,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
     # The registry entry caches each instance's ports/server/domain; overlay the
     # sandbox.local.yml block on top so an instance whose block was lost still
     # resolves to its REAL ports (not the shared hardcoded defaults → collision).
-    _RKEYS = ("wordpress_port", "db_port", "mailpit_port", "server", "domain")
+    _RKEYS = ("wordpress_port", "db_port", "mailpit_port", "server", "domain", "instance_incarnation_id", "server_config_mount_id")
     try:
         reg = {e["instance"]: e for e in _core().registry_all().values()
                if e.get("instance") and e.get("kind") != "compose"}
@@ -377,6 +381,24 @@ def _server_config_registry_identity_fields(
     return {
         "instance_incarnation_id": projection.instance_incarnation_id,
         "server_config_mount_id": projection.server_config_mount_id,
+    }
+
+
+def _server_config_attached_identity_fields(
+        existing: Mapping | None, server: str | None = None) -> dict:
+    """Attach projected server-config mount to an existing modern instance."""
+    from sandbox.server_config.models import InstanceIdentityProjection
+    from sandbox.server_config.context import project_mount
+    from sandbox.core._paths import RUNTIME_DIR
+
+    projection = InstanceIdentityProjection.from_existing_record(existing or {})
+    if projection.is_legacy or server not in ("nginx", "litespeed"):
+        return _server_config_registry_identity_fields(existing)
+    mount = project_mount(RUNTIME_DIR / "server-config", projection.instance_incarnation_id)
+    attached = projection.stage_mount(mount.mount_id)
+    return {
+        "instance_incarnation_id": attached.instance_incarnation_id,
+        "server_config_mount_id": attached.server_config_mount_id,
     }
 
 
@@ -1433,7 +1455,9 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 wp_version=pconf.get("wpVersion"),
                 source=pconf.get("source"),
                 status="ready",
-                **server_config_identity,
+                **_server_config_attached_identity_fields(
+                    dict(server_config_identity, **(existing or {})), server=server
+                ),
             )
 
 
@@ -1673,7 +1697,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
             php_version=pconf.get("phpVersion"),
             wp_version=pconf.get("wpVersion"),
             source=pconf.get("source"),
-            **_server_config_registry_identity_fields(existing),
+            **_server_config_attached_identity_fields(existing, server=server),
         )
         # Report the core reconcile alongside the record (the registry stores
         # the PIN; this is what the site actually runs after this apply).

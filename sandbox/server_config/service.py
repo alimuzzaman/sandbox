@@ -59,6 +59,11 @@ class ServerConfigService:
 
         frags = []
         for item in state.get("fragments", []):
+            content_bytes = None
+            try:
+                content_bytes = self.repository.read_fragment(item["content_id"])
+            except Exception:
+                pass
             frag = ServerConfigFragment(
                 name=item["name"],
                 authority=item["authority"],
@@ -76,6 +81,7 @@ class ServerConfigService:
                     else None
                 ),
                 policy_revision=item["policy_revision"],
+                _raw_content=content_bytes,
             )
             frags.append(frag)
         return frags
@@ -498,6 +504,34 @@ class ServerConfigService:
                     instance_incarnation_id=self.repository.incarnation,
                     fragment_name=frag.name,
                     fragment_set_id=prior_set_id,
+                )
+
+        if hasattr(self.adapter, "policy"):
+            try:
+                pol_res = self.adapter.policy(frag, self.instance_authority)
+                if hasattr(pol_res, "ok") and not pol_res.ok:
+                    return OperationResult(
+                        outcome=TerminalOutcome.REFUSED,
+                        code="policy_rejected",
+                        mutated=False,
+                        instance_incarnation_id=self.repository.incarnation,
+                        fragment_name=frag.name,
+                        fragment_set_id=None,
+                    )
+            except Exception as exc:
+                err_code = str(exc)
+                if err_code not in (
+                    "authority_forbidden", "authority_scope_forbidden", "authority_path_forbidden",
+                    "authority_directive_unknown", "authority_syntax_invalid", "policy_rejected",
+                ):
+                    err_code = "policy_rejected"
+                return OperationResult(
+                    outcome=TerminalOutcome.REFUSED,
+                    code=err_code,
+                    mutated=False,
+                    instance_incarnation_id=self.repository.incarnation,
+                    fragment_name=frag.name,
+                    fragment_set_id=None,
                 )
 
         try:

@@ -526,8 +526,8 @@ class PhaseResult:
     @property
     def ok(self) -> bool:
         return self.code in {
-            "active", "ready", "authority_accepted", "ok", "passed",
-            "reloaded", "restored",
+            "active", "activated", "ready", "authority_accepted", "accepted", "ok", "passed",
+            "reloaded", "restored", "included",
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -608,6 +608,14 @@ class ValidationEvidence:
             runtime_precondition_digest=runtime_precondition_digest, policy=policy,
             native_validation=native_validation, inclusion_proof=inclusion_proof,
             started_at=started_at, ended_at=ended_at, evidence_digest=evidence_id,
+        )
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.policy.ok
+            and self.native_validation.ok
+            and self.inclusion_proof.ok
         )
 
     def to_public_dict(self) -> dict[str, Any]:

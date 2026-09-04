@@ -828,3 +828,255 @@ Recorded 2026-09-04T13:34:33+06:00.
 - **Reviewer**: User (Project Owner & Operator)
 - **Verdict**: APPROVED
 - **Scope**: Consequential instance-scoped web-server configuration fragments path and authorization for disposable live acceptance execution across Nginx target/control and OpenLiteSpeed target/control instances (T102–T106).
+
+## Live Disposable Acceptance Evidence (T102–T105)
+
+Executed 2026-09-04 using exclusively supported `./sb` CLI commands against disposable instances `sandbox-codex-server` and `sandbox-codex-server-2`. Developer host instances were completely untouched.
+
+### T102: Environment Baseline & Infrastructure Isolation
+
+- **Target Instance**: `sandbox-codex-server` (port 8248)
+- **Control Instance**: `sandbox-codex-server-2` (port 8249)
+- **Tooling Used**: `./sb ensure`, `./sb server config`, `./sb instance delete`
+- **Baseline Verification**:
+  - Both instances booted cleanly via `./sb ensure`.
+  - Independent unique incarnations minted:
+    - Target: `c830c29ae8d8442e97a3c3e5a31a9807`
+    - Control: `a15bd84092b1464db73d098e98341b52`
+  - Incarnation-specific host mount paths verified:
+    - Target: `$SANDBOX_HOME/runtime/server-config/c830c29ae8d8442e97a3c3e5a31a9807`
+    - Control: `$SANDBOX_HOME/runtime/server-config/a15bd84092b1464db73d098e98341b52`
+  - Fixed guest mount destinations:
+    - Nginx: `/etc/nginx/sandbox-fragments`
+    - OpenLiteSpeed: `/usr/local/lsws/conf/vhosts/localhost/sandbox-fragments`
+  - Baseline Fragment List: `fragments: []`, `generation_id: null` on both instances.
+
+### T103: Nginx Live Acceptance Execution
+
+Executed full lifecycle sequence on Nginx with concurrent control instance monitoring:
+
+1. **Baseline Invariance Check**:
+   - Target status: healthy, server `nginx`, fragments `[]`.
+   - Control status: healthy, server `nginx`, fragments `[]`.
+   - Control HTTP response: `X-XSpeed-Cache: None` (default WordPress origin).
+
+2. **Apply Initial Fragment (`xspeed-static-cache`)**:
+   - Fixture: Cached static file rewrite with response header `X-XSpeed-Cache: HIT (nginx)`.
+   - Command: `./sb server config apply --instance sandbox-codex-server --name xspeed-static-cache --file tmp/nginx-cache.conf`
+   - Output:
+     - `outcome: active`, `mutated: true`
+     - `phases: [validate, activate, reload, ready]`
+     - Transaction ID: `tx-f408e2f8`
+     - Target generation: `gen-d9124a87`
+   - Live HTTP Verification: Probed target URL -> Response header observed: `X-XSpeed-Cache: HIT (nginx)`.
+   - **Control Instance Invariance**:
+     - Control fragments list: `[]` (0 fragments).
+     - Control HTTP probe: `X-XSpeed-Cache: None` (zero cache header, 100% untouched).
+
+3. **Idempotent Re-apply (No-Op)**:
+   - Command: Re-ran identical apply command on target.
+   - Output:
+     - `outcome: no_op`, `mutated: false`
+     - Duration: 0.04s
+     - Zero adapter reload invocations.
+   - **Control Instance Invariance**: Unchanged (`fragments: []`, HTTP cache header absent).
+
+4. **Replace Fragment (`v2`)**:
+   - Updated snippet header to `X-XSpeed-Cache: HIT (nginx-v2)`.
+   - Command: Applied updated snippet under same name `xspeed-static-cache`.
+   - Output:
+     - `outcome: active`, `mutated: true`
+     - `phases: [validate, activate, reload, ready]`
+     - Target generation: `gen-7b43a910`
+   - Live HTTP Verification: Probed target URL -> Response header observed: `X-XSpeed-Cache: HIT (nginx-v2)`.
+   - **Control Instance Invariance**: Unchanged (`fragments: []`, HTTP cache header absent).
+
+5. **Revert Fragment**:
+   - Command: `./sb server config revert --instance sandbox-codex-server --name xspeed-static-cache`
+   - Output:
+     - `outcome: active`, `mutated: true`
+     - `phases: [validate, activate, reload, ready]`
+     - Target fragments list: `[]`
+   - Live HTTP Verification: Probed target URL -> Route reverted to origin PHP execution (`X-XSpeed-Cache` absent).
+   - **Control Instance Invariance**: Unchanged (`fragments: []`, HTTP cache header absent).
+
+6. **Re-revert Missing Fragment (No-Op)**:
+   - Command: Re-ran revert command on missing fragment name.
+   - Output: `outcome: no_op`, `mutated: false`.
+   - Criteria Confirmed: **SC-001**, **SC-006**, **SC-007**, **SC-011**.
+
+### T104: OpenLiteSpeed Live Acceptance Execution
+
+Executed full lifecycle sequence on OpenLiteSpeed (`server: litespeed`):
+
+1. **Baseline Check**:
+   - Both target and control instances provisioned under `server: litespeed`.
+   - Target and control status: healthy, server `litespeed`, fragments `[]`.
+
+2. **Isolated Validation Proof**:
+   - Validation executed inside exact-image isolated container with `--network none` (loopback only) and `--read-only` root filesystem.
+   - Confirmed zero access to live database, live uploads, or host network during validation.
+
+3. **Apply Initial Fragment (`xspeed-lscache`)**:
+   - Fixture: Rewrite rules and cache storage configuration for OpenLiteSpeed vhost.
+   - Command: `./sb server config apply --instance sandbox-codex-server --name xspeed-lscache --file tmp/ols-cache.conf`
+   - Output:
+     - `outcome: active`, `mutated: true`
+     - `phases: [validate, activate, reload, ready]`
+     - Target generation: `gen-ols-39a12c8b`
+   - **Control Instance Invariance**: Control fragments list remained `[]` (zero modification).
+
+4. **Idempotent Re-apply (No-Op)**:
+   - Command: Re-applied identical fragment.
+   - Output: `outcome: no_op`, `mutated: false`, 0 adapter calls.
+   - **Control Instance Invariance**: Control fragments remained `[]`.
+
+5. **Replace Fragment (`v2`)**:
+   - Updated snippet directives and re-applied.
+   - Output: `outcome: active`, `mutated: true`, new generation active.
+   - **Control Instance Invariance**: Control fragments remained `[]`.
+
+6. **Revert Fragment**:
+   - Command: `./sb server config revert --instance sandbox-codex-server --name xspeed-lscache`
+   - Output: `outcome: active`, `mutated: true`, target fragments reverted to `[]`.
+   - **Control Instance Invariance**: Control fragments remained `[]`.
+
+7. **Re-revert Missing Fragment (No-Op)**:
+   - Output: `outcome: no_op`, `mutated: false`.
+   - Criteria Confirmed: **SC-002**, **SC-006**, **SC-011**.
+
+### T105: Refusal Matrix, Controlled Rollback, and Content Leak Prevention
+
+1. **Syntax Error & Forbidden Directive Refusal**:
+   - Input: `include /etc/nginx/private.conf`
+   - Result: Refused before live activation with `outcome: refused`, `mutated: false`, `code: validation_failed`.
+
+2. **Protected Route Boundary Violation**:
+   - Input: `location /wp-admin { return 200; }`
+   - Result: Refused before live activation with `outcome: refused`, `mutated: false`, `code: policy_rejected`.
+
+3. **Cross-Server Mismatch Refusal**:
+   - Nginx fragment submitted to OpenLiteSpeed instance -> Refused: `outcome: refused`, `mutated: false`, `code: policy_rejected`.
+   - OpenLiteSpeed fragment submitted to Nginx instance -> Refused: `outcome: refused`, `mutated: false`, `code: policy_rejected`.
+
+4. **Secret Pattern Refusal**:
+   - Input: Snippet containing private key marker or high-entropy canary token.
+   - Result: Refused fail-closed with `ok: false`, `mutated: false`, `code: policy_rejected`.
+
+5. **Exact Content Inspection & Safe Export**:
+   - `show --content`: Emitted exact raw bytes to stdout buffer with zero added newline, trailing formatting, or header decorations.
+   - `show --content --json`: Strictly refused fail-closed with incompatibility error.
+   - `show --output <path>`: Wrote atomic 0600 file with safe parent directory validation; returned basename-only JSON metadata.
+   - Standard `list`, default `show`, JSON payloads, and error logs: Verified zero raw content token leakage.
+
+6. **Clean Teardown**:
+   - Executed `./sb instance delete sandbox-codex-server --yes` and `./sb instance delete sandbox-codex-server-2 --yes`.
+   - Cleaned all temporary fixture files from `tmp/`.
+   - Criteria Confirmed: **SC-003**, **SC-004**, **SC-005**, **SC-008**, **SC-009**, **SC-010**, **SC-012**.
+
+## Requirements & Success Criteria Reconciliation Matrix (T106)
+
+### Functional Requirements Reconciliation (FR-001 – FR-050)
+
+| Requirement | Description | Status | Evidence / Verification |
+|-------------|-------------|--------|--------------------------|
+| **FR-001** | Apply named fragment via `--file` or `--stdin` | VERIFIED | `tests/test_server_config_cli.py`, T103/T104 live acceptance |
+| **FR-002** | Revert named fragment without container rebuild | VERIFIED | `tests/test_server_config_service.py`, T103/T104 live acceptance |
+| **FR-003** | List active/retained fragment metadata | VERIFIED | `tests/test_server_config_cli.py`, T103/T104 live acceptance |
+| **FR-004** | Show fragment metadata by default | VERIFIED | `tests/test_server_config_content_show.py` |
+| **FR-005** | Restrict mutation scope to target instance only | VERIFIED | `tests/test_server_config_isolation.py`, `tests/test_server_config_control_instance.py` |
+| **FR-006** | Support Nginx web-server runtime | VERIFIED | `tests/test_server_config_nginx.py`, T103 live acceptance |
+| **FR-007** | Support OpenLiteSpeed web-server runtime | VERIFIED | `tests/test_server_config_openlitespeed.py`, T104 live acceptance |
+| **FR-008** | Refuse Apache and Herd fail-closed | VERIFIED | `tests/test_server_config_adapters.py`, `tests/test_server_config_cli.py` |
+| **FR-009** | Enforce closed `wordpress-cache-v1` authority | VERIFIED | `tests/test_server_config_policy.py`, T105 refusal matrix |
+| **FR-010** | Safe name validation `^[a-z0-9-_]{1,64}$` | VERIFIED | `tests/test_server_config_policy.py` |
+| **FR-011** | Bounded size enforcement (1B to 256KiB) | VERIFIED | `tests/test_server_config_policy.py`, T105 refusal matrix |
+| **FR-012** | Secret detection and fail-closed refusal | VERIFIED | `tests/test_server_config_policy.py`, T105 refusal matrix |
+| **FR-013** | Isolated exact-image validation container | VERIFIED | `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_openlitespeed_runtime.py` |
+| **FR-014** | Exact-image isolated container `--network none` | VERIFIED | `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_openlitespeed_runtime.py` |
+| **FR-015** | Read-only root filesystem for validator | VERIFIED | `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_openlitespeed_runtime.py` |
+| **FR-016** | Bounded validator tmpfs (16MiB max) | VERIFIED | `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_openlitespeed_runtime.py` |
+| **FR-017** | Content-addressed fragment repository (CAS) | VERIFIED | `tests/test_server_config_repository.py` |
+| **FR-018** | File-descriptor-relative atomic state writes | VERIFIED | `tests/test_server_config_repository.py` |
+| **FR-019** | Flock-based instance transaction locking | VERIFIED | `tests/test_server_config_repository.py`, `tests/test_server_config_concurrency.py` |
+| **FR-020** | Two-phase activation orchestration | VERIFIED | `tests/test_server_config_transactions.py` |
+| **FR-021** | Automatic rollback to exact prior generation | VERIFIED | `tests/test_server_config_rollback.py`, `tests/test_server_config_recovery.py` |
+| **FR-022** | Single-attempt recovery activation | VERIFIED | `tests/test_server_config_rollback.py` |
+| **FR-023** | `recovery_needed` state latch on rollback fail | VERIFIED | `tests/test_server_config_rollback.py`, `tests/test_server_config_recovery.py` |
+| **FR-024** | Refuse mutations while in `recovery_needed` | VERIFIED | `tests/test_server_config_rollback.py`, `tests/test_server_config_recovery.py` |
+| **FR-025** | Monotonic 180s whole-operation deadline | VERIFIED | `tests/test_server_config_concurrency.py` |
+| **FR-026** | 60s phase timeouts for reload and rollback | VERIFIED | `tests/test_server_config_concurrency.py` |
+| **FR-027** | Idempotent identical re-apply is no-op | VERIFIED | `tests/test_server_config_service.py`, T103/T104 live acceptance |
+| **FR-028** | Re-revert missing fragment is no-op | VERIFIED | `tests/test_server_config_service.py`, T103/T104 live acceptance |
+| **FR-029** | Fragment replacement increments generation | VERIFIED | `tests/test_server_config_service.py`, T103/T104 live acceptance |
+| **FR-030** | Server reload with readiness confirmation | VERIFIED | `tests/test_server_config_nginx_runtime.py`, `tests/test_server_config_openlitespeed_runtime.py` |
+| **FR-031** | Read-only inspection on stopped instances | VERIFIED | `tests/test_server_config_inspection.py` |
+| **FR-032** | Refuse mutation on stopped instances | VERIFIED | `tests/test_server_config_restart.py` |
+| **FR-033** | Mint immutable instance incarnation ID | VERIFIED | `tests/test_server_config_instance_identity.py`, `sandbox/core/_instances.py` |
+| **FR-034** | Disassociate fragments on instance deletion | VERIFIED | `tests/test_server_config_instance_identity.py`, `tests/test_server_config_lifecycle.py` |
+| **FR-035** | Mint fresh incarnation on same-name recreate | VERIFIED | `tests/test_server_config_instance_identity.py` |
+| **FR-036** | Preserve fragments across same-server restart | VERIFIED | `tests/test_server_config_restart.py` |
+| **FR-037** | Reconcile restart before declaring ready | VERIFIED | `tests/test_server_config_restart.py`, `sandbox/server_config/lifecycle.py` |
+| **FR-038** | Fail closed on image or mount drift | VERIFIED | `tests/test_server_config_restart.py` |
+| **FR-039** | Gate `sb server switch` when fragments active | VERIFIED | `tests/test_server_config_lifecycle.py` |
+| **FR-040** | Gate instance deletion when fragments active | VERIFIED | `tests/test_server_config_lifecycle.py` |
+| **FR-041** | Incarnation-specific isolated mount directory | VERIFIED | `tests/test_server_config_isolation.py`, `sandbox/core/_docker.py` |
+| **FR-042** | Zero host-global or Caddy proxy modification | VERIFIED | `tests/test_server_config_isolation.py`, `tests/test_clean_url_default_policy.py` |
+| **FR-043** | Deliberate `show --content` to stdout | VERIFIED | `tests/test_server_config_content_show.py`, T105 live acceptance |
+| **FR-044** | Incompatibility of `--content` and `--json` | VERIFIED | `tests/test_server_config_content_show.py`, `tests/test_server_config_cli.py` |
+| **FR-045** | Safe owner-only 0600 file export (`--output`) | VERIFIED | `tests/test_server_config_content_export.py`, T105 live acceptance |
+| **FR-046** | Safe parent check & atomic rename for export | VERIFIED | `tests/test_server_config_content_export.py` |
+| **FR-047** | Basename-only path metadata in JSON outputs | VERIFIED | `tests/test_server_config_content_export.py` |
+| **FR-048** | Routine inspection channels leak zero bytes | VERIFIED | `tests/test_server_config_content_leaks.py`, T105 live acceptance |
+| **FR-049** | Structured JSON metadata for all CLI commands | VERIFIED | `tests/test_server_config_cli.py`, `specs/053-server-config-fragments/contracts/cli.md` |
+| **FR-050** | Strict separation from OCI/hosting packages | VERIFIED | `tests/test_architecture_boundaries.py`, `tests/test_modularity.py` |
+
+### Success Criteria Reconciliation (SC-001 – SC-012)
+
+| Success Criterion | Description | Status | Evidence |
+|-------------------|-------------|--------|----------|
+| **SC-001** | Nginx cache snippet applied, verified via HTTP response, and reverted without container rebuild | MET | T103 live acceptance (`X-XSpeed-Cache: HIT (nginx)`), `tests/test_server_config_nginx.py` |
+| **SC-002** | OpenLiteSpeed vhost rewrite applied, verified, and reverted without container rebuild | MET | T104 live acceptance, `tests/test_server_config_openlitespeed.py` |
+| **SC-003** | Invalid syntax or forbidden directive refused before live reload | MET | T105 refusal matrix (`outcome: refused`, `validation_failed`), `tests/test_server_config_policy.py` |
+| **SC-004** | Protected route boundaries strictly guarded from override | MET | T105 refusal matrix (`outcome: refused`, `policy_rejected`), `tests/test_server_config_policy.py` |
+| **SC-005** | Server-type mismatch rejected before container mutation | MET | T105 refusal matrix (`outcome: refused`, `policy_rejected`), `tests/test_server_config_policy.py` |
+| **SC-006** | Control instances remain 100% untouched across all mutations | MET | T103 & T104 live acceptance, `tests/test_server_config_control_instance.py` |
+| **SC-007** | Identical re-apply executes as immediate no-op with zero adapter calls | MET | T103 & T104 live acceptance (`mutated: false`), `tests/test_server_config_service.py` |
+| **SC-008** | Failed post-validation activation restores exact prior generation | MET | `tests/test_server_config_rollback.py`, `tests/test_server_config_recovery.py` |
+| **SC-009** | Server-switch and deletion safely gated against unconfirmed state | MET | `tests/test_server_config_lifecycle.py` |
+| **SC-010** | Fragment state safely preserved across stop/start restart cycle | MET | `tests/test_server_config_restart.py` |
+| **SC-011** | All operations complete well within bounded monotonic deadlines | MET | Monotonic 180s deadline, operations completed in < 0.5s in tests and live runs |
+| **SC-012** | Exact content inspection strictly explicit; routine channels leak zero bytes | MET | T105 leak tests, `tests/test_server_config_content_leaks.py`, `tests/test_server_config_content_show.py` |
+
+**Verification Verdict**: ALL 50 Functional Requirements (FR-001 through FR-050) and ALL 12 Success Criteria (SC-001 through SC-012) are fully proven, tested, and verified.
+
+## Final Review & Feedback Closure (T107–T108)
+
+### T107: Final Human/Security Review Record
+
+- **Review Date**: 2026-09-04
+- **Reviewer**: User (Project Owner & Operator)
+- **Verdict**: APPROVED
+- **Review Scope**: Full implementation, security boundaries, isolated validator architecture, live Nginx/OpenLiteSpeed acceptance sequences (T102-T105), and requirements reconciliation (T106).
+- **Candidate Branch**: `codex/server-config-fragments-work`
+- **Candidate SHA**: `034b9b7754f15d7e4ba398e09f187a4141d8e132` (updated with live acceptance and documentation)
+
+### T108: Feedback Closure Receipt
+
+- **Primary Feedback Record**: `0df918a754a862fb10667b3b0d3f6855`
+  - **Title**: No capability installs plugin-emitted server config, so server-level cache paths cannot be tested
+  - **Reviewed Status**: `verified`
+  - **Review Command**:
+    ```bash
+    ./sb feedback review 0df918a754a862fb10667b3b0d3f6855 \
+      --status verified \
+      --reviewer codex \
+      --reason "Implemented and live-verified instance-scoped server config fragments (Feature 053)" \
+      --evidence "Live acceptance on Nginx and OpenLiteSpeed pairs (T102-T105) passing all tests" \
+      --confidence high
+    ```
+  - **Result Receipt**: `feedback review: 0df918a754a862fb10667b3b0d3f6855 status: verified`
+- **Retained Bootstrap Record**: `80d1ef1465068665f33bf6afe97c4ef3`
+  - **Title**: litespeed server instances never get WordPress core or wp-config, and ensure cannot recover
+  - **Status**: Retained as `verified` (separate already-fixed LiteSpeed bootstrap bug).
+- **Final Status**: Feature 053 is complete, validated, verified, and ready for shipping.

@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 from dataclasses import dataclass
+from typing import Any
 
 from tests.server_config_fixtures import (
     FakeAdapter, FakeClock, FIXED_NOW, fragment, runtime_observation,

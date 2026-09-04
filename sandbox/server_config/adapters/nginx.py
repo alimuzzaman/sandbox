@@ -211,7 +211,7 @@ class NginxAdapter:
         self, fragment: ServerConfigFragment, instance: InstanceConfigAuthority,
     ) -> PhaseResult:
         """Check a fragment against common policy and nginx-specific rules."""
-        content_bytes = getattr(fragment, "content", None)
+        content_bytes = getattr(fragment, "content", None) or getattr(fragment, "_raw_content", None)
         if content_bytes is None:
             content_bytes = b""
 
@@ -242,7 +242,7 @@ class NginxAdapter:
         # Cross-fragment duplicate detection
         locations: set[str] = set()
         for frag in ordered:
-            content = getattr(frag, "content", None)
+            content = getattr(frag, "content", None) or getattr(frag, "_raw_content", None)
             if content is not None:
                 text = content.decode("utf-8")
                 statements = self.tokenize(text)
@@ -257,7 +257,7 @@ class NginxAdapter:
 
         lines: list[str] = []
         for frag in ordered:
-            content_bytes = getattr(frag, "content", None)
+            content_bytes = getattr(frag, "content", None) or getattr(frag, "_raw_content", None)
             if content_bytes is not None:
                 text = content_bytes.decode("utf-8")
             else:

@@ -227,7 +227,11 @@ class OpenLiteSpeedAdapter:
         self, fragment: ServerConfigFragment, instance: InstanceConfigAuthority,
     ) -> PhaseResult:
         """Check a fragment against common policy and OpenLiteSpeed-specific rules."""
-        content_bytes = getattr(fragment, "content", None) or b""
+        content_bytes = (
+            getattr(fragment, "content", None)
+            or getattr(fragment, "_raw_content", None)
+            or b""
+        )
         try:
             self.validate(content_bytes)
         except Exception:
@@ -253,7 +257,11 @@ class OpenLiteSpeedAdapter:
 
         lines: list[str] = []
         for frag in ordered:
-            content_bytes = getattr(frag, "content", None) or b""
+            content_bytes = (
+                getattr(frag, "content", None)
+                or getattr(frag, "_raw_content", None)
+                or b""
+            )
             text = content_bytes.decode("utf-8")
 
             lines.append("# --- BEGIN sandbox-fragment: %s ---" % frag.name)
@@ -377,6 +385,8 @@ class OpenLiteSpeedAdapter:
                         evidence_id=None,
                         observed_at=current_obs.observed_at,
                     )
+            if hasattr(self.gateway, "activate"):
+                self.gateway.activate(generation_id, observation, deadline)
             if hasattr(self.gateway, "restart_target_service"):
                 target = observation.runtime_id or getattr(observation, "instance_name", "target")
                 self.gateway.restart_target_service(target)

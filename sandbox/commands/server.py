@@ -236,9 +236,16 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
         inst_name = getattr(args, "instance", "default") or "default"
         if isinstance(inst_name, str):
             inst_cfg = cfg.get("instances", {}).get(inst_name, {})
+            record = None
+            try:
+                import sandbox_core as sc
+                record = sc.registry_find_instance(inst_name)
+            except Exception:
+                pass
+            mount_id = (record.get("server_config_mount_id") if record else None) or inst_cfg.get("server_config_mount_id")
             if not server_type:
-                server_type = inst_cfg.get("server")
-            if inst_cfg.get("server") in ("nginx", "litespeed") and not inst_cfg.get("server_config_mount_id"):
+                server_type = (record.get("server") if record else None) or inst_cfg.get("server")
+            if server_type in ("nginx", "litespeed") and not mount_id:
                 if use_json:
                     _render_json({
                         "ok": False,
@@ -281,12 +288,12 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
 
     content = None
     if getattr(args, "stdin", False) is True:
-        from sandbox.server_config.input import read_stdin_fragment
-        content = read_stdin_fragment()
+        from sandbox.server_config.input import read_fragment_stdin
+        content = read_fragment_stdin(sys.stdin.buffer)
     elif isinstance(getattr(args, "file", None), str):
         file_path = getattr(args, "file", None)
-        from sandbox.server_config.input import read_file_fragment
-        content = read_file_fragment(file_path)
+        from sandbox.server_config.input import read_fragment_file
+        content = read_fragment_file(file_path)
 
     if service is not None and content is not None:
         name = getattr(args, "name", None)

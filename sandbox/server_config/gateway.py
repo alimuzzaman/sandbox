@@ -55,6 +55,7 @@ class LocalDockerServerConfigGateway:
         self._last_observation: RuntimeObservation | None = None
         self._validation_result: ValidationEvidence | None = None
         self._validation_container_id: str | None = None
+        self._active_generation_id: str | None = None
 
     def _get_mount_id(self) -> str:
         mount = project_mount(self.server_config_root, self.incarnation_id)
@@ -66,10 +67,41 @@ class LocalDockerServerConfigGateway:
     def _compute_observed_generation_id(self) -> str | None:
         frag_file = self._get_active_fragments_file()
         if not frag_file.is_file():
-            return None
+            return "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         content = frag_file.read_bytes()
-        if not content or content == b"# No active sandbox fragments\n":
-            return None
+        if not content:
+            return "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+        gen_id = getattr(self, "_active_generation_id", None)
+        if not gen_id:
+            state_file = self.server_config_root / self.incarnation_id / "state.json"
+            if state_file.is_file():
+                try:
+                    state_data = json.loads(state_file.read_text())
+                    gen_id = state_data.get("generation_id")
+                except Exception:
+                    pass
+
+        if gen_id:
+            if gen_id == "sha256:0000000000000000000000000000000000000000000000000000000000000000":
+                if content == b"# No active sandbox fragments\n":
+                    return gen_id
+            gen_dir = self.server_config_root / self.incarnation_id / "generations" / gen_id.removeprefix("sha256:")
+            gen_frag = gen_dir / "fragments.conf"
+            if gen_frag.is_file() and gen_frag.read_bytes() == content:
+                return gen_id
+            return "sha256:" + hashlib.sha256(content).hexdigest()
+
+        if content == b"# No active sandbox fragments\n":
+            return "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+        gens_dir = self.server_config_root / self.incarnation_id / "generations"
+        if gens_dir.is_dir():
+            for child in gens_dir.iterdir():
+                gen_frag = child / "fragments.conf"
+                if gen_frag.is_file() and gen_frag.read_bytes() == content:
+                    return f"sha256:{child.name}"
+
         return "sha256:" + hashlib.sha256(content).hexdigest()
 
     def observe_runtime(
@@ -278,7 +310,10 @@ class LocalDockerServerConfigGateway:
         now = datetime.datetime.now(datetime.timezone.utc)
         target_dir = self.server_config_root / self.incarnation_id
         target_dir.mkdir(parents=True, exist_ok=True)
-        gen_file = target_dir / "generations" / generation_id / "fragments.conf"
+        gen_dir_name = generation_id.removeprefix("sha256:")
+        gen_file = target_dir / "generations" / gen_dir_name / "fragments.conf"
+        if not gen_file.is_file():
+            gen_file = target_dir / "generations" / generation_id / "fragments.conf"
         target_file = target_dir / "fragments.conf"
 
         if gen_file.is_file():
@@ -290,6 +325,7 @@ class LocalDockerServerConfigGateway:
         tmp_target = target_file.with_suffix(".tmp")
         tmp_target.write_bytes(content)
         tmp_target.replace(target_file)
+        self._active_generation_id = generation_id
 
         return PhaseResult(
             code="activated",
@@ -342,7 +378,10 @@ class LocalDockerServerConfigGateway:
         target_file = target_dir / "fragments.conf"
 
         if generation_id:
-            gen_file = target_dir / "generations" / generation_id / "fragments.conf"
+            gen_dir_name = generation_id.removeprefix("sha256:")
+            gen_file = target_dir / "generations" / gen_dir_name / "fragments.conf"
+            if not gen_file.is_file():
+                gen_file = target_dir / "generations" / generation_id / "fragments.conf"
             if gen_file.is_file():
                 content = gen_file.read_bytes()
             else:
@@ -353,6 +392,7 @@ class LocalDockerServerConfigGateway:
         tmp_target = target_file.with_suffix(".tmp")
         tmp_target.write_bytes(content)
         tmp_target.replace(target_file)
+        self._active_generation_id = generation_id or "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
         self.reload_service(self.container_name, deadline)
         return PhaseResult(

@@ -108,10 +108,12 @@ class OwnedStorageApplicationService:
                 )
 
         # Construct canonical authorization fields
-        authorization_id = f"auth_{uuid.uuid4().hex[:12]}"
-        controller_epoch = f"epoch_{uuid.uuid4().hex[:8]}"
+        auth_seed = f"{request_id}:{remote_identity}:{project_identity}"
+        authorization_id = f"auth_{hashlib.sha256((auth_seed + ':auth').encode('utf-8')).hexdigest()[:12]}"
+        controller_epoch = f"epoch_{hashlib.sha256((remote_identity + ':epoch').encode('utf-8')).hexdigest()[:8]}"
         sequence = 1
         caller_identity_digest = f"sha256:{hashlib.sha256(project_identity.encode('utf-8')).hexdigest()}"
+        expires_at = binding.expires_at if (binding and binding.expires_at) else "2026-09-04T12:00:00Z"
 
         req_dict = {
             "protocol": "owned-storage-authority-v1",
@@ -129,7 +131,7 @@ class OwnedStorageApplicationService:
                 "promotion_id": promotion_id,
                 "authority_binding_id": binding_id,
                 "binding_generation": 1,
-                "expires_at": utc_now_iso(),
+                "expires_at": expires_at,
             },
             "qualification": None,
             "input": {

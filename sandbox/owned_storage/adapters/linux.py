@@ -201,13 +201,21 @@ class LinuxFilesystemAdapter:
         self, object_root: Union[str, Path], write_target: Union[str, Path]
     ) -> bool:
         """Verifies that write_target is strictly confined to the work/ interior."""
-        root_p = Path(object_root).resolve()
-        work_p = (root_p / "work").resolve()
-        target_p = Path(write_target).resolve()
+        return verify_interior_confinement(object_root, write_target)
 
-        try:
-            target_p.relative_to(work_p)
-            return True
-        except ValueError:
-            return False
+
+def verify_interior_confinement(
+    object_root: Union[str, Path], write_target: Union[str, Path]
+) -> bool:
+    """Verifies that write_target is strictly confined to the work/ interior."""
+    root_p = Path(object_root).resolve()
+    work_p = (root_p / "work").resolve()
+    target_p = Path(write_target).resolve()
+
+    try:
+        target_p.relative_to(work_p)
+        return True
+    except ValueError:
+        return False
+
 

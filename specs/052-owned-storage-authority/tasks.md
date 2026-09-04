@@ -180,12 +180,12 @@
 
 **Purpose**: Command registration, packaging, release asset generation, and end-to-end acceptance suite.
 
-- [ ] T048 Register owned-storage commands in command manifest in `sandbox/commands/manifest.py`
-- [ ] T049 Register owned-storage MCP tools in MCP manifest in `mcp/wp-server/tools/manifest.py`
-- [ ] T050 [P] Implement release packaging script updates ensuring specs remain pruned and runtime assets ship in `scripts/make-release.sh`
-- [ ] T051 [P] Implement remote installation asset deployment helper in `scripts/install-remote.sh`
-- [ ] T052 Add packaging validation tests in `tests/test_owned_storage_packaging.py`
-- [ ] T053 Create end-to-end local synthetic acceptance test suite in `tests/acceptance/test_owned_storage_authority.py`
+- [x] T048 Register owned-storage commands in command manifest in `sandbox/commands/manifest.py`
+- [x] T049 Register owned-storage MCP tools in MCP manifest in `mcp/wp-server/tools/manifest.py`
+- [x] T050 [P] Implement release packaging script updates ensuring specs remain pruned and runtime assets ship in `scripts/make-release.sh`
+- [x] T051 [P] Implement remote installation asset deployment helper in `scripts/install-remote.sh`
+- [x] T052 Add packaging validation tests in `tests/test_owned_storage_packaging.py`
+- [x] T053 Create end-to-end local synthetic acceptance test suite in `tests/acceptance/test_owned_storage_authority.py`
 
 ---
 

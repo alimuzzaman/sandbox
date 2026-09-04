@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import uuid
 from typing import Any, BinaryIO, Dict, Optional
@@ -100,6 +101,7 @@ class OwnedStorageApplicationService:
         if not binding_id and policy.admission_basis:
             binding_id = policy.admission_basis.get("binding_id")
 
+        binding = None
         if binding_id:
             binding = self.repository.get_adoption_binding(binding_id)
             if not binding or binding.phase != AdoptionBindingPhase.ACTIVE:
@@ -113,7 +115,8 @@ class OwnedStorageApplicationService:
         controller_epoch = f"epoch_{hashlib.sha256((remote_identity + ':epoch').encode('utf-8')).hexdigest()[:8]}"
         sequence = 1
         caller_identity_digest = f"sha256:{hashlib.sha256(project_identity.encode('utf-8')).hexdigest()}"
-        expires_at = binding.expires_at if (binding and binding.expires_at) else "2026-09-04T12:00:00Z"
+        default_expires = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)).isoformat()
+        expires_at = binding.expires_at if (binding and binding.expires_at) else default_expires
 
         req_dict = {
             "protocol": "owned-storage-authority-v1",
@@ -308,6 +311,7 @@ class OwnedStorageApplicationService:
             except ValueError:
                 start_idx = 0
 
+        candidates.sort(key=lambda c: c.object_id)
         page_candidates = candidates[start_idx : start_idx + bounded_limit]
         next_cursor = (
             str(start_idx + bounded_limit)

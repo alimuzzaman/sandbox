@@ -656,7 +656,7 @@ class StorageAuthorityRepository:
                     reason_code,
                     observed_bytes,
                     completed_at,
-                    completed_at or "now",
+                    completed_at or datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     cleanup_id,
                 ),
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import io
 import json
 from pathlib import Path
@@ -69,10 +70,10 @@ class RemoteOwnedStorageTransport:
                 "promotion_id": None,
                 "authority_binding_id": None,
                 "binding_generation": 1,
-                "expires_at": "2026-09-04T12:00:00Z",
+                "expires_at": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)).isoformat(),
             },
             "qualification": None,
-            "deadline_unix_ms": 1788177600000,
+            "deadline_unix_ms": int((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).timestamp() * 1000),
             "input": {
                 "relationship_id": relationship.relationship_id,
                 "workspace_id": relationship.workspace_id,

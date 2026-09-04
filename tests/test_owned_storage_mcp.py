@@ -28,6 +28,7 @@ class TestOwnedStorageMCP(unittest.TestCase):
         self.root = Path(self.tmp_dir.name)
         self.storage_root = self.root / "storage"
         os.environ["SANDBOX_STORAGE_ROOT"] = str(self.storage_root)
+        self.addCleanup(os.environ.pop, "SANDBOX_STORAGE_ROOT", None)
 
         self.db_path = self.storage_root / "authority.db"
         self.repo = StorageAuthorityRepository(self.db_path)

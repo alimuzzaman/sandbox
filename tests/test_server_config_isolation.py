@@ -7,8 +7,7 @@ from sandbox.server_config.models import ServerType, InstanceConfigAuthority, Ru
 from sandbox.server_config.context import project_mount, project_instance_context
 
 # These imports should fail as the implementation does not exist yet
-from sandbox.server_config.lifecycle import apply_fragment, get_fragment_root, get_nginx_mounts
-from sandbox.server_config.repository import read_fragments
+from sandbox.server_config.lifecycle import apply_fragment, get_fragment_root, get_nginx_mounts, read_fragments
 
 class TestServerConfigIsolation(unittest.TestCase):
     def test_zero_other_instance_write(self):

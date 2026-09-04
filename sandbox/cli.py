@@ -1054,12 +1054,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     sec.add_argument("name", nargs="?",
         help="instance to secure (default: the targeted/main instance)")
 
-    srv = sub.add_parser("server",
-        help="Switch an instance's web server in place (apache|nginx|litespeed)")
-    srv.add_argument("name", nargs="?",
-        help="instance to switch (default: the targeted/main instance)")
-    srv.add_argument("server_type", choices=list(SERVERS),
-        help="web server to switch to")
+
 
     ob = sub.add_parser("onboard",
         help="Guided setup for an existing instance (plugins, https, focus)")

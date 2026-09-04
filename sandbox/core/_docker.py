@@ -366,8 +366,19 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # the same path it does in the fpm `wp` service, or every symlinked
       # plugin's assets 404 and its admin UI renders blank.
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg, ro=True)}
-      - {ROOT}/config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
+      - {ROOT}/config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro{_server_config_nginx_mount(inst_cfg)}
 """
+
+
+def _server_config_nginx_mount(inst_cfg: dict) -> str:
+    incarnation = inst_cfg.get("instance_incarnation_id")
+    if not incarnation:
+        return ""
+    try:
+        (Path(RUNTIME_DIR) / "server-config" / incarnation).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/etc/nginx/sandbox-fragments:ro"
 
 
 def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:

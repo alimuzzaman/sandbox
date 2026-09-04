@@ -58,7 +58,8 @@ class TestNginxAdapter(unittest.TestCase):
         object.__setattr__(f1, "content", b"set $a 1;")
         object.__setattr__(f2, "content", b"set $b 2;")
         
-        rendered = self.adapter.render([f2, f1])
+        result = self.adapter.render([f2, f1])
+        rendered = result.files[0].content.decode("utf-8")
         
         self.assertIn("# --- BEGIN sandbox-fragment: 01-first ---", rendered)
         self.assertIn("# --- BEGIN sandbox-fragment: 02-second ---", rendered)
@@ -93,7 +94,8 @@ class TestNginxAdapter(unittest.TestCase):
         object.__setattr__(f1, "content", b"set $a 1;")
         object.__setattr__(f2, "content", b"set $b 2;")
         
-        rendered = self.adapter.render([f1, f2])
+        result = self.adapter.render([f1, f2])
+        rendered = result.files[0].content.decode("utf-8")
         
         self.assertEqual(rendered.count("# --- BEGIN sandbox-fragment: 01-a ---"), 1)
         self.assertEqual(rendered.count("# --- END sandbox-fragment: 01-a ---"), 1)

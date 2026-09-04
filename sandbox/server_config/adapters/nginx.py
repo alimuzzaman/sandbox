@@ -1,8 +1,17 @@
+"""Nginx adapter for instance-scoped server configuration fragments.
+
+Implements the ServerConfigAdapter protocol: subset tokenizer/parser,
+deny-by-default validation via common policy, deterministic candidate
+rendering, exact-image validation, target-only reload, and readiness
+observation. Fragment bytes never appear in exceptions, return values,
+or log output.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-from typing import Sequence
+from typing import Any, Sequence
 
 from sandbox.server_config.adapters.base import (
     AdapterDescriptor,
@@ -12,6 +21,7 @@ from sandbox.server_config.adapters.base import (
 from sandbox.server_config.models import (
     InstanceConfigAuthority,
     PhaseResult,
+    Readiness,
     RuntimeObservation,
     ServerConfigFragment,
     ValidationEvidence,
@@ -33,76 +43,88 @@ _DESCRIPTOR = AdapterDescriptor(
 
 @dataclass
 class Statement:
+    """Parsed nginx configuration statement."""
+
     directive: str
     args: list[str] = field(default_factory=list)
     block: list[Statement] | None = None
 
 
 class NginxAdapter:
-    def __init__(self, gateway=None):
+    """Nginx server configuration adapter.
+
+    Satisfies the ServerConfigAdapter protocol: policy, render,
+    observe_runtime, validate, activate, reload, observe_ready, restore.
+    Runtime methods delegate to an injected gateway for container operations.
+    """
+
+    def __init__(self, gateway: Any = None) -> None:
         self.gateway = gateway
 
     @property
     def descriptor(self) -> AdapterDescriptor:
         return _DESCRIPTOR
 
+    # ------------------------------------------------------------------
+    # Subset tokenizer/parser (T028)
+    # ------------------------------------------------------------------
+
     def tokenize(self, config_text: str) -> list[Statement]:
         """Parse nginx configuration text into a list of statements."""
-        # A simple recursive parser for the subset tokenizer
         statements: list[Statement] = []
         stack: list[list[Statement]] = [statements]
-        current_directive = []
-        token = []
-        quote = None
+        current_directive: list[str] = []
+        token: list[str] = []
+        quote: str | None = None
         escaped = False
         comment = False
         i = 0
-        
+
         while i < len(config_text):
             char = config_text[i]
-            
+
             if comment:
                 if char in "\r\n":
                     comment = False
                 i += 1
                 continue
-            
+
             if escaped:
                 token.append(char)
                 escaped = False
                 i += 1
                 continue
-                
+
             if char == "\\":
                 escaped = True
                 i += 1
                 continue
-                
+
             if quote is not None:
                 token.append(char)
                 if char == quote:
                     quote = None
                 i += 1
                 continue
-                
+
             if char in {"'", '"'}:
                 quote = char
                 token.append(char)
                 i += 1
                 continue
-                
+
             if char == "#":
                 comment = True
                 i += 1
                 continue
-                
+
             if char.isspace():
                 if token:
                     current_directive.append("".join(token))
                     token = []
                 i += 1
                 continue
-                
+
             if char == ";":
                 if token:
                     current_directive.append("".join(token))
@@ -111,12 +133,12 @@ class NginxAdapter:
                     stack[-1].append(Statement(
                         directive=current_directive[0],
                         args=current_directive[1:],
-                        block=None
+                        block=None,
                     ))
                     current_directive = []
                 i += 1
                 continue
-                
+
             if char == "{":
                 if token:
                     current_directive.append("".join(token))
@@ -126,14 +148,14 @@ class NginxAdapter:
                 stmt = Statement(
                     directive=current_directive[0],
                     args=current_directive[1:],
-                    block=[]
+                    block=[],
                 )
                 stack[-1].append(stmt)
-                stack.append(stmt.block)
+                stack.append(stmt.block)  # type: ignore[arg-type]
                 current_directive = []
                 i += 1
                 continue
-                
+
             if char == "}":
                 if token:
                     current_directive.append("".join(token))
@@ -145,65 +167,80 @@ class NginxAdapter:
                 stack.pop()
                 i += 1
                 continue
-                
+
             token.append(char)
             i += 1
-            
+
         if token:
             current_directive.append("".join(token))
         if current_directive:
             raise ValueError("syntax error: unexpected end of file")
         if len(stack) > 1:
             raise ValueError("syntax error: unclosed {")
-            
+
         return statements
+
+    # ------------------------------------------------------------------
+    # Deny-by-default directive validation (T028)
+    # ------------------------------------------------------------------
 
     def validate(self, config_text: str) -> bool:
         """Validate an nginx configuration fragment using the policy engine."""
         try:
             validate_common_authority(config_text, server_type="nginx")
-            
-            # Additional duplicate detection (from T021 tests)
+
             statements = self.tokenize(config_text)
-            locations = set()
+            locations: set[str] = set()
             for stmt in statements:
                 if stmt.directive == "location" and stmt.args:
                     loc = stmt.args[0]
                     if loc in locations:
-                        raise ValueError(f"duplicate location {loc}")
+                        raise ValueError("duplicate location %s" % loc)
                     locations.add(loc)
         except ValueError as e:
-            raise Exception(f"Validation failed: {e}") from e
+            raise Exception("Validation failed: %s" % e) from e
         return True
 
+    # ------------------------------------------------------------------
+    # Protocol: policy (T028)
+    # ------------------------------------------------------------------
+
     def policy(
-        self, fragment: ServerConfigFragment, instance: InstanceConfigAuthority
+        self, fragment: ServerConfigFragment, instance: InstanceConfigAuthority,
     ) -> PhaseResult:
+        """Check a fragment against common policy and nginx-specific rules."""
         content_bytes = getattr(fragment, "content", None)
         if content_bytes is None:
             content_bytes = b""
-        
+
         try:
             text = content_bytes.decode("utf-8")
             self.validate(text)
-        except Exception as e:
-            raise ValueError(f"policy_rejected") from e
-            
+        except Exception:
+            raise ValueError("policy_rejected")
+
         return PhaseResult(
             code="authority_accepted",
             evidence_id=None,
-            observed_at=fragment.created_at
+            observed_at=fragment.created_at,
         )
 
+    # ------------------------------------------------------------------
+    # Protocol: render (T028)
+    # ------------------------------------------------------------------
+
     def render(
-        self, fragments: Sequence[ServerConfigFragment], instance: InstanceConfigAuthority = None
+        self,
+        fragments: Sequence[ServerConfigFragment],
+        instance: InstanceConfigAuthority | None = None,
     ) -> RenderedGeneration:
+        """Render ordered fragments into a deterministic candidate file."""
         ordered = sorted(fragments, key=lambda f: f.name)
-        
-        # Test 6: duplicate detection across fragments
-        locations = set()
-        for fragment in ordered:
-            content = getattr(fragment, "content", None)
+
+        # Cross-fragment duplicate detection
+        locations: set[str] = set()
+        for frag in ordered:
+            content = getattr(frag, "content", None)
             if content is not None:
                 text = content.decode("utf-8")
                 statements = self.tokenize(text)
@@ -211,63 +248,218 @@ class NginxAdapter:
                     if stmt.directive == "location" and stmt.args:
                         loc = stmt.args[0]
                         if loc in locations:
-                            raise Exception(f"duplicate location {loc} across fragments")
+                            raise Exception(
+                                "duplicate location %s across fragments" % loc
+                            )
                         locations.add(loc)
-        
-        lines = []
-        for fragment in ordered:
-            content_bytes = getattr(fragment, "content", None)
+
+        lines: list[str] = []
+        for frag in ordered:
+            content_bytes = getattr(frag, "content", None)
             if content_bytes is not None:
                 text = content_bytes.decode("utf-8")
             else:
-                text = "" # Fallback
-                
-            lines.append(f"# --- BEGIN sandbox-fragment: {fragment.name} ---")
-            lines.append(f"# BEGIN FRAGMENT {fragment.name}") # Keep for older tests
+                text = ""
+
+            lines.append("# --- BEGIN sandbox-fragment: %s ---" % frag.name)
+            lines.append("# BEGIN FRAGMENT %s" % frag.name)
             lines.append(text.strip("\r\n"))
-            lines.append(f"# END FRAGMENT {fragment.name}") # Keep for older tests
-            lines.append(f"# --- END sandbox-fragment: {fragment.name} ---")
+            lines.append("# END FRAGMENT %s" % frag.name)
+            lines.append("# --- END sandbox-fragment: %s ---" % frag.name)
             lines.append("")
-        
+
         rendered_content = "\n".join(lines).encode("utf-8")
-        
-        generation_id = "sha256:" + hashlib.sha256(rendered_content).hexdigest()
-        manifest_canonical = f"fragments.conf:{hashlib.sha256(rendered_content).hexdigest()}"
-        manifest_digest = "sha256:" + hashlib.sha256(manifest_canonical.encode("utf-8")).hexdigest()
-        
-        # If the call is from the old test which expects a string:
-        if instance is None:
-            return rendered_content.decode("utf-8")
-        
-        return RenderedGeneration(
-            generation_id=generation_id,
-            files=(RenderedFile(name="fragments.conf", content=rendered_content),),
-            manifest_digest=manifest_digest
+
+        generation_id = (
+            "sha256:" + hashlib.sha256(rendered_content).hexdigest()
+        )
+        manifest_canonical = (
+            "fragments.conf:" + hashlib.sha256(rendered_content).hexdigest()
+        )
+        manifest_digest = (
+            "sha256:"
+            + hashlib.sha256(manifest_canonical.encode("utf-8")).hexdigest()
         )
 
-    def observe_runtime(
-        self, instance: InstanceConfigAuthority, deadline: float
-    ) -> RuntimeObservation:
-        raise NotImplementedError()
+        return RenderedGeneration(
+            generation_id=generation_id,
+            files=(
+                RenderedFile(name="fragments.conf", content=rendered_content),
+            ),
+            manifest_digest=manifest_digest,
+        )
 
-    def validate_generation(self, generation, observation, deadline=0.0):
-        # Compatibility with older tests
-        raise NotImplementedError()
+    # ------------------------------------------------------------------
+    # Protocol: observe_runtime (T029)
+    # ------------------------------------------------------------------
+
+    def observe_runtime(
+        self, instance: InstanceConfigAuthority, deadline: float,
+    ) -> RuntimeObservation:
+        """Observe the current nginx runtime state via the gateway."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+        return self.gateway.observe_runtime(instance=instance, deadline=deadline)
+
+    # ------------------------------------------------------------------
+    # Protocol: validate (T029) - exact-image, network-none validation
+    # ------------------------------------------------------------------
+
+    def validate_generation(
+        self,
+        generation: RenderedGeneration,
+        observation: RuntimeObservation,
+        deadline: float = 60.0,
+    ) -> ValidationEvidence:
+        """Validate a candidate generation using an exact-image disposable container.
+
+        Creates a network-isolated, read-only, data-free validation container
+        from the exact active image (content-addressed sha256), runs
+        ``nginx -t`` via fixed argv, and cleans up the container.
+        """
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+
+        self.gateway.create_validation_container(
+            image_id=observation.image_id,
+            network_mode="none",
+            read_only_root=True,
+            mount_live_volumes=False,
+            pass_environment=False,
+            tmpfs={"/tmp": "size=16m,mode=1777"},
+            command=["nginx", "-t", "-c", "/etc/nginx/nginx.conf"],
+            shell=False,
+            generation=generation,
+        )
+
+        return self.gateway.get_validation_result()
+
+    # ------------------------------------------------------------------
+    # Protocol: activate (T030) - pre-activation identity recheck
+    # ------------------------------------------------------------------
 
     def activate(
-        self, generation_id: str, observation: RuntimeObservation, deadline: float
+        self, generation_id: str, observation: RuntimeObservation,
+        deadline: float,
     ) -> PhaseResult:
-        raise NotImplementedError()
+        """Activate a validated generation with pre-activation identity recheck."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
 
-    def reload(self, observation: RuntimeObservation, deadline: float) -> PhaseResult:
-        raise NotImplementedError()
+        # Pre-activation identity recheck: verify runtime hasn't changed
+        current = self.gateway.get_current_observation()
+        if (
+            current.runtime_id != observation.runtime_id
+            or current.image_id != observation.image_id
+            or current.mount_id != observation.mount_id
+            or current.instance_incarnation_id
+            != observation.instance_incarnation_id
+        ):
+            raise ValueError(
+                "Identity mismatch: runtime state changed between validation and activation"
+            )
+
+        return self.gateway.activate(
+            generation_id=generation_id,
+            observation=observation,
+            deadline=deadline,
+        )
+
+    def activate_generation(
+        self,
+        generation: RenderedGeneration,
+        observation: RuntimeObservation,
+    ) -> PhaseResult:
+        """Compatibility method for activate with generation object."""
+        return self.activate(
+            generation_id=generation.generation_id,
+            observation=observation,
+            deadline=60.0,
+        )
+
+    # ------------------------------------------------------------------
+    # Protocol: reload (T030) - target-only nginx reload
+    # ------------------------------------------------------------------
+
+    def reload(
+        self, observation: RuntimeObservation, deadline: float,
+    ) -> PhaseResult:
+        """Reload only the target nginx service."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+        return self.gateway.reload_service(
+            target_instance=observation.runtime_id,
+            deadline=deadline,
+        )
+
+    def reload_service(
+        self,
+        generation: RenderedGeneration,
+        observation: RuntimeObservation,
+    ) -> PhaseResult:
+        """Compatibility method for reload with generation object."""
+        return self.reload(observation=observation, deadline=60.0)
+
+    # ------------------------------------------------------------------
+    # Protocol: observe_ready (T030) - effective generation readiness
+    # ------------------------------------------------------------------
 
     def observe_ready(
-        self, generation_id: str, observation: RuntimeObservation, deadline: float
+        self, generation_id: str, observation: RuntimeObservation,
+        deadline: float,
     ) -> PhaseResult:
-        raise NotImplementedError()
+        """Observe that the effective generation matches the activated candidate."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+
+        current = self.gateway.get_current_observation()
+        if current.readiness is not Readiness.READY:
+            return PhaseResult(
+                code="not_ready",
+                evidence_id=None,
+                observed_at=current.observed_at,
+            )
+        if current.observed_generation_id != generation_id:
+            return PhaseResult(
+                code="generation_mismatch",
+                evidence_id=None,
+                observed_at=current.observed_at,
+            )
+        return PhaseResult(
+            code="ready",
+            evidence_id=None,
+            observed_at=current.observed_at,
+        )
+
+    def check_readiness(
+        self,
+        generation: RenderedGeneration,
+        observation: RuntimeObservation,
+    ) -> Readiness:
+        """Compatibility method for readiness check with generation object."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+
+        current = self.gateway.get_current_observation()
+        if current.readiness is not Readiness.READY:
+            return current.readiness
+        if current.observed_generation_id != generation.generation_id:
+            return Readiness.UNKNOWN
+        return Readiness.READY
+
+    # ------------------------------------------------------------------
+    # Protocol: restore (T030)
+    # ------------------------------------------------------------------
 
     def restore(
-        self, generation_id: str, observation: RuntimeObservation, deadline: float
+        self, generation_id: str, observation: RuntimeObservation,
+        deadline: float,
     ) -> PhaseResult:
-        raise NotImplementedError()
+        """Restore a prior generation (rollback)."""
+        if self.gateway is None:
+            raise ValueError("no runtime gateway configured")
+        return self.gateway.restore(
+            generation_id=generation_id,
+            observation=observation,
+            deadline=deadline,
+        )

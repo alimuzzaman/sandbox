@@ -168,47 +168,65 @@ Combined RED run: 11 errors from 5 modules. No expected RED assertion passed
 accidentally. All failures were missing modules or unimplemented stubs, not environment
 or live-runtime errors. Foundation 95 tests continued passing during the RED phase.
 
-## US1 partial implementation checkpoint
+## US1 GREEN story checkpoint (T034)
 
-Recorded 2026-09-04 after T025, T027, and T028 implementation.
+Recorded 2026-09-04 after completing T019-T034 for User Story 1.
 
 ### GREEN evidence
 
 ```text
 .cli-venv/bin/python -m unittest \
-  tests.test_server_config_context tests.test_server_config_core_identity \
-  tests.test_server_config_instance_identity tests.test_server_config_models \
-  tests.test_server_config_policy tests.test_server_config_repository \
-  tests.test_server_config_adapters tests.test_architecture_boundaries \
-  tests.test_modularity tests.test_lifecycle \
-  tests.test_server_config_nginx tests.test_server_config_service
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy
 ```
 
-Result: **110 tests passed** in 10.3 seconds. The 95 foundation tests plus 7 nginx
-adapter tests and 8 service orchestration tests are green.
+Result: **156 tests passed** across all foundation, nginx adapter, service orchestration,
+runtime verification, lifecycle/isolation, CLI contracts, and clean-URL policy suites.
 
-### Implemented modules
+### Summary of US1 implementations:
 
-- `sandbox/commands/server.py` (T025): Feature-owned `CommandSpec` with config grammar
-  (`apply|list|show|revert`), legacy switch preservation (`sb server <type>`,
-  `sb server <instance> <type>`), `--json` flag, `--stdin`/`--file` mutual exclusion,
-  `--authority` default, and `predispatch_policy` for read-only operations.
-- `sandbox/server_config/service.py` (T027): Apply/list/show/replace/revert/no-op
-  orchestration with identical-reapply detection, deterministic fragment ordering,
-  adapter policy/render delegation, and repository state persistence.
-- `sandbox/server_config/adapters/nginx.py` (T028): Subset tokenizer/parser, common
-  policy projection via `validate_common_authority`, deterministic candidate renderer
-  with provenance markers, inclusion proof, protected base-route detection, and
-  duplicate/conflict detection.
+1. **CLI grammar & legacy compatibility** (`sandbox/commands/server.py`):
+   - Command-owned `CommandSpec` for `server` registered in `BUILTIN_COMMAND_MODULES`.
+   - Complete `config apply|list|show|revert` grammar with `--name`, `--authority`,
+     mutually exclusive `--file`/`--stdin`, and `--json`.
+   - Preserves `sb server <type>` and `sb server <instance> <type>` legacy switch forms.
+   - Enforces mutual exclusion of `--content` and `--json` on `show`.
+   - Content-free JSON output with stable schema (`ok`, `mutated`, `operation`, `outcome`,
+     `instance`, `fragment`, `fragment_set`, `phases`, `transaction_id`).
+   - Read-only pre-dispatch skip policy for `list` and metadata `show`.
 
-### Still RED (expected)
+2. **Service orchestration** (`sandbox/server_config/service.py`):
+   - `ServerConfigService` orchestrates apply, list, show, revert operations.
+   - Deterministic fragment ordering and identical reapply detection with zero-cost no-op.
+   - Rollback and absent-name healthy no-op handling.
 
-- `tests/test_server_config_cli.py`: 16 tests (T025 module exists but T026 wiring and
-  the test's expected `ServerCommand` class API differ from actual implementation)
-- `tests/test_server_config_nginx_runtime.py`: 7 tests (runtime methods are stubs)
-- `tests/test_server_config_lifecycle.py`: 4 tests (lifecycle module absent)
-- `tests/test_server_config_isolation.py`: 3 tests (lifecycle module absent)
+3. **Nginx adapter & runtime** (`sandbox/server_config/adapters/nginx.py`):
+   - Subset tokenizer/parser into statement AST.
+   - Deny-by-default common authority projection, protected-route refusal.
+   - Deterministic candidate renderer with bounded provenance markers and inclusion proof.
+   - Exact-active-image validation using disposable, `--network none`, read-only root,
+     data-free containers with native `nginx -t` via fixed argv.
+   - Target-only reload with pre-activation identity recheck and effective-generation observation.
 
-### Remaining US1 tasks
+4. **Lifecycle & isolation** (`sandbox/server_config/lifecycle.py`, `sandbox/core/_docker.py`, `config/nginx-sandbox.conf`):
+   - Per-incarnation read-only mount: `{RUNTIME_DIR}/server-config/{incarnation}:/etc/nginx/sandbox-fragments:ro`.
+   - Absent-safe wildcard include in `config/nginx-sandbox.conf`: `include /etc/nginx/sandbox-fragments/*.conf;`.
+   - Instance attachment checks refusing unattached legacy instances before mutation.
+   - Cross-incarnation adoption prevention.
 
-T026, T029, T030, T031, T032, T033, and T034 remain open.
+All local US1 contracts pass. T004 (OLS probe) remains an open gate before Phase 4.

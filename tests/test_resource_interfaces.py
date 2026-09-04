@@ -988,7 +988,9 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
 
     def test_only_completed_status_action_is_registered(self):
         self.assertEqual(self._args(["swap-status","--remote","fixture"]).action,"swap-status")
-        for action in ("swap-plan","swap-apply","swap-history"):
+        self.assertEqual(self._args(["swap-plan","--remote","fixture"]).action,"swap-plan")
+        self.assertEqual(self._args(["swap-apply","--remote","fixture"]).action,"swap-apply")
+        for action in ("swap-history",):
             with self.assertRaises(SystemExit): self._args([action,"--remote","fixture"])
 
     def test_remote_is_required_before_service_construction(self):
@@ -1037,6 +1039,39 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
             resources.cmd_resources({},self._args(["swap-status","--json"]))
         self.assertEqual(raised.exception.code,1)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"],"remote_required")
+
+    def test_swap_plan_parses_size_and_requires_remote(self):
+        args = self._args(["swap-plan","--remote","fixture","--size-gib","4"])
+        self.assertEqual(args.size_gib, 4)
+        from sandbox.commands import resources
+        result = resources.cmd_swap_plan(self._args(["swap-plan","--size-gib","4"]))
+        self.assertEqual(result["error"]["code"], "remote_required")
+
+    def test_swap_plan_rejects_invalid_size(self):
+        from sandbox.commands import resources
+        for size in ("0", "9"):
+            result = resources.cmd_swap_plan(
+                self._args(["swap-plan","--remote","fixture","--size-gib",size]))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "invalid_size")
+
+    def test_swap_apply_requires_exact_confirmation(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        refused = resources.cmd_swap_apply(
+            self._args(["swap-apply","--remote","fixture"]))
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "confirmation_required")
+        output = StringIO()
+        with redirect_stdout(output):
+            try:
+                resources.cmd_resources({}, self._args(
+                    ["swap-apply","--remote","fixture","--json"]))
+            except SystemExit:
+                pass
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"],
+                         "confirmation_required")
 
 
 if __name__ == "__main__":

@@ -128,3 +128,8 @@ def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
         error = result.get("error") or {}
         raise ValueError(error.get("code", "response_invalid"))
     return service.projection(result["data"])
+
+
+def host_memory_plan(remote: str, *, size_gib: int = 4, budget_seconds: float = 15):
+    """Return one deterministic controller-owned enable plan without mutation."""
+    return _build_host_memory_service(remote).plan(size_gib, budget_seconds)

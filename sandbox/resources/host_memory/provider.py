@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AggregateMemorySample, HEX64, OwnershipReceipt, RemoteSwapState, canonical_digest
+from .policy import PolicyRefusal
 
 STATE=Path("/var/lib/sandbox/host-memory")
 SWAP=STATE/"sandbox.swap"
@@ -44,6 +45,34 @@ class HostProvider:
         self.target_identity=(target_identity or hashlib.sha256(
             platform.node().encode("utf-8", "replace")
         ).hexdigest()[:24])
+
+    def preflight(self, plan):
+        """Validate one controller plan before the first side effect.
+
+        Pure: performs no reads, writes, or subprocess calls. Returns "ready"
+        when the plan is current, bound to this target, and free of
+        request-supplied paths or commands. Raises PolicyRefusal otherwise.
+        """
+        from .models import parse_utc
+        if not isinstance(plan, dict):
+            raise PolicyRefusal("response_invalid", "plan must be an object")
+        if not HEX64.fullmatch(str(plan.get("plan_id", ""))):
+            raise PolicyRefusal("plan_not_found", "canonical plan identity is invalid")
+        try:
+            expired = parse_utc(plan["expires_at"]) <= self.now()
+        except (KeyError, TypeError, ValueError):
+            raise PolicyRefusal("plan_expired", "plan expiry is missing or invalid") from None
+        if expired:
+            raise PolicyRefusal("plan_expired", "plan has expired")
+        target = plan.get("target") or {}
+        if target.get("target_identity") != self.target_identity:
+            raise PolicyRefusal("ownership_unknown", "plan targets a foreign host")
+        forbidden = ("path", "argv", "shell", "command", "locator", "filename")
+        blob = json.dumps(plan, sort_keys=True, default=str)
+        for key in forbidden:
+            if f'"{key}"' in blob:
+                raise PolicyRefusal("response_invalid", "plan carries request-supplied execution detail")
+        return "ready"
 
     @staticmethod
     def _run(argv, timeout=5):

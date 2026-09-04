@@ -14,7 +14,8 @@ from contextlib import contextmanager
 from sandbox.config.storage_monitor import StorageMonitorConfigError
 from sandbox.registry import CommandSpec, register_specs
 from sandbox.resources.context import (
-    host_memory_status, node_store_service, reclaim_service, resource_service,
+    host_memory_plan, host_memory_status, node_store_service, reclaim_service,
+    resource_service,
 )
 from sandbox.resources.models import resource_cancellation_signal, redact
 from sandbox.resources.monitor import record_path, resolve_policy
@@ -327,7 +328,7 @@ def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
     parser.add_argument(
         "action", choices=("status", "plan", "cleanup", "monitor", "schedule",
-                           "swap-status")
+                           "swap-status", "swap-plan", "swap-apply")
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
@@ -383,6 +384,10 @@ def configure_parser(parser) -> None:
     # job-status/job-output rather than invoking the worker directly.
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan-id", default=None)
+    parser.add_argument(
+        "--size-gib", type=int, default=None,
+        help="swap-plan only: requested swap size from 1 through 8 GiB (default 4)",
+    )
     parser.add_argument(
         "--node-store-family", default=None,
         help="exact canonical Compose family for named node-store plan/apply",
@@ -1090,6 +1095,76 @@ def _host_memory_cli(args):
                 "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
 
 
+def _swap_plan_cli(args):
+    """Render one deterministic controller-owned enable plan without mutation."""
+    action = args.action
+    remote = getattr(args, "remote", None)
+    if not remote:
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": None, "data": {},
+            "error": {"code": "remote_required",
+                      "message": "--remote is required for host-memory operations",
+                      "retryable": False},
+        }
+    size = getattr(args, "size_gib", None)
+    if size is None:
+        size = 4
+    if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 8:
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused",
+                "target": {"kind": "remote", "name": remote}, "data": {},
+                "error": {"code": "invalid_size",
+                          "message": "size must be from 1 through 8 GiB",
+                          "retryable": False}}
+    budget = 15 if args.budget is None else args.budget
+    try:
+        return host_memory_plan(remote, size_gib=size, budget_seconds=budget)
+    except Exception as exc:
+        code = getattr(exc, "code", None) or str(exc)
+        if code not in {"unknown_remote", "remote_runtime_revision_mismatch",
+                        "remote_service_ownership_unknown"}:
+            code = "unknown_remote"
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused",
+                "target": {"kind": "remote", "name": remote}, "data": {},
+                "error": {"code": code, "message": str(exc)[:240], "retryable": False}}
+
+
+def _swap_apply_cli(args):
+    """Refuse apply until the protected apply path registers (T053)."""
+    action = args.action
+    remote = getattr(args, "remote", None)
+    target = {"kind": "remote", "name": remote} if remote else None
+    if not remote:
+        return {
+            "schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "remote_required",
+                      "message": "--remote is required for host-memory operations",
+                      "retryable": False},
+        }
+    if not bool(getattr(args, "confirm", False)):
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": "confirmation_required",
+                          "message": "swap-apply requires explicit confirmation of a current plan",
+                          "retryable": False}}
+    return {"schema_version": 1, "ok": False, "action": action,
+            "status": "refused", "target": target, "data": {},
+            "error": {"code": "apply_unavailable",
+                      "message": "protected apply is not registered until the US3 safety gate passes",
+                      "retryable": False}}
+
+
+def cmd_swap_plan(args) -> dict:
+    return _swap_plan_cli(args)
+
+
+def cmd_swap_apply(args) -> dict:
+    return _swap_apply_cli(args)
+
+
 def _emit_host_memory(payload, json_output):
     if json_output:
         print(json.dumps(payload, sort_keys=True)); return
@@ -1160,6 +1235,12 @@ def cmd_resources(_cfg, args) -> None:
     action = args.action
     if action == "swap-status":
         payload = _host_memory_cli(args)
+        _emit_host_memory(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
+    if action in {"swap-plan", "swap-apply"}:
+        payload = _swap_plan_cli(args) if action == "swap-plan" else _swap_apply_cli(args)
         _emit_host_memory(payload, bool(args.json))
         if not payload.get("ok"):
             raise SystemExit(1)

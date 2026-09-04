@@ -287,3 +287,89 @@ class HostMemoryProviderTest(unittest.TestCase):
                                     target_identity=TARGET).observe()
             self.assertEqual(result["container_eligibility"]["state"],"unknown")
             self.assertEqual(result["evidence_state"],"partial")
+
+    def _enable_plan(self, size_gib=4):
+        from sandbox.resources.host_memory.policy import build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        return build_plan("enable", service_evidence(), eligible_state(),
+                          size_gib=size_gib, now=NOW)
+
+    def test_enable_uses_only_fixed_paths_with_restrictive_modes(self):
+        from sandbox.resources.host_memory.provider import (
+            FIXED_ARTIFACTS, RECEIPT, STATE, SWAP, SWAP_UNIT, HostProvider,
+        )
+        mutated = []
+        def run(argv, timeout=5):
+            mutated.append(tuple(argv)); return command_result()
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=run, target_identity=TARGET)
+        result = provider.enable(self._enable_plan())
+        self.assertEqual(result["status"], "applied")
+        allowed = {str(STATE), str(RECEIPT), str(SWAP), str(SWAP_UNIT),
+                   *(str(path) for path in FIXED_ARTIFACTS.values())}
+        for call in mutated:
+            text = " ".join(call)
+            self.assertTrue(any(root in text for root in allowed), text)
+        self.assertNotIn("/tmp/evil", " ".join(" ".join(call) for call in mutated))
+
+    def test_enable_validates_plan_before_side_effects(self):
+        from datetime import timedelta
+        from sandbox.resources.host_memory.policy import PolicyRefusal, build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        calls = []
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                                target_identity=TARGET, now=lambda: NOW)
+        stale = build_plan("enable", service_evidence(), eligible_state(),
+                           now=NOW - timedelta(minutes=16))
+        with self.assertRaises(PolicyRefusal) as refused:
+            provider.enable(stale)
+        self.assertEqual(refused.exception.code, "plan_expired")
+        self.assertEqual(calls, [])
+
+    def test_enable_is_idempotent_for_the_same_plan(self):
+        from sandbox.resources.host_memory.provider import HostProvider
+        calls = []
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                                target_identity=TARGET)
+        plan = self._enable_plan()
+        first = provider.enable(plan)
+        calls_after_first = len(calls)
+        second = provider.enable(plan)
+        self.assertEqual(first["status"], "applied")
+        self.assertEqual(second["status"], "already_current")
+        self.assertEqual(len(calls), calls_after_first)
+
+    def _preflight_provider(self, calls):
+        from sandbox.resources.host_memory.provider import HostProvider
+        from tests.host_memory_fixtures import NOW
+        return HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                            run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                            target_identity=TARGET, now=lambda: NOW)
+
+    def test_preflight_refuses_unsafe_matrix_without_side_effects(self):
+        from datetime import datetime, timedelta, timezone
+        from sandbox.resources.host_memory.policy import PolicyRefusal, build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        then = datetime(2026, 8, 30, 11, 31, tzinfo=timezone.utc)
+        aged = eligible_state(observed_at="2026-08-30T11:30:00Z")
+        cases = {
+            "stale_plan": build_plan("enable", service_evidence(), aged, now=then),
+            "foreign_target": build_plan("enable", {**service_evidence(),
+                                          "target_identity": "other-host"},
+                                         eligible_state(), now=NOW),
+        }
+        for name, plan in cases.items():
+            with self.subTest(name=name):
+                calls = []
+                provider = self._preflight_provider(calls)
+                with self.assertRaises(PolicyRefusal):
+                    provider.preflight(plan)
+                self.assertEqual(calls, [])
+
+    def test_preflight_passes_eligible_without_touching_foreign_state(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        self.assertEqual(provider.preflight(self._enable_plan()), "ready")
+        self.assertEqual(calls, [])

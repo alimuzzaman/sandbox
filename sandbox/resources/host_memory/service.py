@@ -40,3 +40,22 @@ class HostMemoryService:
     def projection(self,status):
         mem=status.get("memory") or {}; areas=status.get("swap_areas") or []; monitor=status.get("monitor") or {}
         return HostMemoryStatusProjection(target_identity=str(status.get("target_identity","unknown")),observed_at=str(status.get("observed_at","")),evidence_state=str(status.get("evidence_state","unknown")),memory_total_bytes=mem.get("total_bytes"),memory_available_bytes=mem.get("available_bytes"),swap_total_bytes=sum(a.get("total_bytes",0) for a in areas),swap_used_bytes=sum(a.get("used_bytes",0) for a in areas),ownership=str(status.get("ownership","unknown")),monitor_freshness=str(monitor.get("freshness","unknown")),sustained_swap_use=monitor.get("sustained_swap_use"),pressure_state=str(monitor.get("pressure_state","unknown")),operation_block=(status.get("operation_block") or {}).get("reason"))
+
+    def plan(self,size_gib=4,budget_seconds=15):
+        """Build one deterministic controller-owned enable plan from status evidence.
+
+        Read-only: the only remote action is ``host_memory_status``. There is no
+        remote plan action and no provider mutation on this path.
+        """
+        from .policy import PolicyRefusal, build_plan
+        observed=self.status(budget_seconds=budget_seconds)
+        state=observed.get("data") or {}
+        target={"remote_name":self._remote.name,
+                "target_identity":str(state.get("target_identity","unknown")),
+                "service_ownership_marker":str(getattr(self._remote,"marker","")),
+                "runtime_revision":str(getattr(self._remote,"revision",""))}
+        try:
+            plan=build_plan("enable",target,state,size_gib=size_gib,now=self._now())
+        except PolicyRefusal as exc:
+            return failure("swap-plan",exc,self.target)
+        return envelope("swap-plan",plan["state"],target=self.target,data=plan)

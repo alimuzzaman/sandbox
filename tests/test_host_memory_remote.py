@@ -76,3 +76,47 @@ class HostMemoryRemoteTest(unittest.TestCase):
         payload = validate_request({"action":"host_memory_status", "remote_name":"r",
                                     "budget_seconds":1.5})
         self.assertEqual(payload["budget_seconds"], 1.5)
+
+    def test_no_plan_action_and_no_shell_syntax_on_the_wire(self):
+        for payload in (
+            {"action":"host_memory_plan","remote_name":"r","budget_seconds":15},
+            {"action":"host_memory_status;id","remote_name":"r","budget_seconds":15},
+            {"action":"host_memory_status","remote_name":"r","budget_seconds":15,
+             "argv":["id"]},
+            {"action":"host_memory_status","remote_name":"r","budget_seconds":15,
+             "path":"/tmp/x"},
+        ):
+            with self.assertRaises(RemoteProtocolError):
+                validate_request(payload)
+
+    def _apply_request(self, **overrides):
+        plan = {"plan_id":"a"*64, "operation":"enable", "target_identity":"host",
+                "service_ownership_marker":MARKER, "runtime_revision":REVISION,
+                "expires_at":"2026-08-30T12:15:00Z", "observation_digest":"b"*64,
+                "effective_policy":{"size_gib":4}, "intended_artifact_digests":[],
+                "rollback_scope":[]}
+        plan.update(overrides.pop("plan", {}))
+        request = {"action":"host_memory_apply", "remote_name":"r",
+                   "operation_id":"c"*64, "plan":plan, "confirmed":True,
+                   "budget_seconds":15}
+        request.update(overrides)
+        return request
+
+    def test_apply_rejects_non_canonical_effective_policy(self):
+        for policy in ({"size_gib":0}, {"size_gib":9}, {"size_gib":"4"}, {}):
+            with self.subTest(policy=policy), self.assertRaises(RemoteProtocolError):
+                validate_request(self._apply_request(plan={"effective_policy":policy}))
+        with self.assertRaises(RemoteProtocolError):
+            validate_request(self._apply_request(size_gib=4))
+
+    def test_apply_response_requires_normative_typed_result(self):
+        envelope={"resource_schema":1,"host_memory_schema":1,"transport":"control",
+                  "service":{"ownership_marker":MARKER,"runtime_revision":REVISION}}
+        good = validate_response({**envelope,"result":{"status":"applied",
+                                 "operation_id":"c"*64}},marker=MARKER,revision=REVISION,
+                                 action="host_memory_apply")
+        self.assertEqual(good["status"], "applied")
+        for result in ({"status":"bogus"}, {"outcome":"applied"}, {}):
+            with self.subTest(result=result), self.assertRaises(RemoteProtocolError):
+                validate_response({**envelope,"result":result},marker=MARKER,
+                                  revision=REVISION,action="host_memory_apply")

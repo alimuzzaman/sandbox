@@ -67,3 +67,80 @@ class HostMemoryPolicyTest(unittest.TestCase):
                 sample("2026-08-30T11:55:00Z", 512 * 1024 ** 2)]
         self.assertFalse(sustained_swap_use(rows))
         self.assertEqual(freshness("2026-08-30T12:00:01Z", NOW), "unknown")
+
+    def test_plan_requested_and_effective_policy_for_every_size(self):
+        from sandbox.resources.host_memory.policy import ACTIVE_ARTIFACTS
+        target = service_evidence()
+        for size in (1, 2, 4, 8):
+            plan = build_plan("enable", target, eligible_state(), size_gib=size, now=NOW)
+            self.assertEqual(plan["requested_policy"], {"size_gib": size})
+            self.assertEqual(plan["effective_policy"]["size_gib"], size)
+            self.assertEqual(plan["intended_changes"], list(ACTIVE_ARTIFACTS))
+            self.assertEqual(plan["rollback_scope"], list(ACTIVE_ARTIFACTS))
+            self.assertTrue(plan["requires_confirmation"])
+            self.assertEqual(plan["state"], "planned")
+
+    def test_plan_expiry_is_created_plus_fifteen_minutes(self):
+        plan = build_plan("enable", service_evidence(), eligible_state(), now=NOW)
+        self.assertEqual(plan["expires_at"], "2026-08-30T12:15:00Z")
+
+    def test_plan_current_refuses_expired_and_drifted(self):
+        from sandbox.resources.host_memory.policy import plan_current
+        target = service_evidence()
+        plan = build_plan("enable", target, eligible_state(), now=NOW)
+        with self.assertRaises(PolicyRefusal) as expired:
+            plan_current(plan, eligible_state(), now=NOW + timedelta(minutes=16))
+        self.assertEqual(expired.exception.code, "plan_expired")
+        with self.assertRaises(PolicyRefusal) as drifted:
+            plan_current(plan, eligible_state(
+                memory={"total_bytes": 32 * GIB, "available_bytes": 24 * GIB}), now=NOW)
+        self.assertEqual(drifted.exception.code, "plan_drifted")
+
+    def test_plan_invalid_sizes_and_modes_refuse(self):
+        target = service_evidence()
+        for size in (0, 9, True, "4"):
+            with self.subTest(size=size):
+                with self.assertRaises(PolicyRefusal):
+                    build_plan("enable", target, eligible_state(), size_gib=size, now=NOW)
+        with self.assertRaises(PolicyRefusal) as mode:
+            build_plan("format", target, eligible_state(), now=NOW)
+        self.assertEqual(mode.exception.code, "invalid_mode")
+
+    def test_already_enabled_converges_without_duplicate_mutation(self):
+        target = service_evidence()
+        state = eligible_state(
+            ownership="owned",
+            swap_areas=[{"ownership": "owned", "used_bytes": 0, "total_bytes": 4 * GIB}],
+        )
+        plan = build_plan("enable", target, state, size_gib=4, now=NOW)
+        self.assertEqual(plan["state"], "already_current")
+
+    def test_plan_refuses_unregistered_or_unsafe_targets(self):
+        state = eligible_state()
+        for target in (
+            {},
+            {"remote_name": "r"},
+            {"remote_name": "r", "target_identity": "host"},
+            {"remote_name": "r", "target_identity": "host",
+             "service_ownership_marker": "short", "runtime_revision": "b" * 24},
+            {"remote_name": "r", "target_identity": "../escape",
+             "service_ownership_marker": "a" * 24, "runtime_revision": "b" * 24},
+        ):
+            with self.subTest(target=target):
+                with self.assertRaises(PolicyRefusal) as refused:
+                    build_plan("enable", target, state, now=NOW)
+                self.assertEqual(refused.exception.code, "unregistered_target")
+
+    def test_plan_refuses_stale_observations(self):
+        old = eligible_state(observed_at="2026-08-30T09:00:00Z")
+        with self.assertRaises(PolicyRefusal) as refused:
+            build_plan("enable", service_evidence(), old, now=NOW)
+        self.assertEqual(refused.exception.code, "evidence_stale")
+
+    def test_plan_refuses_ambiguous_ownership(self):
+        for ownership in ("ambiguous", "contested", "foreign"):
+            with self.subTest(ownership=ownership):
+                with self.assertRaises(PolicyRefusal) as refused:
+                    build_plan("enable", service_evidence(),
+                               eligible_state(ownership=ownership), now=NOW)
+                self.assertEqual(refused.exception.code, "ownership_unknown")

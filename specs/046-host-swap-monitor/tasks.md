@@ -79,20 +79,20 @@
 
 ### Tests for User Story 2 planning - RED first
 
-- [ ] T028 [P] [US2] Add failing plan tests for the 4 GiB default, every valid 1-8 GiB override boundary, invalid integer/range, RAM/filesystem/free-reserve bounds, requested/effective policy, artifact inventory, confirmation binding, expiry, and already-enabled convergence in `tests/test_host_memory_policy.py`
-- [ ] T029 [P] [US2] Add failing enable-transaction tests for fixed paths, restrictive modes, preallocation validation, signature writing, swap activation, service installation, atomic ordering, and idempotency in `tests/test_host_memory_provider.py`
-- [ ] T030 [P] [US2] Add failing service tests for controller-owned plan identity, size propagation, request identity, confirmation binding, authorization-before-side-effect, phase journaling, and replay-safe convergence in `tests/test_host_memory_service.py`
-- [ ] T031 [P] [US2] Add failing control-contract tests for strict `host_memory_apply` canonical-plan schemas, capability checks, typed results, allowed canonical `effective_policy.size_gib`, rejected top-level overrides, and bounded evidence in `tests/test_host_memory_remote.py` and `tests/test_resource_remote.py`
-- [ ] T032 [P] [US2] Add failing CLI tests for `resources swap-plan --operation enable --size-gib 1..8`, invalid size/mode handling, confirmed `resources swap-apply`, JSON parity, refusal without confirmation, and replay-safe plan identities in `tests/test_resource_interfaces.py`
-- [ ] T033 [US2] Run the User Story 2 planning/apply tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T028 [P] [US2] Add failing plan tests for the 4 GiB default, every valid 1-8 GiB override boundary, invalid integer/range, RAM/filesystem/free-reserve bounds, requested/effective policy, artifact inventory, confirmation binding, expiry, and already-enabled convergence in `tests/test_host_memory_policy.py`
+- [X] T029 [P] [US2] Add failing enable-transaction tests for fixed paths, restrictive modes, preallocation validation, signature writing, swap activation, service installation, atomic ordering, and idempotency in `tests/test_host_memory_provider.py`
+- [X] T030 [P] [US2] Add failing service tests for controller-owned plan identity, size propagation, request identity, confirmation binding, authorization-before-side-effect, phase journaling, and replay-safe convergence in `tests/test_host_memory_service.py`
+- [X] T031 [P] [US2] Add failing control-contract tests for strict `host_memory_apply` canonical-plan schemas, capability checks, typed results, allowed canonical `effective_policy.size_gib`, rejected top-level overrides, and bounded evidence in `tests/test_host_memory_remote.py` and `tests/test_resource_remote.py`
+- [X] T032 [P] [US2] Add failing CLI tests for `resources swap-plan --operation enable --size-gib 1..8`, invalid size/mode handling, confirmed `resources swap-apply`, JSON parity, refusal without confirmation, and replay-safe plan identities in `tests/test_resource_interfaces.py`
+- [X] T033 [US2] Run the User Story 2 planning/apply tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_provider.py`, `tests/test_host_memory_service.py`, `tests/test_host_memory_remote.py`, `tests/test_resource_remote.py`, and `tests/test_resource_interfaces.py`; confirm the assertions fail and record RED evidence in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 ### Controller planning implementation - GREEN after T033
 
-- [ ] T034 [US2] Implement deterministic controller-side enable-plan construction, 4 GiB default, valid 1-8 GiB requested/effective sizing, every capacity calculation, preconditions, and confirmation digest rules in `sandbox/resources/host_memory/policy.py`
-- [ ] T035 [US2] Implement stored plan, requested/effective policy, confirmation, request, phase, artifact, and ownership records with atomic transitions in `sandbox/resources/host_memory/repository.py`
-- [ ] T036 [US2] Implement read-only controller plan orchestration from `host_memory_status` evidence only, with no remote plan action or provider mutation, in `sandbox/resources/host_memory/service.py`
-- [ ] T037 [US2] Add `resources swap-plan` parsing and text/JSON rendering, including valid `--size-gib 1..8` propagation and disable-mode rejection, in `sandbox/commands/resources.py`
-- [ ] T038 [US2] Run the plan-focused tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, and `tests/test_resource_interfaces.py`; require the read-only planning path GREEN while protected apply remains unavailable, and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
+- [X] T034 [US2] Implement deterministic controller-side enable-plan construction, 4 GiB default, valid 1-8 GiB requested/effective sizing, every capacity calculation, preconditions, and confirmation digest rules in `sandbox/resources/host_memory/policy.py`
+- [X] T035 [US2] Implement stored plan, requested/effective policy, confirmation, request, phase, artifact, and ownership records with atomic transitions in `sandbox/resources/host_memory/repository.py`
+- [X] T036 [US2] Implement read-only controller plan orchestration from `host_memory_status` evidence only, with no remote plan action or provider mutation, in `sandbox/resources/host_memory/service.py`
+- [X] T037 [US2] Add `resources swap-plan` parsing and text/JSON rendering, including valid `--size-gib 1..8` propagation and disable-mode rejection, in `sandbox/commands/resources.py`
+- [X] T038 [US2] Run the plan-focused tests in `tests/test_host_memory_policy.py`, `tests/test_host_memory_repository.py`, `tests/test_host_memory_service.py`, and `tests/test_resource_interfaces.py`; require the read-only planning path GREEN while protected apply remains unavailable, and record bounded output in `specs/046-host-swap-monitor/acceptance-evidence.md`
 
 **Checkpoint**: The reviewed plan is controller-owned and read-only. The remote allowlist still has no planning action, and protected apply is not registered or reachable.
 

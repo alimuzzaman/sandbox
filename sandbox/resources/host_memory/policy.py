@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from .models import SwapPolicy, canonical_digest, parse_utc, utc_text
+from .models import HEX24, SwapPolicy, canonical_digest, parse_utc, utc_text
 
 GIB = 1024 ** 3
 ACTIVE_ARTIFACTS = ("swap_file", "swap_unit", "swappiness_policy", "monitor_helper",
@@ -55,10 +55,35 @@ def validate_common(state: Mapping):
     if len(areas) > 1: raise PolicyRefusal("unmanaged_swap", "multiple swap areas are unsupported")
     if any(area.get("ownership") != "owned" for area in areas):
         raise PolicyRefusal("unmanaged_swap", "unmanaged swap blocks lifecycle mutation")
+    if state.get("ownership") not in {"absent", "owned"}:
+        raise PolicyRefusal("ownership_unknown", "host ownership is ambiguous or unproven")
     if state.get("operation_block"):
         code = "rollback_incomplete" if state["operation_block"].get("reason") == "rollback_incomplete" else "operation_in_progress"
         raise PolicyRefusal(code, "another lifecycle operation blocks mutation")
     if evidence != "known": raise PolicyRefusal("ownership_unknown", "required evidence is not complete")
+
+
+def validate_target(target: Mapping):
+    if not isinstance(target, Mapping): raise PolicyRefusal("unregistered_target", "planning target is not registered")
+    name, identity = target.get("remote_name"), target.get("target_identity")
+    if not isinstance(name, str) or not name or not isinstance(identity, str) or not identity:
+        raise PolicyRefusal("unregistered_target", "planning target is not registered")
+    if "/" in identity or ".." in identity or "/" in name or ".." in name:
+        raise PolicyRefusal("unregistered_target", "planning target carries an unsafe locator")
+    marker = target.get("service_ownership_marker", target.get("ownership_marker"))
+    if not HEX24.fullmatch(str(marker or "")):
+        raise PolicyRefusal("unregistered_target", "planning target lacks service evidence")
+    if not HEX24.fullmatch(str(target.get("runtime_revision", ""))):
+        raise PolicyRefusal("unregistered_target", "planning target lacks service evidence")
+
+
+def validate_freshness(state: Mapping, now):
+    try:
+        fresh = freshness(state["observed_at"], now)
+    except (KeyError, TypeError, ValueError):
+        raise PolicyRefusal("evidence_stale", "planning requires a timestamped observation") from None
+    if fresh != "fresh":
+        raise PolicyRefusal("evidence_stale", "planning requires a fresh observation")
 
 
 def disable_calculations(state: Mapping):
@@ -77,10 +102,17 @@ def disable_calculations(state: Mapping):
 
 def build_plan(operation, target, state, *, size_gib=4, now=None):
     if operation not in {"enable", "disable"}: raise PolicyRefusal("invalid_mode", "operation must be enable or disable")
+    if operation == "enable":
+        size_gib = _integer(size_gib)
+        if not 1 <= size_gib <= 8:
+            raise PolicyRefusal("invalid_size", "size must be from 1 through 8 GiB")
+    validate_target(target)
     validate_common(state)
     now = now or datetime.now(timezone.utc)
+    validate_freshness(state, now)
     policy = SwapPolicy(size_gib=size_gib) if operation == "enable" else None
     calculations = enable_calculations(state, size_gib) if policy else disable_calculations(state)
+    converged = operation == "enable" and _already_enabled(state, size_gib)
     payload = {
         "schema_version": 1, "operation": operation, "target": dict(target),
         "created_at": utc_text(now), "expires_at": utc_text(now + timedelta(minutes=15)),
@@ -89,10 +121,16 @@ def build_plan(operation, target, state, *, size_gib=4, now=None):
         "effective_policy": policy.to_dict() if policy else None,
         "calculations": calculations, "intended_changes": list(ACTIVE_ARTIFACTS),
         "rollback_scope": list(ACTIVE_ARTIFACTS), "requires_confirmation": True,
-        "state": "planned",
+        "state": "already_current" if converged else "planned",
     }
     payload["plan_id"] = canonical_digest(payload)
     return payload
+
+
+def _already_enabled(state: Mapping, size_gib: int):
+    areas = state.get("swap_areas") or []
+    return (len(areas) == 1 and areas[0].get("ownership") == "owned"
+            and areas[0].get("total_bytes") == size_gib * GIB)
 
 
 def plan_current(plan, state, *, now=None):

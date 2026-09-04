@@ -112,6 +112,59 @@ safety or release readiness.
   The later strict foundational and User Story 1 tests were executed against that scaffold
   before their corresponding bounded implementation changes, producing the RED results
   above. No RED claim is made for later user stories.
+- User Story 2 planning RED (T033) was captured against the pre-planning scaffold with
+  `python3 -m unittest tests.test_host_memory_policy tests.test_host_memory_provider
+  tests.test_host_memory_service tests.test_host_memory_remote
+  tests.test_resource_remote.TestHostMemoryRemoteTransport
+  tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`: 60 tests ran with
+  nine failures and thirteen errors in 0.119 seconds. Every failing assertion belongs
+  to the fifteen new T028-T032 tests; the new requested/effective-policy, inventory,
+  confirmation, expiry, and plan-expiry/drift tests already pass against the existing
+  `build_plan`/`plan_current` scaffold. Missing behavior was specific to fail-closed
+  invalid-size handling in `build_plan` (raw `ValueError` escapes instead of
+  `PolicyRefusal`), already-enabled convergence, controller-owned service plan
+  orchestration, provider enable transactions, strict apply canonical-plan schemas
+  and typed results, pre-control apply refusal, and `swap-plan`/`swap-apply` CLI
+  parsing and confirmation. No pre-existing test regressed. Local synthetic evidence
+  only.
+- User Story 2 planning GREEN (T038) after the read-only planning implementation
+  (T034 policy, T036 service, T037 CLI; T035 repository deferred): `python3
+  -m unittest tests.test_host_memory_policy tests.test_host_memory_repository
+  tests.test_host_memory_service tests.test_resource_interfaces` ran 71 tests and
+  passed in 0.336 seconds. The read-only planning path is GREEN while protected
+  apply remains unavailable (`swap-apply` refuses with `confirmation_required`
+  without `--confirm` and `apply_unavailable` with it, pending the US3 safety
+  gate). T035 repository work is deferred because the parallel server-config
+  branch already modifies `sandbox/resources/host_memory/repository.py`; merging
+  that file concurrently would conflict. Local synthetic evidence only.
+- User Story 3 safety-gate RED (T043) was captured against the pre-gate scaffold
+  with `python3 -m unittest tests.test_host_memory_policy
+  tests.test_host_memory_provider tests.test_host_memory_remote
+  tests.test_resource_remote.TestHostMemoryRemoteTransport
+  tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`: 60 tests ran
+  with seventeen failures and six errors in 0.128 seconds. Every failing assertion
+  belongs to the new T039-T041 tests plus the still-open T029/T031 planning tests
+  (provider enable transactions and strict apply contracts land in Phase 6 and the
+  US3 protocol gate). Missing behavior was specific to unregistered/unsafe target
+  refusal, stale-observation refusal, ambiguous-ownership refusal, provider
+  preflight without side effects, and pre-control apply refusal. T042 interface
+  composition tests are deferred: the parallel server-config branch already
+  modifies `tests/test_host_memory_interfaces.py`. Local synthetic evidence only.
+- User Story 3 fail-closed GREEN (T047, partial) after the refusal and preflight
+  implementation (T044 policy, T045 provider, strict apply schemas and typed
+  results in `sandbox/resources/host_memory/remote.py`): `python3 -m unittest
+  tests.test_host_memory_policy tests.test_host_memory_provider
+  tests.test_host_memory_remote tests.test_resource_remote
+  tests.test_resource_interfaces` ran 128 tests in 311.689 seconds with only three
+  errors, all in the Phase 6 provider enable-transaction tests (`enable` lands in
+  T048 after this gate). The US3 refusal matrix, expiry/drift/plan-current,
+  preflight-before-side-effects, exact wire allowlist with no plan action, and
+  bounded apply-result contracts are GREEN. Deliberately deferred on parallel-
+  branch collisions: T042 interface composition (`tests/
+  test_host_memory_interfaces.py` owned by the server-config branch) and the
+  `mcp/wp-server/server.py` + `sandbox/core/_remote.py` enforcement share of T046
+  (both files owned there too). Protected apply stays unregistered, so no mutation
+  is reachable through this branch. Local synthetic evidence only.
 
 ## Fixed authenticated synthetic-provider evidence
 

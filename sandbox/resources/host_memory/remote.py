@@ -52,7 +52,18 @@ def validate_request(payload):
         if set(plan)!=canonical: raise RemoteProtocolError("response_invalid","canonical plan fields do not match")
         if not HEX24.fullmatch(str(plan["service_ownership_marker"])) or not HEX24.fullmatch(str(plan["runtime_revision"])):
             raise RemoteProtocolError("remote_runtime_revision_mismatch","service evidence is invalid")
+        effective=plan.get("effective_policy")
+        if (not isinstance(effective,dict) or isinstance(effective.get("size_gib"),bool)
+                or not isinstance(effective.get("size_gib"),int)
+                or not 1 <= effective["size_gib"] <= 8):
+            raise RemoteProtocolError("response_invalid","canonical effective policy size is invalid")
     return bounded(payload,64*1024)
+
+
+APPLY_OUTCOMES=frozenset({"applied","already_current","refused","partial","failed",
+                          "rollback_complete","rollback_incomplete"})
+RAW_RESULT_KEYS=frozenset({"stdout","stderr","output","source_path","processes","argv",
+                           "path","locator","filename"})
 
 
 def validate_response(response, *, marker, revision, action):
@@ -69,6 +80,12 @@ def validate_response(response, *, marker, revision, action):
     try:
         if action == "host_memory_status":
             return RemoteSwapState.from_dict(result, require_digest=True).to_dict()
+        if action == "host_memory_apply":
+            if result.get("status") not in APPLY_OUTCOMES:
+                raise RemoteProtocolError("response_invalid","apply result is not a normative outcome")
+            if set(result) & RAW_RESULT_KEYS:
+                raise RemoteProtocolError("response_invalid","apply result carries raw evidence")
+            return bounded(result)
         return bounded(result)
     except (TypeError, ValueError):
         raise RemoteProtocolError("response_invalid", "remote evidence is invalid or oversized") from None

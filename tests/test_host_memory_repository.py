@@ -5,14 +5,14 @@ import os
 from unittest import mock
 from sandbox.resources.host_memory.policy import build_plan
 from sandbox.resources.host_memory.repository import HostMemoryRepository, RepositoryError
-from tests.host_memory_fixtures import NOW, eligible_state, ownership_receipt, sample
+from tests.host_memory_fixtures import NOW, eligible_state, ownership_receipt, sample, service_evidence
 
 
 class HostMemoryRepositoryTest(unittest.TestCase):
     def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.repo=HostMemoryRepository(Path(self.tmp.name))
     def tearDown(self): self.tmp.cleanup()
     def test_plan_is_owner_only_atomic_and_immutable(self):
-        plan=build_plan("enable",{},eligible_state(),now=NOW); self.repo.save_plan(plan)
+        plan=build_plan("enable",service_evidence(),eligible_state(),now=NOW); self.repo.save_plan(plan)
         self.assertEqual(self.repo.load_plan(plan["plan_id"]),plan)
         self.assertEqual((self.repo.plans/f"{plan['plan_id']}.json").stat().st_mode & 0o777,0o600)
     def test_corrupt_plan_fails_closed(self):

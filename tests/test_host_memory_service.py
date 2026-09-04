@@ -46,3 +46,30 @@ class HostMemoryServiceTest(unittest.TestCase):
         result = self.service.status()
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "partial")
+
+    def test_plan_is_deterministic_and_controller_owned(self):
+        first = self.service.plan()
+        second = self.service.plan()
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["data"]["plan_id"], second["data"]["plan_id"])
+        self.assertEqual(first["data"]["effective_policy"]["size_gib"], 4)
+        actions = [call[0] for call in self.remote.calls]
+        self.assertTrue(actions)
+        self.assertEqual(set(actions), {"host_memory_status"})
+
+    def test_plan_propagates_valid_sizes_and_refuses_invalid(self):
+        for size in (1, 8):
+            result = self.service.plan(size_gib=size)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["data"]["requested_policy"], {"size_gib": size})
+        for size in (0, 9):
+            result = self.service.plan(size_gib=size)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "invalid_size")
+
+    def test_plan_binds_confirmation_without_mutation(self):
+        result = self.service.plan(size_gib=4)
+        self.assertTrue(result["data"]["requires_confirmation"])
+        self.assertEqual(result["data"]["state"], "planned")
+        for action, _fields in self.remote.calls:
+            self.assertEqual(action, "host_memory_status")

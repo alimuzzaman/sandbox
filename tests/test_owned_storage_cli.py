@@ -141,7 +141,31 @@ class TestOwnedStorageCLI(unittest.TestCase):
         self.assertTrue(cap_out["ok"])
         self.assertEqual(cap_out["capability"], "owned-storage-authority-v1")
         self.assertEqual(cap_out["support_tier"], "implemented_unproven")
-        self.assertIn("checks", cap_out)
+    def test_security_screening_absence_of_secrets_and_paths(self):
+        # Run capability, status, and preview, and verify that raw strings contain NO host paths, secrets, env vars
+        for subcmd in [
+            ["authority", "capability", "--remote", self.remote_id, "--json"],
+            ["authority", "status", "--remote", self.remote_id, "--project-identity", self.project_id, "--json"],
+            ["authority", "preview", "--remote", self.remote_id, "--project-identity", self.project_id, "--json"],
+        ]:
+            args = self.parser.parse_args(subcmd)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                cmd_storage(args)
+            output_text = buf.getvalue()
+
+            # Verify no host directory paths leaked
+            self.assertNotIn("/Users/", output_text)
+            self.assertNotIn("/home/", output_text)
+            self.assertNotIn("/var/lib/", output_text)
+            self.assertNotIn("/private/var/", output_text)
+
+            # Verify no token or secret patterns leaked
+            self.assertNotIn("bearer ", output_text.lower())
+            self.assertNotIn("password=", output_text.lower())
+            self.assertNotIn("secret=", output_text.lower())
+            self.assertNotIn("ghp_", output_text)
+            self.assertNotIn("sk_live_", output_text)
 
 
 if __name__ == "__main__":

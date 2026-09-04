@@ -34,9 +34,11 @@ def owned_storage_capability(
     try:
         from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
         lifecycle_service = build_authority_lifecycle_service()
-        return lifecycle_service.evaluate_capability(remote_identity=remote)
+        res = lifecycle_service.evaluate_capability(remote_identity=remote)
     except Exception as exc:
-        return {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+        res = {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+    from sandbox.owned_storage.redaction import redact_storage_projection
+    return redact_storage_projection(res)
 
 
 def owned_storage_status(
@@ -48,7 +50,7 @@ def owned_storage_status(
 ) -> Dict[str, Any]:
     """Read a bounded page of authority-owned objects for a project and remote."""
     try:
-        return get_service().get_status(
+        res = get_service().get_status(
             remote_identity=remote,
             project_identity=project_identity,
             kind=kind,
@@ -56,9 +58,11 @@ def owned_storage_status(
             cursor=cursor,
         )
     except OwnedStorageApplicationError as exc:
-        return {"ok": False, "code": exc.code, "message": str(exc)}
+        res = {"ok": False, "code": exc.code, "message": str(exc)}
     except Exception as exc:
-        return {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+        res = {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+    from sandbox.owned_storage.redaction import redact_storage_projection
+    return redact_storage_projection(res)
 
 
 def owned_storage_preview(
@@ -70,7 +74,7 @@ def owned_storage_preview(
 ) -> Dict[str, Any]:
     """Inspect retained objects and create an immutable 15-minute reclamation preview."""
     try:
-        return get_service().generate_preview(
+        res = get_service().generate_preview(
             remote_identity=remote,
             project_identity=project_identity,
             kind=kind,
@@ -78,9 +82,11 @@ def owned_storage_preview(
             cursor=cursor,
         )
     except OwnedStorageApplicationError as exc:
-        return {"ok": False, "code": exc.code, "message": str(exc)}
+        res = {"ok": False, "code": exc.code, "message": str(exc)}
     except Exception as exc:
-        return {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+        res = {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+    from sandbox.owned_storage.redaction import redact_storage_projection
+    return redact_storage_projection(res)
 
 
 def owned_storage_reclaim(
@@ -93,7 +99,7 @@ def owned_storage_reclaim(
 ) -> Dict[str, Any]:
     """Safely reclaim one exact eligible preview candidate."""
     try:
-        return get_service().reclaim(
+        res = get_service().reclaim(
             remote_identity=remote,
             project_identity=project_identity,
             preview_id=preview_id,
@@ -102,9 +108,11 @@ def owned_storage_reclaim(
             confirm=confirm,
         )
     except OwnedStorageApplicationError as exc:
-        return {"ok": False, "code": exc.code, "message": str(exc)}
+        res = {"ok": False, "code": exc.code, "message": str(exc)}
     except Exception as exc:
-        return {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+        res = {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
+    from sandbox.owned_storage.redaction import redact_storage_projection
+    return redact_storage_projection(res)
 
 
 __all__ = [

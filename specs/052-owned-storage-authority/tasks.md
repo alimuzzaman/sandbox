@@ -164,13 +164,13 @@
 
 ### Tests for User Story 7
 
-- [ ] T044 [P] [US7] Add security screening tests verifying total absence of secrets, host paths, environment variables, and raw UIDs/GIDs in evidence in `tests/test_owned_storage_cli.py`
-- [ ] T045 [P] [US7] Add redaction contract tests across all public projections in `tests/test_owned_storage_mcp.py`
+- [x] T044 [P] [US7] Add security screening tests verifying total absence of secrets, host paths, environment variables, and raw UIDs/GIDs in evidence in `tests/test_owned_storage_cli.py`
+- [x] T045 [P] [US7] Add redaction contract tests across all public projections in `tests/test_owned_storage_mcp.py`
 
 ### Implementation for User Story 7
 
-- [ ] T046 [US7] Implement strict projection redactor and field allowlisting in `sandbox/owned_storage/redaction.py`
-- [ ] T047 [US7] Wire redaction into all public CLI and MCP response formatting pipelines in `sandbox/commands/owned_storage.py` and `mcp/wp-server/tools/owned_storage.py`
+- [x] T046 [US7] Implement strict projection redactor and field allowlisting in `sandbox/owned_storage/redaction.py`
+- [x] T047 [US7] Wire redaction into all public CLI and MCP response formatting pipelines in `sandbox/commands/owned_storage.py` and `mcp/wp-server/tools/owned_storage.py`
 
 **Checkpoint**: User Story 7 complete. All emitted public evidence is bounded, path-free, and secret-free.
 

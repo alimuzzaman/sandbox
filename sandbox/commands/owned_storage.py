@@ -114,6 +114,9 @@ def cmd_storage(args: argparse.Namespace) -> None:
     except Exception as exc:
         res = {"ok": False, "code": "internal_indeterminate", "message": str(exc)}
 
+    from sandbox.owned_storage.redaction import redact_storage_projection
+    res = redact_storage_projection(res)
+
     if getattr(args, "json", False):
         print(json.dumps(res, sort_keys=True, indent=2))
     else:

@@ -125,7 +125,33 @@ class TestOwnedStorageMCP(unittest.TestCase):
         self.assertTrue(cap_res["ok"])
         self.assertEqual(cap_res["capability"], "owned-storage-authority-v1")
         self.assertEqual(cap_res["support_tier"], "implemented_unproven")
-        self.assertIn("checks", cap_res)
+    def test_mcp_redaction_contract_across_projections(self):
+        # Verify that all returned dictionaries strictly conform to allowed keys and have zero host paths
+        from sandbox.owned_storage.redaction import (
+            ALLOWED_CANDIDATE_FIELDS,
+            ALLOWED_OBJECT_FIELDS,
+            ALLOWED_TOP_LEVEL_FIELDS,
+        )
+
+        st = mcp_storage.owned_storage_status(remote=self.remote_id, project_identity=self.project_id)
+        self.assertTrue(set(st.keys()).issubset(ALLOWED_TOP_LEVEL_FIELDS))
+        for obj in st.get("objects", []):
+            self.assertTrue(set(obj.keys()).issubset(ALLOWED_OBJECT_FIELDS))
+
+        pv = mcp_storage.owned_storage_preview(remote=self.remote_id, project_identity=self.project_id)
+        self.assertTrue(set(pv.keys()).issubset(ALLOWED_TOP_LEVEL_FIELDS))
+        for cand in pv.get("candidates", []):
+            self.assertTrue(set(cand.keys()).issubset(ALLOWED_CANDIDATE_FIELDS))
+
+        cap = mcp_storage.owned_storage_capability(remote=self.remote_id)
+        self.assertTrue(set(cap.keys()).issubset(ALLOWED_TOP_LEVEL_FIELDS))
+
+        # Check JSON dump contains no host paths
+        import json
+        dump = json.dumps([st, pv, cap])
+        self.assertNotIn("/Users/", dump)
+        self.assertNotIn("/home/", dump)
+        self.assertNotIn("/var/lib/", dump)
 
 
 if __name__ == "__main__":

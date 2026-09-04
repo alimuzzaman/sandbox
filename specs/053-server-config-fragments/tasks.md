@@ -291,7 +291,7 @@ control instance, obtain human security approval, then close feedback truthfully
 ### Human security authorization before live mutation
 
 - [x] T100 Prepare a content-free security review package covering authority grammar, path/header/log controls, exact-image validators, OLS network/data isolation, argv/environment safety, durable rollback, lifecycle/deletion, content output, Feature 048-051 non-authority/import separation, and test evidence in `specs/053-server-config-fragments/implementation-evidence.md`
-- [ ] T101 Obtain explicit independent human security approval for the consequential server-config path and authorization for disposable live acceptance, record reviewer/verdict/scope in `specs/053-server-config-fragments/implementation-evidence.md`, and stop before live mutation if approval is absent or conditional blockers remain
+- [x] T101 Obtain explicit independent human security approval for the consequential server-config path and authorization for disposable live acceptance, record reviewer/verdict/scope in `specs/053-server-config-fragments/implementation-evidence.md`, and stop before live mutation if approval is absent or conditional blockers remain
 
 ### Disposable live acceptance through Sandbox only
 

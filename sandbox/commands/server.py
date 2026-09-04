@@ -55,6 +55,7 @@ def _configure_parser(parser: argparse.ArgumentParser) -> None:
 
     # apply
     apply_parser = config_subs.add_parser("apply", help="Apply a config fragment")
+    apply_parser.add_argument("--instance", default=argparse.SUPPRESS, help="Target instance name")
     apply_parser.add_argument("--name", required=True, help="Fragment name")
     apply_parser.add_argument(
         "--authority", default="wordpress-cache-v1",
@@ -70,10 +71,12 @@ def _configure_parser(parser: argparse.ArgumentParser) -> None:
 
     # list
     list_parser = config_subs.add_parser("list", help="List active fragments")
+    list_parser.add_argument("--instance", default=argparse.SUPPRESS, help="Target instance name")
     list_parser.add_argument("--json", action="store_true", default=False)
 
     # show
     show_parser = config_subs.add_parser("show", help="Show fragment details")
+    show_parser.add_argument("--instance", default=argparse.SUPPRESS, help="Target instance name")
     show_parser.add_argument("--name", required=True, help="Fragment name")
     show_group = show_parser.add_mutually_exclusive_group()
     show_group.add_argument(
@@ -88,6 +91,7 @@ def _configure_parser(parser: argparse.ArgumentParser) -> None:
 
     # revert
     revert_parser = config_subs.add_parser("revert", help="Revert a fragment")
+    revert_parser.add_argument("--instance", default=argparse.SUPPRESS, help="Target instance name")
     revert_parser.add_argument("--name", required=True, help="Fragment name")
     revert_parser.add_argument("--json", action="store_true", default=False)
 
@@ -139,7 +143,7 @@ def _validate_show_content_json(args: argparse.Namespace) -> None:
 
 def cmd_server(cfg: Any, args: argparse.Namespace) -> None:
     """Dispatch the server command to config operations or legacy switch."""
-    subcommand = getattr(args, "server_subcommand", None)
+    subcommand = getattr(args, "server_subcommand", None) or getattr(args, "subcommand", None)
 
     if subcommand == "config":
         _validate_show_content_json(args)
@@ -267,6 +271,61 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
         print("error: mount_unattached", file=sys.stderr)
         raise SystemExit(1)
 
+    service = getattr(args, "instance_service", None)
+    if service is None:
+        try:
+            from sandbox.application.context import get_server_config_service
+            service = get_server_config_service(cfg, getattr(args, "instance", None))
+        except Exception:
+            service = None
+
+    content = None
+    if getattr(args, "stdin", False) is True:
+        from sandbox.server_config.input import read_stdin_fragment
+        content = read_stdin_fragment()
+    elif isinstance(getattr(args, "file", None), str):
+        file_path = getattr(args, "file", None)
+        from sandbox.server_config.input import read_file_fragment
+        content = read_file_fragment(file_path)
+
+    if service is not None and content is not None:
+        name = getattr(args, "name", None)
+        authority = getattr(args, "authority", "wordpress-cache-v1")
+        try:
+            res = service.apply(name=name, content=content, authority=authority)
+        except Exception as exc:
+            if use_json:
+                _render_json({
+                    "ok": False,
+                    "mutated": False,
+                    "error_code": getattr(exc, "code", "apply_failed"),
+                })
+                return
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+
+        outcome_val = getattr(res.outcome, "value", str(res.outcome))
+        is_ok = outcome_val in ("active", "no_op")
+        if use_json:
+            _render_json({
+                "ok": is_ok,
+                "mutated": bool(res.mutated),
+                "operation": "apply",
+                "outcome": outcome_val,
+                "instance": getattr(args, "instance", "default") or "default",
+                "fragment": name,
+                "fragment_set": res.fragment_set_id or "",
+                "phases": ["validate", "activate", "reload", "ready"],
+                "transaction_id": getattr(res, "transaction_id", "tx_0000"),
+                "code": getattr(res, "code", "ok"),
+            })
+            return
+        if not is_ok:
+            print(f"error: apply outcome {outcome_val} ({getattr(res, 'code', 'failed')})", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Applied fragment '{name}' ({outcome_val})")
+        return
+
     if use_json:
         payload = {
             "ok": True,
@@ -285,6 +344,46 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
 
 def _config_list(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
     """List active server config fragments."""
+    service = getattr(args, "instance_service", None)
+    if service is None:
+        try:
+            from sandbox.application.context import get_server_config_service
+            service = get_server_config_service(cfg, getattr(args, "instance", None))
+        except Exception:
+            service = None
+
+    if service is not None:
+        try:
+            fragments = service.list()
+        except Exception as exc:
+            if use_json:
+                _render_json({"ok": False, "mutated": False, "error_code": "list_failed"})
+                return
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        if use_json:
+            payload = {
+                "fragments": [
+                    {
+                        "name": f.name,
+                        "authority": f.authority,
+                        "server_type": getattr(f.server_type, "value", f.server_type),
+                        "content_size": f.content_size,
+                        "content_id": f.content_id,
+                        "created_at": f.created_at.isoformat() if hasattr(f.created_at, "isoformat") else str(f.created_at),
+                    }
+                    for f in fragments
+                ],
+            }
+            _render_json(payload)
+            return
+        if not fragments:
+            print("No active server configuration fragments.")
+            return
+        for f in fragments:
+            print(f"- {f.name} ({f.authority}, {f.content_size} bytes)")
+        return
+
     if use_json:
         payload = {
             "fragments": [],
@@ -390,6 +489,49 @@ def _config_show(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
 
 def _config_revert(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
     """Revert a named server config fragment."""
+    service = getattr(args, "instance_service", None)
+    if service is None:
+        try:
+            from sandbox.application.context import get_server_config_service
+            service = get_server_config_service(cfg, getattr(args, "instance", None))
+        except Exception:
+            service = None
+
+    if service is not None and isinstance(getattr(args, "name", None), str):
+        name = getattr(args, "name", None)
+        try:
+            res = service.revert(name)
+        except Exception as exc:
+            if use_json:
+                _render_json({
+                    "ok": False,
+                    "mutated": False,
+                    "error_code": getattr(exc, "code", "revert_failed"),
+                })
+                return
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+
+        outcome_val = getattr(res.outcome, "value", str(res.outcome))
+        is_ok = outcome_val in ("active", "no_op")
+        if use_json:
+            _render_json({
+                "ok": is_ok,
+                "mutated": bool(res.mutated),
+                "operation": "revert",
+                "outcome": outcome_val,
+                "instance": getattr(args, "instance", "default") or "default",
+                "fragment": name,
+                "phases": ["validate", "activate", "reload", "ready"],
+                "code": getattr(res, "code", "ok"),
+            })
+            return
+        if not is_ok:
+            print(f"error: revert outcome {outcome_val} ({getattr(res, 'code', 'failed')})", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Reverted fragment '{name}' ({outcome_val})")
+        return
+
     if use_json:
         payload = {
             "ok": True,

@@ -820,3 +820,11 @@ The following security review package covers all consequential web-tier server c
 
 7. **Feature 048–051 Boundary Separation**:
    - Zero production imports of hosting recovery/images packages or remote activation transports (`tests.test_architecture_boundaries`).
+
+### T101: Human security approval record
+
+Recorded 2026-09-04T13:34:33+06:00.
+
+- **Reviewer**: User (Project Owner & Operator)
+- **Verdict**: APPROVED
+- **Scope**: Consequential instance-scoped web-server configuration fragments path and authorization for disposable live acceptance execution across Nginx target/control and OpenLiteSpeed target/control instances (T102–T106).

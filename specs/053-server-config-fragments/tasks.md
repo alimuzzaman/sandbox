@@ -187,22 +187,22 @@ selection, bounded concurrency/deadlines, and write-free degraded inspection.
 
 ### RED tests for User Story 4
 
-- [ ] T056 [P] [US4] Write failing durable requested/prepared/validated/activating/reloading/observing/committed/terminal transition and exact prior/candidate binding tests in `tests/test_server_config_transactions.py`
-- [ ] T057 [P] [US4] Write failing interruption-before/after every phase, committed-receipt interruption, missing-generation, corrupt-journal, runtime drift, no-recency-choice, and later-mutation reconciliation tests in `tests/test_server_config_recovery.py`
-- [ ] T058 [P] [US4] Write failing post-validation activation/reload/readiness fault, exact-prior restore, one recovery activation, rolled-back nonzero result, rollback-timeout, and recovery-needed tests in `tests/test_server_config_rollback.py`
-- [ ] T059 [P] [US4] Write failing per-incarnation lock contention, re-read-after-wait, whole-operation/phase deadline, cleanup timeout, and no duplicate retry tests in `tests/test_server_config_concurrency.py`
-- [ ] T060 [P] [US4] Write failing stopped/unknown/degraded/recovery-needed list/show projection and zero-persistent-write tests in `tests/test_server_config_inspection.py`
-- [ ] T061 [US4] Run T056-T060 and record the intended recovery/rollback/concurrency failures before changing journal/service behavior in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T056 [P] [US4] Write failing durable requested/prepared/validated/activating/reloading/observing/committed/terminal transition and exact prior/candidate binding tests in `tests/test_server_config_transactions.py`
+- [x] T057 [P] [US4] Write failing interruption-before/after every phase, committed-receipt interruption, missing-generation, corrupt-journal, runtime drift, no-recency-choice, and later-mutation reconciliation tests in `tests/test_server_config_recovery.py`
+- [x] T058 [P] [US4] Write failing post-validation activation/reload/readiness fault, exact-prior restore, one recovery activation, rolled-back nonzero result, rollback-timeout, and recovery-needed tests in `tests/test_server_config_rollback.py`
+- [x] T059 [P] [US4] Write failing per-incarnation lock contention, re-read-after-wait, whole-operation/phase deadline, cleanup timeout, and no duplicate retry tests in `tests/test_server_config_concurrency.py`
+- [x] T060 [P] [US4] Write failing stopped/unknown/degraded/recovery-needed list/show projection and zero-persistent-write tests in `tests/test_server_config_inspection.py`
+- [x] T061 [US4] Run T056-T060 and record the intended recovery/rollback/concurrency failures before changing journal/service behavior in `specs/053-server-config-fragments/implementation-evidence.md`
 
 ### Implementation for User Story 4
 
-- [ ] T062 [P] [US4] Implement the durable transaction phase API, exact referenced-generation retention, terminalization, and no-recency recovery reads in `sandbox/server_config/repository.py` and `sandbox/server_config/models.py`
-- [ ] T063 [US4] Implement mutation-start reconciliation for interrupted pre/post-activation states and fail-closed corrupt/drifted evidence in `sandbox/server_config/service.py`
-- [ ] T064 [US4] Implement exact prior-generation restoration, at-most-one target recovery activation, readiness proof, rolled-back result, and recovery-needed blocking in `sandbox/server_config/service.py`
-- [ ] T065 [US4] Enforce one monotonic 180-second operation deadline, 60-second phase/rollback ceilings, bounded lock wait, and timeout propagation through `sandbox/server_config/service.py`, `sandbox/server_config/repository.py`, and `sandbox/server_config/adapters/base.py`
-- [ ] T066 [US4] Implement read-only healthy/stopped/degraded/recovery-needed/unsupported/absent projection without repair, pruning, timestamp writes, or lock-file creation in `sandbox/server_config/service.py` and `sandbox/server_config/repository.py`
-- [ ] T067 [US4] Add test-only injected activation/readiness/rollback fault adapters that are never registered or reachable from production CLI/environment in `tests/server_config_fixtures.py` and `tests/test_server_config_rollback.py`
-- [ ] T068 [US4] Run all transaction/recovery/rollback/concurrency/inspection suites plus service/adapter regressions and record the green recovery checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
+- [x] T062 [P] [US4] Implement the durable transaction phase API, exact referenced-generation retention, terminalization, and no-recency recovery reads in `sandbox/server_config/repository.py` and `sandbox/server_config/models.py`
+- [x] T063 [US4] Implement mutation-start reconciliation for interrupted pre/post-activation states and fail-closed corrupt/drifted evidence in `sandbox/server_config/service.py`
+- [x] T064 [US4] Implement exact prior-generation restoration, at-most-one target recovery activation, readiness proof, rolled-back result, and recovery-needed blocking in `sandbox/server_config/service.py`
+- [x] T065 [US4] Enforce one monotonic 180-second operation deadline, 60-second phase/rollback ceilings, bounded lock wait, and timeout propagation through `sandbox/server_config/service.py`, `sandbox/server_config/repository.py`, and `sandbox/server_config/adapters/base.py`
+- [x] T066 [US4] Implement read-only healthy/stopped/degraded/recovery-needed/unsupported/absent projection without repair, pruning, timestamp writes, or lock-file creation in `sandbox/server_config/service.py` and `sandbox/server_config/repository.py`
+- [x] T067 [US4] Add test-only injected activation/readiness/rollback fault adapters that are never registered or reachable from production CLI/environment in `tests/server_config_fixtures.py` and `tests/test_server_config_rollback.py`
+- [x] T068 [US4] Run all transaction/recovery/rollback/concurrency/inspection suites plus service/adapter regressions and record the green recovery checkpoint in `specs/053-server-config-fragments/implementation-evidence.md`
 
 **Checkpoint**: Post-validation failure restores exactly once or remains visibly blocked;
 read-only inspection never repairs.

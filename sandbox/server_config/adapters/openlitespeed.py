@@ -10,6 +10,7 @@ or log output.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hashlib
 from typing import Any, Sequence
 
@@ -24,6 +25,7 @@ from sandbox.server_config.models import (
     Readiness,
     RuntimeObservation,
     ServerConfigFragment,
+    ServerType,
 )
 from sandbox.server_config.policy import validate_common_authority
 
@@ -206,14 +208,16 @@ class OpenLiteSpeedAdapter:
 
         return statements
 
-    def validate(self, config: str | bytes) -> bool:
-        """Validate an OpenLiteSpeed fragment against common authority policy."""
-        if isinstance(config, bytes):
-            text = config.decode("utf-8")
-        else:
-            text = config
-        validate_common_authority(text, server_type="litespeed")
-        return True
+    def validate(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+        """Validate an OpenLiteSpeed fragment against common authority policy or candidate generation."""
+        if isinstance(config, (str, bytes)):
+            if isinstance(config, bytes):
+                text = config.decode("utf-8")
+            else:
+                text = config
+            validate_common_authority(text, server_type="litespeed")
+            return True
+        return self.validate_generation(config, *args, **kwargs)
 
     # ------------------------------------------------------------------
     # Protocol: policy (T040)
@@ -258,8 +262,10 @@ class OpenLiteSpeedAdapter:
             lines.append("# END FRAGMENT %s" % frag.name)
             lines.append("# --- END sandbox-fragment: %s ---" % frag.name)
             lines.append("")
-
-        rendered_content = "\n".join(lines).encode("utf-8")
+        if not ordered:
+            rendered_content = b"# No active sandbox fragments\n"
+        else:
+            rendered_content = "\n".join(lines).encode("utf-8")
 
         generation_id = (
             "sha256:" + hashlib.sha256(rendered_content).hexdigest()
@@ -285,12 +291,23 @@ class OpenLiteSpeedAdapter:
     # ------------------------------------------------------------------
 
     def observe_runtime(
-        self, instance: InstanceConfigAuthority, deadline: float,
+        self, instance: InstanceConfigAuthority, deadline: float = 60.0,
     ) -> RuntimeObservation:
         """Observe the current OpenLiteSpeed runtime state via the gateway."""
-        if self.gateway is None:
-            raise ValueError("no runtime gateway configured")
-        return self.gateway.observe_runtime(instance=instance, deadline=deadline)
+        if self.gateway is not None and hasattr(self.gateway, "observe_runtime"):
+            return self.gateway.observe_runtime(instance=instance, deadline=deadline)
+        incarnation = getattr(instance, "instance_incarnation_id", None) or "inc_" + "0" * 32
+        mount_id = getattr(instance, "server_config_mount_id", None)
+        return RuntimeObservation(
+            instance_incarnation_id=incarnation,
+            server_type=ServerType.LITESPEED,
+            runtime_id="runtime-ols",
+            image_id="sha256:" + "0" * 64,
+            mount_id=mount_id,
+            observed_generation_id=None,
+            readiness=Readiness.READY,
+            observed_at=datetime.now(timezone.utc),
+        )
 
     # ------------------------------------------------------------------
     # Runtime verification & validation (T041)

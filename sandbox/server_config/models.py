@@ -520,7 +520,10 @@ class PhaseResult:
 
     @property
     def ok(self) -> bool:
-        return self.code in {"active", "ready", "authority_accepted", "ok", "passed"}
+        return self.code in {
+            "active", "ready", "authority_accepted", "ok", "passed",
+            "reloaded", "restored",
+        }
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -642,6 +645,37 @@ class KnownGoodReceipt:
             _require_digest(getattr(self, field_name), field_name)
         _require_image_id(self.runtime_image_id, "runtime_image_id")
         _require_timestamp(self.committed_at, "committed_at")
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema": 1,
+            "instance_incarnation_id": self.instance_incarnation_id,
+            "server_type": self.server_type.value,
+            "fragment_set_id": self.fragment_set_id,
+            "generation_id": self.generation_id,
+            "runtime_image_id": self.runtime_image_id,
+            "mount_id": self.mount_id,
+            "validation_evidence_id": self.validation_evidence_id,
+            "readiness_evidence_id": self.readiness_evidence_id,
+            "committed_at": self.committed_at.isoformat(),
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "KnownGoodReceipt":
+        if not isinstance(record, Mapping) or record.get("schema") != 1:
+            raise ValueError("known-good receipt schema is unsupported")
+        return cls(
+            schema=1,
+            instance_incarnation_id=record["instance_incarnation_id"],
+            server_type=ServerType(record["server_type"]),
+            fragment_set_id=record["fragment_set_id"],
+            generation_id=record["generation_id"],
+            runtime_image_id=record["runtime_image_id"],
+            mount_id=record["mount_id"],
+            validation_evidence_id=record["validation_evidence_id"],
+            readiness_evidence_id=record["readiness_evidence_id"],
+            committed_at=datetime.fromisoformat(record["committed_at"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -802,6 +836,68 @@ class ActivationTransaction:
             raise ValueError("terminal transaction cannot finish twice")
         self._validate_terminal(outcome)
         return replace(self, terminal=outcome)
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema": 1,
+            "transaction_id": self.transaction_id,
+            "operation": self.operation.value,
+            "fragment_name": self.fragment_name,
+            "instance_incarnation_id": self.instance_incarnation_id,
+            "server_type": self.server_type.value,
+            "prior_set_id": self.prior_set_id,
+            "prior_generation_id": self.prior_generation_id,
+            "candidate_set_id": self.candidate_set_id,
+            "candidate_generation_id": self.candidate_generation_id,
+            "runtime_precondition_digest": self.runtime_precondition_digest,
+            "phase": self.phase.value,
+            "phase_evidence": [
+                {
+                    "phase": pe.phase.value,
+                    "code": pe.code,
+                    "evidence_id": pe.evidence_id,
+                    "observed_at": pe.observed_at.isoformat(),
+                }
+                for pe in self.phase_evidence
+            ],
+            "deadline_at": self.deadline_at.isoformat(),
+            "rollback_attempted": self.rollback_attempted,
+            "terminal": self.terminal.value if self.terminal is not None else None,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "ActivationTransaction":
+        if not isinstance(record, Mapping) or record.get("schema") != 1:
+            raise ValueError("transaction record schema is unsupported")
+        evidence = tuple(
+            PhaseEvidence(
+                phase=TransactionPhase(pe["phase"]),
+                code=pe["code"],
+                evidence_id=pe.get("evidence_id"),
+                observed_at=datetime.fromisoformat(pe["observed_at"]),
+            )
+            for pe in record.get("phase_evidence", ())
+        )
+        terminal = (
+            TerminalOutcome(record["terminal"]) if record.get("terminal") is not None else None
+        )
+        return cls(
+            transaction_id=record["transaction_id"],
+            operation=Operation(record["operation"]),
+            fragment_name=record["fragment_name"],
+            instance_incarnation_id=record["instance_incarnation_id"],
+            server_type=ServerType(record["server_type"]),
+            prior_set_id=record["prior_set_id"],
+            prior_generation_id=record["prior_generation_id"],
+            candidate_set_id=record["candidate_set_id"],
+            candidate_generation_id=record["candidate_generation_id"],
+            runtime_precondition_digest=record["runtime_precondition_digest"],
+            phase=TransactionPhase(record["phase"]),
+            phase_evidence=evidence,
+            deadline_at=datetime.fromisoformat(record["deadline_at"]),
+            rollback_attempted=bool(record.get("rollback_attempted", False)),
+            terminal=terminal,
+        )
 
 
 @dataclass(frozen=True)

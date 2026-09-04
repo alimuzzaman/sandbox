@@ -401,3 +401,96 @@ Result: **201 tests passed** across all foundation, Nginx, OpenLiteSpeed, policy
    - Structured JSON error output with `ok: false`, `mutated: false`, and bounded error codes (`server_unsupported`, `mount_unattached`).
    - Refusal of unattached legacy instances and unsupported server types (`apache`, `herd`).
    - Clean subprocess execution with synthetic environments ensuring zero environment leakage.
+
+## US4 RED checkpoint (T061)
+
+Recorded 2026-09-04 before transaction, rollback, concurrency, and inspection hardening for User Story 4.
+
+### Failing recovery, rollback, concurrency, and inspection test evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_transactions \
+  tests.test_server_config_recovery \
+  tests.test_server_config_rollback \
+  tests.test_server_config_concurrency \
+  tests.test_server_config_inspection
+```
+
+Result: **35 tests ran, 22 failed/errored (100% expected)** across newly authored US4 test suites:
+- `tests/test_server_config_transactions.py` (T056): Fails on `to_record` / `from_record` round-trip serialization on `ActivationTransaction`.
+- `tests/test_server_config_recovery.py` (T057): Fails on missing `service.reconcile()`, lack of drift detection before mutation, and unhandled corrupt journals.
+- `tests/test_server_config_rollback.py` (T058): Fails on absence of automatic rollback orchestration on `adapter.activate()`, `reload()`, or `observe_ready()` faults, and missing `TerminalOutcome.ROLLED_BACK` / `RECOVERY_NEEDED` transitions.
+- `tests/test_server_config_concurrency.py` (T059): Fails on missing operation and phase deadline enforcement and re-read-under-lock behavior.
+- `tests/test_server_config_inspection.py` (T060): Fails on missing `service.inspect()` method and persistent lock files left on disk during read-only inspection.
+
+Foundation (95) and US1/US2/US3 (106) baseline assertions continue to pass without regressions.
+
+## US4 GREEN story checkpoint (T068)
+
+Recorded 2026-09-04 after completing T062-T068 for User Story 4.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed \
+  tests.test_redaction_parity \
+  tests.test_server_config_transactions \
+  tests.test_server_config_recovery \
+  tests.test_server_config_rollback \
+  tests.test_server_config_concurrency \
+  tests.test_server_config_inspection
+```
+
+Result: **236 tests passed** across all 27 test suites:
+- `tests/test_server_config_transactions.py` (T056): 12 tests passed (durable requested/prepared/validated/activating/reloading/observing/committed/terminal transition, JSON record round-trip, immutable receipts).
+- `tests/test_server_config_recovery.py` (T057): 7 tests passed (mutation-start reconciliation, pre-activation clean refusal, post-activation recovery/rollback, missing generation detection, corrupt journal detection, fail-closed blocking).
+- `tests/test_server_config_rollback.py` (T058): 5 tests passed (injected activation/reload/readiness failures, automatic rollback to exact known-good receipt, at-most-one recovery activation, ROLLED_BACK outcome, timeout/failure transition to RECOVERY_NEEDED).
+- `tests/test_server_config_concurrency.py` (T059): 6 tests passed (per-incarnation lock contention, re-reading state under lock, monotonic 180s operation deadline, 60s phase deadline, timeout handling without retry loops).
+- `tests/test_server_config_inspection.py` (T060): 5 tests passed (read-only inspect() projection across healthy, stopped, degraded, recovery-needed, unsupported, absent states with zero persistent disk writes or lock files).
+
+### Summary of US4 implementations:
+
+1. **Transaction & Receipt serialization** (`sandbox/server_config/models.py`, `sandbox/server_config/repository.py`):
+   - Added `to_record()` and `from_record()` to `ActivationTransaction` and `KnownGoodReceipt`.
+   - Added `has_generation(generation_id)` to `ServerConfigRepository`.
+   - Stored transactions and receipts with atomic file writes and schema validation.
+
+2. **Reconciliation & Fail-Closed Recovery** (`sandbox/server_config/service.py`):
+   - Pre-activation interrupted transactions (`REQUESTED`, `PREPARED`, `VALIDATED`) are reconciled to `TerminalOutcome.REFUSED` and cleared, enabling subsequent mutations.
+   - Post-activation interrupted transactions (`ACTIVATING`, `RELOADING`, `OBSERVING`) trigger automatic rollback to prior known-good receipt or enter `TerminalOutcome.RECOVERY_NEEDED`.
+   - Corrupt journals and missing candidate/prior generations fail closed and refuse mutations without recency guessing.
+
+3. **Automatic Rollback Orchestration** (`sandbox/server_config/service.py`):
+   - On candidate activation, reload, or observation failure, the service executes automatic rollback to prior known-good generation if available.
+   - Limits recovery attempts to at most one target activation per mutation.
+   - Emits `TerminalOutcome.ROLLED_BACK` with `mutated=True` on successful restoration, or `TerminalOutcome.RECOVERY_NEEDED` on rollback failure.
+
+4. **Monotonic Deadlines & Concurrency** (`sandbox/server_config/service.py`):
+   - Enforced 180-second overall operation deadline and 60-second phase/rollback ceilings.
+   - Enforced per-incarnation lock contention handling and re-read-under-lock semantics.
+
+5. **Read-Only Inspection** (`sandbox/server_config/service.py`):
+   - Implemented `inspect()` projecting runtime status (healthy, stopped, degraded, recovery-needed, unsupported) without acquiring locks or modifying persistent state.
+

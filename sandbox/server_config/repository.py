@@ -433,6 +433,9 @@ class RepositoryMutation:
             return
         os.fsync(self._root_descriptor)
 
+    def has_generation(self, generation_id: str) -> bool:
+        return self._repository._has_generation_at(self._root_descriptor, generation_id)
+
 
 class ServerConfigRepository:
     def __init__(self, base: str | os.PathLike[str], incarnation: str):
@@ -880,3 +883,30 @@ class ServerConfigRepository:
         finally:
             os.close(generations_descriptor)
         return tuple(removed)
+
+    def _has_generation_at(self, root_descriptor: int, generation_id: str) -> bool:
+        if not isinstance(generation_id, str) or _DIGEST.fullmatch(generation_id) is None:
+            return False
+        generation_name = generation_id.removeprefix("sha256:")
+        generations_descriptor = _open_directory_at(root_descriptor, "generations", absent_ok=True)
+        if generations_descriptor is None:
+            return False
+        try:
+            gen_descriptor = _open_directory_at(generations_descriptor, generation_name, absent_ok=True)
+            if gen_descriptor is None:
+                return False
+            try:
+                facts = os.stat("manifest.json", dir_fd=gen_descriptor, follow_symlinks=False)
+                return stat.S_ISREG(facts.st_mode) and facts.st_size > 0
+            except OSError:
+                return False
+            finally:
+                os.close(gen_descriptor)
+        finally:
+            os.close(generations_descriptor)
+
+    def has_generation(self, generation_id: str) -> bool:
+        with self._root_descriptor(create=False) as root_descriptor:
+            if root_descriptor is None:
+                return False
+            return self._has_generation_at(root_descriptor, generation_id)

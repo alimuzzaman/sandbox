@@ -184,22 +184,24 @@ class NginxAdapter:
     # Deny-by-default directive validation (T028)
     # ------------------------------------------------------------------
 
-    def validate(self, config_text: str) -> bool:
-        """Validate an nginx configuration fragment using the policy engine."""
-        try:
-            validate_common_authority(config_text, server_type="nginx")
-
-            statements = self.tokenize(config_text)
-            locations: set[str] = set()
-            for stmt in statements:
-                if stmt.directive == "location" and stmt.args:
-                    loc = stmt.args[0]
-                    if loc in locations:
-                        raise ValueError("duplicate location %s" % loc)
-                    locations.add(loc)
-        except ValueError as e:
-            raise Exception("Validation failed: %s" % e) from e
-        return True
+    def validate(self, config: Any, *args: Any, **kwargs: Any) -> Any:
+        """Validate an nginx configuration fragment or candidate generation."""
+        if isinstance(config, (str, bytes)):
+            config_text = config.decode("utf-8") if isinstance(config, bytes) else config
+            try:
+                validate_common_authority(config_text, server_type="nginx")
+                statements = self.tokenize(config_text)
+                locations: set[str] = set()
+                for stmt in statements:
+                    if stmt.directive == "location" and stmt.args:
+                        loc = stmt.args[0]
+                        if loc in locations:
+                            raise ValueError("duplicate location %s" % loc)
+                        locations.add(loc)
+            except ValueError as e:
+                raise Exception("Validation failed: %s" % e) from e
+            return True
+        return self.validate_generation(config, *args, **kwargs)
 
     # ------------------------------------------------------------------
     # Protocol: policy (T028)
@@ -267,8 +269,10 @@ class NginxAdapter:
             lines.append("# END FRAGMENT %s" % frag.name)
             lines.append("# --- END sandbox-fragment: %s ---" % frag.name)
             lines.append("")
-
-        rendered_content = "\n".join(lines).encode("utf-8")
+        if not ordered:
+            rendered_content = b"# No active sandbox fragments\n"
+        else:
+            rendered_content = "\n".join(lines).encode("utf-8")
 
         generation_id = (
             "sha256:" + hashlib.sha256(rendered_content).hexdigest()

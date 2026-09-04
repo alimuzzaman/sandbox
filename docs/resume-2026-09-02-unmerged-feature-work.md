@@ -41,37 +41,43 @@ and production gates remain separate and open.
 ## Feature 052: owned storage authority
 
 - Remote branch: `origin/codex/owned-storage-authority-planning-repair`
-- Safe checkpoint: `40b018c`
-- Status: **PLANNING REPAIRED (Option 2 Authorized)**
-- Evidence: `specs/052-owned-storage-authority/analysis.md` on the branch
+- Final checkpoint: `bc4ff51` (merged into `latest` at `b350374`)
+- Status: **PLANNING REPAIRED AND MERGED INTO LATEST**
+- Evidence: `specs/052-owned-storage-authority/analysis.md`, `tasks.md` (53 tasks)
 
-On 2026-09-04, the operator authorized Option 2: FR-058 was amended to establish
-a dedicated, crash-safe `StorageAuthorityLifecycleRepository` with generation CAS
-and advisory locking, completely decoupling owned storage lifecycle from OCI
-hosting infrastructure (`RecoveryRepository` / `hosts.json`). Specifications,
-data models, contracts, research notes, and plan were repaired and aligned.
-Protected paths (`sandbox/hosting/**`, `specs/048-051/**`) remain 100% immutable
-with 0 diff. Next step is Spec Kit task generation and consistency analysis.
+On 2026-09-04, Option 2 was authorized: FR-058 was amended to establish a dedicated,
+crash-safe `StorageAuthorityLifecycleRepository` with generation CAS and advisory
+locking, completely decoupling owned storage lifecycle from OCI hosting infrastructure.
+Specifications, data models, contracts, research notes, plan, and 53 dependency-ordered
+tasks were generated and aligned with zero diff on protected OCI hosting paths. Code
+review findings resolved and merged into `latest` (`b350374`).
 
 ## Feature 053: instance-scoped server configuration fragments
 
-- Remote branch: `origin/codex/server-config-fragments`
-- Safe checkpoint: `a92272278bf94dd00d217491ea5de246e3bcc88c`
-- Status: reviewed foundation only; T005–T018 complete, T004 and T019–T108 open
-- Evidence: 95 source-only tests passed; independent Sol High review PASS;
-  compile and `git diff --check` passed
+- Remote branch: `origin/codex/server-config-fragments-work`
+- Final checkpoint: `02bf39d` (merged into `latest` at `5b7e132`)
+- Status: **COMPLETE AND MERGED INTO LATEST**
+- Evidence: `specs/053-server-config-fragments/acceptance-evidence.md`
 
-The checkpoint contains typed models, immutable instance incarnation identity,
-bounded input, fail-closed common policy, owner-only descriptor-based repository,
-mutation locking, transaction retention, adapter contracts, and nginx/
-OpenLiteSpeed manifest boundaries.
+All phases (T001–T108) completed: live disposable OpenLiteSpeed feasibility probe (T004),
+foundation and models (T005–T018), validation and preflight (T019–T040), nginx and OLS
+renderers and reloads (T041–T060), CLI inspection and application (T061–T082), dry-run
+and exact inspection (T083–T090), documentation and regression gates (T091–T098),
+security review and human approval (T099–T101), live acceptance on `scaleway-sandbox`
+(T102–T108). Merged into `latest` (`5b7e132`).
 
-Resume with the explicit T004 disposable exact-image OpenLiteSpeed feasibility
-probe. It requires authorization for live disposable mutation. Stop and redesign
-if no stable vhost inclusion, isolated validation boot, canary, or fixed reload
-path can be proven. Continue T019–T108 only after T004 passes. Human security
-approval, disposable nginx/OpenLiteSpeed acceptance, final exact-SHA review,
-merge, deployment, and release remain open.
+## Feature 046: bounded host swap provisioning and memory monitoring
+
+- Remote branch: `origin/codex/feat-046-us2-planning`
+- Current checkpoint: `4a3a77d`
+- Status: **PHASES 1–5 COMPLETE (US3 FAIL-CLOSED SAFETY GATE GREEN)**
+- Evidence: `specs/046-host-swap-monitor/acceptance-evidence.md`
+
+Phases 1–5 completed (T001–T047). Controller-owned planning, policy refusal matrix,
+provider preflight without side effects, strict underscore wire action allowlists,
+and Feature 047 projection-only composition tests are fully GREEN (46 focused tests
+passed, zero diff on protected paths). Protected apply remains strictly unregistered
+and unreachable pending Phase 6 implementation.
 
 ## Stable stopping-state evidence
 

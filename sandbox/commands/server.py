@@ -238,8 +238,8 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
             inst_cfg = cfg.get("instances", {}).get(inst_name, {})
             record = None
             try:
-                import sandbox_core as sc
-                record = sc.registry_find_instance(inst_name)
+                from sandbox.core._instances import registry_find_instance
+                record = registry_find_instance(inst_name)
             except Exception:
                 pass
             mount_id = (record.get("server_config_mount_id") if record else None) or inst_cfg.get("server_config_mount_id")

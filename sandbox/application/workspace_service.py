@@ -1355,6 +1355,7 @@ class WorkspaceService:
     # injected at the composition boundary so this application service never
     # reaches into the remote registry or reads its state files directly.
     remote_service_status: Any | None = None
+    owned_storage_cleanup_manager: Any | None = None
 
     def __post_init__(self) -> None:
         if self.repository is None and self.storage is not None:
@@ -2272,7 +2273,47 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "terminal checkout filesystem identity changed")
+
+            owned_storage_object_id = record.metadata.get("owned_storage_object_id")
+            if not owned_storage_object_id and self.owned_storage_cleanup_manager is not None:
+                auth_obj = self.owned_storage_cleanup_manager.repository.find_object_by_workspace(workspace_id)
+                if auth_obj is None and job.get("job_id"):
+                    auth_obj = self.owned_storage_cleanup_manager.repository.find_object_by_job(job["job_id"])
+                if auth_obj is not None:
+                    owned_storage_object_id = auth_obj.object_id
+
+            if self.owned_storage_cleanup_manager is not None and owned_storage_object_id:
+                repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
+                try:
+                    cleanup_res = self.owned_storage_cleanup_manager.cleanup_object(
+                        preview_id=f"prev_{uuid.uuid4().hex[:12]}",
+                        object_id=owned_storage_object_id,
+                        request_id=f"req_{job.get('job_id', uuid.uuid4().hex[:12])}",
+                        confirm=True,
+                        expected_object_evidence_digest=record.metadata.get("expected_object_evidence_digest", "sha256:default"),
+                        expected_reference_digest=record.metadata.get("expected_reference_digest", "sha256:default"),
+                    )
+                except Exception:
+                    repo.mark_lifecycle(workspace_id, "indeterminate", status="indeterminate")
+                    raise
+                if metadata_path is not None and metadata_path.exists():
+                    try:
+                        metadata_path.unlink()
+                        if metadata_path.parent.exists():
+                            metadata_path.parent.rmdir()
+                    except OSError:
+                        pass
+                repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
+                job_repository.set_cleanup_state(job["job_id"], "completed")
+                return {
+                    "ok": True,
+                    "status": "released",
+                    "observed_reclaimed_bytes": cleanup_res.get("observed_reclaimed_bytes", 0),
+                    "cleanup_id": cleanup_res.get("cleanup_id"),
+                }
+
             cleanup_root = deployment_root / ".sandbox-ci-cleanup"
+
             try:
                 cleanup_root.mkdir(mode=0o700, exist_ok=True)
                 cleanup_identity = os.stat(cleanup_root, follow_symlinks=False)

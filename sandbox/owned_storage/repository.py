@@ -1,5 +1,6 @@
 """Private SQLite repository for owned storage authority."""
 
+import datetime
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -296,11 +297,14 @@ class StorageAuthorityRepository:
         self,
         operation_id: str,
         phase: OperationPhase,
-        updated_at: str,
+        updated_at: Optional[str] = None,
         outcome: Optional[OperationOutcome] = None,
         reason_code: Optional[str] = None,
     ) -> None:
+        if updated_at is None:
+            updated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self.connect() as conn:
+
             conn.execute(
                 """
                 UPDATE canonical_operations

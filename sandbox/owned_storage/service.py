@@ -14,6 +14,8 @@ from sandbox.owned_storage.models import (
     AdoptionBindingPhase,
     AuthorityOwnedObject,
     CanonicalOperationRequest,
+    CleanupOutcome,
+    CleanupPhase,
     GenerationBinding,
     ObjectKind,
     ObjectLifecycle,
@@ -54,6 +56,111 @@ class OwnedStorageService:
         self.adapter.ensure_directory(self.staging_dir, 0o700)
         self.adapter.ensure_directory(self.objects_dir, 0o700)
         self.adapter.ensure_directory(self.quarantine_dir, 0o700)
+
+    def reconcile_startup(self) -> Dict[str, Any]:
+        """Reconcile in-flight or interrupted staging and quarantine operations."""
+        reconciled_staging = 0
+        reconciled_quarantine = 0
+        aborted_ops = 0
+
+        # 1. Staging directory reconciliation
+        if self.staging_dir.exists():
+            for child in list(self.staging_dir.iterdir()):
+                if child.is_dir():
+                    op = self.repository.get_operation(child.name)
+                    if op is None or op.phase != OperationPhase.TERMINAL:
+                        self.adapter.remove_tree_beneath(child)
+                        try:
+                            child.rmdir()
+                        except OSError:
+                            pass
+                        reconciled_staging += 1
+                        if op is not None and op.phase != OperationPhase.TERMINAL:
+                            self.repository.update_operation_phase(
+                                op.operation_id,
+                                OperationPhase.TERMINAL,
+                                outcome=OperationOutcome.FAILED,
+                                reason_code="interrupted_recovery",
+                            )
+                            aborted_ops += 1
+
+            self.adapter.fsync_directory(self.staging_dir)
+
+        # 2. Quarantine directory reconciliation
+        if self.quarantine_dir.exists():
+            for child in list(self.quarantine_dir.iterdir()):
+                if child.is_dir():
+                    clean_id = child.name
+                    intent = self.repository.get_cleanup_intent(clean_id)
+                    target = child / "target"
+
+                    if intent is not None and intent.phase in (
+                        CleanupPhase.QUARANTINED,
+                        CleanupPhase.REMOVING,
+                        CleanupPhase.FINAL_REMOVE_INTENT,
+                    ):
+                        if target.exists():
+                            self.adapter.remove_tree_beneath(target)
+                            try:
+                                target.rmdir()
+                            except OSError:
+                                pass
+                        try:
+                            child.rmdir()
+                        except OSError:
+                            pass
+
+                        reconciled_quarantine += 1
+                        now = utc_now_iso()
+                        self.repository.update_cleanup_intent(
+                            clean_id,
+                            CleanupPhase.TERMINAL,
+                            outcome=CleanupOutcome.COMPLETED,
+                            observed_bytes=intent.estimated_bytes or 0,
+                            completed_at=now,
+                        )
+                        with self.repository.connect() as conn:
+                            conn.execute(
+                                "UPDATE authority_objects SET lifecycle = ?, removed_at = ? WHERE object_id = ?",
+                                (ObjectLifecycle.REMOVED.value, now, intent.object_id),
+                            )
+                    else:
+                        if target.exists():
+                            self.adapter.remove_tree_beneath(target)
+                            try:
+                                target.rmdir()
+                            except OSError:
+                                pass
+                        try:
+                            child.rmdir()
+                        except OSError:
+                            pass
+                        reconciled_quarantine += 1
+
+            self.adapter.fsync_directory(self.quarantine_dir)
+
+        # 3. Abort uncommitted in-flight operations recorded in DB
+        with self.repository.connect() as conn:
+            rows = conn.execute(
+                "SELECT operation_id FROM canonical_operations WHERE phase != 'terminal'",
+            ).fetchall()
+            for r in rows:
+                self.repository.update_operation_phase(
+                    r["operation_id"],
+                    OperationPhase.TERMINAL,
+                    outcome=OperationOutcome.FAILED,
+                    reason_code="interrupted_recovery",
+                )
+                aborted_ops += 1
+
+
+        return {
+            "ok": True,
+            "reconciled_staging_count": reconciled_staging,
+            "reconciled_quarantine_count": reconciled_quarantine,
+            "aborted_operations": aborted_ops,
+        }
+
 
     def publish_generation(
         self,

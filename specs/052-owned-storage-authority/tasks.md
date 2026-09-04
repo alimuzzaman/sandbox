@@ -87,13 +87,14 @@
 
 ### Tests for User Story 3
 
-- [ ] T024 [P] [US3] Add unit tests for canonical request hashing, replay idempotency, and conflicting request-reuse refusal in `tests/test_owned_storage_recovery.py`
-- [ ] T025 [P] [US3] Add 100-trial simulated crash and interruption recovery suite in `tests/test_owned_storage_recovery.py`
+- [x] T024 [P] [US3] Add unit tests for canonical request hashing, replay idempotency, and conflicting request-reuse refusal in `tests/test_owned_storage_recovery.py`
+- [x] T025 [P] [US3] Add 100-trial simulated crash and interruption recovery suite in `tests/test_owned_storage_recovery.py`
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Implement canonical request digest derivation and idempotent replay matching in `sandbox/owned_storage/repository.py`
-- [ ] T027 [US3] Implement crash recovery reconciliation for interrupted staging and quarantine transitions on service startup in `sandbox/owned_storage/service.py`
+- [x] T026 [US3] Implement canonical request digest derivation and idempotent replay matching in `sandbox/owned_storage/repository.py`
+- [x] T027 [US3] Implement crash recovery reconciliation for interrupted staging and quarantine transitions on service startup in `sandbox/owned_storage/service.py`
+
 
 **Checkpoint**: User Story 3 complete. Publication and cleanup operations are crash-safe and replay-safe.
 

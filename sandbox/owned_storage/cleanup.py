@@ -5,19 +5,28 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from sandbox.owned_storage.adapters.linux import LinuxFilesystemAdapter, RenameNoReplaceError
 from sandbox.owned_storage.models import (
+    CanonicalOperationRequest,
     CleanupIntent,
     CleanupOutcome,
     CleanupPhase,
     LeaseState,
     ObjectKind,
     ObjectLifecycle,
+    OperationOutcome,
+    OperationPhase,
+    OperationType,
 )
-from sandbox.owned_storage.repository import StorageAuthorityRepository
+from sandbox.owned_storage.protocol import compute_request_digest
+from sandbox.owned_storage.repository import (
+    StorageAuthorityRepository,
+    StorageRepositoryConflictError,
+)
 from sandbox.owned_storage.service import utc_now_iso
 
 
@@ -55,6 +64,18 @@ class OwnedStorageCleanupManager:
         if not confirm:
             raise CleanupExecutionError("Confirmation is required for cleanup", "request_invalid")
 
+        # Conflict check for replayed request_id against different target
+        with self.repository.connect() as conn:
+            existing_row = conn.execute(
+                "SELECT * FROM canonical_operations WHERE operation_type = 'cleanup' AND request_id = ?",
+                (request_id,),
+            ).fetchone()
+        if existing_row is not None and existing_row["target_object_id"] != object_id:
+            raise CleanupExecutionError(
+                f"Request ID {request_id} replayed with conflicting target_object_id",
+                "request_id_conflict",
+            )
+
         obj = self.repository.get_object(object_id)
         if obj is None:
             raise CleanupExecutionError(f"Object {object_id} unknown", "object_unknown")
@@ -88,6 +109,69 @@ class OwnedStorageCleanupManager:
         cleanup_id = f"clean_{uuid.uuid4().hex[:12]}"
         operation_id = f"op_clean_{uuid.uuid4().hex[:12]}"
         now = utc_now_iso()
+
+        req_payload = {
+            "protocol": "owned-storage-authority-v1",
+            "operation": "cleanup",
+            "request_id": request_id,
+            "remote_identity": obj.remote_identity,
+            "project_identity": obj.project_identity,
+            "authorization": None,
+            "qualification": None,
+            "input": {
+                "preview_id": preview_id,
+                "object_id": object_id,
+                "confirm": confirm,
+                "expected_object_evidence_digest": expected_object_evidence_digest,
+                "expected_reference_digest": expected_reference_digest,
+            },
+        }
+        req_digest = compute_request_digest(req_payload)
+
+        canon_op = CanonicalOperationRequest(
+            operation_id=operation_id,
+            operation_type=OperationType.CLEANUP,
+            request_id=request_id,
+            request_digest=req_digest,
+            authorization_id=f"auth_{uuid.uuid4().hex[:8]}",
+            controller_epoch=str(int(time.time())),
+            sequence=1,
+            caller_identity_digest="sha256:caller",
+            remote_identity=obj.remote_identity,
+            project_identity=obj.project_identity,
+            relationship_id=obj.relationship_id,
+            workspace_id=obj.workspace_id,
+            job_id=obj.job_id,
+            target_object_id=object_id,
+            canonical_evidence_digest=expected_object_evidence_digest,
+            qualification_admission_id=None,
+            evidence_candidate_id=None,
+            promotion_id=None,
+            authority_binding_id=None,
+            phase=OperationPhase.RESERVED,
+            outcome=None,
+            reason_code=None,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            created, existing_op = self.repository.reserve_operation(canon_op)
+        except StorageRepositoryConflictError as exc:
+            raise CleanupExecutionError(str(exc), "request_id_conflict") from exc
+
+        if not created:
+            if existing_op.outcome in (OperationOutcome.COMPLETED, OperationOutcome.ACCEPTED) or obj.lifecycle == ObjectLifecycle.REMOVED:
+                return {
+                    "ok": True,
+                    "protocol": "owned-storage-authority-v1",
+                    "operation": "cleanup",
+                    "object_id": object_id,
+                    "status": "already_completed",
+                    "observed_reclaimed_bytes": 0,
+                    "complete": True,
+                }
+            operation_id = existing_op.operation_id
+
 
         intent = CleanupIntent(
             cleanup_id=cleanup_id,
@@ -230,6 +314,13 @@ class OwnedStorageCleanupManager:
                 """,
                 (ObjectLifecycle.REMOVED.value, finished_at, object_id),
             )
+
+        self.repository.update_operation_phase(
+            operation_id,
+            OperationPhase.TERMINAL,
+            outcome=OperationOutcome.COMPLETED,
+        )
+
 
         return {
             "ok": True,

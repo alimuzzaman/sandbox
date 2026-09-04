@@ -52,6 +52,10 @@ class TestArchitectureBoundaries(unittest.TestCase):
             "ActivationRequest", "ActivationResult", "ActivationService",
             "ForwardRollbackSubject", "RollbackCompatibilityGrant",
             "validate_activation_artifacts",
+            "ActivationRequestV2", "ActivationServiceV2",
+            "GenerationBoundEdgeReceiptV2", "PrivateComposeInputSnapshotV2",
+            "RollbackCompatibilityGrantV2", "VerifiedActivationGenerationV2",
+            "validate_activation_generation",
         })
         self.assertFalse(hasattr(activation, "StageRepository"))
         self.assertFalse(hasattr(activation, "RecoveryRepository"))

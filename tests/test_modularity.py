@@ -180,7 +180,7 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 90,
                 "mcp_tools": 44,
                 "wildcard_imports": 20,
-                "kind_referencing_conditionals": 212,
+                "kind_referencing_conditionals": 222,
             },
         )
 

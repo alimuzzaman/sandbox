@@ -1027,7 +1027,10 @@ through durable commit; supported registration updates use that same guard. If a
 cannot measure Feature 046 identity, apply may continue but no recovery authority is kept.
 Immutable image staging uses the same authenticated Feature 046 machine identity
 even when the optional resource monitor reports partial evidence; capacity and
-swap authority remain fail-closed until that monitor is complete.
+swap authority remain fail-closed until that monitor is complete. The measured
+staging helper independently recreates the same stable node projection and
+requires an exact policy match. It reads the raw machine ID only before and after
+staging as an internal host-epoch stability fence; raw identity is never returned.
 Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
 and Cloudflare preconditions from the entry held under that guard. Recovery authority
 stores a canonical non-secret desired edge intent plus digest; observation and immediate

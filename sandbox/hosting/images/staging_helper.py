@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import signal
@@ -292,9 +293,16 @@ def _anonymous_denied(repository: str, manifest_digest: str) -> bool:
         raise ValueError("registry_observation_failed") from None
 
 
+def _projected_machine_identity() -> str:
+    """Recreate Feature 046's authenticated stable host projection."""
+    return hashlib.sha256(
+        platform.node().encode("utf-8", "replace")).hexdigest()[:24]
+
+
 def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
             runner=_run, anonymous_probe=_anonymous_denied,
             cgroup_identity=_cgroup_identity, machine_epoch_reader=None,
+            projected_identity_reader=_projected_machine_identity,
             remover=shutil.rmtree) -> dict:
     plan = _closed_plan(plan)
     if type(credential) is not bytes or not credential or len(credential) > MAX_CREDENTIAL_BYTES:
@@ -302,7 +310,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
     cgroup = cgroup_identity(plan["unit_name"])
     run_root = _verify_workspace_parent() if run_root is None else run_root
     machine_epoch_reader = machine_epoch_reader or (
-        lambda: Path("/etc/machine-id").read_text().strip())
+        lambda: Path("/etc/machine-id").read_text())
     workspace = Path(tempfile.mkdtemp(prefix="operation-", dir=run_root))
     os.chmod(workspace, 0o700)
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
@@ -323,7 +331,8 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         remover(workspace / "docker", ignore_errors=False)
         cleanup_complete = not (workspace / "docker").exists()
         if not cleanup_complete: raise ValueError("cleanup_unproven")
-        target_start = machine_epoch_reader()
+        machine_epoch_start = machine_epoch_reader()
+        projected_identity = projected_identity_reader()
         epoch_start = runner(("docker", "info", "--format", "{{.ID}}"), environment=environment,
                            timeout=15)
         inspect = runner(("docker", "image", "inspect", plan["repository_qualified_digest"],
@@ -332,10 +341,11 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
                          environment=environment, timeout=15)
         if any(item.returncode != 0 for item in (epoch_start, inspect, epoch_end)):
             raise ValueError("observation_invalid")
-        target_end = machine_epoch_reader()
+        machine_epoch_end = machine_epoch_reader()
         start = epoch_start.stdout.decode().strip(); end = epoch_end.stdout.decode().strip()
-        if not start or start != end or not target_start or target_start != target_end \
-                or target_start != plan["target"]["machine_identity"] \
+        if not start or start != end or not machine_epoch_start \
+                or machine_epoch_start != machine_epoch_end \
+                or projected_identity != plan["target"]["machine_identity"] \
                 or start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
         raw = json.loads(inspect.stdout)
@@ -371,7 +381,8 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
                     "authenticated_exact_manifest": "succeeded"}
         registry["observation_digest"] = staging_digest(
             "sandbox.hosting.images.registry-observation.v1", registry)
-        observation = {"target_epoch_start": target_start, "target_epoch_end": target_end,
+        observation = {"target_epoch_start": projected_identity,
+            "target_epoch_end": projected_identity,
             "daemon_epoch_start": start, "daemon_epoch_end": end, "target": plan["target"],
             "repository": plan["repository"], "repo_digest": plan["repository_qualified_digest"],
             "config_digest": config_digest, "platform": platform, "local_image_id": local_image_id,
@@ -401,6 +412,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
 def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                runner=_run, anonymous_probe=_anonymous_denied,
                cgroup_identity=_cgroup_identity, machine_epoch_reader=None,
+               projected_identity_reader=_projected_machine_identity,
                remover=shutil.rmtree) -> dict:
     """Pull and observe the whole plan set in one measured process and lease."""
     plan = _closed_plan_v2(plan)
@@ -409,7 +421,7 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
     cgroup = cgroup_identity(plan["unit_name"])
     run_root = _verify_workspace_parent() if run_root is None else run_root
     machine_epoch_reader = machine_epoch_reader or (
-        lambda: Path("/etc/machine-id").read_text().strip())
+        lambda: Path("/etc/machine-id").read_text())
     workspace = Path(tempfile.mkdtemp(prefix="operation-", dir=run_root))
     os.chmod(workspace, 0o700)
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
@@ -423,7 +435,8 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                         "--password-stdin"), environment=environment,
                        input_data=credential + b"\n", timeout=30)
         if login.returncode != 0: raise ValueError("broker_unavailable")
-        target_start = machine_epoch_reader()
+        machine_epoch_start = machine_epoch_reader()
+        projected_identity = projected_identity_reader()
         daemon_start_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                      environment=environment, timeout=15)
         if daemon_start_result.returncode != 0: raise ValueError("observation_invalid")
@@ -468,15 +481,16 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                 "authenticated_exact_manifest": "succeeded"})
         daemon_end_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                    environment=environment, timeout=15)
-        target_end = machine_epoch_reader()
+        machine_epoch_end = machine_epoch_reader()
         if daemon_end_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_end = daemon_end_result.stdout.decode().strip()
-        if not target_start or target_start != target_end \
-                or target_start != plan["target"]["machine_identity"] \
+        if not machine_epoch_start or machine_epoch_start != machine_epoch_end \
+                or projected_identity != plan["target"]["machine_identity"] \
                 or not daemon_start or daemon_start != daemon_end \
                 or daemon_start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
-        body = {"target_epoch_start": target_start, "target_epoch_end": target_end,
+        body = {"target_epoch_start": projected_identity,
+                "target_epoch_end": projected_identity,
                 "daemon_epoch_start": daemon_start, "daemon_epoch_end": daemon_end,
                 "target": plan["target"], "images": observations}
         observation = {**body, "observation_digest": staging_digest(

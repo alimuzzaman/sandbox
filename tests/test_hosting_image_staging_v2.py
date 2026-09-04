@@ -170,7 +170,8 @@ class TestV2BatchStaging(unittest.TestCase):
             result = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
                 runner=runner, anonymous_probe=lambda *_: True,
                 cgroup_identity=lambda unit: "/app.slice/" + unit,
-                machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+                machine_epoch_reader=lambda: "raw-machine-a",
+                projected_identity_reader=lambda: "machine-a", remover=shutil.rmtree)
         self.assertEqual(result["code"], "pull_failed")
         self.assertEqual(result["payload"]["pull_failure"],
                          {"image": "queue", "class": "not_found"})
@@ -201,7 +202,8 @@ class TestV2BatchStaging(unittest.TestCase):
                 response = staging_helper.execute_v2(self.frame, b"canary",
                     run_root=self.root, runner=runner, anonymous_probe=lambda *_: True,
                     cgroup_identity=lambda unit: "/app.slice/" + unit,
-                    machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+                    machine_epoch_reader=lambda: "raw-machine-a",
+                    projected_identity_reader=lambda: "machine-a", remover=shutil.rmtree)
                 response["payload"]["process"].update(
                     unit_inactive=True, cgroup_empty_or_removed=True)
                 return RemoteStageResponse(response["ok"], response["code"],
@@ -947,7 +949,7 @@ class TestV2BatchStaging(unittest.TestCase):
             parse_stage_response({"schema_version": True, "ok": False,
                                   "code": "protocol_invalid", "payload": {}})
 
-    def test_real_v2_helper_uses_one_login_three_pulls_and_no_topology_label(self):
+    def test_real_v2_helper_accepts_stable_raw_epoch_and_exact_projected_identity(self):
         import shutil
         import subprocess
         from sandbox.hosting.images import staging_helper
@@ -986,8 +988,14 @@ class TestV2BatchStaging(unittest.TestCase):
                 runner=runner, anonymous_probe=lambda *_: True,
                 cgroup_identity=lambda unit: (
                     "/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit),
-                machine_epoch_reader=lambda: "machine-a", remover=shutil.rmtree)
+                machine_epoch_reader=lambda: "raw-machine-a",
+                projected_identity_reader=lambda: "machine-a", remover=shutil.rmtree)
         self.assertTrue(result["ok"])
+        self.assertEqual(result["payload"]["observation"]["target_epoch_start"],
+                         "machine-a")
+        self.assertEqual(result["payload"]["observation"]["target_epoch_end"],
+                         "machine-a")
+        self.assertNotIn("raw-machine-a", json.dumps(result, sort_keys=True))
         self.assertEqual(sum(call[:2] == ("docker", "login") for call in calls), 1)
         self.assertEqual(sum(call[:2] == ("docker", "pull") for call in calls), 3)
         self.assertEqual([row["name"] for row in result["payload"]["observation"]["images"]],
@@ -995,6 +1003,58 @@ class TestV2BatchStaging(unittest.TestCase):
         for row, expected in zip(result["payload"]["observation"]["images"], frame["images"]):
             self.assertEqual(row["config_digest"], expected["config_digest"])
             self.assertEqual(row["local_image_id"], expected["manifest_digest"])
+
+        machine_epochs = iter(("raw-machine-a", "raw-machine-b"))
+        with tempfile.TemporaryDirectory() as temp:
+            changed = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
+                runner=runner, anonymous_probe=lambda *_: True,
+                cgroup_identity=lambda unit: (
+                    "/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit),
+                machine_epoch_reader=lambda: next(machine_epochs),
+                projected_identity_reader=lambda: "machine-a", remover=shutil.rmtree)
+        self.assertFalse(changed["ok"])
+        self.assertEqual(changed["code"], "observation_invalid")
+        self.assertNotIn("raw-machine", json.dumps(changed, sort_keys=True))
+
+    def test_real_v2_helper_rejects_projected_identity_mismatch(self):
+        import shutil
+        import subprocess
+        from sandbox.hosting.images import staging_helper
+        from sandbox.hosting.images.staging_worker import StageWorkerV2
+        plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
+        class Capture:
+            def prepare(self, _remote, frame, *, timeout_seconds):
+                self.frame = frame; return object()
+        transport = Capture(); StageWorkerV2(transport).prepare(request, policy)
+        frame = transport.frame
+        frame["helper"]["artifact_digest"] = "sha256:" + hashlib.sha256(
+            Path(staging_helper.__file__).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temp:
+            def runner(argv, *, environment, input_data=None, timeout=300):
+                command = tuple(argv)
+                if command[:2] == ("docker", "login"):
+                    Path(environment["DOCKER_CONFIG"]).mkdir(parents=True)
+                    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                if command[:2] == ("docker", "pull"):
+                    return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+                if command[:2] == ("docker", "info"):
+                    return subprocess.CompletedProcess(command, 0,
+                                                       stdout=b"daemon-a\n", stderr=b"")
+                image = next(item for item in frame["images"]
+                             if item["repository_qualified_digest"] == command[3])
+                inspected = {"Id": image["config_digest"],
+                    "RepoDigests": [image["repository_qualified_digest"]],
+                    "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {}}}
+                return subprocess.CompletedProcess(command, 0,
+                    stdout=json.dumps(inspected).encode(), stderr=b"")
+            result = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
+                runner=runner, anonymous_probe=lambda *_: True,
+                cgroup_identity=lambda unit: "/app.slice/" + unit,
+                machine_epoch_reader=lambda: "raw-machine-a",
+                projected_identity_reader=lambda: "machine-b", remover=shutil.rmtree)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "observation_invalid")
+        self.assertEqual(set(result["payload"]), {"process", "cleanup"})
 
 
 if __name__ == "__main__":

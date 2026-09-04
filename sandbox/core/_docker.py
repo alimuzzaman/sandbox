@@ -411,8 +411,20 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - {RUNTIME_DIR}/wp-{instance}:{docroot}
       - {RUNTIME_DIR}/seeds:/seeds
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
-      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
+      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache{_server_config_ols_mount(inst_cfg)}
 """
+
+
+def _server_config_ols_mount(inst_cfg: dict) -> str:
+    incarnation = inst_cfg.get("instance_incarnation_id")
+    if not incarnation:
+        return ""
+    try:
+        (Path(RUNTIME_DIR) / "server-config" / incarnation).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/usr/local/lsws/conf/vhosts-include:ro"
+
 
 
 def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:

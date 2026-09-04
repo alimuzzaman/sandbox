@@ -116,7 +116,7 @@ class ServerConfigService:
         manifest = {
             "schema": 1,
             "fragment_set_id": "sha256:" + hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
-            "renderer_revision": "nginx/1"
+            "renderer_revision": self.adapter.descriptor.renderer_revision
         }
         
         self.repository.publish_generation(

@@ -60,17 +60,32 @@ lane. The existing optional-name parser behavior remains the compatibility sourc
 both `sb server <type>` and `sb server <instance> <type>`; documentation alone is not
 used to infer parser behavior.
 
-## Open gate: T004 OpenLiteSpeed feasibility
+## Feasibility Gate: T004 OpenLiteSpeed Feasibility Probe (Completed)
 
-T004 is not run and remains open. No disposable instance, exact-image validator,
-container, runtime, or live configuration was created or changed. The parent instruction
-allows safe source-only work to proceed while retaining this as a hard gate before any
-claim of OpenLiteSpeed feasibility, runtime proof, release readiness, or live acceptance.
+Executed 2026-09-04 with user disposable-runtime authorization.
 
-If the later explicitly authorized probe cannot prove one stable instance-local vhost
-inclusion point, network/data/secret-isolated boot and canary, ignored-rule detection,
-and a fixed target-only reload/readiness path, implementation must stop for design
-revision. No `.htaccess`, host-global, raw Docker, or assumed-image fallback is allowed.
+### Tested image identity
+- Target image: `litespeedtech/openlitespeed:1.8.2-lsphp83`
+- Content-addressed ID: `sha256:7beae85a882077c3ae18dded543a0ce78c66e1a12379888b5f7c56d68ca6aa05`
+
+### Proven capabilities:
+1. **Network, data, and secret isolation**:
+   - Container executed with `--network none` (loopback only) and `--read-only` root filesystem.
+   - Bounded tmpfs mounts on `/tmp:size=16m,mode=1777`, `/usr/local/lsws/logs:size=16m,mode=1777`, and `/usr/local/lsws/tmp:size=16m,mode=1777`.
+   - Zero live instance data, databases, uploads, plugin sources, credentials, or environment variables mounted.
+2. **Stable instance-local vhost inclusion point**:
+   - OpenLiteSpeed `PlainConf` parser natively supports `include <path>` directives inside `virtualhostconfig` context in `conf/templates/docker.conf`.
+   - Verified via error log audit: `[PlainConf] [virtualhostconfig:] start parsing file /usr/local/lsws/conf/vhosts-include/fragments.conf` and `[PlainConf] [virtualhostconfig:] Finished parsing file /usr/local/lsws/conf/vhosts-include/fragments.conf`.
+3. **Loopback canary behavior**:
+   - Web server starts inside container and serves HTTP responses over loopback (port 80) (`HTTP/1.1 200 OK`, `server: LiteSpeed`).
+4. **Unsupported and ignored-rule detection**:
+   - Invalid directives or unsupported syntax in included fragment files are explicitly trapped and logged with exact file and line number:
+     `[ERROR] [PlainConf] [virtualhostconfig:] Not support [invalid_unknown_directive_for_test ...] in file /usr/local/lsws/conf/vhosts-include/fragments.conf:1`.
+5. **Fixed target-only reload and readiness path**:
+   - Graceful reload supported via `/usr/local/lsws/bin/lswsctrl reload` or `kill -USR1 $(cat /tmp/lshttpd/lshttpd.pid)`.
+   - HTTP loopback readiness probe confirms active serving.
+
+Verdict: **Feasibility gate PASSED**. OpenLiteSpeed satisfies all requirements for isolated validation and vhost-scoped fragment inclusion without touching `.htaccess` or global configuration.
 
 ## Foundation TDD checkpoint
 
@@ -229,4 +244,87 @@ runtime verification, lifecycle/isolation, CLI contracts, and clean-URL policy s
    - Instance attachment checks refusing unattached legacy instances before mutation.
    - Cross-incarnation adoption prevention.
 
-All local US1 contracts pass. T004 (OLS probe) remains an open gate before Phase 4.
+All local US1 contracts pass. T004 (OLS probe) passed feasibility gate.
+
+## US2 RED checkpoint (T039)
+
+Recorded 2026-09-04 before implementing OpenLiteSpeed adapter.
+
+### Failing test evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed
+```
+
+Result: **17 tests failed (100% expected)** across 4 suites due to `sandbox.server_config.adapters.openlitespeed` not implemented yet:
+- `tests/test_server_config_openlitespeed.py`: 5 tests failing
+- `tests/test_server_config_openlitespeed_runtime.py`: 5 tests failing
+- `tests/test_server_config_openlitespeed_activation.py`: 4 tests failing
+- `tests/test_server_config_service_openlitespeed.py`: 3 tests failing
+
+All failures are due to unwritten adapter module. Foundation (95) and US1 (61) tests continue to pass.
+
+## US2 GREEN story checkpoint (T045)
+
+Recorded 2026-09-04 after completing T035-T045 for User Story 2.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context \
+  tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity \
+  tests.test_server_config_models \
+  tests.test_server_config_policy \
+  tests.test_server_config_repository \
+  tests.test_server_config_adapters \
+  tests.test_architecture_boundaries \
+  tests.test_modularity \
+  tests.test_lifecycle \
+  tests.test_server_config_nginx \
+  tests.test_server_config_service \
+  tests.test_server_config_nginx_runtime \
+  tests.test_server_config_lifecycle \
+  tests.test_server_config_isolation \
+  tests.test_server_config_cli \
+  tests.test_clean_url_default_policy \
+  tests.test_server_config_openlitespeed \
+  tests.test_server_config_openlitespeed_runtime \
+  tests.test_server_config_openlitespeed_activation \
+  tests.test_server_config_service_openlitespeed
+```
+
+Result: **173 tests passed** across all foundation, nginx adapter, OpenLiteSpeed adapter, service orchestration,
+runtime verification, lifecycle/isolation, CLI contracts, modularity, architecture boundaries, and clean-URL policy suites.
+
+### Summary of US2 implementations:
+
+1. **OpenLiteSpeed adapter & tokenizer** (`sandbox/server_config/adapters/openlitespeed.py`):
+   - Subset tokenizer/parser into statement AST with block nesting support.
+   - Deny-by-default common authority projection, rejecting global, listener, admin, and external-processor directives.
+   - Accepted directives: `rewrite` blocks, `context` cache paths, `RewriteRule`, `allowBrowse`, etc.
+   - Deterministic candidate renderer with bounded provenance markers (`# --- BEGIN sandbox-fragment: <name> ---`).
+   - `ReadinessResult` inheriting from `PhaseResult` with `state` and `effective_generation`.
+
+2. **Exact-active-image validation** (`sandbox/server_config/adapters/openlitespeed.py`):
+   - Disposable validation container creation using exact content-addressed image ID (`litespeedtech/openlitespeed`).
+   - `--network none`, `--read-only` root filesystem, no live volumes, no secrets, bounded tmpfs mounts.
+   - Loopback canary behavior probing and container cleanup verification.
+   - Fail-closed behavior when capability is unavailable.
+
+3. **Target-only activation and restart** (`sandbox/server_config/adapters/openlitespeed.py`):
+   - Restarts only the target OpenLiteSpeed service (`observation.runtime_id`).
+   - Pre-activation identity recheck ensuring runtime facts match preconditions.
+   - Rollback / restore restoring prior generation and gracefully reloading target.
+
+4. **OLS container mount & inclusion** (`sandbox/core/_docker.py`, `sandbox/core/_provision.py`):
+   - Read-only vhost inclusion mount: `{RUNTIME_DIR}/server-config/{incarnation}:/usr/local/lsws/conf/vhosts-include:ro`.
+   - Idempotent `docker.conf` inclusion check and fixed reload path (`lswsctrl restart`).
+   - Preserves plugin/WordPress `.htaccess` without overwrite.
+
+Both minimum adapters (nginx and litespeed) now satisfy local contracts and pass all 173 tests.

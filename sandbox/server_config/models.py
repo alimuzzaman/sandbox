@@ -518,6 +518,10 @@ class PhaseResult:
         _require_optional_digest(self.evidence_id, "evidence_id")
         _require_timestamp(self.observed_at, "observed_at")
 
+    @property
+    def ok(self) -> bool:
+        return self.code in {"active", "ready", "authority_accepted", "ok", "passed"}
+
     def to_public_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,

@@ -150,21 +150,20 @@ safety or release readiness.
   preflight without side effects, and pre-control apply refusal. T042 interface
   composition tests are deferred: the parallel server-config branch already
   modifies `tests/test_host_memory_interfaces.py`. Local synthetic evidence only.
-- User Story 3 fail-closed GREEN (T047, partial) after the refusal and preflight
-  implementation (T044 policy, T045 provider, strict apply schemas and typed
-  results in `sandbox/resources/host_memory/remote.py`): `python3 -m unittest
-  tests.test_host_memory_policy tests.test_host_memory_provider
-  tests.test_host_memory_remote tests.test_resource_remote
-  tests.test_resource_interfaces` ran 128 tests in 311.689 seconds with only three
-  errors, all in the Phase 6 provider enable-transaction tests (`enable` lands in
-  T048 after this gate). The US3 refusal matrix, expiry/drift/plan-current,
-  preflight-before-side-effects, exact wire allowlist with no plan action, and
-  bounded apply-result contracts are GREEN. Deliberately deferred on parallel-
-  branch collisions: T042 interface composition (`tests/
-  test_host_memory_interfaces.py` owned by the server-config branch) and the
-  `mcp/wp-server/server.py` + `sandbox/core/_remote.py` enforcement share of T046
-  (both files owned there too). Protected apply stays unregistered, so no mutation
-  is reachable through this branch. Local synthetic evidence only.
+- User Story 3 fail-closed GREEN (T047, complete) after the refusal and preflight
+  implementation and reconciliation with `latest`: following the clean merge of
+  `latest` (which landed Features 052 and 053), all previously deferred collision
+  points in `tests/test_host_memory_interfaces.py`, `mcp/wp-server/server.py`,
+  and `sandbox/core/_remote.py` are resolved. The focused User Story 3 test suite
+  (`tests.test_host_memory_policy`, `tests.test_host_memory_remote`,
+  `tests.test_host_memory_interfaces`,
+  `tests.test_resource_remote.TestHostMemoryRemoteTransport`, and
+  `tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`) ran 46 tests
+  and passed in 0.111 seconds. The US3 refusal matrix, expiry/drift/plan-current,
+  preflight-before-side-effects, exact wire allowlist with no remote plan action,
+  and bounded apply-result contracts are fully GREEN. Protected apply remains
+  unregistered and fail-closed; no mutation is reachable. Local synthetic evidence
+  only.
 
 ## Fixed authenticated synthetic-provider evidence
 

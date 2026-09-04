@@ -133,10 +133,11 @@ class TestLinuxFilesystemAdapter(unittest.TestCase):
         os.close(bundle["source_fd"])
 
     def test_mount_controller_descriptor_handoff(self):
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        import importlib
-        mc = importlib.import_module("tools.owned-storage-mount-controller")
+        import importlib.util
+        mc_path = Path(__file__).resolve().parent.parent / "tools" / "owned-storage-mount-controller.py"
+        spec = importlib.util.spec_from_file_location("owned_storage_mount_controller", mc_path)
+        mc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mc)
 
         controller = mc.MountController(runtime_root=self.root / "run")
 

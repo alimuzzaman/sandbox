@@ -287,6 +287,109 @@ class TestStorageAuthorityRepository(unittest.TestCase):
         self.assertEqual(curr.object_id, "obj_gen_1")
         self.assertEqual(curr.selection_generation, 1)
 
+    def test_save_and_get_reclamation_preview(self):
+        from sandbox.owned_storage.models import (
+            CandidateDecision,
+            ObjectKind,
+            ObjectLifecycle,
+            PreviewCandidate,
+            ReclamationPreview,
+        )
+
+        candidate1 = PreviewCandidate(
+            object_id="obj_prev_1",
+            object_kind=ObjectKind.SYNC_GENERATION,
+            lifecycle=ObjectLifecycle.SUPERSEDED,
+            decision=CandidateDecision.ELIGIBLE,
+            reason_code="superseded_unreferenced",
+            estimated_bytes=500,
+            object_evidence_digest="sha256:ev1",
+            reference_snapshot_digest="sha256:ref1",
+        )
+        candidate2 = PreviewCandidate(
+            object_id="obj_prev_2",
+            object_kind=ObjectKind.SYNC_GENERATION,
+            lifecycle=ObjectLifecycle.ACCEPTED,
+            decision=CandidateDecision.PROTECTED,
+            reason_code="reference_active",
+            estimated_bytes=1000,
+            object_evidence_digest="sha256:ev2",
+            reference_snapshot_digest="sha256:ref2",
+        )
+
+        preview = ReclamationPreview(
+            preview_id="prev_repo_1",
+            remote_identity="rem_1",
+            project_identity="proj_1",
+            inventory_generation=1,
+            policy_generation=2,
+            candidate_digest="sha256:candidates",
+            candidates=[candidate1, candidate2],
+            estimated_reclaimable_bytes=500,
+            complete=True,
+            created_at="2026-09-04T00:00:00Z",
+            expires_at="2026-09-04T00:15:00Z",
+        )
+
+        self.repo.save_preview(preview)
+
+        loaded = self.repo.get_preview("prev_repo_1")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.preview_id, "prev_repo_1")
+        self.assertEqual(loaded.remote_identity, "rem_1")
+        self.assertEqual(loaded.project_identity, "proj_1")
+        self.assertEqual(loaded.inventory_generation, 1)
+        self.assertEqual(loaded.policy_generation, 2)
+        self.assertEqual(loaded.estimated_reclaimable_bytes, 500)
+        self.assertTrue(loaded.complete)
+        self.assertEqual(len(loaded.candidates), 2)
+        c_by_id = {c.object_id: c for c in loaded.candidates}
+        self.assertEqual(c_by_id["obj_prev_1"].decision, CandidateDecision.ELIGIBLE)
+        self.assertEqual(c_by_id["obj_prev_2"].decision, CandidateDecision.PROTECTED)
+
+    def test_bounded_query_objects_pagination_and_clamping(self):
+        for i in range(25):
+            obj = AuthorityOwnedObject(
+                object_id=f"obj_page_{i:02d}",
+                object_kind=ObjectKind.SYNC_GENERATION,
+                remote_identity="rem_page",
+                project_identity="proj_page",
+                relationship_id=None,
+                workspace_id=None,
+                job_id=None,
+                parent_object_id=None,
+                created_by_operation_id=f"op_{i}",
+                lifecycle=ObjectLifecycle.SUPERSEDED,
+                policy_id="pol_1",
+                policy_generation=1,
+                qualification_admission_id=None,
+                evidence_candidate_id=None,
+                promotion_id=None,
+                evidence_id=None,
+                authority_binding_id="bind_1",
+                retention_policy_digest="sha256:page",
+                content_evidence={},
+                filesystem_identity={},
+                known_bytes=10,
+                created_at=f"2026-09-04T00:{i:02d}:00Z",
+            )
+            self.repo.save_object(obj)
+
+        # Query page 1 with limit 10
+        page1, cursor1 = self.repo.query_objects("rem_page", "proj_page", limit=10)
+        self.assertEqual(len(page1), 10)
+        self.assertIsNotNone(cursor1)
+
+        # Query page 2 with limit 10
+        page2, cursor2 = self.repo.query_objects("rem_page", "proj_page", limit=10, cursor=cursor1)
+        self.assertEqual(len(page2), 10)
+        self.assertIsNotNone(cursor2)
+
+        # Query page 3 with limit 10
+        page3, cursor3 = self.repo.query_objects("rem_page", "proj_page", limit=10, cursor=cursor2)
+        self.assertEqual(len(page3), 5)
+        self.assertIsNone(cursor3)
+
 
 if __name__ == "__main__":
     unittest.main()

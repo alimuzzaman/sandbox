@@ -732,3 +732,144 @@ class StorageAuthorityRepository:
                 expires_at=row["expires_at"],
                 closed_at=row["closed_at"],
             )
+
+    def save_preview(self, preview: ReclamationPreview) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO reclamation_previews (
+                    preview_id, remote_identity, project_identity,
+                    inventory_generation, policy_generation,
+                    candidate_digest, estimated_reclaimable_bytes,
+                    complete, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    preview.preview_id,
+                    preview.remote_identity,
+                    preview.project_identity,
+                    preview.inventory_generation,
+                    preview.policy_generation,
+                    preview.candidate_digest,
+                    preview.estimated_reclaimable_bytes,
+                    1 if preview.complete else 0,
+                    preview.created_at,
+                    preview.expires_at,
+                ),
+            )
+            for c in preview.candidates:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO preview_candidates (
+                        preview_id, object_id, object_kind, lifecycle,
+                        decision, reason_code, estimated_bytes,
+                        object_evidence_digest, reference_snapshot_digest
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        preview.preview_id,
+                        c.object_id,
+                        c.object_kind.value if isinstance(c.object_kind, ObjectKind) else str(c.object_kind),
+                        c.lifecycle.value if isinstance(c.lifecycle, ObjectLifecycle) else str(c.lifecycle),
+                        c.decision.value if isinstance(c.decision, CandidateDecision) else str(c.decision),
+                        c.reason_code,
+                        c.estimated_bytes,
+                        c.object_evidence_digest,
+                        c.reference_snapshot_digest,
+                    ),
+                )
+
+    def get_preview(self, preview_id: str) -> Optional[ReclamationPreview]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM reclamation_previews WHERE preview_id = ?", (preview_id,)
+            ).fetchone()
+            if not row:
+                return None
+            candidate_rows = conn.execute(
+                "SELECT * FROM preview_candidates WHERE preview_id = ? ORDER BY object_id ASC",
+                (preview_id,),
+            ).fetchall()
+            candidates = [
+                PreviewCandidate(
+                    object_id=cr["object_id"],
+                    object_kind=ObjectKind(cr["object_kind"]),
+                    lifecycle=ObjectLifecycle(cr["lifecycle"]),
+                    decision=CandidateDecision(cr["decision"]),
+                    reason_code=cr["reason_code"],
+                    estimated_bytes=cr["estimated_bytes"],
+                    object_evidence_digest=cr["object_evidence_digest"],
+                    reference_snapshot_digest=cr["reference_snapshot_digest"],
+                )
+                for cr in candidate_rows
+            ]
+            return ReclamationPreview(
+                preview_id=row["preview_id"],
+                remote_identity=row["remote_identity"],
+                project_identity=row["project_identity"],
+                inventory_generation=row["inventory_generation"],
+                policy_generation=row["policy_generation"],
+                candidate_digest=row["candidate_digest"],
+                candidates=candidates,
+                estimated_reclaimable_bytes=row["estimated_reclaimable_bytes"],
+                complete=bool(row["complete"]),
+                created_at=row["created_at"],
+                expires_at=row["expires_at"],
+            )
+
+    def query_objects(
+        self,
+        remote_identity: str,
+        project_identity: str,
+        kind: Optional[ObjectKind] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> Tuple[List[AuthorityOwnedObject], Optional[str]]:
+        bounded_limit = min(max(1, limit), 500)
+        query = (
+            "SELECT * FROM authority_objects WHERE remote_identity = ? AND project_identity = ?"
+        )
+        params: List[Any] = [remote_identity, project_identity]
+        if kind is not None:
+            query += " AND object_kind = ?"
+            params.append(kind.value if isinstance(kind, ObjectKind) else str(kind))
+
+        if cursor:
+            if "|" in cursor:
+                c_created, c_id = cursor.split("|", 1)
+                query += " AND (created_at > ? OR (created_at = ? AND object_id > ?))"
+                params.extend([c_created, c_created, c_id])
+            else:
+                query += " AND object_id > ?"
+                params.append(cursor)
+
+        query += " ORDER BY created_at ASC, object_id ASC LIMIT ?"
+        params.append(bounded_limit + 1)
+
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        if len(rows) > bounded_limit:
+            page_rows = rows[:bounded_limit]
+            last = page_rows[-1]
+            next_cursor = f"{last['created_at']}|{last['object_id']}"
+        else:
+            page_rows = rows
+            next_cursor = None
+
+        return [self._row_to_object(r) for r in page_rows], next_cursor
+
+    def get_all_objects_for_scope(
+        self,
+        remote_identity: str,
+        project_identity: str,
+        max_limit: int = 10000,
+    ) -> List[AuthorityOwnedObject]:
+        query = (
+            "SELECT * FROM authority_objects WHERE remote_identity = ? AND project_identity = ? "
+            "ORDER BY created_at ASC, object_id ASC LIMIT ?"
+        )
+        with self.connect() as conn:
+            rows = conn.execute(query, (remote_identity, project_identity, max_limit)).fetchall()
+        return [self._row_to_object(r) for r in rows]
+

@@ -125,14 +125,14 @@
 
 ### Tests for User Story 5
 
-- [ ] T033 [P] [US5] Add unit tests for storage preview projections, bounded pagination (max 500 records), and 15-minute preview expiry in `tests/test_owned_storage_application.py`
-- [ ] T034 [P] [US5] Add tests for retention policy evaluation and race-safe reclamation in `tests/test_owned_storage_repository.py`
+- [x] T033 [P] [US5] Add unit tests for storage preview projections, bounded pagination (max 500 records), and 15-minute preview expiry in `tests/test_owned_storage_application.py`
+- [x] T034 [P] [US5] Add tests for retention policy evaluation and race-safe reclamation in `tests/test_owned_storage_repository.py`
 
 ### Implementation for User Story 5
 
-- [ ] T035 [US5] Implement bounded query and projection engine for authority and legacy storage records in `sandbox/owned_storage/repository.py`
-- [ ] T036 [US5] Implement retention evaluation and preview generation service in `sandbox/application/owned_storage_service.py`
-- [ ] T037 [US5] Implement CLI and MCP storage preview and reclaim commands in `sandbox/commands/owned_storage.py` and `mcp/wp-server/tools/owned_storage.py`
+- [x] T035 [US5] Implement bounded query and projection engine for authority and legacy storage records in `sandbox/owned_storage/repository.py`
+- [x] T036 [US5] Implement retention evaluation and preview generation service in `sandbox/application/owned_storage_service.py`
+- [x] T037 [US5] Implement CLI and MCP storage preview and reclaim commands in `sandbox/commands/owned_storage.py` and `mcp/wp-server/tools/owned_storage.py`
 
 **Checkpoint**: User Story 5 complete. Bounded, safe preview and explicit reclamation operational via CLI and MCP.
 

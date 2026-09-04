@@ -204,6 +204,27 @@ class HostMemoryRepository:
         except (OSError, ValueError): raise RepositoryError("operation evidence is corrupt") from None
         return bounded(data)
 
+
+    def record_disable_receipt(self, *, target_identity, operation_id, prior_receipt=None):
+        from .models import utc_text
+        from datetime import datetime, timezone
+        verified_at = utc_text(datetime.now(timezone.utc))
+        receipt = {
+            "schema_version": 1,
+            "target_identity": target_identity,
+            "created_by_operation": (prior_receipt or {}).get("created_by_operation", operation_id),
+            "last_verified_operation": operation_id,
+            "policy": {"size_gib": 4},
+            "artifacts": {},
+            "swap_area_id": (prior_receipt or {}).get("swap_area_id", "0" * 24),
+            "prior_swappiness": (prior_receipt or {}).get("prior_swappiness", {"value": 60}),
+            "verified_at": verified_at,
+            "reboot_verification": {"state": "unverified", "observed_at": None},
+            "lifecycle_state": "disabled",
+        }
+        self.save_receipt(receipt)
+        return receipt
+
     def save_receipt(self, receipt):
         model = OwnershipReceipt.from_dict(receipt)
         current = self.load_receipt()

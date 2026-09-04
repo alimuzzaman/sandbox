@@ -10,6 +10,8 @@ from .models import HEX24, SwapPolicy, canonical_digest, parse_utc, utc_text
 GIB = 1024 ** 3
 ACTIVE_ARTIFACTS = ("swap_file", "swap_unit", "swappiness_policy", "monitor_helper",
                     "monitor_service", "monitor_timer", "rotation_policy", "receipt")
+DISABLE_ARTIFACTS = ("monitor_timer", "monitor_service", "monitor_helper",
+                      "swappiness_policy", "swap_unit", "swap_file")
 
 
 class PolicyRefusal(ValueError):
@@ -119,7 +121,7 @@ def build_plan(operation, target, state, *, size_gib=4, now=None):
         "observation": dict(state), "observation_digest": canonical_digest(state),
         "requested_policy": {"size_gib": size_gib} if policy else None,
         "effective_policy": policy.to_dict() if policy else None,
-        "calculations": calculations, "intended_changes": list(ACTIVE_ARTIFACTS),
+        "calculations": calculations, "intended_changes": list(ACTIVE_ARTIFACTS) if operation == "enable" else list(DISABLE_ARTIFACTS),
         "rollback_scope": list(ACTIVE_ARTIFACTS), "requires_confirmation": True,
         "state": "already_current" if converged else "planned",
     }

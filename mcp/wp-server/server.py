@@ -188,7 +188,10 @@ def _host_memory_contract(payload: dict) -> dict:
                     "error": {"code": "ownership_unknown", "message": "plan targets a foreign host"},
                 }
             else:
-                apply_res = provider.enable(plan)
+                if plan.get("operation") == "disable":
+                    apply_res = provider.disable(plan)
+                else:
+                    apply_res = provider.enable(plan)
                 result = {
                     "status": apply_res.get("status", "applied"),
                     "operation_id": request["operation_id"],

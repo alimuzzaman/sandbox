@@ -517,7 +517,8 @@ class OwnershipReceipt:
             raise ValueError("invalid ownership identity")
         if not HEX24.fullmatch(self.swap_area_id) or self.lifecycle_state not in {"enabled", "disabled"}:
             raise ValueError("invalid ownership state")
-        SwapPolicy(**dict(self.policy)); parse_utc(self.verified_at)
+        if self.lifecycle_state == "enabled": SwapPolicy(**dict(self.policy))
+        parse_utc(self.verified_at)
         if not isinstance(self.artifacts, Mapping) or len(self.artifacts) > 16:
             raise ValueError("invalid owned artifacts")
 

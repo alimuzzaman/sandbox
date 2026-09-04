@@ -255,6 +255,48 @@ safety or release readiness.
      0.440s. CLI invocations verified for refusal on missing remote, invalid options,
      and invalid limits. Local synthetic evidence only.
 
+
+- User Story 5 owned disable RED (T071): failing tests added for disable policy
+  rules (reverse teardown ordering, strict headroom, ownership refusal), provider
+  disable transaction (reverse teardown, history preservation), service disable
+  planning and confirmation orchestration, CLI swap-disable parsing, and repository
+  disabled-state receipt recording:
+  1. `tests.test_host_memory_policy`: `test_disable_plan_policy_rules` failed with
+     `AssertionError: 'swap_file' != '/etc/systemd/system/sandbox-host-memory-monitor.timer'`
+     verifying reverse teardown ordering in intended changes.
+  2. `tests.test_host_memory_provider`: `test_disable_transaction_enforces_reverse_order_and_preserves_history`
+     failed with `AttributeError: 'HostProvider' object has no attribute 'disable'`
+     before disable transaction implementation.
+  3. `tests.test_host_memory_service`: `test_disable_planning_and_apply_orchestration`
+     failed with `AttributeError: 'HostMemoryService' object has no attribute 'disable_plan'`
+     before service disable plan and apply orchestration.
+  4. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_disable_requires_remote_and_confirmation` failed with
+     `argparse.ArgumentError: argument action: invalid choice: 'swap-disable'`
+     before CLI registration.
+  5. `tests.test_host_memory_repository`: `test_disable_phase_journaling_and_disabled_receipt`
+     failed with `AttributeError: 'HostMemoryRepository' object has no attribute 'record_disable_receipt'`
+     before repository disabled receipt recording.
+  Local synthetic evidence only.
+
+- User Story 5 owned disable GREEN (T076): owned disable planning, reverse teardown
+  execution, history preservation, disabled-state receipt, and swap-disable CLI:
+  1. `tests.test_host_memory_policy`: `test_disable_plan_policy_rules` verified reverse
+     teardown ordering (`monitor_timer` through `swap_file`), strict RAM headroom
+     calculation (`available <= required` refusal), and ownership checks.
+  2. `tests.test_host_memory_provider`: `test_disable_transaction_enforces_reverse_order_and_preserves_history`
+     verified reverse order teardown (timer disable, service stop, swapoff, swap_unit disable,
+     swappiness sysctl removal, swapfile removal) with applied outcome.
+  3. `tests.test_host_memory_service`: `test_disable_planning_and_apply_orchestration`
+     verified disable planning, unconfirmed refusal (`confirmation_required`), and confirmed
+     application success.
+  4. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_disable_requires_remote_and_confirmation` verified `swap-disable` CLI
+     registration and confirmation gating.
+  5. `tests.test_host_memory_repository`: `test_disable_phase_journaling_and_disabled_receipt`
+     verified phase journaling and minimal disabled-state receipt recording (`lifecycle_state="disabled"`).
+  Suite run: 141 tests in 0.33s, 0 failures, 0 errors. Local synthetic evidence only.
+
 ## Fixed authenticated synthetic-provider evidence
 
 Pending T096.

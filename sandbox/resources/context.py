@@ -152,3 +152,14 @@ def host_memory_history(remote: str, *, since=None, until=None, limit: int = 288
     return _build_host_memory_service(remote).history(
         since=since, until=until, limit=limit, budget_seconds=budget_seconds,
     )
+
+
+def host_memory_disable(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
+    """Execute confirmed host-memory disable with normative outcome envelope."""
+    service = _build_host_memory_service(remote)
+    if not plan_id:
+        plan_res = service.disable_plan(budget_seconds=min(budget_seconds, 15))
+        if not plan_res.get("ok"):
+            return plan_res
+        plan_id = plan_res["data"]["plan_id"]
+    return service.apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)

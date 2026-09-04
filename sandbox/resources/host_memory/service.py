@@ -115,6 +115,28 @@ class HostMemoryService:
             self._repo.save_plan(plan)
         return envelope("swap-plan", plan["state"], target=self.target, data=plan)
 
+
+    def disable_plan(self, budget_seconds=15):
+        """Build one deterministic controller-owned disable plan from status evidence."""
+        from .policy import PolicyRefusal, build_plan
+
+        observed = self.status(budget_seconds=budget_seconds)
+        state = observed.get("data") or {}
+        target = {
+            "remote_name": self._remote.name,
+            "target_identity": str(state.get("target_identity", "unknown")),
+            "service_ownership_marker": str(getattr(self._remote, "marker", "")),
+            "runtime_revision": str(getattr(self._remote, "revision", "")),
+        }
+        try:
+            plan = build_plan("disable", target, state, now=self._now())
+        except PolicyRefusal as exc:
+            return failure("swap-plan", exc, self.target)
+        self._plans[plan["plan_id"]] = plan
+        if self._repo is not None:
+            self._repo.save_plan(plan)
+        return envelope("swap-plan", plan["state"], target=self.target, data=plan)
+
     def apply(self, plan_or_id, *, confirmed=False, operation_id=None, budget_seconds=300):
         """Orchestrate protected host-memory apply with normative outcomes."""
         from .models import canonical_digest

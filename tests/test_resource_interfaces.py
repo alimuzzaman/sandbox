@@ -991,6 +991,7 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertEqual(self._args(["swap-plan","--remote","fixture"]).action,"swap-plan")
         self.assertEqual(self._args(["swap-apply","--remote","fixture"]).action,"swap-apply")
         self.assertEqual(self._args(["swap-history","--remote","fixture"]).action,"swap-history")
+        self.assertEqual(self._args(["swap-disable","--remote","fixture"]).action,"swap-disable")
 
     def test_swap_history_cli_registered_and_parses_arguments(self):
         args = self._args(["swap-history", "--remote", "fixture", "--limit", "100", "--since", "2026-08-30T00:00:00Z"])
@@ -1078,6 +1079,16 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["error"]["code"],
                          "confirmation_required")
 
+
+
+    def test_swap_disable_requires_remote_and_confirmation(self):
+        from sandbox.commands import resources
+        args = self._args(["swap-disable", "--remote", "fixture", "--confirm"])
+        self.assertEqual(args.action, "swap-disable")
+        self.assertTrue(args.confirm)
+        refused = resources.cmd_swap_disable(self._args(["swap-disable", "--remote", "fixture"]))
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "confirmation_required")
 
 if __name__ == "__main__":
     unittest.main()

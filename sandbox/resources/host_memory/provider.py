@@ -427,6 +427,30 @@ class HostProvider:
         return {"status": "applied",
                 "operation_id": plan.get("operation_id", plan_id)}
 
+
+    def disable(self, plan):
+        self.preflight(plan)
+        plan_id = plan.get("plan_id")
+        operation_id = plan.get("operation_id", plan_id)
+        commands = [
+            ("systemctl", "disable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+            ("systemctl", "stop", str(FIXED_ARTIFACTS["monitor_service"])),
+            ("swapoff", str(SWAP)),
+            ("systemctl", "disable", "--now", str(SWAP_UNIT)),
+            ("rm", "-f", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("rm", "-f", str(SWAP)),
+        ]
+        for cmd in commands:
+            res = self.run(cmd)
+            if getattr(res, "returncode", 0) != 0:
+                raise RuntimeError(f"command failed: {' '.join(cmd)}")
+        self._active_plan_id = None
+        return {
+            "status": "applied",
+            "outcome": "applied",
+            "operation_id": operation_id,
+        }
+
     def collect_sample(self, *, deadline=None):
         if deadline is None:
             deadline = time.monotonic() + 5.0

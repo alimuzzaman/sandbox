@@ -52,11 +52,18 @@ def validate_request(payload):
         if set(plan)!=canonical: raise RemoteProtocolError("response_invalid","canonical plan fields do not match")
         if not HEX24.fullmatch(str(plan["service_ownership_marker"])) or not HEX24.fullmatch(str(plan["runtime_revision"])):
             raise RemoteProtocolError("remote_runtime_revision_mismatch","service evidence is invalid")
+        op=plan.get("operation")
         effective=plan.get("effective_policy")
-        if (not isinstance(effective,dict) or isinstance(effective.get("size_gib"),bool)
-                or not isinstance(effective.get("size_gib"),int)
-                or not 1 <= effective["size_gib"] <= 8):
-            raise RemoteProtocolError("response_invalid","canonical effective policy size is invalid")
+        if op == "enable":
+            if (not isinstance(effective,dict) or isinstance(effective.get("size_gib"),bool)
+                    or not isinstance(effective.get("size_gib"),int)
+                    or not 1 <= effective["size_gib"] <= 8):
+                raise RemoteProtocolError("response_invalid","canonical effective policy size is invalid")
+        elif op == "disable":
+            if not isinstance(effective, dict):
+                raise RemoteProtocolError("response_invalid","canonical effective policy must be an object")
+        else:
+            raise RemoteProtocolError("response_invalid","canonical operation must be enable or disable")
     return bounded(payload,64*1024)
 
 

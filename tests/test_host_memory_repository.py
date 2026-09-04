@@ -167,3 +167,24 @@ class HostMemoryRepositoryTest(unittest.TestCase):
             with self.assertRaises(RepositoryError): repo.history_window(limit=3)
         after=len(os.listdir("/dev/fd"))
         self.assertLessEqual(after,before+1)
+
+    def test_disable_phase_journaling_and_disabled_receipt(self):
+        op = {
+            "schema_version": 1,
+            "operation_id": "b" * 64,
+            "plan_id": "c" * 64,
+            "operation": "disable",
+            "phase": "disabled_receipt",
+            "phase_evidence": ["monitor_stopped", "swapoff", "cleaned"],
+        }
+        self.repo.save_operation(op)
+        self.assertEqual(self.repo.load_operation()["phase"], "disabled_receipt")
+
+        receipt = self.repo.record_disable_receipt(
+            target_identity="host",
+            operation_id="b" * 64,
+            prior_receipt=ownership_receipt(),
+        )
+        self.assertEqual(receipt["lifecycle_state"], "disabled")
+        loaded = self.repo.load_receipt()
+        self.assertEqual(loaded["lifecycle_state"], "disabled")

@@ -141,3 +141,31 @@ class HostMemoryServiceTest(unittest.TestCase):
         self.assertIn("samples", result["data"])
         self.assertIn("counts", result["data"])
         assert_privacy_bounded(self, result, maximum=1024 * 1024)
+
+    def test_disable_planning_and_apply_orchestration(self):
+        area = {
+            "area_id": "a" * 24, "type": "file", "total_bytes": 4 * 1024 ** 3,
+            "used_bytes": 0, "active": True, "persistent": True, "priority": -2, "ownership": "owned",
+        }
+        self.remote.call = lambda action, **fields: {
+            **status_state(target_identity="host", ownership="owned", swap_areas=[area]),
+            "evidence_state": "known",
+        } if action == "host_memory_status" else {"status": "applied", "data": {"operation_id": fields.get("operation_id")}, "error": None}
+        # disable_plan builds a plan with operation="disable"
+        plan_res = self.service.disable_plan()
+        self.assertTrue(plan_res["ok"])
+        self.assertEqual(plan_res["action"], "swap-plan")
+        plan = plan_res["data"]
+        self.assertEqual(plan["operation"], "disable")
+        plan_id = plan["plan_id"]
+
+        # unconfirmed apply is refused
+        refused = self.service.apply(plan_id, confirmed=False)
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["status"], "refused")
+        self.assertEqual(refused["error"]["code"], "confirmation_required")
+
+        # confirmed apply succeeds
+        applied = self.service.apply(plan_id, confirmed=True)
+        self.assertTrue(applied["ok"])
+        self.assertIn(applied["status"], {"applied", "already_current"})

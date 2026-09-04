@@ -144,3 +144,42 @@ class HostMemoryPolicyTest(unittest.TestCase):
                     build_plan("enable", service_evidence(),
                                eligible_state(ownership=ownership), now=NOW)
                 self.assertEqual(refused.exception.code, "ownership_unknown")
+
+    def test_disable_plan_policy_rules(self):
+        target = service_evidence()
+        # Refuses foreign, unmanaged, ambiguous ownership
+        for ownership in ("foreign", "unmanaged", "ambiguous"):
+            with self.subTest(ownership=ownership):
+                with self.assertRaises(PolicyRefusal) as refused:
+                    build_plan("disable", target, eligible_state(ownership=ownership), now=NOW)
+                self.assertEqual(refused.exception.code, "ownership_unknown")
+
+        # Refuses unmanaged swap area
+        with self.assertRaises(PolicyRefusal) as refused:
+            build_plan("disable", target, eligible_state(
+                ownership="owned",
+                swap_areas=[{"ownership": "unmanaged", "used_bytes": 0, "total_bytes": 1 * GIB}],
+            ), now=NOW)
+        self.assertIn(refused.exception.code, {"ownership_unknown", "unmanaged_swap"})
+
+        # Headroom: strictly greater than
+        # total 16 GiB -> max(1 GiB, 1.6 GiB) = 1.6 GiB; used = 1 GiB -> required = 2.6 GiB
+        # available = 2.6 GiB -> available <= required -> Refuses
+        state = eligible_state(
+            ownership="owned",
+            memory={"total_bytes": 16 * GIB, "available_bytes": 2 * GIB + 600 * 1024 * 1024},
+            swap_areas=[{"ownership": "owned", "used_bytes": 1 * GIB, "total_bytes": 4 * GIB}],
+        )
+        with self.assertRaises(PolicyRefusal) as refused:
+            build_plan("disable", target, state, now=NOW)
+        self.assertEqual(refused.exception.code, "insufficient_disable_headroom")
+
+        # Available = 4 GiB -> strictly greater -> success
+        state["memory"]["available_bytes"] = 4 * GIB
+        plan = build_plan("disable", target, state, now=NOW)
+        self.assertEqual(plan["operation"], "disable")
+        self.assertEqual(plan["state"], "planned")
+        self.assertTrue(plan["requires_confirmation"])
+        # Reverse teardown ordering required
+        self.assertEqual(plan["intended_changes"][0], "monitor_timer")
+        self.assertEqual(plan["intended_changes"][-1], "swap_file")

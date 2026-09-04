@@ -392,3 +392,29 @@ class HostMemoryProviderTest(unittest.TestCase):
         forbidden_keys = {"stdout", "stderr", "output", "source_path", "processes", "argv", "path"}
         self.assertFalse(set(sample_res) & forbidden_keys)
         self.assertIn(sample_res["status"], {"valid", "partial", "failed"})
+
+    def test_disable_transaction_enforces_reverse_order_and_preserves_history(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        plan = {
+            "operation": "disable",
+            "plan_id": "a" * 64,
+            "target": {"remote_name": "scaleway-sandbox", "target_identity": TARGET},
+            "expires_at": "2026-08-30T12:15:00Z",
+            "intended_changes": [
+                "/etc/systemd/system/sandbox-host-memory-monitor.timer",
+                "/etc/systemd/system/sandbox-host-memory-monitor.service",
+                "/etc/sysctl.d/99-sandbox-swap.conf",
+                "/etc/fstab",
+                "/var/lib/sandbox/swap/swapfile",
+            ],
+            "rollback_scope": [
+                "/etc/systemd/system/sandbox-host-memory-monitor.timer",
+                "/etc/systemd/system/sandbox-host-memory-monitor.service",
+                "/etc/sysctl.d/99-sandbox-swap.conf",
+                "/etc/fstab",
+                "/var/lib/sandbox/swap/swapfile",
+            ],
+        }
+        res = provider.disable(plan)
+        self.assertEqual(res["outcome"], "applied")

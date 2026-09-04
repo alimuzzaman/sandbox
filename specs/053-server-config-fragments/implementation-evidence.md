@@ -147,3 +147,68 @@ and diff checks. Final verdict: `PASS`, with no actionable findings.
 - Focused lifecycle tests are local fakes. They are not browser, Compose, exact-image,
   registered-remote, deployment, edge, or production proof.
 - T004 and every later human/live acceptance gate remain open.
+
+## US1 RED checkpoint (T024)
+
+All US1 RED tests were written and confirmed failing before any command, service, or
+adapter implementation. Recorded 2026-09-04.
+
+### RED test files and failure evidence
+
+| Test file | Tests | Failure mode |
+|---|---|---|
+| `tests/test_server_config_cli.py` | 16 | `ModuleNotFoundError: No module named 'sandbox.commands.server'` |
+| `tests/test_server_config_service.py` | 8 | `ModuleNotFoundError: No module named 'sandbox.server_config.service'` |
+| `tests/test_server_config_nginx.py` | 7 | `AssertionError: sandbox.server_config.adapters.nginx not implemented yet` |
+| `tests/test_server_config_nginx_runtime.py` | 7 | `NotImplementedError` (stub adapter) |
+| `tests/test_server_config_lifecycle.py` | 4 | `ModuleNotFoundError: No module named 'sandbox.server_config.lifecycle'` |
+| `tests/test_server_config_isolation.py` | 3 | `ModuleNotFoundError: No module named 'sandbox.server_config.lifecycle'` |
+
+Combined RED run: 11 errors from 5 modules. No expected RED assertion passed
+accidentally. All failures were missing modules or unimplemented stubs, not environment
+or live-runtime errors. Foundation 95 tests continued passing during the RED phase.
+
+## US1 partial implementation checkpoint
+
+Recorded 2026-09-04 after T025, T027, and T028 implementation.
+
+### GREEN evidence
+
+```text
+.cli-venv/bin/python -m unittest \
+  tests.test_server_config_context tests.test_server_config_core_identity \
+  tests.test_server_config_instance_identity tests.test_server_config_models \
+  tests.test_server_config_policy tests.test_server_config_repository \
+  tests.test_server_config_adapters tests.test_architecture_boundaries \
+  tests.test_modularity tests.test_lifecycle \
+  tests.test_server_config_nginx tests.test_server_config_service
+```
+
+Result: **110 tests passed** in 10.3 seconds. The 95 foundation tests plus 7 nginx
+adapter tests and 8 service orchestration tests are green.
+
+### Implemented modules
+
+- `sandbox/commands/server.py` (T025): Feature-owned `CommandSpec` with config grammar
+  (`apply|list|show|revert`), legacy switch preservation (`sb server <type>`,
+  `sb server <instance> <type>`), `--json` flag, `--stdin`/`--file` mutual exclusion,
+  `--authority` default, and `predispatch_policy` for read-only operations.
+- `sandbox/server_config/service.py` (T027): Apply/list/show/replace/revert/no-op
+  orchestration with identical-reapply detection, deterministic fragment ordering,
+  adapter policy/render delegation, and repository state persistence.
+- `sandbox/server_config/adapters/nginx.py` (T028): Subset tokenizer/parser, common
+  policy projection via `validate_common_authority`, deterministic candidate renderer
+  with provenance markers, inclusion proof, protected base-route detection, and
+  duplicate/conflict detection.
+
+### Still RED (expected)
+
+- `tests/test_server_config_cli.py`: 16 tests (T025 module exists but T026 wiring and
+  the test's expected `ServerCommand` class API differ from actual implementation)
+- `tests/test_server_config_nginx_runtime.py`: 7 tests (runtime methods are stubs)
+- `tests/test_server_config_lifecycle.py`: 4 tests (lifecycle module absent)
+- `tests/test_server_config_isolation.py`: 3 tests (lifecycle module absent)
+
+### Remaining US1 tasks
+
+T026, T029, T030, T031, T032, T033, and T034 remain open.

@@ -772,3 +772,51 @@ Result: **Ran 302 tests in 23.308s: OK**. Zero regressions. Feature 048-051 boun
 
 - Executed `./sb server config --help`, `apply --help`, `list --help`, `show --help`, `revert --help`.
 - All argument signatures, options, mutually exclusive groups (`--file`/`--stdin`, `--content`/`--output`), and defaults strictly match `specs/053-server-config-fragments/contracts/cli.md` and documentation in `docs/sandbox-config-reference.md`.
+
+### T099: origin/latest integration and final candidate SHA
+
+- Cleanly merged latest changes from `origin/latest` with zero conflict markers.
+- Reconciled architecture and modularity boundary tests with the updated v2 hosting exports and metric counts on `origin/latest`.
+- Reran all Feature 053 focused test modules (280 tests passed in 11.485s) and quickstart suites (214 tests passed in 120.550s).
+- Preserved owner-controlled active pointer (`specs/051-immutable-activation-recovery`).
+- **Exact Final Candidate SHA**: `270221c5c9443877395f1db4713ed1a9347c7b4c`
+
+## Human Security Authorization Package (T100–T101)
+
+### T100: Content-free security review package
+
+The following security review package covers all consequential web-tier server configuration mechanisms:
+
+1. **Authority & Grammar Boundaries**:
+   - Closed whitelist for `wordpress-cache-v1` authority across Nginx and OpenLiteSpeed.
+   - Deny-by-default parsing refusing global listeners, SSL/TLS certificates, upstreams, resolvers, module loadings, administrative endpoints, and external processors.
+   - Bounded size: strictly enforces 1 to 262,144 bytes; empty and oversized inputs are rejected fail-closed.
+   - Safe naming: enforced pattern `^[a-z0-9-_]{1,64}$` preventing path traversal.
+
+2. **Isolated Exact-Image Validators**:
+   - Validations run inside exact-image isolated containers with `--network none` (loopback only) and `--read-only` root filesystems.
+   - Zero live instance volumes, databases, uploads, secrets, or host environment variables are mounted or accessible.
+   - Temporary write space is strictly limited to bounded tmpfs mounts (`size=16m`).
+
+3. **Argv & Subprocess Environment Safety**:
+   - Subprocesses are invoked with fixed argv sequences without shell interpolation.
+   - All test and runtime subprocess executions use `synthetic_environment` without implicit parent environment inheritance.
+
+4. **Durable Two-Phase Activation & Rollback**:
+   - State mutations follow a strict two-phase commit with file-descriptor-relative atomic operations and `flock` transaction locking.
+   - Activation, reload, or readiness failures trigger automatic single-attempt restoration to the exact prior generation (`rolled_back`).
+   - If restoration fails, the state enters an explicit `recovery_needed` latch, blocking subsequent mutations until inspected.
+   - Monotonic 180-second operation deadline and 60-second phase timeouts prevent stalled operations.
+
+5. **Instance & Lifecycle Isolation**:
+   - Fragments are bound to an immutable instance incarnation ID. Recreating an instance mints a new incarnation and disassociates prior fragments.
+   - Web-server switching (`sb switch`) is gated: refused if active fragments, unresolved transactions, or recovery-needed states exist.
+   - Instance deletion is gated: requires explicit server-config confirmation (`--confirm-server-config` / confirmation prompt) if active fragments exist.
+   - Reconciles committed generations upon restart and confirms readiness before reporting ready.
+
+6. **Content Output & Leak Prevention (US6)**:
+   - Routine inspection channels (`list`, default `show`, JSON payloads, error messages, phase logs) emit bounded metadata only.
+   - Raw fragment content is emitted only via explicit `--content` (direct to stdout buffer, incompatible with `--json`) or `--output` (owner-only 0600 file with safe parent checks).
+
+7. **Feature 048–051 Boundary Separation**:
+   - Zero production imports of hosting recovery/images packages or remote activation transports (`tests.test_architecture_boundaries`).

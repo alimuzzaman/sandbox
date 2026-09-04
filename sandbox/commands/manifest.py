@@ -19,6 +19,7 @@ BUILTIN_COMMAND_MODULES = (
     # Native owns the managed-runtime support/preflight surface, including the
     # secret-free Credential Vault capability/binding status report.
     "sandbox.commands.native",
+    "sandbox.commands.server",
     "sandbox.commands.net",
     "sandbox.commands.debug",
     "sandbox.commands.abilities",
@@ -66,7 +67,7 @@ LEGACY_BRIDGE_COMMANDS = {
     "global": "config_setup", "connect": "config_setup",
     "snapshot": "data", "restore": "data", "snapshots": "data", "reset": "data",
     "clean": "data", "wp": "wp", "seed": "wp", "visit": "wp",
-    "domains": "domains", "secure": "net", "server": "net", "pxdiff": "net",
+    "domains": "domains", "secure": "net", "pxdiff": "net",
     "native": "native",
     "vrdiff": "net", "specextract": "net", "specdiff": "net", "specgate": "net",
     "xdebug": "debug", "dump": "debug", "qm": "debug", "introspect": "debug",

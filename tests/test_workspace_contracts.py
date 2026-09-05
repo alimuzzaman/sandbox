@@ -368,3 +368,14 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertEqual(selected.remote_name, "beta")
         self.assertEqual(selected.sources["remote_selection"], "explicit")
         self.assertEqual(selected.sources["canonical_root"], str(Path("/tmp/project").resolve()))
+
+    def test_workspace_contracts_do_not_couple_to_host_memory_state(self):
+        from sandbox.config.facade import project_identity
+        descriptor = {
+            "root": "/tmp/example.site",
+            "kind": "compose",
+            "display_name": "Example.Site",
+        }
+        identity = project_identity(descriptor, label="qa", remote="myvps")
+        self.assertNotIn("swap", identity)
+        self.assertNotIn("host_memory", identity)

@@ -2889,7 +2889,7 @@ json.load(open(path))
         source = source.replace(
             'pathlib.Path("/run/lock/sandbox-docker-pool.lock")',
             f'pathlib.Path({str(root / "transaction.lock")!r})')
-        env = synthetic_environment()
+        env = dict(synthetic_environment())
         env["PATH"] = str(binary) + os.pathsep + env.get("PATH", "")
         result = subprocess.run(
             [sys.executable, "-c", source], text=True, capture_output=True,
@@ -4013,6 +4013,11 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
         self.assertEqual(result["remote"], "myvps")
         self.assertIn("timed out", result["error"])
 
+
+    def test_remote_module_does_not_conflate_host_memory_with_ssh_dispatch(self):
+        from sandbox.core import _remote
+        self.assertTrue(hasattr(_remote, "remote_host_memory_request"))
+        self.assertFalse(hasattr(_remote, "remote_host_memory_ssh"))
 
 if __name__ == "__main__":
     unittest.main()

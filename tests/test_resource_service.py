@@ -720,5 +720,13 @@ class TestCategoryOutcomeEnrichment(unittest.TestCase):
         )
 
 
+    def test_resource_service_remains_independent_of_host_memory_service(self):
+        from sandbox.resources.service import ResourceService
+        self.assertFalse(hasattr(ResourceService, "swap_plan"))
+        self.assertFalse(hasattr(ResourceService, "swap_apply"))
+        self.assertFalse(hasattr(ResourceService, "swap_disable"))
+        self.assertFalse(hasattr(ResourceService, "swap_status"))
+        self.assertFalse(hasattr(ResourceService, "host_memory_status"))
+
 if __name__ == "__main__":
     unittest.main()

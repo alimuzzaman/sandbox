@@ -1019,5 +1019,13 @@ class TestHostMemoryRemoteTransport(unittest.TestCase):
                 request.assert_not_called()
 
 
+    def test_transport_rejects_arbitrary_actions_and_unknown_fields(self):
+        from sandbox.core import _remote
+        with mock.patch.object(_remote, "_remote_control_request") as request:
+            for bad_action in ["host_memory_destroy", "host_memory_exec", "rm_rf"]:
+                with self.assertRaises(Exception):
+                    _remote.remote_host_memory_request({}, {"action": bad_action, "remote_name": "fixture", "budget_seconds": 15})
+        request.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

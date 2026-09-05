@@ -1082,6 +1082,18 @@ class TestStorageDoctorChecks(TestCase):
         self.assertFalse(rows[1]["ok"])
 
 
+    def test_storage_monitor_policy_remains_separate_from_host_memory(self):
+        with mock.patch.object(monitor, "load_config", return_value={
+            "resources": {
+                "monitor": {"warn_ratio": 0.20, "critical_ratio": 0.05},
+                "host_memory": {"swap_size_gib": 8, "unrelated": "marker"},
+            },
+        }):
+            policy = monitor.resolve_policy()
+        self.assertEqual(policy["warn_ratio"], 0.20)
+        self.assertNotIn("swap_size_gib", policy)
+        self.assertNotIn("host_memory", policy)
+
 if __name__ == "__main__":
     import unittest
 

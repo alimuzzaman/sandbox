@@ -328,24 +328,64 @@ safety or release readiness.
   5. `test_resource_interfaces.py` and `test_host_memory_remote.py`: Verified normative exit codes and status mappings.
   GREEN run: 183 tests ran in 203s, 0 failures, 0 errors. Local synthetic evidence only.
 
+- Documentation, regression proof, and external gates (T088-T094, T096, T100):
+  1. `docs/resource-monitoring.md` (T088): Documented status, controller-owned planning,
+     1..8 GiB size overrides, apply, history, safe disable, history preservation, ownership,
+     fixed paths, privacy, replay, rollback, normative outcomes/reason codes, and Feature 047
+     read-only composition.
+  2. `README.md` (T089): Updated with host swap/memory command overview, CLI examples,
+     size validation (1..8 GiB), preflight headroom rules, refusal semantics, and explicit
+     external acceptance caveats.
+  3. `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md` (T090): Updated
+     with CLI-first operator rules, confirmation constraints, replay rules, fixed wire actions
+     (`host_memory_*`), and strict prohibition of SSH fallback.
+  4. Interface and regression coverage (T091, T092): Added tests in `tests/test_remote_service_help.py`,
+     `tests/test_resource_interfaces.py`, `tests/test_resource_remote.py`, `tests/test_storage_monitor_policy.py`,
+     `tests/test_storage_monitor_schedule.py`, `tests/test_storage_monitor_runner.py`,
+     `tests/test_mcp_resource_tier.py`, `tests/test_resource_service.py`, `tests/test_workspace_contracts.py`,
+     and `tests/test_remote.py` proving that Spec 043 storage monitoring, schedule generation,
+     workspace identity, and remote dispatch stay decoupled and isolated from Feature 046 state.
+  5. Regression suite run (T093): 15 core Feature 046 and adjacent suites ran 298 tests in 3.010s
+     with 0 failures and 0 errors; `test_resource_remote` ran 41 tests in 302.839s with 0 failures;
+     `test_remote` ran 231 tests in 57.857s with 0 failures. Total: 570 tests passing across 17 suites.
+  6. Static hygiene and workspace checks (T094): Ran `git diff --check` (0 issues), verified 0 diff
+     on protected OCI and hosting paths against `origin/latest`, confirmed synchronized tasks and specs.
+
 ## Fixed authenticated synthetic-provider evidence
 
-Pending T096.
+T096 executed. Verified full refusal matrix via local synthetic fixtures across:
+- Unregistered target (`remote_required`, `unknown_remote`)
+- Platform / facility refusal (`unsupported_platform`, `facility_not_supported`)
+- Protocol and revision validation (`remote_service_ownership_unknown`, `remote_runtime_revision_mismatch`)
+- Size and capacity bounds (`invalid_size` on 0 or >8 GiB, `insufficient_capacity` on tight disks)
+- Ownership and path conflicts (`unmanaged_swap_present`, `unowned_path`, `path_conflict`)
+- Plan validation and expiry (`plan_not_found`, `plan_expired`, `observation_digest_mismatch`, `plan_incompatible`)
+- Confirmation gating (`confirmation_required`)
+- Active operation concurrency (`operation_in_progress`)
+- Rollback execution on failure (`rollback_complete`, `rollback_incomplete`)
+- Ambiguous transport outcomes (`response_invalid`, `collector_timeout`)
+All responses use the common JSON envelope and allowlisted keys. Local synthetic evidence only; not live-host proof.
 
 ## Human review
 
 T095 open. Consequential authentication, authorization, cryptographic identity, privileged
 fixed-path, ownership, rollback, privacy, dependency-trust, and production-path review has
-not been approved by a human.
+not been approved by a human. Local test passes must not be treated as this approval.
 
 ## Live Linux evidence
 
-T097-T098 open. No remote was accessed, updated, or mutated.
+T097-T098 open. No live remote host was mutated or updated. In accordance with the project
+spec and instructions, external live deployment and live-host mutation gates require explicit
+separate authorization and remain open.
 
 ## Reboot evidence
 
-T099 open. Reboot persistence is unverified.
+T099 open. Reboot persistence remains explicitly unverified until separately authorized.
 
 ## Reconciliation
 
-T100 remains open until performed evidence is reconciled. No release-readiness claim exists.
+T100 reconciled against `specs/046-host-swap-monitor/spec.md`. All local implementation tasks
+(Phases 1 through 9 and Phase 10 local documentation/regression/synthetic matrix) are complete,
+verified, and passing with zero diff on protected paths. External gates (T095 human review,
+T097-T098 live Linux deployment, T099 reboot persistence) remain open as specified. No premature
+release-readiness claim is made.

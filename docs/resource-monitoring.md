@@ -570,29 +570,127 @@ match `status --fast` and `status --refresh`; passing both is refused with
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.
 
-## Remote host swap and memory status
+## Remote host swap and memory operations
 
-Feature 046 adds a remote-only, authenticated-control surface. It never falls back to SSH:
+Feature 046 provides an authenticated, remote-only host memory and swap management surface.
+It communicates strictly through the authenticated control service (using fixed wire actions
+such as `host_memory_status`, `host_memory_plan`, `host_memory_apply`, `host_memory_disable`,
+and `host_memory_history`) and **never falls back to SSH**.
+
+### Inspect host swap and memory status
+
+`swap-status` provides read-only observation of host memory capacity, swap area configuration,
+ownership, freshness, and sustained-pressure history:
 
 ```sh
-./sb resources swap-status --remote NAME --json
+./sb resources swap-status --remote scaleway-sandbox --json
 ```
 
-The current MVP registers only `host_memory_status`. It validates the complete typed status
-schema, composes attested fixed host history into monitor freshness and sustained-pressure
-state, and reports only aggregate evidence. Planning, apply, disable, and history commands
-remain unimplemented and are not registered or reachable.
+Status output validates the complete typed schema, composes attested fixed host history into
+monitor freshness and pressure classifications, and reports only aggregate metrics.
 
-This completed boundary is observation only. It can report an owned area only after the
-fixed receipt and swap file pass owner, type, mode, link-count, and target checks, and the
-fixed persistence unit and swappiness policy also match their receipt-bound digests. Any
-missing, malformed, contradictory, or partial
-evidence stays non-authorizing. The later planning, mutation, rollback, disable, and public
-history stories remain unchecked in the Feature 046 task ledger; their design contracts do
-not describe currently available commands.
+### Controller-owned planning
 
-Process/container identity, PID, command/argument/environment data, raw output, credentials,
-and private paths are never collected into the result. Reboot persistence stays `unverified`
-until a separately authorized reboot acceptance.
-Feature 047 may consume only `HostMemoryStatusProjection`; it receives no planning,
-provider, repository, apply, rollback, or disable authority.
+Planning is completely read-only and controller-owned:
+
+```sh
+./sb resources swap-plan --remote scaleway-sandbox --json
+./sb resources swap-plan --remote scaleway-sandbox --size-gib 8 --json
+./sb resources swap-plan --remote scaleway-sandbox --operation disable --json
+```
+
+- **Valid size overrides**: Integer between 1 and 32 GiB (default: 4 GiB). Values outside `1..8`
+  are rejected immediately with `invalid_size`.
+- **Preflight and headroom enforcement**: The host must have strictly more available disk
+  space than the requested swap size (`available <= required` is refused with `headroom_insufficient`).
+- **Target binding**: The plan binds strictly to the probed `target_identity`, runtime revision,
+  and observation digest. Plans carry a short expiration window (15 minutes).
+
+### Protected apply and explicit confirmation
+
+Mutating actions are protected and require explicit confirmation:
+
+```sh
+./sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+```
+
+- Invoking apply without `--confirm` refuses with `confirmation_required` without touching the host.
+- Passing a plan targeting another host or expired plan refuses with `ownership_unknown` or `plan_expired`.
+- **Replay rules**: Replaying the same `plan_id` or `operation_id` performs a durable ledger lookup
+  and returns the recorded terminal outcome (`applied`, `already_current`, or `rollback_complete`)
+  without duplicating remote mutations.
+- **Concurrency & operation locks**: If another operation is active, or if a prior rollback failed
+  partially, apply refuses with `operation_in_progress` or `rollback_incomplete`.
+
+### Safe owned-only disable
+
+`swap-disable` disables active swap and timer infrastructure safely:
+
+```sh
+./sb resources swap-disable --remote scaleway-sandbox --confirm --json
+./sb resources swap-disable --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+```
+
+- **Reverse teardown order**: `monitor_timer` -> `monitor_service` -> `monitor_helper` ->
+  `swappiness_policy` -> `swap_unit` -> `swap_file`.
+- **Preserved history**: Disabling swap removes owned units, policies, and files, but
+  **strictly preserves** the aggregate telemetry history log (`/var/log/sandbox/host-memory.jsonl`).
+- Unowned or foreign swap files and artifacts are never modified or removed.
+
+### Bounded aggregate history
+
+Review historical telemetry without accessing raw host logs:
+
+```sh
+./sb resources swap-history --remote scaleway-sandbox --limit 144 --json
+./sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z --until 2026-09-05T00:00:00Z --json
+```
+
+- Query window supports ISO 8601 `--since` and `--until` parameters.
+- `--limit` accepts values from 1 to 1000 (default: 288, representing 24 hours of 5-minute samples).
+
+### Fixed paths and ownership proof
+
+All managed artifacts live at fixed, non-configurable host paths:
+- Swap file: `/swapfile` (mode `0600`, root:root, 1 link count, regular file)
+- Systemd swap unit: `/etc/systemd/system/sandbox-swap.service`
+- Swappiness configuration: `/etc/sysctl.d/99-sandbox-swappiness.conf` (swappiness=15)
+- Monitor timer: `/etc/systemd/system/sandbox-host-memory-monitor.timer`
+- Monitor service: `/etc/systemd/system/sandbox-host-memory-monitor.service`
+- Monitor helper script: `/usr/local/bin/sandbox-host-memory-monitor.sh`
+- Attestation log: `/var/log/sandbox/host-memory.jsonl`
+- Operation receipt: `/var/lib/sandbox/host-memory/receipt.json`
+
+An area is classified as `owned` only if all fixed files pass type, owner, permission, link-count,
+and cryptographic receipt digest checks. Any missing, foreign, or drifted element marks
+ownership as `unmanaged`, `partial`, or `drifted`, preventing automatic mutation.
+
+### Rollback and fault recovery
+
+If a fault occurs during apply:
+- The system automatically triggers an owned-only reverse rollback of artifacts created during the run.
+- If all prior state elements are verified restored, the operation returns `status="rollback_complete"`.
+- If any element cannot be verified restored, the operation returns `status="rollback_incomplete"`
+  and sets a persistent operation block, preventing any unrelated mutation until human review.
+- Aggregate telemetry history and unowned files are strictly excluded from rollback removal.
+
+### Normative outcomes and reason codes
+
+Responses adhere to standard normative envelope formats with consistent exit codes:
+- **Success / Idempotent**: `applied`, `already_current` (exit code 0).
+- **Refused**: `confirmation_required`, `plan_not_found`, `plan_expired`, `operation_in_progress`,
+  `rollback_incomplete`, `ownership_unknown`, `headroom_insufficient`, `invalid_size`, `remote_required` (exit code 1).
+- **Terminal Rollback**: `rollback_complete` (exit code 0), `rollback_incomplete` (exit code 1).
+
+### Privacy guarantees
+
+Telemetry records and observation envelopes adhere to strict privacy rules:
+- Only aggregate metrics are gathered: total, used, available memory and swap bytes, sample counts, and timestamps.
+- **Strictly prohibited**: Process/container identity, PIDs, command lines, arguments, environment
+  variables, credentials, and private paths are never collected or transmitted.
+
+### Feature 047 read-only composition
+
+Feature 047 (host observations and autonomous decisions) may consume only `HostMemoryStatusProjection`.
+It receives read-only status and telemetry history projections; it is granted **no planning, provider,
+repository, apply, rollback, or disable authority**.

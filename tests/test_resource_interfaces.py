@@ -1110,5 +1110,45 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertFalse(refused["ok"])
         self.assertEqual(refused["error"]["code"], "confirmation_required")
 
+
+    def test_swap_commands_json_schema_error_classes_and_mode_prohibitions(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        # 1. Non-swap commands refuse --size-gib as invalid_mode
+        out = StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+            resources.cmd_resources({}, self._args(["status", "--size-gib", "4", "--json"]))
+        self.assertEqual(raised.exception.code, 1)
+        res = json.loads(out.getvalue())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"]["code"], "invalid_mode")
+
+        # 2. Swap commands refuse --tier or --scope as invalid_mode
+        for action in ["swap-plan", "swap-apply", "swap-history", "swap-disable"]:
+            for flag_args in [["--tier", "safe"], ["--scope", "cache"]]:
+                cmd_fn = getattr(resources, f"cmd_{action.replace('-', '_')}")
+                ans = cmd_fn(self._args([action, "--remote", "scaleway"] + flag_args))
+                self.assertFalse(ans["ok"], f"{action} should reject {flag_args}")
+                self.assertEqual(ans["error"]["code"], "invalid_mode")
+
+        # 3. Standard envelope structure across all swap actions
+        for action, cmd_fn, extra in [
+            ("swap-plan", resources.cmd_swap_plan, ["--size-gib", "4"]),
+            ("swap-apply", resources.cmd_swap_apply, ["--plan-id", "a" * 64]),
+            ("swap-history", resources.cmd_swap_history, ["--limit", "100"]),
+            ("swap-disable", resources.cmd_swap_disable, []),
+        ]:
+            ans = cmd_fn(self._args([action] + extra))  # missing --remote
+            self.assertEqual(ans["schema_version"], 1)
+            self.assertIn("ok", ans)
+            self.assertEqual(ans["action"], action)
+            self.assertIn("status", ans)
+            self.assertIn("target", ans)
+            self.assertIn("data", ans)
+            self.assertIn("error", ans)
+            self.assertEqual(ans["error"]["code"], "remote_required")
+
 if __name__ == "__main__":
     unittest.main()

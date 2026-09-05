@@ -1123,6 +1123,14 @@ def _swap_plan_cli(args):
                       "message": "--remote is required for host-memory operations",
                       "retryable": False},
         }
+    if any(getattr(args, name, None) for name in
+           ("scope", "tier", "node_store_family", "detach", "request_id", "confirm", "plan_id")):
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused",
+                "target": {"kind": "remote", "name": remote}, "data": {},
+                "error": {"code": "invalid_mode",
+                          "message": "option is not valid for this host-memory action",
+                          "retryable": False}}
     size = getattr(args, "size_gib", None)
     if size is None:
         size = 4
@@ -1214,6 +1222,14 @@ def _swap_disable_cli(args) -> dict:
                       "message": "--remote is required for host-memory operations",
                       "retryable": False},
         }
+    if (getattr(args, "tier", None) is not None
+            or any(getattr(args, name, None) for name in
+                   ("scope", "tier", "node_store_family", "detach", "request_id", "size_gib"))):
+        return {"schema_version": 1, "ok": False, "action": action,
+                "status": "refused", "target": target, "data": {},
+                "error": {"code": "invalid_mode",
+                          "message": "option is not valid for this host-memory action",
+                          "retryable": False}}
     if not bool(getattr(args, "confirm", False)):
         return {"schema_version": 1, "ok": False, "action": action,
                 "status": "refused", "target": target, "data": {},

@@ -464,5 +464,12 @@ class TestStorageMonitorSchedule(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["status"], "deactivated")
 
 
+    def test_schedule_plan_remains_isolated_from_host_swap_timer(self):
+        plan = build_schedule_plan(POLICY, TARGET, "systemd")
+        for unit_name in plan["units"]:
+            self.assertIn("sandbox-storage-monitor", unit_name)
+            self.assertNotIn("sandbox-host-memory-monitor", unit_name)
+            self.assertNotIn("swap", unit_name)
+
 if __name__ == "__main__":
     unittest.main()

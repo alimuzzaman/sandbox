@@ -420,6 +420,29 @@ unused — hosted sites are untouchable, a partial delete is reported as a
 failure rather than success, and the default retention window is 7 days.
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
+### Host swap and memory management
+
+Feature 046 provides remote-only, authenticated host memory and swap operations:
+
+```sh
+./sb resources swap-status --remote scaleway-sandbox --json
+./sb resources swap-plan --remote scaleway-sandbox --size-gib 4 --json
+./sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+./sb resources swap-disable --remote scaleway-sandbox --confirm --json
+./sb resources swap-history --remote scaleway-sandbox --limit 144 --json
+```
+
+- **Validation & Refusal**: Planning validates size strictly within `1..8` GiB (`invalid_size`)
+  and enforces disk headroom (`headroom_insufficient`).
+- **Protected Apply**: Requires `--confirm` (`confirmation_required`) and binds to target identity,
+  runtime revision, and observation digest.
+- **Replay & Rollback**: Same-identity replays resolve via durable ledger without duplicate mutations;
+  mutation failures trigger owned reverse rollback (`rollback_complete` or `rollback_incomplete`).
+- **Safe Disable**: Removes owned units/files in reverse order while strictly preserving aggregate
+  telemetry history (`/var/log/sandbox/host-memory.jsonl`).
+- **Control Plane**: Uses fixed wire actions (`host_memory_*`) through the authenticated control service;
+  **never falls back to SSH**.
+
 ### Durable remote-first jobs
 
 When `sandbox.config.json` configures a provisioned `runtime.default: "remote"`,
@@ -963,12 +986,12 @@ and can usually diagnose itself.
 
 Re-run `./sb setup` after a global config change — it's idempotent.
 
-The current Feature 046 MVP exposes only read-only `resources swap-status --remote NAME`.
-It uses the authenticated `host_memory_status` action and never falls back to SSH. Planning,
-apply, disable, and history commands remain unimplemented and unavailable.
-See [resource monitoring](docs/resource-monitoring.md#remote-host-swap-and-memory-history).
-Local or synthetic tests do not prove live Linux mutation, reboot persistence, or release
-readiness.
+Feature 046 host memory and swap monitoring, planning, apply, disable, history, and
+safe rollback are implemented and verified against local and synthetic suites.
+It uses authenticated control actions (`host_memory_*`) and never falls back to SSH.
+See [resource monitoring](docs/resource-monitoring.md#remote-host-swap-and-memory-operations).
+External acceptance gates (live Linux host mutations, reboot persistence, and production release)
+remain explicit operator-gated steps; local and synthetic-provider passes do not claim live proof.
 ## Hermes Agent
 
 Remote Hermes control is documented in [docs/hermes-agent.md](docs/hermes-agent.md).

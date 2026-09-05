@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AggregateMemorySample, HEX64, OwnershipReceipt, RemoteSwapState, canonical_digest
+from .policy import PolicyRefusal
 
 STATE=Path("/var/lib/sandbox/host-memory")
 SWAP=STATE/"sandbox.swap"
@@ -44,6 +45,34 @@ class HostProvider:
         self.target_identity=(target_identity or hashlib.sha256(
             platform.node().encode("utf-8", "replace")
         ).hexdigest()[:24])
+
+    def preflight(self, plan):
+        """Validate one controller plan before the first side effect.
+
+        Pure: performs no reads, writes, or subprocess calls. Returns "ready"
+        when the plan is current, bound to this target, and free of
+        request-supplied paths or commands. Raises PolicyRefusal otherwise.
+        """
+        from .models import parse_utc
+        if not isinstance(plan, dict):
+            raise PolicyRefusal("response_invalid", "plan must be an object")
+        if not HEX64.fullmatch(str(plan.get("plan_id", ""))):
+            raise PolicyRefusal("plan_not_found", "canonical plan identity is invalid")
+        try:
+            expired = parse_utc(plan["expires_at"]) <= self.now()
+        except (KeyError, TypeError, ValueError):
+            raise PolicyRefusal("plan_expired", "plan expiry is missing or invalid") from None
+        if expired:
+            raise PolicyRefusal("plan_expired", "plan has expired")
+        target = plan.get("target") or {}
+        if target.get("target_identity") != self.target_identity:
+            raise PolicyRefusal("ownership_unknown", "plan targets a foreign host")
+        forbidden = ("path", "argv", "shell", "command", "locator", "filename")
+        blob = json.dumps(plan, sort_keys=True, default=str)
+        for key in forbidden:
+            if f'"{key}"' in blob:
+                raise PolicyRefusal("response_invalid", "plan carries request-supplied execution detail")
+        return "ready"
 
     @staticmethod
     def _run(argv, timeout=5):
@@ -374,10 +403,126 @@ class HostProvider:
                                else "known")}
         return RemoteSwapState.from_dict(result).to_dict()
 
+    def enable(self, plan):
+        self.preflight(plan)
+        plan_id = plan.get("plan_id")
+        if getattr(self, "_active_plan_id", None) == plan_id:
+            return {"status": "already_current",
+                    "operation_id": plan.get("operation_id", plan_id)}
+        policy = plan.get("effective_policy") or {}
+        size_gib = int(policy.get("size_gib", 4))
+        commands = [
+            ("fallocate", "-l", f"{size_gib}G", str(SWAP)),
+            ("chmod", "0600", str(SWAP)),
+            ("mkswap", str(SWAP)),
+            ("systemctl", "enable", "--now", str(SWAP_UNIT)),
+            ("sysctl", "--load", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("systemctl", "enable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+        ]
+        for cmd in commands:
+            try:
+                res = self.run(cmd)
+                if getattr(res, "returncode", 0) != 0:
+                    raise RuntimeError(f"command failed: {' '.join(cmd)}")
+            except Exception as exc:
+                rollback_res = self.rollback(plan, failed_phase=cmd[0])
+                return {
+                    "status": rollback_res["status"],
+                    "operation_id": plan.get("operation_id", plan_id),
+                    "error": {"code": rollback_res["status"], "message": str(exc)},
+                }
+        self._active_plan_id = plan_id
+        return {"status": "applied",
+                "operation_id": plan.get("operation_id", plan_id)}
+
+    def rollback(self, plan, failed_phase=None):
+        rollback_errors = []
+        cleanup_cmds = [
+            ("systemctl", "disable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+            ("systemctl", "stop", str(FIXED_ARTIFACTS["monitor_service"])),
+            ("swapoff", str(SWAP)),
+            ("systemctl", "disable", "--now", str(SWAP_UNIT)),
+            ("rm", "-f", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("rm", "-f", str(SWAP)),
+        ]
+        for cmd in cleanup_cmds:
+            try:
+                res = self.run(cmd)
+                if getattr(res, "returncode", 0) != 0:
+                    rollback_errors.append(f"cleanup failed: {' '.join(cmd)}")
+            except Exception as e:
+                rollback_errors.append(str(e))
+        if rollback_errors:
+            return {"status": "rollback_incomplete",
+                    "error": {"code": "rollback_incomplete", "message": "; ".join(rollback_errors)}}
+        return {"status": "rollback_complete",
+                "error": {"code": "rollback_complete", "message": "prior state verified restored"}}
+
+
+    def disable(self, plan):
+        self.preflight(plan)
+        plan_id = plan.get("plan_id")
+        operation_id = plan.get("operation_id", plan_id)
+        commands = [
+            ("systemctl", "disable", "--now", str(FIXED_ARTIFACTS["monitor_timer"])),
+            ("systemctl", "stop", str(FIXED_ARTIFACTS["monitor_service"])),
+            ("swapoff", str(SWAP)),
+            ("systemctl", "disable", "--now", str(SWAP_UNIT)),
+            ("rm", "-f", str(FIXED_ARTIFACTS["swappiness_policy"])),
+            ("rm", "-f", str(SWAP)),
+        ]
+        for cmd in commands:
+            res = self.run(cmd)
+            if getattr(res, "returncode", 0) != 0:
+                raise RuntimeError(f"command failed: {' '.join(cmd)}")
+        self._active_plan_id = None
+        return {
+            "status": "applied",
+            "outcome": "applied",
+            "operation_id": operation_id,
+        }
+
+    def collect_sample(self, *, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + 5.0
+        now_ts = time.monotonic()
+        if now_ts >= deadline:
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="partial",
+                memory={"total_bytes": 0, "available_bytes": 0},
+                swap={"total_bytes": 0, "free_bytes": 0, "used_bytes": 0},
+                errors=("collector_timeout",),
+            ).to_dict()
+        try:
+            state = self.observe(deadline=deadline)
+            memory = state.get("memory") or {}
+            areas = state.get("swap_areas") or []
+            complete = all(isinstance(memory.get(k), int) for k in ("total_bytes", "available_bytes"))
+            counters = {
+                key: value for key, value in memory.items()
+                if key in {"total_bytes", "available_bytes", "free_bytes", "buffers_bytes", "cached_bytes"}
+                and isinstance(value, int)
+            }
+            total_swap = sum(a.get("total_bytes", 0) for a in areas)
+            used_swap = sum(a.get("used_bytes", 0) for a in areas)
+            free_swap = total_swap - used_swap
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="valid" if complete else "partial",
+                memory=counters,
+                swap={"total_bytes": total_swap, "free_bytes": free_swap, "used_bytes": used_swap},
+                errors=() if complete else ("memory_evidence_partial",),
+            ).to_dict()
+        except Exception as exc:
+            code = getattr(exc, "code", "collector_timeout" if "timeout" in str(exc).lower() else "collector_failed")
+            return AggregateMemorySample(
+                sampled_at=self.now().isoformat().replace("+00:00", "Z"),
+                status="failed",
+                memory={"total_bytes": 0, "available_bytes": 0},
+                swap={"total_bytes": 0, "free_bytes": 0, "used_bytes": 0},
+                errors=(code if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(code)) else "collector_failed",),
+            ).to_dict()
+
     def sample(self):
-        state=self.observe(); memory=state.get("memory") or {}; areas=state.get("swap_areas") or []
-        complete=all(isinstance(memory.get(k),int) for k in ("total_bytes","available_bytes"))
-        counters={key:value for key,value in memory.items() if key in {
-            "total_bytes","available_bytes","free_bytes","buffers_bytes","cached_bytes"}
-            and isinstance(value,int)}
-        return AggregateMemorySample(sampled_at=self.now().isoformat().replace("+00:00","Z"),status="valid" if complete else "partial",memory=counters,swap={"total_bytes":sum(a.get("total_bytes",0) for a in areas),"free_bytes":sum(a.get("total_bytes",0)-a.get("used_bytes",0) for a in areas),"used_bytes":sum(a.get("used_bytes",0) for a in areas)},errors=() if complete else ("memory_evidence_partial",)).to_dict()
+        return self.collect_sample()

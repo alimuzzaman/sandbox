@@ -5,14 +5,14 @@ import os
 from unittest import mock
 from sandbox.resources.host_memory.policy import build_plan
 from sandbox.resources.host_memory.repository import HostMemoryRepository, RepositoryError
-from tests.host_memory_fixtures import NOW, eligible_state, ownership_receipt, sample
+from tests.host_memory_fixtures import NOW, eligible_state, ownership_receipt, sample, service_evidence
 
 
 class HostMemoryRepositoryTest(unittest.TestCase):
     def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.repo=HostMemoryRepository(Path(self.tmp.name))
     def tearDown(self): self.tmp.cleanup()
     def test_plan_is_owner_only_atomic_and_immutable(self):
-        plan=build_plan("enable",{},eligible_state(),now=NOW); self.repo.save_plan(plan)
+        plan=build_plan("enable",service_evidence(),eligible_state(),now=NOW); self.repo.save_plan(plan)
         self.assertEqual(self.repo.load_plan(plan["plan_id"]),plan)
         self.assertEqual((self.repo.plans/f"{plan['plan_id']}.json").stat().st_mode & 0o777,0o600)
     def test_corrupt_plan_fails_closed(self):
@@ -167,3 +167,89 @@ class HostMemoryRepositoryTest(unittest.TestCase):
             with self.assertRaises(RepositoryError): repo.history_window(limit=3)
         after=len(os.listdir("/dev/fd"))
         self.assertLessEqual(after,before+1)
+
+    def test_disable_phase_journaling_and_disabled_receipt(self):
+        op = {
+            "schema_version": 1,
+            "operation_id": "b" * 64,
+            "plan_id": "c" * 64,
+            "operation": "disable",
+            "phase": "disabled_receipt",
+            "phase_evidence": ["monitor_stopped", "swapoff", "cleaned"],
+        }
+        self.repo.save_operation(op)
+        self.assertEqual(self.repo.load_operation()["phase"], "disabled_receipt")
+
+        receipt = self.repo.record_disable_receipt(
+            target_identity="host",
+            operation_id="b" * 64,
+            prior_receipt=ownership_receipt(),
+        )
+        self.assertEqual(receipt["lifecycle_state"], "disabled")
+        loaded = self.repo.load_receipt()
+        self.assertEqual(loaded["lifecycle_state"], "disabled")
+
+    def test_journal_recovery_phases_duplicate_and_conflict_reconciliation(self):
+        op_id = "1" * 64
+        plan_id = "2" * 64
+        phases = ("accepted", "preflight", "staged", "persistent", "active", "monitoring", "verifying", "rolling_back", "terminal")
+        for phase in phases:
+            op = {
+                "schema_version": 1,
+                "operation_id": op_id,
+                "plan_id": plan_id,
+                "phase": phase,
+                "phase_evidence": [{"phase": phase, "at": "2026-08-30T12:00:00Z"}],
+                "prior_state_digest": "3" * 64,
+                "last_observation_digest": "4" * 64,
+                "mutation_started": phase not in {"accepted", "preflight"},
+                "rollback": None,
+                "outcome": "applied" if phase == "terminal" else None,
+                "unrelated_mutation_blocked": phase != "terminal",
+            }
+            self.repo.save_operation(op)
+            loaded = self.repo.load_operation()
+            self.assertEqual(loaded["phase"], phase)
+
+        # Active operation block is None once terminal with applied outcome
+        self.assertIsNone(self.repo.active_operation_block())
+
+        # Terminal replay returns the completed operation
+        reconciled = self.repo.reconcile_operation(op_id)
+        self.assertIsNotNone(reconciled)
+        self.assertEqual(reconciled["outcome"], "applied")
+
+        # In-progress operation blocks new operation ID
+        in_progress_op = {
+            "schema_version": 1,
+            "operation_id": op_id,
+            "plan_id": plan_id,
+            "phase": "staged",
+            "phase_evidence": [],
+            "prior_state_digest": "3" * 64,
+            "last_observation_digest": "4" * 64,
+            "mutation_started": True,
+            "rollback": None,
+            "outcome": None,
+            "unrelated_mutation_blocked": True,
+        }
+        self.repo.save_operation(in_progress_op)
+        block = self.repo.active_operation_block()
+        self.assertEqual(block, {"operation_id": op_id, "reason": "operation_in_progress"})
+
+        # Conflicting operation ID while in-progress raises conflict
+        other_op = {
+            "schema_version": 1,
+            "operation_id": "9" * 64,
+            "plan_id": plan_id,
+            "phase": "accepted",
+            "phase_evidence": [],
+            "prior_state_digest": "3" * 64,
+            "last_observation_digest": "4" * 64,
+            "mutation_started": False,
+            "rollback": None,
+            "outcome": None,
+            "unrelated_mutation_blocked": True,
+        }
+        with self.assertRaises(RepositoryError):
+            self.repo.save_operation(other_op)

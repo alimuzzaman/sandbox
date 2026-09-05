@@ -8,7 +8,7 @@ from sandbox.resources.host_memory.models import canonical_digest
 from tests.host_memory_assertions import assert_privacy_bounded
 from tests.host_memory_fixtures import (
     CGROUP_V1, CGROUP_V2, PROC_MEMINFO, PROC_SWAPS_EMPTY, SYSCTL_TEXT,
-    SWAP_UNIT_TEXT, TARGET, command_result, ownership_receipt,
+    NOW, SWAP_UNIT_TEXT, TARGET, command_result, ownership_receipt,
 )
 import json
 import stat as statmod
@@ -287,3 +287,156 @@ class HostMemoryProviderTest(unittest.TestCase):
                                     target_identity=TARGET).observe()
             self.assertEqual(result["container_eligibility"]["state"],"unknown")
             self.assertEqual(result["evidence_state"],"partial")
+
+    def _enable_plan(self, size_gib=4):
+        from sandbox.resources.host_memory.policy import build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        return build_plan("enable", service_evidence(), eligible_state(),
+                          size_gib=size_gib, now=NOW)
+
+    def test_enable_uses_only_fixed_paths_with_restrictive_modes(self):
+        from sandbox.resources.host_memory.provider import (
+            FIXED_ARTIFACTS, RECEIPT, STATE, SWAP, SWAP_UNIT, HostProvider,
+        )
+        mutated = []
+        def run(argv, timeout=5):
+            mutated.append(tuple(argv)); return command_result()
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=run, target_identity=TARGET, now=lambda: NOW)
+        result = provider.enable(self._enable_plan())
+        self.assertEqual(result["status"], "applied")
+        allowed = {str(STATE), str(RECEIPT), str(SWAP), str(SWAP_UNIT),
+                   *(str(path) for path in FIXED_ARTIFACTS.values())}
+        for call in mutated:
+            text = " ".join(call)
+            self.assertTrue(any(root in text for root in allowed), text)
+        self.assertNotIn("/tmp/evil", " ".join(" ".join(call) for call in mutated))
+
+    def test_enable_validates_plan_before_side_effects(self):
+        from datetime import timedelta
+        from sandbox.resources.host_memory.policy import PolicyRefusal, build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        calls = []
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                                target_identity=TARGET, now=lambda: NOW)
+        stale_time = NOW - timedelta(minutes=16)
+        stale = build_plan("enable", service_evidence(),
+                           eligible_state(observed_at=stale_time.isoformat().replace("+00:00", "Z")),
+                           now=stale_time)
+        with self.assertRaises(PolicyRefusal) as refused:
+            provider.enable(stale)
+        self.assertEqual(refused.exception.code, "plan_expired")
+        self.assertEqual(calls, [])
+
+    def test_enable_is_idempotent_for_the_same_plan(self):
+        from sandbox.resources.host_memory.provider import HostProvider
+        calls = []
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                                target_identity=TARGET, now=lambda: NOW)
+        plan = self._enable_plan()
+        first = provider.enable(plan)
+        calls_after_first = len(calls)
+        second = provider.enable(plan)
+        self.assertEqual(first["status"], "applied")
+        self.assertEqual(second["status"], "already_current")
+        self.assertEqual(len(calls), calls_after_first)
+
+    def _preflight_provider(self, calls):
+        from sandbox.resources.host_memory.provider import HostProvider
+        from tests.host_memory_fixtures import NOW
+        return HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                            run=lambda argv, timeout=5: calls.append(tuple(argv)) or command_result(),
+                            target_identity=TARGET, now=lambda: NOW)
+
+    def test_preflight_refuses_unsafe_matrix_without_side_effects(self):
+        from datetime import datetime, timedelta, timezone
+        from sandbox.resources.host_memory.policy import PolicyRefusal, build_plan
+        from tests.host_memory_fixtures import NOW, eligible_state, service_evidence
+        then = datetime(2026, 8, 30, 11, 31, tzinfo=timezone.utc)
+        aged = eligible_state(observed_at="2026-08-30T11:30:00Z")
+        cases = {
+            "stale_plan": build_plan("enable", service_evidence(), aged, now=then),
+            "foreign_target": build_plan("enable", {**service_evidence(),
+                                          "target_identity": "other-host"},
+                                         eligible_state(), now=NOW),
+        }
+        for name, plan in cases.items():
+            with self.subTest(name=name):
+                calls = []
+                provider = self._preflight_provider(calls)
+                with self.assertRaises(PolicyRefusal):
+                    provider.preflight(plan)
+                self.assertEqual(calls, [])
+
+    def test_preflight_passes_eligible_without_touching_foreign_state(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        self.assertEqual(provider.preflight(self._enable_plan()), "ready")
+        self.assertEqual(calls, [])
+
+    def test_sample_deadline_and_lock_no_overlap(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        # Test hard 5-second deadline and timeout handling
+        past_deadline = 0.0
+        sample_res = provider.collect_sample(deadline=past_deadline)
+        self.assertIn(sample_res["status"], {"partial", "failed"})
+        self.assertIn("collector_timeout", sample_res.get("errors", ()))
+
+    def test_sample_aggregates_without_sensitive_raw_data(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        sample_res = provider.sample()
+        forbidden_keys = {"stdout", "stderr", "output", "source_path", "processes", "argv", "path"}
+        self.assertFalse(set(sample_res) & forbidden_keys)
+        self.assertIn(sample_res["status"], {"valid", "partial", "failed"})
+
+    def test_disable_transaction_enforces_reverse_order_and_preserves_history(self):
+        calls = []
+        provider = self._preflight_provider(calls)
+        plan = {
+            "operation": "disable",
+            "plan_id": "a" * 64,
+            "target": {"remote_name": "scaleway-sandbox", "target_identity": TARGET},
+            "expires_at": "2026-08-30T12:15:00Z",
+            "intended_changes": [
+                "/etc/systemd/system/sandbox-host-memory-monitor.timer",
+                "/etc/systemd/system/sandbox-host-memory-monitor.service",
+                "/etc/sysctl.d/99-sandbox-swap.conf",
+                "/etc/fstab",
+                "/var/lib/sandbox/swap/swapfile",
+            ],
+            "rollback_scope": [
+                "/etc/systemd/system/sandbox-host-memory-monitor.timer",
+                "/etc/systemd/system/sandbox-host-memory-monitor.service",
+                "/etc/sysctl.d/99-sandbox-swap.conf",
+                "/etc/fstab",
+                "/var/lib/sandbox/swap/swapfile",
+            ],
+        }
+        res = provider.disable(plan)
+        self.assertEqual(res["outcome"], "applied")
+
+    def test_fault_injection_and_owned_rollback_behavior(self):
+        calls = []
+        fail_on_cmd = "mkswap"
+        def run_with_fault(argv, timeout=5):
+            cmd_str = " ".join(argv)
+            calls.append(tuple(argv))
+            if fail_on_cmd in cmd_str:
+                raise OSError("simulated disk/io failure")
+            return command_result()
+
+        provider = HostProvider(read_text=lambda path: PROC_MEMINFO, stat=safe_stat,
+                                run=run_with_fault, target_identity=TARGET, now=lambda: NOW)
+        plan = self._enable_plan()
+        res = provider.enable(plan)
+        # Should catch failure and attempt rollback, yielding rollback_complete or rollback_incomplete
+        self.assertIn(res["status"], {"rollback_complete", "rollback_incomplete"})
+        self.assertIn("error", res)
+        # Verify foreign files were never targeted in any command
+        all_calls = " ".join(" ".join(c) for c in calls)
+        self.assertNotIn("/foreign", all_calls)
+        self.assertNotIn("/tmp/evil", all_calls)

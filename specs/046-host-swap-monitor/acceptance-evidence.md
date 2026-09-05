@@ -112,25 +112,280 @@ safety or release readiness.
   The later strict foundational and User Story 1 tests were executed against that scaffold
   before their corresponding bounded implementation changes, producing the RED results
   above. No RED claim is made for later user stories.
+- User Story 2 planning RED (T033) was captured against the pre-planning scaffold with
+  `python3 -m unittest tests.test_host_memory_policy tests.test_host_memory_provider
+  tests.test_host_memory_service tests.test_host_memory_remote
+  tests.test_resource_remote.TestHostMemoryRemoteTransport
+  tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`: 60 tests ran with
+  nine failures and thirteen errors in 0.119 seconds. Every failing assertion belongs
+  to the fifteen new T028-T032 tests; the new requested/effective-policy, inventory,
+  confirmation, expiry, and plan-expiry/drift tests already pass against the existing
+  `build_plan`/`plan_current` scaffold. Missing behavior was specific to fail-closed
+  invalid-size handling in `build_plan` (raw `ValueError` escapes instead of
+  `PolicyRefusal`), already-enabled convergence, controller-owned service plan
+  orchestration, provider enable transactions, strict apply canonical-plan schemas
+  and typed results, pre-control apply refusal, and `swap-plan`/`swap-apply` CLI
+  parsing and confirmation. No pre-existing test regressed. Local synthetic evidence
+  only.
+- User Story 2 planning GREEN (T038) after the read-only planning implementation
+  (T034 policy, T036 service, T037 CLI; T035 repository deferred): `python3
+  -m unittest tests.test_host_memory_policy tests.test_host_memory_repository
+  tests.test_host_memory_service tests.test_resource_interfaces` ran 71 tests and
+  passed in 0.336 seconds. The read-only planning path is GREEN while protected
+  apply remains unavailable (`swap-apply` refuses with `confirmation_required`
+  without `--confirm` and `apply_unavailable` with it, pending the US3 safety
+  gate). T035 repository work is deferred because the parallel server-config
+  branch already modifies `sandbox/resources/host_memory/repository.py`; merging
+  that file concurrently would conflict. Local synthetic evidence only.
+- User Story 3 safety-gate RED (T043) was captured against the pre-gate scaffold
+  with `python3 -m unittest tests.test_host_memory_policy
+  tests.test_host_memory_provider tests.test_host_memory_remote
+  tests.test_resource_remote.TestHostMemoryRemoteTransport
+  tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`: 60 tests ran
+  with seventeen failures and six errors in 0.128 seconds. Every failing assertion
+  belongs to the new T039-T041 tests plus the still-open T029/T031 planning tests
+  (provider enable transactions and strict apply contracts land in Phase 6 and the
+  US3 protocol gate). Missing behavior was specific to unregistered/unsafe target
+  refusal, stale-observation refusal, ambiguous-ownership refusal, provider
+  preflight without side effects, and pre-control apply refusal. T042 interface
+  composition tests are deferred: the parallel server-config branch already
+  modifies `tests/test_host_memory_interfaces.py`. Local synthetic evidence only.
+- User Story 3 fail-closed GREEN (T047, complete) after the refusal and preflight
+  implementation and reconciliation with `latest`: following the clean merge of
+  `latest` (which landed Features 052 and 053), all previously deferred collision
+  points in `tests/test_host_memory_interfaces.py`, `mcp/wp-server/server.py`,
+  and `sandbox/core/_remote.py` are resolved. The focused User Story 3 test suite
+  (`tests.test_host_memory_policy`, `tests.test_host_memory_remote`,
+  `tests.test_host_memory_interfaces`,
+  `tests.test_resource_remote.TestHostMemoryRemoteTransport`, and
+  `tests.test_resource_interfaces.TestHostMemoryResourceInterfaces`) ran 46 tests
+  and passed in 0.111 seconds. The US3 refusal matrix, expiry/drift/plan-current,
+  preflight-before-side-effects, exact wire allowlist with no remote plan action,
+  and bounded apply-result contracts are fully GREEN. Protected apply remains
+  unregistered and fail-closed; no mutation is reachable. Local synthetic evidence
+  only.
+
+- User Story 2 protected apply GREEN (T053): with the fail-closed safety gate
+  (Phase 5) fully green, the protected apply implementation is completed:
+  1. `HostProvider.enable(plan)` (T048) executes the fixed-path swap creation
+     and monitor enable transaction behind the completed preflight gate with
+     restrictive permissions (0600 on swap file, 0644 on units/configs),
+     policy-selected size, command validation restricted exclusively to fixed
+     artifact paths, and idempotent convergence (`already_current` without side
+     effects for identical plans).
+  2. `HostMemoryService.apply` (T049) orchestrates authorization, exact confirmation
+     requirement (`confirmation_required`), current plan and repository lookup
+     (`plan_not_found`), plan expiry checks against `expires_at` (`plan_expired`),
+     canonical plan envelope translation, replay-safe operation identity generation,
+     and mapping of normative outcomes (`applied`, `already_current`, `refused`,
+     `failed`).
+  3. `mcp/wp-server/server.py` (T050) registers `host_memory_apply` alongside
+     `host_memory_status`, rejecting any uncanonical or foreign-target payloads,
+     and dispatching through the provider's enable transaction.
+  4. `sandbox/core/_remote.py` (T051) validates request payloads, rejecting
+     arbitrary paths or shell overrides before control invocation, and routes
+     strictly over authenticated control with no direct SSH fallback.
+  5. `sandbox/commands/resources.py` (T052) provides `resources swap-apply`
+     CLI wiring with confirmation enforcement, `--plan-id` lookup, invalid-option
+     refusal (`invalid_mode`), and text/JSON envelope rendering.
+  6. Test verification (T053): the complete User Story 2 test suite
+     (`tests.test_host_memory_models`, `tests.test_host_memory_policy`,
+     `tests.test_host_memory_repository`, `tests.test_host_memory_provider`,
+     `tests.test_host_memory_service`, `tests.test_host_memory_remote`,
+     `tests.test_host_memory_interfaces`, and `tests.test_resource_interfaces`)
+     ran 126 tests and passed in 0.391s. Adjacent regression suites
+     (`test_storage_monitor_policy`, `test_storage_monitor_schedule`,
+     `test_storage_monitor_runner`, `test_mcp_resource_tier`,
+     `test_resource_service`, `test_workspace_contracts`) ran 146 tests and passed
+     in 0.239s. CLI end-to-end invocations verify refusal on missing confirmation,
+     missing remote, missing plan ID, and invalid options. Local synthetic
+     evidence only.
+
+- User Story 4 aggregate history RED (T059): failing tests added for bounded
+  history samples, 5-second sample collector deadline, lock non-overlap, service
+  history orchestration, remote history response schema validation, and CLI
+  swap-history dispatch:
+  1. `tests.test_host_memory_models`: `test_history_window_enforces_ordering_and_bounds`
+     failed with `AssertionError: ValueError not raised` when testing chronological
+     descending sample ordering enforcement and sample limit checks.
+  2. `tests.test_host_memory_provider`: `test_sample_deadline_and_lock_no_overlap`
+     failed with `AttributeError: 'HostProvider' object has no attribute 'collect_sample'`
+     before lock/deadline collector implementation.
+  3. `tests.test_host_memory_service`: `test_history_retrieves_bounded_window_and_enforces_limits`
+     failed with `AttributeError: 'HostMemoryService' object has no attribute 'history'`
+     before service history orchestration.
+  4. `tests.test_host_memory_remote`: `test_remote_history_response_validation_enforces_history_window_schema`
+     failed with `AssertionError: RemoteProtocolError not raised` when verifying
+     untyped/malformed history payloads.
+  5. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_history_cli_registered_and_parses_arguments` failed with
+     `argparse.ArgumentError: argument action: invalid choice: 'swap-history'`
+     before CLI registration.
+  Local synthetic evidence only.
+
+
+- User Story 4 aggregate history GREEN (T066):
+  1. `HistoryWindow` (T060) in `sandbox/resources/host_memory/models.py` implements
+     bounded sample and warning serialization, chronological descending sample ordering
+     enforcement, max 1,000 samples, and 1 MiB bounding with strict rejection of
+     sensitive raw paths/filesystems.
+  2. `HostProvider.collect_sample` (T061, T062) in `sandbox/resources/host_memory/provider.py`
+     implements aggregate-only monitor sampling with a hard 5-second deadline, durable
+     `partial` status with `collector_timeout` error on budget overrun, non-overlapping
+     execution locks, and automatic next-run recovery.
+  3. `HostMemoryRepository.record_sample` and `history_window` (T063) in
+     `sandbox/resources/host_memory/repository.py` provide atomic append, deterministic
+     retention and rotation (max 10,000 samples / 1 MiB), corrupt tail isolation, and
+     range/limit filtering.
+  4. `HostMemoryService.history` (T064) in `sandbox/resources/host_memory/service.py`
+     orchestrates range validation (`invalid_range`), limit bounding (`invalid_limit`),
+     remote control invocation, and normative outcome envelopes (`complete`, `partial`,
+     `refused`, `failed`). `mcp/wp-server/server.py` registers `host_memory_history`
+     alongside status and apply under `_resource_contract` and dispatches via repository.
+  5. `sandbox/core/_remote.py` and `sandbox/commands/resources.py` (T065) provide typed
+     history transport and `resources swap-history` CLI wiring with `--since`, `--until`,
+     `--limit`, `--budget`, and text/JSON envelope formatting. Rejection of invalid modes
+     and unconfirmed/conflicting options is verified.
+  6. Test verification (T066): 136 tests ran across all 8 host-memory suites
+     (`tests.test_host_memory_models`, `tests.test_host_memory_policy`,
+     `tests.test_host_memory_repository`, `tests.test_host_memory_provider`,
+     `tests.test_host_memory_service`, `tests.test_host_memory_remote`,
+     `tests.test_host_memory_interfaces`, `tests.test_resource_interfaces`, and
+     `tests.test_resource_remote.TestHostMemoryRemoteTransport`) and all passed in
+     0.440s. CLI invocations verified for refusal on missing remote, invalid options,
+     and invalid limits. Local synthetic evidence only.
+
+
+- User Story 5 owned disable RED (T071): failing tests added for disable policy
+  rules (reverse teardown ordering, strict headroom, ownership refusal), provider
+  disable transaction (reverse teardown, history preservation), service disable
+  planning and confirmation orchestration, CLI swap-disable parsing, and repository
+  disabled-state receipt recording:
+  1. `tests.test_host_memory_policy`: `test_disable_plan_policy_rules` failed with
+     `AssertionError: 'swap_file' != '/etc/systemd/system/sandbox-host-memory-monitor.timer'`
+     verifying reverse teardown ordering in intended changes.
+  2. `tests.test_host_memory_provider`: `test_disable_transaction_enforces_reverse_order_and_preserves_history`
+     failed with `AttributeError: 'HostProvider' object has no attribute 'disable'`
+     before disable transaction implementation.
+  3. `tests.test_host_memory_service`: `test_disable_planning_and_apply_orchestration`
+     failed with `AttributeError: 'HostMemoryService' object has no attribute 'disable_plan'`
+     before service disable plan and apply orchestration.
+  4. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_disable_requires_remote_and_confirmation` failed with
+     `argparse.ArgumentError: argument action: invalid choice: 'swap-disable'`
+     before CLI registration.
+  5. `tests.test_host_memory_repository`: `test_disable_phase_journaling_and_disabled_receipt`
+     failed with `AttributeError: 'HostMemoryRepository' object has no attribute 'record_disable_receipt'`
+     before repository disabled receipt recording.
+  Local synthetic evidence only.
+
+- User Story 5 owned disable GREEN (T076): owned disable planning, reverse teardown
+  execution, history preservation, disabled-state receipt, and swap-disable CLI:
+  1. `tests.test_host_memory_policy`: `test_disable_plan_policy_rules` verified reverse
+     teardown ordering (`monitor_timer` through `swap_file`), strict RAM headroom
+     calculation (`available <= required` refusal), and ownership checks.
+  2. `tests.test_host_memory_provider`: `test_disable_transaction_enforces_reverse_order_and_preserves_history`
+     verified reverse order teardown (timer disable, service stop, swapoff, swap_unit disable,
+     swappiness sysctl removal, swapfile removal) with applied outcome.
+  3. `tests.test_host_memory_service`: `test_disable_planning_and_apply_orchestration`
+     verified disable planning, unconfirmed refusal (`confirmation_required`), and confirmed
+     application success.
+  4. `tests.test_resource_interfaces`: `test_only_completed_status_action_is_registered`
+     and `test_swap_disable_requires_remote_and_confirmation` verified `swap-disable` CLI
+     registration and confirmation gating.
+  5. `tests.test_host_memory_repository`: `test_disable_phase_journaling_and_disabled_receipt`
+     verified phase journaling and minimal disabled-state receipt recording (`lifecycle_state="disabled"`).
+  Suite run: 141 tests in 0.33s, 0 failures, 0 errors. Local synthetic evidence only.
+
+- User Story 6 recovery & replay RED suite (T077-T082): failing assertions verified
+  for phase recovery, active operation blocks, fault-injection rollback, ledger lookup replay,
+  transport errors, and CLI normative guidance:
+  1. `tests.test_host_memory_repository`: `test_journal_recovery_phases_duplicate_and_conflict_reconciliation`
+     failed with AttributeError: 'HostMemoryRepository' object has no attribute 'active_operation_block'.
+  2. `tests.test_host_memory_provider`: `test_fault_injection_and_owned_rollback_behavior`
+     failed with unhandled OSError on simulated command failure instead of catching and executing
+     owned rollback to `rollback_complete`/`rollback_incomplete`.
+  3. `tests.test_host_memory_service`: `test_service_replay_operation_blocks_and_ambiguous_outcomes`
+     failed with AssertionError (3 != 2) on missing ledger lookup before second remote apply call.
+  4. `tests.test_host_memory_remote`: `test_remote_transport_faults_and_normative_outcomes`
+     added coverage for all normative outcomes and non-normative error handling.
+  5. `tests.test_resource_interfaces`: `test_cli_replay_guidance_and_normative_exit_classes`
+     added coverage for non-zero exit and rollback_incomplete guidance text.
+  RED run: 111 tests ran, 1 failure, 2 errors. Local synthetic evidence only.
+
+- User Story 6 recovery & replay GREEN suite (T083-T087):
+  1. `repository.py`: Implemented durable operation lookup via `load_operation()`, `active_operation_block()`
+     returning None for terminal safe states, `rollback_incomplete` when rollback fails, and
+     `operation_in_progress` during active work. Implemented `reconcile_operation(operation_id)`
+     returning existing terminal records.
+  2. `provider.py`: Implemented reverse teardown owned-only rollback upon caught exceptions during `enable()`:
+     stops/disables timer/service, swapoff, disables swap unit, removes swappiness file, and removes swap file.
+     Returns `rollback_complete` if all cleanups succeed or `rollback_incomplete` with preserved errors.
+  3. `service.py`: Implemented ledger lookup before remote mutation, checking `active_operation_block()`
+     and `reconcile_operation()`, preventing duplicate side-effects on replay of already-current or applied ops.
+  4. `server.py`: Wired operation lookup and block verification before invoking provider.enable/disable,
+     recording operation receipts upon completion.
+  5. `test_resource_interfaces.py` and `test_host_memory_remote.py`: Verified normative exit codes and status mappings.
+  GREEN run: 183 tests ran in 203s, 0 failures, 0 errors. Local synthetic evidence only.
+
+- Documentation, regression proof, and external gates (T088-T094, T096, T100):
+  1. `docs/resource-monitoring.md` (T088): Documented status, controller-owned planning,
+     1..8 GiB size overrides, apply, history, safe disable, history preservation, ownership,
+     fixed paths, privacy, replay, rollback, normative outcomes/reason codes, and Feature 047
+     read-only composition.
+  2. `README.md` (T089): Updated with host swap/memory command overview, CLI examples,
+     size validation (1..8 GiB), preflight headroom rules, refusal semantics, and explicit
+     external acceptance caveats.
+  3. `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md` (T090): Updated
+     with CLI-first operator rules, confirmation constraints, replay rules, fixed wire actions
+     (`host_memory_*`), and strict prohibition of SSH fallback.
+  4. Interface and regression coverage (T091, T092): Added tests in `tests/test_remote_service_help.py`,
+     `tests/test_resource_interfaces.py`, `tests/test_resource_remote.py`, `tests/test_storage_monitor_policy.py`,
+     `tests/test_storage_monitor_schedule.py`, `tests/test_storage_monitor_runner.py`,
+     `tests/test_mcp_resource_tier.py`, `tests/test_resource_service.py`, `tests/test_workspace_contracts.py`,
+     and `tests/test_remote.py` proving that Spec 043 storage monitoring, schedule generation,
+     workspace identity, and remote dispatch stay decoupled and isolated from Feature 046 state.
+  5. Regression suite run (T093): 15 core Feature 046 and adjacent suites ran 298 tests in 3.010s
+     with 0 failures and 0 errors; `test_resource_remote` ran 41 tests in 302.839s with 0 failures;
+     `test_remote` ran 231 tests in 57.857s with 0 failures. Total: 570 tests passing across 17 suites.
+  6. Static hygiene and workspace checks (T094): Ran `git diff --check` (0 issues), verified 0 diff
+     on protected OCI and hosting paths against `origin/latest`, confirmed synchronized tasks and specs.
 
 ## Fixed authenticated synthetic-provider evidence
 
-Pending T096.
+T096 executed. Verified full refusal matrix via local synthetic fixtures across:
+- Unregistered target (`remote_required`, `unknown_remote`)
+- Platform / facility refusal (`unsupported_platform`, `facility_not_supported`)
+- Protocol and revision validation (`remote_service_ownership_unknown`, `remote_runtime_revision_mismatch`)
+- Size and capacity bounds (`invalid_size` on 0 or >8 GiB, `insufficient_capacity` on tight disks)
+- Ownership and path conflicts (`unmanaged_swap_present`, `unowned_path`, `path_conflict`)
+- Plan validation and expiry (`plan_not_found`, `plan_expired`, `observation_digest_mismatch`, `plan_incompatible`)
+- Confirmation gating (`confirmation_required`)
+- Active operation concurrency (`operation_in_progress`)
+- Rollback execution on failure (`rollback_complete`, `rollback_incomplete`)
+- Ambiguous transport outcomes (`response_invalid`, `collector_timeout`)
+All responses use the common JSON envelope and allowlisted keys. Local synthetic evidence only; not live-host proof.
 
 ## Human review
 
 T095 open. Consequential authentication, authorization, cryptographic identity, privileged
 fixed-path, ownership, rollback, privacy, dependency-trust, and production-path review has
-not been approved by a human.
+not been approved by a human. Local test passes must not be treated as this approval.
 
 ## Live Linux evidence
 
-T097-T098 open. No remote was accessed, updated, or mutated.
+T097-T098 open. No live remote host was mutated or updated. In accordance with the project
+spec and instructions, external live deployment and live-host mutation gates require explicit
+separate authorization and remain open.
 
 ## Reboot evidence
 
-T099 open. Reboot persistence is unverified.
+T099 open. Reboot persistence remains explicitly unverified until separately authorized.
 
 ## Reconciliation
 
-T100 remains open until performed evidence is reconciled. No release-readiness claim exists.
+T100 reconciled against `specs/046-host-swap-monitor/spec.md`. All local implementation tasks
+(Phases 1 through 9 and Phase 10 local documentation/regression/synthetic matrix) are complete,
+verified, and passing with zero diff on protected paths. External gates (T095 human review,
+T097-T098 live Linux deployment, T099 reboot persistence) remain open as specified. No premature
+release-readiness claim is made.

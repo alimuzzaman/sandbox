@@ -76,3 +76,105 @@ class HostMemoryRemoteTest(unittest.TestCase):
         payload = validate_request({"action":"host_memory_status", "remote_name":"r",
                                     "budget_seconds":1.5})
         self.assertEqual(payload["budget_seconds"], 1.5)
+
+    def test_no_plan_action_and_no_shell_syntax_on_the_wire(self):
+        for payload in (
+            {"action":"host_memory_plan","remote_name":"r","budget_seconds":15},
+            {"action":"host_memory_status;id","remote_name":"r","budget_seconds":15},
+            {"action":"host_memory_status","remote_name":"r","budget_seconds":15,
+             "argv":["id"]},
+            {"action":"host_memory_status","remote_name":"r","budget_seconds":15,
+             "path":"/tmp/x"},
+        ):
+            with self.assertRaises(RemoteProtocolError):
+                validate_request(payload)
+
+    def _apply_request(self, **overrides):
+        plan = {"plan_id":"a"*64, "operation":"enable", "target_identity":"host",
+                "service_ownership_marker":MARKER, "runtime_revision":REVISION,
+                "expires_at":"2026-08-30T12:15:00Z", "observation_digest":"b"*64,
+                "effective_policy":{"size_gib":4}, "intended_artifact_digests":[],
+                "rollback_scope":[]}
+        plan.update(overrides.pop("plan", {}))
+        request = {"action":"host_memory_apply", "remote_name":"r",
+                   "operation_id":"c"*64, "plan":plan, "confirmed":True,
+                   "budget_seconds":15}
+        request.update(overrides)
+        return request
+
+    def test_apply_rejects_non_canonical_effective_policy(self):
+        for policy in ({"size_gib":0}, {"size_gib":9}, {"size_gib":"4"}, {}):
+            with self.subTest(policy=policy), self.assertRaises(RemoteProtocolError):
+                validate_request(self._apply_request(plan={"effective_policy":policy}))
+        with self.assertRaises(RemoteProtocolError):
+            validate_request(self._apply_request(size_gib=4))
+
+
+    def test_remote_transport_faults_and_normative_outcomes(self):
+        envelope = {"resource_schema": 1, "host_memory_schema": 1, "transport": "control",
+                    "service": {"ownership_marker": MARKER, "runtime_revision": REVISION}}
+        normative = ("applied", "already_current", "refused", "partial", "failed", "rollback_complete", "rollback_incomplete")
+        for st in normative:
+            res = validate_response({**envelope, "result": {"status": st, "operation_id": "c" * 64}},
+                                    marker=MARKER, revision=REVISION, action="host_memory_apply")
+            self.assertEqual(res["status"], st)
+
+        # Non-normative or malformed results
+        for bad in ({"status": "ok"}, {"status": "success"}, {"status": "in_progress"}, {}):
+            with self.subTest(bad=bad), self.assertRaises(RemoteProtocolError):
+                validate_response({**envelope, "result": bad}, marker=MARKER, revision=REVISION, action="host_memory_apply")
+
+    def test_apply_response_requires_normative_typed_result(self):
+        envelope={"resource_schema":1,"host_memory_schema":1,"transport":"control",
+                  "service":{"ownership_marker":MARKER,"runtime_revision":REVISION}}
+        good = validate_response({**envelope,"result":{"status":"applied",
+                                 "operation_id":"c"*64}},marker=MARKER,revision=REVISION,
+                                 action="host_memory_apply")
+        self.assertEqual(good["status"], "applied")
+        for result in ({"status":"bogus"}, {"outcome":"applied"}, {}):
+            with self.subTest(result=result), self.assertRaises(RemoteProtocolError):
+                validate_response({**envelope,"result":result},marker=MARKER,
+                                  revision=REVISION,action="host_memory_apply")
+
+    def test_remote_history_request_and_response_validation(self):
+        req = validate_request({
+            "action": "host_memory_history",
+            "remote_name": "scaleway",
+            "since": "2026-08-30T00:00:00Z",
+            "until": "2026-08-30T12:00:00Z",
+            "limit": 100,
+            "budget_seconds": 15,
+        })
+        self.assertEqual(req["action"], "host_memory_history")
+        self.assertEqual(req["limit"], 100)
+
+        # Invalid limits
+        for bad_limit in (0, 1001, -1, "100", True):
+            with self.assertRaises(RemoteProtocolError):
+                validate_request({
+                    "action": "host_memory_history",
+                    "remote_name": "scaleway",
+                    "limit": bad_limit,
+                    "budget_seconds": 15,
+                })
+
+        # Inverted range
+        with self.assertRaises(RemoteProtocolError):
+            validate_request({
+                "action": "host_memory_history",
+                "remote_name": "scaleway",
+                "since": "2026-08-30T12:00:00Z",
+                "until": "2026-08-30T00:00:00Z",
+                "budget_seconds": 15,
+            })
+
+    def test_remote_history_response_validation_enforces_history_window_schema(self):
+        envelope = {
+            "resource_schema": 1,
+            "host_memory_schema": 1,
+            "transport": "control",
+            "service": {"ownership_marker": MARKER, "runtime_revision": REVISION},
+            "result": {"requested_range": {}, "samples": "not_a_list"},
+        }
+        with self.assertRaises(RemoteProtocolError):
+            validate_response(envelope, marker=MARKER, revision=REVISION, action="host_memory_history")

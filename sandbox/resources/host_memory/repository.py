@@ -196,13 +196,54 @@ class HostMemoryRepository:
             raise RepositoryError("invalid operation identity")
         current = self.load_operation()
         if current is not None and current.get("operation_id") != operation_id:
-            raise RepositoryError("operation identity conflict")
+            if self.active_operation_block() is not None:
+                raise RepositoryError("operation identity conflict")
         self._atomic(self.root / "operation.json", operation)
+
     def load_operation(self):
         try: data = json.loads((self.root / "operation.json").read_text())
         except FileNotFoundError: return None
         except (OSError, ValueError): raise RepositoryError("operation evidence is corrupt") from None
         return bounded(data)
+
+    def active_operation_block(self):
+        op = self.load_operation()
+        if not op:
+            return None
+        phase = op.get("phase")
+        outcome = op.get("outcome")
+        if phase == "terminal":
+            if outcome == "rollback_incomplete":
+                return {"operation_id": op.get("operation_id"), "reason": "rollback_incomplete"}
+            return None
+        return {"operation_id": op.get("operation_id"), "reason": "operation_in_progress"}
+
+    def reconcile_operation(self, operation_id):
+        op = self.load_operation()
+        if op is not None and op.get("operation_id") == operation_id:
+            return op
+        return None
+
+
+    def record_disable_receipt(self, *, target_identity, operation_id, prior_receipt=None):
+        from .models import utc_text
+        from datetime import datetime, timezone
+        verified_at = utc_text(datetime.now(timezone.utc))
+        receipt = {
+            "schema_version": 1,
+            "target_identity": target_identity,
+            "created_by_operation": (prior_receipt or {}).get("created_by_operation", operation_id),
+            "last_verified_operation": operation_id,
+            "policy": {"size_gib": 4},
+            "artifacts": {},
+            "swap_area_id": (prior_receipt or {}).get("swap_area_id", "0" * 24),
+            "prior_swappiness": (prior_receipt or {}).get("prior_swappiness", {"value": 60}),
+            "verified_at": verified_at,
+            "reboot_verification": {"state": "unverified", "observed_at": None},
+            "lifecycle_state": "disabled",
+        }
+        self.save_receipt(receipt)
+        return receipt
 
     def save_receipt(self, receipt):
         model = OwnershipReceipt.from_dict(receipt)

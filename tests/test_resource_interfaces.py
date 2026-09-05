@@ -988,8 +988,16 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
 
     def test_only_completed_status_action_is_registered(self):
         self.assertEqual(self._args(["swap-status","--remote","fixture"]).action,"swap-status")
-        for action in ("swap-plan","swap-apply","swap-history"):
-            with self.assertRaises(SystemExit): self._args([action,"--remote","fixture"])
+        self.assertEqual(self._args(["swap-plan","--remote","fixture"]).action,"swap-plan")
+        self.assertEqual(self._args(["swap-apply","--remote","fixture"]).action,"swap-apply")
+        self.assertEqual(self._args(["swap-history","--remote","fixture"]).action,"swap-history")
+        self.assertEqual(self._args(["swap-disable","--remote","fixture"]).action,"swap-disable")
+
+    def test_swap_history_cli_registered_and_parses_arguments(self):
+        args = self._args(["swap-history", "--remote", "fixture", "--limit", "100", "--since", "2026-08-30T00:00:00Z"])
+        self.assertEqual(args.action, "swap-history")
+        self.assertEqual(args.limit, 100)
+        self.assertEqual(args.since, "2026-08-30T00:00:00Z")
 
     def test_remote_is_required_before_service_construction(self):
         from sandbox.commands.resources import _host_memory_cli
@@ -1038,6 +1046,109 @@ class TestHostMemoryResourceInterfaces(unittest.TestCase):
         self.assertEqual(raised.exception.code,1)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"],"remote_required")
 
+    def test_swap_plan_parses_size_and_requires_remote(self):
+        args = self._args(["swap-plan","--remote","fixture","--size-gib","4"])
+        self.assertEqual(args.size_gib, 4)
+        from sandbox.commands import resources
+        result = resources.cmd_swap_plan(self._args(["swap-plan","--size-gib","4"]))
+        self.assertEqual(result["error"]["code"], "remote_required")
+
+    def test_swap_plan_rejects_invalid_size(self):
+        from sandbox.commands import resources
+        for size in ("0", "9"):
+            result = resources.cmd_swap_plan(
+                self._args(["swap-plan","--remote","fixture","--size-gib",size]))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["code"], "invalid_size")
+
+    def test_swap_apply_requires_exact_confirmation(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+        refused = resources.cmd_swap_apply(
+            self._args(["swap-apply","--remote","fixture"]))
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "confirmation_required")
+        output = StringIO()
+        with redirect_stdout(output):
+            try:
+                resources.cmd_resources({}, self._args(
+                    ["swap-apply","--remote","fixture","--json"]))
+            except SystemExit:
+                pass
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"],
+                         "confirmation_required")
+
+
+
+
+    def test_cli_replay_guidance_and_normative_exit_classes(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        # When swap-apply finishes with rollback_incomplete, it exits non-zero and displays guidance
+        payload = {
+            "schema_version": 1, "ok": False, "action": "swap-apply",
+            "status": "rollback_incomplete", "target": {"kind": "remote", "name": "scaleway"},
+            "data": {},
+            "error": {"code": "rollback_incomplete", "message": "prior state could not be verified", "retryable": False},
+        }
+        with patch("sandbox.resources.context.host_memory_apply", return_value=payload):
+            out = StringIO()
+            with redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+                resources.cmd_resources({}, self._args(["swap-apply", "--remote", "scaleway", "--plan-id", "a" * 64, "--confirm"]))
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("rollback_incomplete", out.getvalue())
+
+    def test_swap_disable_requires_remote_and_confirmation(self):
+        from sandbox.commands import resources
+        args = self._args(["swap-disable", "--remote", "fixture", "--confirm"])
+        self.assertEqual(args.action, "swap-disable")
+        self.assertTrue(args.confirm)
+        refused = resources.cmd_swap_disable(self._args(["swap-disable", "--remote", "fixture"]))
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "confirmation_required")
+
+
+    def test_swap_commands_json_schema_error_classes_and_mode_prohibitions(self):
+        from sandbox.commands import resources
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        # 1. Non-swap commands refuse --size-gib as invalid_mode
+        out = StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as raised:
+            resources.cmd_resources({}, self._args(["status", "--size-gib", "4", "--json"]))
+        self.assertEqual(raised.exception.code, 1)
+        res = json.loads(out.getvalue())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"]["code"], "invalid_mode")
+
+        # 2. Swap commands refuse --tier or --scope as invalid_mode
+        for action in ["swap-plan", "swap-apply", "swap-history", "swap-disable"]:
+            for flag_args in [["--tier", "safe"], ["--scope", "cache"]]:
+                cmd_fn = getattr(resources, f"cmd_{action.replace('-', '_')}")
+                ans = cmd_fn(self._args([action, "--remote", "scaleway"] + flag_args))
+                self.assertFalse(ans["ok"], f"{action} should reject {flag_args}")
+                self.assertEqual(ans["error"]["code"], "invalid_mode")
+
+        # 3. Standard envelope structure across all swap actions
+        for action, cmd_fn, extra in [
+            ("swap-plan", resources.cmd_swap_plan, ["--size-gib", "4"]),
+            ("swap-apply", resources.cmd_swap_apply, ["--plan-id", "a" * 64]),
+            ("swap-history", resources.cmd_swap_history, ["--limit", "100"]),
+            ("swap-disable", resources.cmd_swap_disable, []),
+        ]:
+            ans = cmd_fn(self._args([action] + extra))  # missing --remote
+            self.assertEqual(ans["schema_version"], 1)
+            self.assertIn("ok", ans)
+            self.assertEqual(ans["action"], action)
+            self.assertIn("status", ans)
+            self.assertIn("target", ans)
+            self.assertIn("data", ans)
+            self.assertIn("error", ans)
+            self.assertEqual(ans["error"]["code"], "remote_required")
 
 if __name__ == "__main__":
     unittest.main()

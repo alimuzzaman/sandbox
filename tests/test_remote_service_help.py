@@ -19,5 +19,16 @@ class TestRemoteServiceHelp(unittest.TestCase):
                       result.stdout)
 
 
+    def test_resources_help_lists_swap_actions(self):
+        result = subprocess.run(
+            [str(ROOT / "sb"), "resources", "--help"],
+            cwd=str(ROOT), capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        for action in ["swap-status", "swap-plan", "swap-apply", "swap-history", "swap-disable"]:
+            self.assertIn(action, result.stdout)
+        self.assertIn("--size-gib", result.stdout)
+        self.assertIn("--limit", result.stdout)
+
 if __name__ == "__main__":
     unittest.main()

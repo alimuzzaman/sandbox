@@ -23,6 +23,11 @@ sb resources monitor --json
 sb resources monitor --remote scaleway-sandbox --scheduled --dry-run --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
+sb resources swap-status --remote scaleway-sandbox --json
+sb resources swap-plan --remote scaleway-sandbox --json
+sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+sb resources swap-disable --remote scaleway-sandbox --confirm --json
+sb resources swap-history --remote scaleway-sandbox --json
 # tiered reclamation of deploy-src (classes, reasons, manifest, retention)
 sb resources status --remote scaleway-sandbox --deep --budget 180 --json
 sb resources plan --remote scaleway-sandbox --tier safe --json
@@ -167,6 +172,50 @@ workspace, say so (`sb workspace release <name>`) instead of leaving it to age
 out; extend with `sb workspace ttl <name> --ttl 14d` when you need it longer.
 Every deletion is recorded in
 `$SANDBOX_HOME/runtime/resources/deletions/<run_id>.jsonl` before it happens.
+
+## Host swap and memory operations (Feature 046)
+
+Feature 046 provides authenticated host memory telemetry, controller-owned swap planning,
+protected apply, safe disable, and aggregate history queries:
+
+```sh
+# Read-only telemetry and health observation
+sb resources swap-status --remote scaleway-sandbox --json
+
+# Controller-owned planning (size in 1..8 GiB, default 4)
+sb resources swap-plan --remote scaleway-sandbox --json
+sb resources swap-plan --remote scaleway-sandbox --size-gib 8 --json
+sb resources swap-plan --remote scaleway-sandbox --operation disable --json
+
+# Protected apply (requires exact confirmation)
+sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+
+# Safe owned-only disable (reverses units/files, preserves aggregate history log)
+sb resources swap-disable --remote scaleway-sandbox --confirm --json
+
+# Aggregate telemetry history window (limit 1..1000, default 288)
+sb resources swap-history --remote scaleway-sandbox --limit 144 --json
+sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z --until 2026-09-05T00:00:00Z --json
+```
+
+### CLI-first operator rules and constraints
+
+- **CLI-First Reflex**: Always use `sb resources swap-*` commands. **Never fall back to SSH**
+  (`sb remote ssh`) or manual host manipulation (e.g. running `mkswap` or modifying sysctl manually).
+  All communications flow over the authenticated control plane using fixed wire actions
+  (`host_memory_status`, `host_memory_plan`, `host_memory_apply`, `host_memory_disable`, `host_memory_history`).
+- **Controller-Owned Planning**: Swap planning is strictly read-only and performed locally on the
+  controller. The resulting plan is cryptographically bound to the target identity, runtime revision,
+  and observation digest.
+- **Confirmation Rules**: All mutating operations (`swap-apply` and `swap-disable`) require explicit
+  `--confirm`. Missing confirmation fails closed immediately with `confirmation_required` without touching the host.
+- **Replay & Concurrency Rules**: Replaying the same `plan_id` or `operation_id` performs a durable
+  ledger lookup and returns the recorded terminal outcome (`applied`, `already_current`, `rollback_complete`)
+  without duplicating side effects. Never generate or inject a second operation identity for an in-flight operation.
+  If an operation is already in progress or a prior rollback was incomplete, further operations are refused
+  with `operation_in_progress` or `rollback_incomplete`.
+- **Fault Recovery & Rollback**: Any failure during apply triggers an automatic reverse teardown of owned
+  artifacts. Aggregate history (`/var/log/sandbox/host-memory.jsonl`) and unowned files are strictly preserved.
 
 ## Durable remote-first jobs
 

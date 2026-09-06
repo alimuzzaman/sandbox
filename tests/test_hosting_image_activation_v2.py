@@ -965,6 +965,12 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
             snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
         self.assertTrue(all(row["topology_identity"] == proof.observation.observation_digest
                             for row in observed["services"]))
+        observation_calls = [call for call in calls
+            if call["argv"][0] == "sandbox-activation-observe-running-v2"]
+        self.assertEqual(len(observation_calls), 1)
+        for key, image_ref in environment.items():
+            self.assertEqual(observation_calls[0]["environment"][key], image_ref)
+        self.assertNotIn("DB_PASSWORD", observation_calls[0]["environment"])
         effects = [call for call in calls if "up" in call["argv"]]
         self.assertEqual(len(effects), 1)
         self.assertIn("--no-build", effects[0]["argv"])

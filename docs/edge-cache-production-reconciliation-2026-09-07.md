@@ -61,3 +61,8 @@ merged cleanly. Local durable job `c84902f20e75da9ab1e19c1b5fb7fad3`
 passed 53 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`,
 exit 0. This aligns the private-source validator with verified manifest image
 identities already admitted by the transport.
+
+Runtime image-binding repair `5c90f119aad3112f3839b3816b752cc4e0bc218f`
+merged cleanly. It carries the retained image-binding environment into runtime
+observation. Local durable job `bfe8159b4fd556bab3779feee1e5d3f1` passed
+53 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.

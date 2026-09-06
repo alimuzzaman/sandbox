@@ -835,6 +835,7 @@ class RegisteredRemoteActivationTransport:
         result = self._invoke(("sandbox-activation-observe-running-v2",
                                self._service(compose_project),
                                *map(self._service, services)), timeout_seconds=60,
+                              environment=selector["environment"],
                               private_environment_source=source)
         try:
             rows = json.loads(result["stdout"])

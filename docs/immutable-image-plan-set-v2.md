@@ -210,6 +210,8 @@ Runtime observation accepts a local image ID equal to the verified config
 digest, full repository digest reference, or that reference's manifest digest.
 Unrelated or malformed local IDs remain refused before the remote observation.
 The private observation runner enforces the same verified identity alternatives.
+Observation also reuses the retained public image/profile environment bindings
+so the private Compose render resolves the same immutable service images.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

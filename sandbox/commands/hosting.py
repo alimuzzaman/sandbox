@@ -4378,7 +4378,11 @@ def _cmd_host_image(validated: dict, args) -> None:
                         or (prior and (prior.get("target") != authority_target \
                             or prior.get("compose_project") != compose_project)):
                     raise ValueError("activation generation authority is unavailable")
-                projection = ActivationTransitionProjection(
+                # Retained v2 intents build their projection after observation.
+                # The legacy candidate-only projection cannot represent an
+                # uncertain replacement that has not minted a generation yet.
+                projection = None if (active_schema == 2 and
+                    active.get("replacement_intent") is not None) else ActivationTransitionProjection(
                     transaction_digest=transaction_digest,
                     request_digest=active["request_digest"], operation=active["operation"],
                     phase=active["phase"], effect_entered=active["effect_entered"],

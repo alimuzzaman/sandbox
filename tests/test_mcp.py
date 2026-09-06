@@ -402,7 +402,12 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
         )
         self.assertEqual(len(actual), 138)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
-        self.assertTrue(all(response is None for _name, _required, response in actual), actual)
+        for name, _required, response in actual:
+            if name.startswith("owned_storage_"):
+                self.assertEqual(response.get("type"), "object", (name, response))
+                self.assertEqual(response.get("required"), ["result"], (name, response))
+            else:
+                self.assertIsNone(response, (name, response))
 
     def test_tools_and_prompts_register(self):
         r = subprocess.run(

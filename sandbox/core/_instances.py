@@ -1201,9 +1201,12 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     a user could never pre-author a config file matching a random label."""
     import types
     sc = _core()
-    pconf = sc.load_project_config(project_dir,
-                                   label=config_label if config_label is not None else label,
-                                   config_file=config_file)
+    config_kwargs = {} if config_file is None else {"config_file": config_file}
+    pconf = sc.load_project_config(
+        project_dir,
+        label=config_label if config_label is not None else label,
+        **config_kwargs,
+    )
     if php_version:
         pconf = {**pconf, "phpVersion": php_version}
     if wp_version:
@@ -1488,7 +1491,8 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
     yet (caller should ensure_instance first)."""
     import types
     sc = _core()
-    pconf = sc.load_project_config(project_dir, config_file=config_file)
+    config_kwargs = {} if config_file is None else {"config_file": config_file}
+    pconf = sc.load_project_config(project_dir, **config_kwargs)
     root = pconf["root"]
 
     with sc.project_lock(root):
@@ -1506,7 +1510,9 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
         # Re-load with the RESOLVED label now known, so a per-label
         # sandbox.config.<label>.json layer (if present) applies correctly —
         # the first load above (label-less) only existed to find `root`.
-        pconf = sc.load_project_config(project_dir, label=label, config_file=config_file)
+        pconf = sc.load_project_config(
+            project_dir, label=label, **config_kwargs,
+        )
         ports = {
             "wordpress_port": existing["wordpress_port"],
             "db_port": existing["db_port"],

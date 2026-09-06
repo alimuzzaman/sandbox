@@ -3633,7 +3633,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
             install_owner_only_json_pair,
             prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
             prepare_stage_bundle, reuse_owner_only_stage_bundle,
-            replace_expired_stage_bundle,
+            replace_expired_stage_bundle, install_activation_bundle,
         )
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -3877,7 +3877,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         authority_revision=signer_config["rollback_authority_revision"],
                         signer=signer, grant_ttl_seconds=args.grant_ttl_seconds)
                     path = root / "image-activation" / "policies" / f"{selector}.json"
-                    disposition = install_owner_only_json(path, bundle)
+                    disposition = install_activation_bundle(path, bundle)
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,
                         proof_set_digest=proof.proof_digest,

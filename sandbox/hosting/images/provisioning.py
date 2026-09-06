@@ -141,6 +141,86 @@ def install_owner_only_json(path: Path, value: dict[str, Any]) -> str:
             except OSError: pass
 
 
+def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | None = None) -> str:
+    """Install/renew v2 authority while the caller holds the target mutation lock.
+
+    Renewal requires both old leases to have expired. Keep the old document as
+    owner-only evidence; publish the replacement with one atomic rename.
+    """
+    from sandbox.hosting.images.plan_set import read_stable_file
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                info.st_ctime_ns, info.st_uid, info.st_mode, info.st_nlink)
+
+    def validate(raw):
+        if (type(raw) is not dict or set(raw) != {"schema_version", "compose_snapshot",
+                "rollback_grant", "rollback_grant_public_key", "stage_ledger"}
+                or type(raw["schema_version"]) is not int or raw["schema_version"] != 2):
+            raise ProvisioningError("conflict")
+        snapshot = PrivateComposeInputSnapshotV2.from_mapping(raw["compose_snapshot"])
+        grant = RollbackCompatibilityGrantV2.from_mapping(raw["rollback_grant"])
+        ledger = raw["stage_ledger"]
+        if (type(ledger) is not dict or set(ledger) != {"authority", "revision"}
+                or ledger["authority"] != "feature-050-stage-ledger-v2"
+                or type(ledger["revision"]) is not int or ledger["revision"] < 1
+                or type(raw["rollback_grant_public_key"]) is not str
+                or snapshot.target != grant.target
+                or snapshot.plan_set_digest != grant.candidate_plan_set_digest
+                or not SshRollbackGrantVerifier(raw["rollback_grant_public_key"],
+                    grant.authority_id).verify(grant)):
+            raise ProvisioningError("conflict")
+        return snapshot, grant
+
+    try:
+        fresh_snapshot, fresh_grant = validate(value)
+        try:
+            return install_owner_only_json(path, value)
+        except ProvisioningError as exc:
+            if exc.code != "conflict":
+                raise
+        before = path.lstat()
+        retained = read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True)
+        old = _load_json_bytes(retained)
+        snapshot, grant = validate(old)
+        instant = int(time.time()) if now is None else now
+        if (snapshot.expires_at > instant or grant.expires_at > instant
+                or fresh_snapshot.expires_at <= instant or fresh_grant.expires_at <= instant
+                or fresh_grant.issued_at > instant
+                or snapshot.target != fresh_snapshot.target
+                or grant.authority_id != fresh_grant.authority_id
+                or grant.authority_revision != fresh_grant.authority_revision
+                or old["rollback_grant_public_key"] != value["rollback_grant_public_key"]
+                or grant.expected_generation > fresh_grant.expected_generation
+                or (grant.expected_generation == fresh_grant.expected_generation
+                    and grant.prior_generation_digest != fresh_grant.prior_generation_digest)):
+            raise ProvisioningError("conflict")
+        archive = path.with_name(path.name + ".expired-" + hashlib.sha256(retained).hexdigest())
+        install_owner_only_json(archive, old)
+        descriptor, temporary = tempfile.mkstemp(prefix=".provision-", dir=path.parent)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+                handle.flush(); os.fsync(handle.fileno())
+            # Cooperating writers hold the same target lock. Also detect a
+            # replaced/edited pathname before publishing against retained data.
+            if (identity(path.lstat()) != identity(before) or read_stable_file(path,
+                    MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True) != retained):
+                raise ProvisioningError("conflict")
+            os.replace(temporary, path)
+            parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try: os.fsync(parent)
+            finally: os.close(parent)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+        return "installed"
+    except ProvisioningError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise ProvisioningError("conflict") from None
+
+
 def replace_expired_stage_bundle(path: Path, value: dict[str, Any]) -> str:
     """Rotate one expired stage binding without replacing live authority.
 

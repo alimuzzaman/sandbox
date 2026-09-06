@@ -3786,7 +3786,13 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         host_state_port=recovery.activation_host_state_port(),
                         stage_repository=stage,
                         target_mutation_port=recovery.target_mutation_port("activate"))
-                    state = activation.snapshot(target_id)
+                    # The provisioning command already owns the target through
+                    # the image-provision capability.  Reacquiring the
+                    # activation lock here uses a separate file descriptor and
+                    # deadlocks until the bounded lock timeout, surfacing as
+                    # the opaque artifact_invalid refusal.  Read the nested
+                    # activation state through the under-lock port instead.
+                    state = activation.snapshot_under_target_mutation(target_id)
                     generation = state["generation"]
                     if args.expected_generation != generation:
                         raise ValueError("activation generation changed")

@@ -161,7 +161,7 @@
 - [X] T057 [US5] Implement control-plane capture/restore adapter over Sandbox/Hermes backup and shared service contracts in `sandbox/recovery/control_plane.py`
 - [X] T058 [US5] Add fresh-server bootstrap and verification orchestration in `sandbox/recovery/bootstrap.py`
 - [X] T059 [US5] Document operator-safe recovery and per-profile restore in `docs/recovery.md`
-- [ ] T060 [US5] Create one real scoped encrypted set with the current passphrase through `./sb recovery create` and verify download/decrypt/integrity in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T060 [US5] Create one real scoped encrypted set with the current passphrase through `./sb recovery create` and verify download/decrypt/integrity in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T061 [US5] Run a disposable fresh-server drill and re-run Hermes/public-dashboard/hosting acceptance checks in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 
 **Checkpoint**: A current-passphrase real recovery set and fresh-server proof exist.

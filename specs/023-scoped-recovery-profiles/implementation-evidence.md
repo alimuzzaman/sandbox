@@ -372,3 +372,30 @@ in 43.171s with 1 skipped. T060/T061/T069/T071/T072 and the live
 T021 catalog-companion acceptance check remain protected operations requiring their documented
 operator authorization; no production capture, restore, deletion, schedule activation, or live
 deployment was performed by this hardening audit.
+
+## Real scoped capture checkpoint (T060)
+
+On 2026-09-06, after the controller-owned materializer and the supported remote service
+migration were applied and independently checked, one real scoped set was created and verified:
+
+```text
+remote: scaleway-sandbox
+destination: gdrive:hermes-full-recovery
+set: 20260906T133000Z-amarsonar-nongit
+profiles: control-plane, amarsonar-bangla-prod
+remote runtime revision: aa478497152eca073c873b74
+machine identity: scaleway-sandbox:vmi3430003
+source digest: sha256:3d2a2b6d620376792c124e099fb533a60571de569304023118c1dbfbad46e831
+ASB artifact: 96450560 bytes; sha256=49fa766d0d73611a6c006683cd3ea550dac4dc03308c0b6985a1012fa5fffd67
+control-plane declaration: 627 bytes; sha256=be5b28b7a75f001dfb063f9e185472a681c835f4b3b60728113a4681962cc23e
+ciphertext: 33621320 bytes; sha256=7df4a58797725c0feaa72508f581480db59292bd26f61730078bd89f8e74f84b
+plaintext sha256: 26c3ad75ae1c78ccd4682c90503782db6ab5d9725a5843a7259e175329115885
+```
+
+The create command used the registered secret broker for `RECOVERY_PASSPHRASE` and the ASB
+database credential; neither value entered argv, output, the manifest, or this evidence. The
+independent `recovery verify` command downloaded the ciphertext, checked its Drive hash and
+manifest binding, decrypted it with the current passphrase, and returned `status=verified`.
+The set contains no `alimuzzaman-me` Git profile and no other project state. Legacy Drive objects
+remain untouched. T061 fresh-server restore proof, schedule activation, retention deletion, and
+production restore remain open and separately protected.

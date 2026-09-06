@@ -618,6 +618,14 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     basic_auth = _basic_auth(env)
     if public_acme and basic_auth and basic_auth.get("bypass_ips"):
         raise HostingError("basic_auth.bypass_ips requires Cloudflare proxied hosting")
+    from sandbox.hosting.edge_cache import EdgeCacheError, validate_policy
+    try:
+        cache_purge = validate_policy(
+            cf.get("cache_purge"), routes=routes, proxied=cf.get("proxied"),
+        )
+    except EdgeCacheError as exc:
+        raise HostingError(f"cloudflare.cache_purge is invalid ({exc.code})") from None
+    cf = {**cf, "cache_purge": cache_purge}
     # `robots: deny` makes Caddy answer /robots.txt with `Disallow: /` for every
     # served hostname of this environment — for a staging environment that is
     # publicly resolvable but must never be indexed. Default `allow` leaves the
@@ -966,4 +974,5 @@ def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | No
     return {"project": validated["project"], "environment": validated["environment"],
             "routes": validated["routes"], "records": records,
             "certificate_hostnames": [r["hostname"] for r in validated["routes"]],
-            "ssl_mode": "strict" if proxied else None}
+            "ssl_mode": "strict" if proxied else None,
+            "edge_cache_purge": (validated.get("cloudflare") or {}).get("cache_purge")}

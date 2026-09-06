@@ -166,6 +166,14 @@ See [research.md](research.md). All consequential choices are closed: one shared
 owner, inspect-before-start init, same-transaction edge replay, zero-init adoption,
 pre-forward machine rollback grant, and additive observation-only Feature 048 integration.
 
+## Plan amendment: Lenzora edge-cache purge
+
+The detailed amendment is [edge-cache-plan.md](edge-cache-plan.md). It adds an
+opt-in, explicit Cloudflare `zone_all` purge policy and durable per-zone receipts
+to both Lenzora deployment paths. Existing v2 receipts remain versioned and
+readable; a retained receipt from a policy-absent deployment cannot satisfy a
+newly required purge. See [contracts/edge-cache.md](contracts/edge-cache.md).
+
 ## Phase 1: Design
 
 - [data-model.md](data-model.md)

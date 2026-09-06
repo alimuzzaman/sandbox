@@ -187,12 +187,49 @@ class ActivationServiceV2:
                 "terminal": False, "receipt_digest": None}
             self.repository.transition_v2(
                 target_key, request, "edge_pending", edge_result=edge_prepared)
-            receipt_mapping = self.edge_adapter.apply_generation_v2(
-                request_digest=request.request_digest, target=target,
-                generation=request.expected_generation + 1,
-                generation_subject_digest=subject_digest,
-                route_digest=edge_route_digest,
-                observation_digest=observation["observation_digest"])
+            # The provider adapter may perform several effects.  Give the
+            # target owner a narrow callback so each zone transition is
+            # durable before/after its POST.  Adapters without this optional
+            # capability retain the existing pure observation contract.
+            checkpoint = getattr(self.edge_adapter, "set_generation_checkpoint", None)
+            if callable(checkpoint):
+                def persist_edge_checkpoint(event):
+                    current = self.repository.snapshot(target_key)
+                    active = current.get("active") if isinstance(current, dict) else None
+                    edge_state = active.get("edge_result") if isinstance(active, dict) else None
+                    if not isinstance(edge_state, dict):
+                        raise ActivationContractError("edge_uncertain")
+                    updated = {**edge_state}
+                    rows = [dict(row) for row in (updated.get("zones") or [])]
+                    target_zone = event.get("zone")
+                    changed = False
+                    for row in rows:
+                        if row.get("zone") == target_zone:
+                            row.update({key: value for key, value in event.items()
+                                        if key != "zone"})
+                            changed = True
+                            break
+                    if not changed:
+                        if event.get("state") != "prepared" or not target_zone:
+                            raise ActivationContractError("edge_uncertain")
+                        rows.append({"zone": target_zone,
+                                     "zone_id": event.get("zone_id"),
+                                     "state": "prepared"})
+                    updated["zones"] = rows
+                    self.repository.transition_v2(
+                        target_key, request, "edge_pending", edge_result=updated)
+                checkpoint(persist_edge_checkpoint)
+            try:
+                receipt_mapping = self.edge_adapter.apply_generation_v2(
+                    request_digest=request.request_digest, target=target,
+                    generation=request.expected_generation + 1,
+                    generation_subject_digest=subject_digest,
+                    route_digest=edge_route_digest,
+                    observation_digest=observation["observation_digest"])
+            finally:
+                clear_checkpoint = getattr(self.edge_adapter, "clear_generation_checkpoint", None)
+                if callable(clear_checkpoint):
+                    clear_checkpoint()
             receipt = GenerationBoundEdgeReceiptV2.from_mapping(receipt_mapping)
             body = {**base, "edge_receipt": receipt.as_mapping()}
             generation = VerifiedActivationGenerationV2(

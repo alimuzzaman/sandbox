@@ -328,6 +328,12 @@ provisional crash replay performs only the post-write observation. Apply, sync, 
 failed-apply recovery, edge continuation, staging, activation, adoption, rollback, and image
 recovery all use the same registered target-mutation owner.
 
+When `cloudflare.cache_purge` is enabled, the edge receipt also contains a durable,
+per-zone `purge_everything` acknowledgement. The owner records preparation and each
+effect-entry transition before provider writes; a possible timeout is
+`acceptance_unknown` and is never replayed by observation. A receipt proves API
+acceptance only, not global cache propagation.
+
 Terminal activation records retain a private, bounded, closed copy of the exact holder and
 proof pin beside the public result. This permits terminal-before-release replay to reconcile
 the accepted Feature 050 lease and release only that lease; the private pin is not added to

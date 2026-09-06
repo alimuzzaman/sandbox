@@ -47,6 +47,11 @@ python3 -m unittest \
 This gate is local acceptance only. Live registered-host, edge, deployment, rollback,
 and production proof remain open until separately authorized and observed.
 
+For the Lenzora edge-cache extension, run the focused edge-cache and hosting suites.
+The effective plan must list normalized routes and the explicitly approved Cloudflare
+zones. A successful receipt proves only that Cloudflare accepted one zone-wide purge;
+it is not proof of global cache propagation.
+
 The built-in public-route check is reachability diagnostics only. Until an edge adapter
 returns a durable receipt bound to the exact target, generation, runtime observation,
 route plan, and deployment identity, required-edge activation refuses `edge_incomplete`.

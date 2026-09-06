@@ -784,6 +784,27 @@ to `compose.service` for stacks where WordPress is also the public service.
 The default policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.
 
+An environment can opt into a deployment-time, zone-wide Cloudflare purge:
+
+```yaml
+cloudflare:
+  proxied: true
+  tls: origin-ca
+  cache_purge:
+    on_deploy: true
+    scope: zone_all
+    zones: [example.com]
+```
+
+The zone list is explicit and must cover every declared route. `host plan` shows the
+normalized routes and affected zones; `host apply` resolves all zones before sending
+any purge request and records bounded per-zone acknowledgements in host status. Pass
+`--purge-edge-cache` to an otherwise approved `host apply` to run the same purge on
+demand. Acknowledgement means Cloudflare accepted `purge_everything`; it does not prove
+global propagation, browser-cache removal, or that every location serves the new
+frontend generation. Missing policy keeps existing deployments unchanged; an invalid
+or unavailable enabled policy fails closed.
+
 Nested hostnames that are not covered by the zone's edge certificate can opt into
 DNS-only public ACME instead. Caddy then obtains and renews a publicly trusted
 certificate, while Cloudflare manages only the DNS record:

@@ -29,6 +29,7 @@ import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
+from sandbox.hosting import edge_cache
 from sandbox.hosting.recovery.models import (
     MAX_RECEIPT_BYTES, RecoveryAction, RecoveryRequest, TargetIdentity,
     canonical_digest, validate_edge_intent,
@@ -1531,7 +1532,7 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
     """Return the canonical non-secret edge and DNS intent for one registration."""
     plan = hosting.desired_plan(
         validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
-    return validate_edge_intent({
+    intent = {
         "records": sorted(({
             "hostname": item.get("hostname"), "address": item.get("address"),
             "proxied": item.get("proxied"), "mode": item.get("mode"),
@@ -1547,7 +1548,11 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
             "enabled": bool(validated.get("basic_auth")),
             "username": (validated.get("basic_auth") or {}).get("username"),
         },
-    })
+    }
+    cache_purge = (validated.get("cloudflare") or {}).get("cache_purge") or {}
+    if cache_purge.get("enabled") is True:
+        intent["cache_purge"] = cache_purge
+    return validate_edge_intent(intent)
 
 
 def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
@@ -1655,6 +1660,7 @@ def _nonsecret_host_intent(validated: dict) -> str:
         "routes": validated.get("routes"),
         "healthcheck": validated.get("healthcheck"),
         "cloudflare": validated.get("cloudflare"),
+        "edge_cache": (validated.get("cloudflare") or {}).get("cache_purge"),
         "basic_auth": {key: value for key, value in
                        (validated.get("basic_auth") or {}).items()
                        if key != "password"},
@@ -2131,6 +2137,16 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         recorded_runtime["source_revision"] = _safe_source_revision_receipt(
             recorded_runtime.get("source_revision"),
         )
+    edge_cache_receipt = recorded.get("edge_cache_purge")
+    if edge_cache_receipt is None:
+        # v2 activation owns its receipt inside the shared host record's
+        # additive image-activation envelope.  Project only the closed cache
+        # receipt into status; never parse a second state file here.
+        activation = recorded.get("image_activation")
+        current = activation.get("current") if isinstance(activation, dict) else None
+        edge_receipt = current.get("edge_receipt") if isinstance(current, dict) else None
+        if isinstance(edge_receipt, dict):
+            edge_cache_receipt = edge_receipt.get("cache_purge_receipt")
     services = [
         validated["compose"]["service"],
         *validated["compose"].get("background_services", []),
@@ -2146,6 +2162,7 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "observed_runtime_revision": recorded.get("observed_runtime_revision"),
         "runtime": recorded_runtime,
         "edge": recorded.get("edge") or {"state": "unknown"},
+        "edge_cache_purge": edge_cache_receipt,
         "generation": recorded.get("generation", 0),
         "latest_recovery": _latest_recovery_summary(recorded),
         "state_record": "present" if recorded else "missing",
@@ -2818,7 +2835,8 @@ def _resolve_host_source_commit(project_root: str) -> str:
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
-                progress=None, recovery_repository=None) -> dict:
+                progress=None, recovery_repository=None,
+                purge_edge_cache: bool = False) -> dict:
     durable_save = (recovery_repository._write if recovery_repository is not None
                     else hosting.save_host_state)
     broker_guard = (personal_secrets.hosting_binding_broker_lock()
@@ -2972,6 +2990,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     previous_caddy = _read_remote_optional(entry, caddy_path)
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
+    edge_cache_receipt = None
 
     def rollback() -> None:
         nonlocal reservation
@@ -3002,7 +3021,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("; ".join(failures))
 
     def apply() -> None:
-        nonlocal reservation
+        nonlocal reservation, edge_cache_receipt
         if stream_progress is not None:
             stream_progress(f"source reset to {sha}")
             stream_progress(f"apply log: {apply_log}")
@@ -3162,6 +3181,58 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         _verify_edge(validated["routes"], **verify_kwargs)
+        cache_policy = (validated.get("cloudflare") or {}).get("cache_purge") or {}
+        if cache_policy.get("on_deploy") is True or purge_edge_cache:
+            if cache_policy.get("enabled") is not True:
+                raise RuntimeError("edge-cache purge requested without an approved cache policy")
+            cache_request_id = (
+                f"host-cache-{validated['project']}-{validated['environment']}-"
+                f"{sha[:24]}"
+            )
+            purge = edge_cache.build_purge_plan(
+                policy=cache_policy, project=validated["project"],
+                environment=validated["environment"], request_id=cache_request_id,
+                deployment_revision=sha,
+            )
+            retained = previous_entry.get("edge_cache_purge")
+            if isinstance(retained, dict) and retained.get("request_digest") == purge["request_digest"] \
+                    and retained.get("status") == "complete":
+                edge_cache_receipt = retained
+            else:
+                prepared = {"schema_version": 1, "status": "prepared",
+                             "request_id": purge["request_id"],
+                             "request_digest": purge["request_digest"],
+                             "policy_digest": purge["policy_digest"],
+                             "scope": purge["scope"], "zones": [
+                                 {"zone": zone, "state": "prepared"}
+                                 for zone in purge["zones"]]}
+                state["hosts"][key]["edge_cache_purge"] = prepared
+                durable_save(state)
+                def before_zone(zone):
+                    current = state["hosts"][key]["edge_cache_purge"]
+                    for item in current["zones"]:
+                        if item.get("zone") == zone["name"]:
+                            item["zone_id"] = zone["id"]
+                            item["state"] = "effect_entered"
+                    durable_save(state)
+                def after_zone(item):
+                    current = state["hosts"][key]["edge_cache_purge"]
+                    for row in current["zones"]:
+                        if row.get("zone") == item["zone"]:
+                            row.update(item)
+                    durable_save(state)
+                try:
+                    edge_cache_receipt = edge_cache.purge_plan(
+                        client=client, plan=purge,
+                        before_zone=before_zone, after_zone=after_zone,
+                    )
+                except edge_cache.EdgeCacheError as exc:
+                    current = state["hosts"][key].get("edge_cache_purge") or {}
+                    current["status"] = "acceptance_unknown" if exc.code == "acceptance_unknown" else "refused"
+                    durable_save(state)
+                    raise RuntimeError(f"edge-cache purge failed ({exc.code})") from None
+                state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
+                durable_save(state)
         _release_host_apply_reservation(entry, reservation)
         reservation = None
         state["hosts"][key].update({
@@ -3174,6 +3245,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "caddy_name": caddy_name,
             "edge": {"state": "ready"},
         })
+        if edge_cache_receipt is not None:
+            state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
         durable_save(state)
 
     hosting.apply_with_rollback(apply, rollback)
@@ -3185,6 +3258,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "observed_runtime_revision": state["hosts"][key].get("observed_runtime_revision"),
         "runtime": state["hosts"][key].get("runtime"),
         "edge": state["hosts"][key].get("edge"),
+        "edge_cache_purge": state["hosts"][key].get("edge_cache_purge"),
         "derived_environment": runtime.get("derived_environment", []),
     }
     if progress is not None:
@@ -3366,6 +3440,14 @@ class _HostImageEdgeAdapter:
         self.activation_repository = activation_repository
         self.target_identity = target_identity
         self.results = {}
+        self._generation_checkpoint = None
+
+    def set_generation_checkpoint(self, callback) -> None:
+        """Install the target-owner callback used around each provider POST."""
+        self._generation_checkpoint = callback
+
+    def clear_generation_checkpoint(self) -> None:
+        self._generation_checkpoint = None
 
     def observe_plan(self):
         from sandbox.hosting.images.activation.models import activation_digest
@@ -3415,15 +3497,75 @@ class _HostImageEdgeAdapter:
             "sandbox.hosting.images.generation-bound-edge-receipt.v2", body)}
 
     def apply_generation_v2(self, **values) -> dict:
-        receipt = self._v2_receipt(**values)
+        cache_purge_receipt = None
+        cache_policy = (self.validated.get("cloudflare") or {}).get("cache_purge") or {}
+        if cache_policy.get("on_deploy") is True:
+            from sandbox.hosting.edge_cache import build_purge_plan, purge_plan, EdgeCacheError
+            durable = None
+            if self.activation_repository is not None and self.target_identity is not None:
+                state = self.activation_repository.snapshot(self.target_identity)
+                active = state.get("active") if isinstance(state, dict) else None
+                durable = active.get("edge_result") if isinstance(active, dict) else None
+                if isinstance(durable, dict):
+                    if (durable.get("request_digest") != values.get("request_digest")
+                            or durable.get("generation") != values.get("generation")
+                            or durable.get("generation_subject_digest") !=
+                            values.get("generation_subject_digest")):
+                        raise RuntimeError("edge cache request conflict")
+                    if durable.get("terminal") is True:
+                        return durable
+                    states = {row.get("state") for row in durable.get("zones", [])
+                              if isinstance(row, dict)}
+                    if states & {"effect_entered", "acknowledged", "acceptance_unknown"}:
+                        raise EdgeCacheError("acceptance_unknown")
+            request_id = (
+                f"host-cache-{self.validated['project']}-{self.validated['environment']}-"
+                f"{values['request_digest'].removeprefix('sha256:')[:24]}"
+            )
+            try:
+                purge = build_purge_plan(
+                    policy=cache_policy, project=self.validated["project"],
+                    environment=self.validated["environment"], request_id=request_id,
+                    generation_subject_digest=values.get("generation_subject_digest"),
+                    activation_request_digest=values["request_digest"],
+                )
+                def before_zone(zone):
+                    if self._generation_checkpoint is not None:
+                        self._generation_checkpoint({
+                            "zone": zone["name"], "zone_id": zone["id"],
+                            "state": "effect_entered"})
+                def after_zone(item):
+                    if self._generation_checkpoint is not None:
+                        self._generation_checkpoint(item)
+                def prepare_zones(zones):
+                    if self._generation_checkpoint is not None:
+                        for zone in zones:
+                            self._generation_checkpoint({
+                                "zone": zone["name"], "zone_id": zone["id"],
+                                "state": "prepared"})
+                cache_purge_receipt = purge_plan(
+                    client=cloudflare.Client(), plan=purge,
+                    before_zone=before_zone, after_zone=after_zone,
+                    prepare_zones=prepare_zones)
+            except EdgeCacheError as exc:
+                raise RuntimeError(f"edge-cache purge failed ({exc.code})") from None
+        receipt = self._v2_receipt(**values, cache_purge_receipt=cache_purge_receipt)
         self.results[(values["request_digest"], values["generation"])] = receipt
         return receipt
 
     def observe_generation_v2(self, **values) -> dict:
         # Rerun the manifest-derived route observation.  Stored state is only a
         # comparison target; it is not evidence that the edge is ready now.
-        current = self._v2_receipt(**values)
         retained = self.results.get((values["request_digest"], values["generation"]))
+        current = self._v2_receipt(
+            **values,
+            cache_purge_receipt=(retained or {}).get("cache_purge_receipt")
+            if isinstance(retained, dict) else None,
+        )
+        if (self.validated.get("cloudflare") or {}).get("cache_purge", {}).get("on_deploy") is True \
+                and (not isinstance(retained, dict) or retained.get("cache_purge_receipt") is None):
+            from sandbox.hosting.images.activation.models import ActivationContractError
+            raise ActivationContractError("edge_incomplete")
         if retained is not None and retained != current:
             from sandbox.hosting.images.activation.models import ActivationContractError
             raise ActivationContractError("edge_uncertain")
@@ -4660,6 +4802,9 @@ def cmd_host(cfg, args) -> None:
             print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
             print(f"  health: {result['health']['state']}")
             print(f"  generation: {result['generation']}")
+            cache = result.get("edge_cache_purge")
+            if isinstance(cache, dict):
+                print(f"  edge cache purge: {cache.get('status', 'unknown')}")
             if result.get("latest_recovery"):
                 print(f"  latest recovery: {result['latest_recovery']['result_class']}")
             for service in result["services"]:
@@ -4750,6 +4895,7 @@ def cmd_host(cfg, args) -> None:
             "username": (validated.get("basic_auth") or {}).get("username"),
         }
         plan["cloudflare"] = _cloudflare_drift(plan)
+        plan["edge_cache_purge"] = (validated.get("cloudflare") or {}).get("cache_purge")
         _emit({"ok": True, **plan}, args.json)
         return
     progress = (lambda _message: None) if args.json else (
@@ -4781,6 +4927,7 @@ def cmd_host(cfg, args) -> None:
                     validated, current_entry, args.remote, runtime, state,
                     bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
                     recovery_repository=recovery_repository,
+                    purge_edge_cache=bool(getattr(args, "purge_edge_cache", False)),
                 )
     except TimeoutError:
         die("another host apply or recovery owns this target")
@@ -4798,6 +4945,8 @@ def cmd_host(cfg, args) -> None:
     }
     if result.get("apply_log"):
         evidence["apply_log"] = result["apply_log"]
+    if result.get("edge_cache_purge") is not None:
+        evidence["edge_cache_purge"] = result["edge_cache_purge"]
     if args.json:
         print(json.dumps(evidence))
     else:

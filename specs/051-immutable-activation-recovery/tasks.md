@@ -267,3 +267,28 @@ remote mutation, edge change, deployment, or production use.
 - [X] T062 Add protected post-stage v2 activation-bundle preparation, target-scoped
   Compose identity, ssh-agent public-key signing, immediate verification, owner-only
   replay/conflict handling, and focused refusal tests.
+
+## Phase 24: Lenzora edge-cache purge extension (Astra Medium plan)
+
+- [X] T147 Add RED policy/value/provider tests for explicit route-covered `zone_all` policies,
+  exact zone responses, all-zone preflight, provider refusal classes, bounded receipts, and
+  secret non-disclosure in `tests/test_hosting_edge_cache.py` and `tests/test_hosting.py`.
+- [X] T148 Extend the Feature 051 contracts/data model and validate `cloudflare.cache_purge`
+  in `sandbox/core/_hosting.py`; implement a pure policy plus Cloudflare purge adapter in
+  `sandbox/hosting/edge_cache.py` and `sandbox/core/_cloudflare.py` without credential or
+  arbitrary-zone escapes.
+- [X] T149 Add durable per-zone purge operation/receipt validation and exact replay,
+  conflict, acceptance-unknown, and retention bounds through the existing outer host-state
+  owner and v2 activation repository/models.
+- [X] T150 Integrate admitted purge order and read-only observation into v2 activation,
+  rollback, and `_HostImageEdgeAdapter`; preserve old receipt schemas and zero-write
+  recovery/adoption behavior.
+- [X] T151 Integrate the same purge operation into ordinary `host apply`, edge continuation,
+  plan/status/diagnose output, and add an explicit confirmation-gated CLI path only if the
+  shared owner contract requires it.
+- [X] T152 Update Lenzora's production/development hosting manifests and protected deployment
+  classifiers while preserving existing v2 production and ordinary development flows.
+- [X] T153 Run focused edge-cache, hosting, activation, recovery, and CLI gates plus
+  architecture scans; record exact evidence and open live validation in implementation docs.
+- [ ] T154 Commit and push verified Sandbox work on `latest`; separately preserve and report
+  the Lenzora checkout's existing dirty files and branch state.

@@ -882,6 +882,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
     host_p.add_argument("--confirm", action="store_true",
         help="allow protected host apply or separately confirmed edge continuation")
+    host_p.add_argument("--purge-edge-cache", action="store_true",
+        help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",

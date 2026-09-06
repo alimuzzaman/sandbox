@@ -390,6 +390,7 @@ class GenerationBoundEdgeReceiptV2:
     observation_digest: str
     terminal: bool
     receipt_digest: str
+    cache_purge_receipt: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 2 or self.terminal is not True:
@@ -399,6 +400,32 @@ class GenerationBoundEdgeReceiptV2:
         for value in (self.request_digest, self.generation_subject_digest,
                       self.route_digest, self.observation_digest, self.receipt_digest):
             _digest(value)
+        if self.cache_purge_receipt is not None:
+            purge = self.cache_purge_receipt
+            if (type(purge) is not dict or purge.get("schema_version") != 1
+                    or purge.get("status") != "complete"
+                    or purge.get("provider") != "cloudflare"
+                    or purge.get("scope") != "zone_all"
+                    or not _DIGEST.fullmatch(str(purge.get("request_digest")))
+                    or purge.get("activation_request_digest") != self.request_digest
+                    or not isinstance(purge.get("project"), str)
+                    or not isinstance(purge.get("environment"), str)
+                    or not isinstance(purge.get("routes"), list)
+                    or not isinstance(purge.get("policy_digest"), str)
+                    or not _DIGEST.fullmatch(purge["policy_digest"])
+                    or not _DIGEST.fullmatch(str(purge.get("receipt_digest")))):
+                raise ActivationContractError("edge_incomplete")
+            if (not isinstance(purge.get("zones"), list)
+                    or len(purge["zones"]) > 32):
+                raise ActivationContractError("edge_incomplete")
+            for zone in purge["zones"]:
+                if (type(zone) is not dict or set(zone) !=
+                        {"zone_id", "zone", "state", "provider_id"}
+                        or zone.get("state") != "acknowledged"
+                        or not isinstance(zone.get("zone_id"), str)
+                        or not isinstance(zone.get("zone"), str)
+                        or not isinstance(zone.get("provider_id"), str)):
+                    raise ActivationContractError("edge_incomplete")
         if self.receipt_digest != activation_digest(
                 "sandbox.hosting.images.generation-bound-edge-receipt.v2",
                 self.body_mapping()):
@@ -406,14 +433,22 @@ class GenerationBoundEdgeReceiptV2:
 
     def body_mapping(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__
-                if name != "receipt_digest"}
+                if name != "receipt_digest" and
+                (name != "cache_purge_receipt" or getattr(self, name) is not None)}
 
     def as_mapping(self) -> dict[str, Any]:
         return {**self.body_mapping(), "receipt_digest": self.receipt_digest}
 
     @classmethod
     def from_mapping(cls, value: object) -> "GenerationBoundEdgeReceiptV2":
-        raw = _closed(value, frozenset(cls.__dataclass_fields__))
+        if type(value) is not dict:
+            raise ActivationContractError("edge_incomplete")
+        fields = frozenset(cls.__dataclass_fields__)
+        if not set(value) <= fields or "cache_purge_receipt" not in value:
+            if set(value) != fields - {"cache_purge_receipt"}:
+                raise ActivationContractError("edge_incomplete")
+            value = {**value, "cache_purge_receipt": None}
+        raw = _closed(value, fields)
         return cls(**raw)
 
 

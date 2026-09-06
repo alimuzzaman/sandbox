@@ -277,14 +277,28 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
             prepared_fields = {"schema_version", "phase", "request_digest", "generation",
                 "generation_subject_digest", "route_digest", "observation_digest",
                 "terminal", "receipt_digest"}
-            if set(edge) != prepared_fields or edge.get("schema_version") != 2 \
+            if (set(edge) not in (prepared_fields, prepared_fields | {"zones"})
+                    or edge.get("schema_version") != 2 \
                     or edge.get("phase") != "prepared" or edge.get("terminal") is not False \
-                    or edge.get("receipt_digest") is not None:
+                    or edge.get("receipt_digest") is not None):
                 raise ActivationContractError()
             for key in ("request_digest", "generation_subject_digest", "route_digest",
                         "observation_digest"):
                 _digest(edge[key])
             _integer(edge["generation"], minimum=1)
+            if "zones" in edge:
+                zones = edge["zones"]
+                if type(zones) is not list or len(zones) > 32:
+                    raise ActivationContractError()
+                for zone in zones:
+                    if (type(zone) is not dict
+                            or set(zone) != {"zone", "zone_id", "state"}
+                            or type(zone["zone"]) is not str
+                            or type(zone["zone_id"]) is not str
+                            or zone["state"] not in {
+                                "prepared", "effect_entered", "acknowledged",
+                                "acceptance_unknown", "refused"}):
+                        raise ActivationContractError()
     if raw["candidate_generation"] is not None:
         candidate = VerifiedActivationGenerationV2.from_mapping(candidate)
     if raw["phase"] == "accepted" and (replacement is not None or raw["effect_entered"]

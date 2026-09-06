@@ -22,6 +22,7 @@ MAX_EDGE_RECORDS = 128
 MAX_CERTIFICATE_HOSTNAMES = 64
 MAX_EDGE_INTENT_BYTES = 64 * 1024
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_ACTIVATION_TARGET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -297,8 +298,9 @@ class ActivationTransitionProjection:
                 or type(self.expected_generation) is not int or self.expected_generation < 0 \
                 or type(self.target) is not dict \
                 or set(self.target) != {"machine_identity", "target_identity", "daemon_identity"} \
-                or any(not isinstance(value, str) or not _SAFE_ID.fullmatch(value)
-                       for value in self.target.values()):
+                or any(not isinstance(value, str) or not (
+                    _ACTIVATION_TARGET_ID if name == "target_identity" else _SAFE_ID).fullmatch(value)
+                       for name, value in self.target.items()):
             raise ValueError("activation transition projection is invalid")
         required = {"service", "runtime_identity", "declared_image", "repository_digest",
                     "local_image_id", "config_digest", "platform", "topology_identity",
@@ -372,9 +374,11 @@ class ActivationRecoveryObservation:
                 or type(self.expected_generation) is not int or self.expected_generation < 0:
             raise ValueError("activation observation is invalid")
         for value in (self.target_epoch_start, self.target_epoch_end,
-                      self.target_identity_start, self.target_identity_end,
                       self.runtime_epoch_start, self.runtime_epoch_end):
             _safe_id(value, "activation observation epoch")
+        for value in (self.target_identity_start, self.target_identity_end):
+            if not isinstance(value, str) or not _ACTIVATION_TARGET_ID.fullmatch(value):
+                raise ValueError("activation observation target identity is invalid")
         if (self.target_epoch_start != self.target_epoch_end \
                 or self.target_identity_start != self.target_identity_end \
                 or self.runtime_epoch_start != self.runtime_epoch_end) \

@@ -208,6 +208,8 @@ Retained v2 replacement intents use their observation-bound projection directly;
 they do not require a candidate generation merely to enter recovery.
 Empty observations use the retained intent sentinel without attempting candidate
 service validation; generation and epoch checks still decide prior-state eligibility.
+Recovery target identities accept the activation contract's bounded slash-separated
+registered target names. Machine and daemon epoch identity rules remain unchanged.
 Runtime observation accepts a local image ID equal to the verified config
 digest, full repository digest reference, or that reference's manifest digest.
 Unrelated or malformed local IDs remain refused before the remote observation.

@@ -158,9 +158,10 @@ class ReplacementIntentV2:
             _text(row["name"], identity=True); _text(row["image_ref"])
             _digest(row["config_digest"])
             _local_image_id(row["local_image_id"], row["image_ref"])
+            manifest_digest = row["image_ref"].rsplit("@", 1)[-1]
             if row["platform"] != {"os": "linux", "architecture": "amd64"} \
                     or row["local_image_id"] not in {
-                        row["config_digest"], row["image_ref"]}:
+                        row["config_digest"], row["image_ref"], manifest_digest}:
                 raise ActivationContractError("local_image_mismatch")
             images[row["name"]] = row
         if len(images) != len(self.images):
@@ -459,7 +460,9 @@ class VerifiedActivationGenerationV2:
             _text(row["name"], identity=True); _text(row["image_ref"])
             _digest(row["config_digest"])
             _local_image_id(row["local_image_id"], row["image_ref"])
-            if row["local_image_id"] not in {row["config_digest"], row["image_ref"]} \
+            manifest_digest = row["image_ref"].rsplit("@", 1)[-1]
+            if row["local_image_id"] not in {
+                    row["config_digest"], row["image_ref"], manifest_digest} \
                     or row["platform"] != {
                     "os": "linux", "architecture": "amd64"}:
                 raise ActivationContractError("local_image_mismatch")

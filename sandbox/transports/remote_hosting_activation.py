@@ -469,9 +469,14 @@ class RegisteredRemoteActivationTransport:
             # the caller; never derive or overwrite it from Docker's Id.
             if expected_config_digest is None:
                 expected_config_digest = image_id
+            # Docker 29's containerd image store may expose the bare manifest
+            # digest as ``.Id``. The signed receipt still binds the config
+            # digest, while the qualified RepoDigest above proves the exact
+            # manifest. Accept all three equivalent engine identities.
+            manifest_digest = image.rsplit("@", 1)[-1]
             if (not isinstance(expected_config_digest, str)
                     or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_config_digest)
-                    or image_id not in {expected_config_digest, image}):
+                    or image_id not in {expected_config_digest, image, manifest_digest}):
                 raise RemoteActivationError("local_image_mismatch")
             end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             end_target = self._observed_target(end_epoch)

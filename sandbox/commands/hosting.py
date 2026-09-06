@@ -3453,20 +3453,30 @@ class _HostImageEdgeAdapter:
         from sandbox.hosting.images.activation.models import activation_digest
         # A first immutable activation may legitimately have no origin yet:
         # the runtime effect below is what creates the web listener behind the
-        # already-declared edge.  Keep the live edge proof for every existing
-        # or non-empty transaction, and for the post-effect
+        # already-declared edge. Retained terminal refusals at generation zero
+        # do not establish an origin. Keep live proof for effect-bearing history
+        # and for the post-effect
         # ``apply_generation_v2`` call, which invokes this method again.
         bootstrap = False
         if self.activation_repository is not None and self.target_identity is not None:
             snapshot = getattr(self.activation_repository, "snapshot", None)
             if callable(snapshot):
                 state = snapshot(self.target_identity)
+                results = state.get("results")
+                only_refusals = type(results) is dict and all(
+                    type(entry) is dict and type(entry.get("result")) is dict
+                    and entry["result"].get("result_class") == "refused"
+                    and entry["result"].get("ok") is False
+                    and entry["result"].get("starting_generation") == 0
+                    and entry["result"].get("resulting_generation") == 0
+                    and entry["result"].get("generation_digest") is None
+                    for entry in results.values())
                 bootstrap = (
                     state.get("generation") == 0
                     and state.get("current") is None
                     and state.get("previous") is None
                     and state.get("active") is None
-                    and not state.get("results")
+                    and only_refusals
                     and not state.get("tombstones")
                     and state.get("recovery_provisional") is None
                     and not state.get("recovery_results")

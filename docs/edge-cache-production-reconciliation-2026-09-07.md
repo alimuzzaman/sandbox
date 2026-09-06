@@ -15,3 +15,10 @@ also passed. This is source validation, not live activation evidence.
 The production task still owns the live controller and has a further admission
 fix underway. Lenzora must not pin this intermediate merge or advance its held
 dev/main branches until that final revision is reconciled and validated.
+
+Follow-up source integration includes `931eda2c25c3327148d36ebd4a15cfb00fcf08a6`.
+It allows initial edge planning after terminal pre-effect refusal history,
+while retaining verification for any effect-bearing or uncertain history.
+Local durable job `467c587e56055e243a690449c329ef2a` completed `succeeded`,
+exit 0: 54 tests across edge cache, activation CLI/v2, and recovery.
+This follow-up merged without conflicts. The live production hold still applies.

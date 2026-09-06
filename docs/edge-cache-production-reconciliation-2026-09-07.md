@@ -28,3 +28,11 @@ normalizes missing/null Compose dependencies to an empty mapping while
 retaining malformed-value refusal. It merged cleanly. Local durable job
 `7552f18c35277de3d6198948d825a135` passed 37 helper/private-source,
 activation CLI, and edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Recovery scope repair `e69be7f91d25789250d94908113b438dc37b67ca`
+adds the declared initializer services to recovery render admission while
+retaining the persistent runtime projection. It merged cleanly. Local durable
+jobs `b5163a1e09cbd7f648f2f24188381722` (54 regression tests) and
+`0cc23a31a170fe9f83915757f5d63bd5` (two recovery CLI tests) both completed
+`succeeded`, exit 0. The live uncertain transaction remains owned by the
+production task; this branch performed no runtime effects.

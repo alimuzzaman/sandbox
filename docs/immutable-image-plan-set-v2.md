@@ -197,6 +197,8 @@ or successful history does not. Post-effect edge verification remains required.
 
 The public Compose projection treats absent/null `depends_on` as an empty
 dependency map. Explicit malformed non-map values retain an invalid marker.
+Recovery profile discovery admits the manifest's persistent and initializer
+services while retaining only the selected persistent service projection.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

@@ -381,6 +381,30 @@ class ActivationCliTests(unittest.TestCase):
         self.assertEqual(observed["route_digest"], activation_digest(
             "sandbox.hosting.images.activation-edge-routes.v1", expected))
 
+    def test_initial_immutable_activation_defers_live_edge_check_until_after_effect(self):
+        from sandbox.commands.hosting import _HostImageEdgeAdapter
+        validated = {"routes": [{"hostname": "example.test", "mode": "serve",
+                                  "primary": True}],
+                     "healthcheck": {"path": "/health"}, "basic_auth": None}
+
+        class Repository:
+            def snapshot(self, _target):
+                return {
+                    "generation": 0, "current": None, "previous": None,
+                    "active": None, "results": {}, "tombstones": {},
+                    "recovery_provisional": None, "recovery_results": {},
+                }
+
+        with patch("sandbox.commands.hosting._verify_edge") as verify:
+            observed = _HostImageEdgeAdapter(
+                validated, activation_repository=Repository(),
+                target_identity="target-a").observe_plan()
+        verify.assert_not_called()
+        self.assertEqual(observed["routes"], [{
+            "hostname": "example.test", "mode": "serve", "target": None,
+            "primary": True, "healthcheck_path": "/health",
+        }])
+
     def test_reachability_only_edge_adapter_refuses_generation_authority(self):
         from sandbox.commands.hosting import _HostImageEdgeAdapter
         validated = {"routes": [], "healthcheck": {"path": "/health"},

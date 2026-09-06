@@ -170,6 +170,14 @@ Atomic activation
   --json
 ```
 
+Activation provisioning can renew a retained v2 bundle only after both its
+snapshot and signed rollback grant expire. The target and signing authority
+must match, and generation authority cannot move backwards. Under the target
+mutation lock, provisioning retains an owner-only `.expired-<digest>` evidence
+copy and atomically installs the fresh bundle, returning `installed`. Live,
+malformed, unsigned, or conflicting authority is refused; exact replay remains
+`replayed`.
+
 The owner-only activation bundle is selected from the registered target and has
 exactly these fields: `schema_version`, `compose_snapshot`, `rollback_grant`,
 `rollback_grant_public_key`, and `stage_ledger`. There is no public

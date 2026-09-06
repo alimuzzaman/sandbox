@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
 import signal
@@ -294,9 +293,16 @@ def _anonymous_denied(repository: str, manifest_digest: str) -> bool:
 
 
 def _projected_machine_identity() -> str:
-    """Recreate Feature 046's authenticated stable host projection."""
+    """Match the authenticated server's machine-id projection, not its provider default."""
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip().lower()
+    except (OSError, UnicodeError):
+        raise ValueError("observation_invalid") from None
+    if re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ValueError("observation_invalid")
     return hashlib.sha256(
-        platform.node().encode("utf-8", "replace")).hexdigest()[:24]
+        b"sandbox-host-machine-id-v1\0" + machine_id.encode("ascii")
+    ).hexdigest()[:24]
 
 
 def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
@@ -342,9 +348,11 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         if any(item.returncode != 0 for item in (epoch_start, inspect, epoch_end)):
             raise ValueError("observation_invalid")
         machine_epoch_end = machine_epoch_reader()
+        projected_identity_end = projected_identity_reader()
         start = epoch_start.stdout.decode().strip(); end = epoch_end.stdout.decode().strip()
         if not start or start != end or not machine_epoch_start \
                 or machine_epoch_start != machine_epoch_end \
+                or projected_identity != projected_identity_end \
                 or projected_identity != plan["target"]["machine_identity"] \
                 or start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
@@ -382,7 +390,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         registry["observation_digest"] = staging_digest(
             "sandbox.hosting.images.registry-observation.v1", registry)
         observation = {"target_epoch_start": projected_identity,
-            "target_epoch_end": projected_identity,
+            "target_epoch_end": projected_identity_end,
             "daemon_epoch_start": start, "daemon_epoch_end": end, "target": plan["target"],
             "repository": plan["repository"], "repo_digest": plan["repository_qualified_digest"],
             "config_digest": config_digest, "platform": platform, "local_image_id": local_image_id,
@@ -482,15 +490,17 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
         daemon_end_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                    environment=environment, timeout=15)
         machine_epoch_end = machine_epoch_reader()
+        projected_identity_end = projected_identity_reader()
         if daemon_end_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_end = daemon_end_result.stdout.decode().strip()
         if not machine_epoch_start or machine_epoch_start != machine_epoch_end \
+                or projected_identity != projected_identity_end \
                 or projected_identity != plan["target"]["machine_identity"] \
                 or not daemon_start or daemon_start != daemon_end \
                 or daemon_start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
         body = {"target_epoch_start": projected_identity,
-                "target_epoch_end": projected_identity,
+                "target_epoch_end": projected_identity_end,
                 "daemon_epoch_start": daemon_start, "daemon_epoch_end": daemon_end,
                 "target": plan["target"], "images": observations}
         observation = {**body, "observation_digest": staging_digest(

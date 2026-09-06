@@ -3451,9 +3451,30 @@ class _HostImageEdgeAdapter:
 
     def observe_plan(self):
         from sandbox.hosting.images.activation.models import activation_digest
-        _verify_edge(self.validated["routes"],
-                     healthcheck_path=self.validated["healthcheck"]["path"],
-                     basic_auth_enabled=bool(self.validated.get("basic_auth")))
+        # A first immutable activation may legitimately have no origin yet:
+        # the runtime effect below is what creates the web listener behind the
+        # already-declared edge.  Keep the live edge proof for every existing
+        # or non-empty transaction, and for the post-effect
+        # ``apply_generation_v2`` call, which invokes this method again.
+        bootstrap = False
+        if self.activation_repository is not None and self.target_identity is not None:
+            snapshot = getattr(self.activation_repository, "snapshot", None)
+            if callable(snapshot):
+                state = snapshot(self.target_identity)
+                bootstrap = (
+                    state.get("generation") == 0
+                    and state.get("current") is None
+                    and state.get("previous") is None
+                    and state.get("active") is None
+                    and not state.get("results")
+                    and not state.get("tombstones")
+                    and state.get("recovery_provisional") is None
+                    and not state.get("recovery_results")
+                )
+        if not bootstrap:
+            _verify_edge(self.validated["routes"],
+                         healthcheck_path=self.validated["healthcheck"]["path"],
+                         basic_auth_enabled=bool(self.validated.get("basic_auth")))
         health_path = self.validated["healthcheck"]["path"]
         routes = sorted(({
             "hostname": item["hostname"], "mode": item["mode"],
@@ -3731,6 +3752,8 @@ def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None =
 
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
+    from sandbox.transports.remote_hosting_activation import RemoteActivationError
+
     phase = getattr(args, "provision_phase", None)
     if phase not in {"machine-policy", "stage-bundle", "activation-bundle"}:
         die("host image provision requires --provision-phase; no authority was opened")
@@ -3752,7 +3775,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
             install_owner_only_json_pair,
             prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
             prepare_stage_bundle, reuse_owner_only_stage_bundle,
-            replace_expired_stage_bundle,
+            replace_expired_stage_bundle, install_activation_bundle,
         )
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
@@ -3831,7 +3854,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     raise ValueError("verified plan target changed")
                 helper_path = Path(__file__).parents[1] / "hosting" / "images" / "staging_helper.py"
                 helper_digest = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
-                revision = subprocess.run(("git", "rev-parse", "HEAD"), cwd=Path(__file__).parents[2],
+                # Bind the remote helper to the revision that actually owns
+                # its source file. Controller-only changes must not make an
+                # unchanged installed staging helper look like a new runtime.
+                revision = subprocess.run(("git", "log", "-1", "--format=%H", "--",
+                    str(helper_path.relative_to(Path(__file__).parents[2]))),
+                    cwd=Path(__file__).parents[2],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True,
                     env={"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C"}).stdout.strip()
                 helper = HelperIdentity(helper_digest, "sandbox-image-stage-helper-v2", revision,
@@ -3921,7 +3949,13 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         host_state_port=recovery.activation_host_state_port(),
                         stage_repository=stage,
                         target_mutation_port=recovery.target_mutation_port("activate"))
-                    state = activation.snapshot(target_id)
+                    # The provisioning command already owns the target through
+                    # the image-provision capability.  Reacquiring the
+                    # activation lock here uses a separate file descriptor and
+                    # deadlocks until the bounded lock timeout, surfacing as
+                    # the opaque artifact_invalid refusal.  Read the nested
+                    # activation state through the under-lock port instead.
+                    state = activation.snapshot_under_target_mutation(target_id)
                     generation = state["generation"]
                     if args.expected_generation != generation:
                         raise ValueError("activation generation changed")
@@ -3965,6 +3999,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         compose_files=prepare_selector["compose_files"],
                         project_name=prepare_selector["project_name"],
                         selected_services=plan.policy.persistent_services,
+                        allowed_services=(plan.policy.persistent_services
+                                          + plan.policy.one_shot_services),
                         service_image_bindings=images, environment_bindings=env_bindings,
                         target=target.as_mapping(), snapshot_id=snapshot_id,
                         provider_revision=provider_revision)
@@ -3983,7 +4019,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         authority_revision=signer_config["rollback_authority_revision"],
                         signer=signer, grant_ttl_seconds=args.grant_ttl_seconds)
                     path = root / "image-activation" / "policies" / f"{selector}.json"
-                    disposition = install_owner_only_json(path, bundle)
+                    disposition = install_activation_bundle(path, bundle)
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,
                         proof_set_digest=proof.proof_digest,
@@ -3994,6 +4030,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         activation_generation=generation, installed_path=str(path))
     except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         response["code"] = getattr(exc, "code", "artifact_invalid")
+        # Preserve the public refusal code while exposing only fixed adapter
+        # reasons. Never forward arbitrary exception messages or remote output.
+        if isinstance(exc, RemoteActivationError) and str(exc) in {
+                "topology_mismatch", "runtime_mismatch", "local_image_mismatch",
+                "init_mismatch", "effect_unknown"}:
+            response["reason"] = str(exc)
     print(json.dumps(response, sort_keys=True, separators=(",", ":")))
     if response["ok"] is not True: raise SystemExit(1)
 
@@ -4242,13 +4284,14 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  if ii.returncode!=0 or ii.stderr or ir.get('Id')!=image_id:raise ValueError('runtime_mismatch')",
             "  repo_digests=ir.get('RepoDigests')",
-            "  if expected_identity is not None and (not isinstance(repo_digests,list) or repo_digests.count(expected_identity['image_ref'])!=1 or image_id not in (expected_identity['config_digest'],expected_identity['image_ref'])):raise ValueError('runtime_mismatch')",
+            "  manifest_digest=expected_identity['image_ref'].rsplit('@',1)[-1] if expected_identity is not None else None",
+            "  if expected_identity is not None and (not isinstance(repo_digests,list) or repo_digests.count(expected_identity['image_ref'])!=1 or image_id not in (expected_identity['config_digest'],expected_identity['image_ref'],manifest_digest)):raise ValueError('runtime_mismatch')",
             "  config_digest=expected_identity['config_digest'] if expected_identity is not None else image_id",
             "  platform={'os':ir.get('Os'),'architecture':ir.get('Architecture')}",
             "  if ir.get('Variant'):platform['variant']=ir['Variant']",
             "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':config_digest,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
             " return out",
-            "vals=[];render=None;environment_fd=None;environment_before=None",
+            "vals=[];render=None;environment_fd=None;environment_before=None;list_profiles=False",
             "if s:",
             " if configuration_key is None:sys.stderr.write('configuration_binding_unavailable');sys.exit(91)",
             " e.update(s['environment'])",
@@ -4269,21 +4312,33 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " else:runtime_epoch=s['runtime_epoch']",
             " before=subprocess.run(['docker','info','--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             " if before.returncode!=0 or before.stderr or before.stdout.decode().strip()!=runtime_epoch:sys.stderr.write('compose_daemon_mismatch');sys.exit(91)",
+            " raw_args=sys.argv[2:];profiles=[];i=0",
+            " while i<len(raw_args):",
+            "  if raw_args[i]=='--profile':",
+            "   if i+1>=len(raw_args) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',raw_args[i+1]) is None or raw_args[i+1] in profiles:sys.stderr.write('compose_profile_invalid');sys.exit(91)",
+            "   profiles.append(raw_args[i+1]);i+=2",
+            "  else:i+=1",
+            " list_profiles='--profiles' in raw_args and 'config' in raw_args",
             " a=['docker','compose']",
+            " for profile in profiles:a+=['--profile',profile]",
             " if v2:a+=['--env-file','/proc/self/fd/'+str(environment_fd)]",
             " for f in s['compose_files']:a+=['--file',f]",
-            " a+=['--project-directory',s['project_directory'],'--project-name',s['project_name'],'config','--format','json']",
+            " a+=['--project-directory',s['project_directory'],'--project-name',s['project_name'],'config']",
+            " if list_profiles:a+=['--profiles']",
+            " else:a+=['--format','json']",
             " q=subprocess.run(a,env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=((environment_fd,) if environment_fd is not None else ()),timeout=min(command_timeout,60))",
             " if q.returncode!=0 or q.stderr:sys.stderr.write('compose_source_refused');sys.exit(91)",
             " if len(q.stdout)>1048576:sys.stderr.write('compose_source_oversized');sys.exit(91)",
-            " try:c=json.loads(q.stdout)",
-            " except Exception:sys.stderr.write('compose_source_malformed');sys.exit(91)",
-            " if not v2:vals.extend(strings(c))",
+            " if list_profiles:c={}",
             " else:",
-            "  for svc in c.get('services',{}).values():",
-            "   if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
+            "  try:c=json.loads(q.stdout)",
+            "  except Exception:sys.stderr.write('compose_source_malformed');sys.exit(91)",
+            "  if not v2:vals.extend(strings(c))",
+            "  else:",
+            "   for svc in c.get('services',{}).values():",
+            "    if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
             " got=configuration_identity(q.stdout,v2)",
-            " if s.get('kind')!='compose_prepare_v2' and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
+            " if s.get('kind') not in ('compose_prepare_v2','compose_snapshot_v2') and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
             " if s.get('kind') in ('compose_replace_v1','compose_replace_v2'):",
             "  for svc in c.get('services',{}).values():vals.extend((svc.get('environment') or {}).values())",
             "  render=q.stdout",
@@ -4319,7 +4374,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " if tuple(getattr(environment_before,n) for n in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_uid','st_nlink'))!=tuple(getattr(environment_after,n) for n in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_uid','st_nlink')):r=subprocess.CompletedProcess([],92,b'',b'compose_environment_changed')",
             " os.close(environment_fd)",
             "o=r.stdout;d=r.stderr",
-            "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode==0:",
+            "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode==0 and not list_profiles:",
             " raw=o",
             " if configuration_key is None:r=subprocess.CompletedProcess([],91,b'',b'configuration_binding_unavailable');o=b'';d=r.stderr",
             " else:",

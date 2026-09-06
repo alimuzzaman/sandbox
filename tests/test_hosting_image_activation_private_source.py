@@ -75,6 +75,52 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         self.assertNotIn(canary, "".join(
             (item.stdout or "") + (item.stderr or "") for item in results))
 
+    def test_v2_prepare_selects_the_unique_profile_matching_declared_services(self):
+        from sandbox.transports.remote_hosting_activation import (
+            RegisteredRemoteActivationTransport,
+        )
+
+        image = "ghcr.io/acme/widget@sha256:" + "a" * 64
+        base = {"services": {"web": {"image": image, "build": None,
+            "pull_policy": "never", "platform": "linux/amd64", "depends_on": {}}},
+            "x-sandbox-configuration-digest": "sha256:" + "b" * 64}
+        profiled = {"services": {
+            "web": base["services"]["web"],
+            "worker": {"image": image, "build": None, "pull_policy": "never",
+                "platform": "linux/amd64", "depends_on": {}},
+        }, "x-sandbox-configuration-digest": "sha256:" + "c" * 64}
+        calls = []
+
+        def runner(*, argv, **kwargs):
+            calls.append(argv)
+            if "--profiles" in argv:
+                return {"returncode": 0, "stdout": "object-storage\njob-orchestration\n",
+                        "stderr": "", "terminated": True}
+            if "--profile" in argv:
+                profile = argv[argv.index("--profile") + 1]
+                self.assertEqual(kwargs["environment"].get("COMPOSE_PROFILES"), profile)
+                rendered = profiled if profile == "job-orchestration" else base
+            else:
+                rendered = base
+            return {"returncode": 0, "stdout": json.dumps(rendered),
+                    "stderr": "", "terminated": True}
+
+        transport = RegisteredRemoteActivationTransport(
+            argv_runner=runner, configuration_binding_key=CONFIGURATION_KEY)
+        digest = transport.prepare_compose_snapshot_v2(
+            compose_files=("/synthetic/compose.yml",), project_name="widget",
+            selected_services=("web", "worker"),
+            service_image_bindings={"web": image, "worker": image},
+            environment_bindings={"WEB_IMAGE": image, "WORKER_IMAGE": image},
+            target={"machine_identity": "machine-a", "target_identity": "target-a",
+                    "daemon_identity": "daemon-a"},
+            snapshot_id="compose-snapshot/test-profile", provider_revision="provider-v2")
+
+        self.assertEqual(digest, "sha256:" + "c" * 64)
+        self.assertTrue(any("--profile" in call and
+                            call[call.index("--profile") + 1] == "job-orchestration"
+                            for call in calls))
+
     def test_running_projection_keeps_env_labels_and_raw_config_hash_remote(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from sandbox.transports.remote_hosting_activation import (

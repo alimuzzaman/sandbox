@@ -11,12 +11,49 @@ from tests.hosting_image_fixtures import stage_request
 
 class TestImageStagingProcess(unittest.TestCase):
     def test_helper_recreates_authenticated_projected_machine_identity(self):
-        import hashlib
+        import ast
+        import re
+        from pathlib import Path
+        from types import SimpleNamespace
         from unittest.mock import patch
         from sandbox.hosting.images import staging_helper
-        with patch.object(staging_helper.platform, "node", return_value="stable-node-a"):
-            self.assertEqual(staging_helper._projected_machine_identity(),
-                hashlib.sha256(b"stable-node-a").hexdigest()[:24])
+
+        # Execute the actual authenticated producer up to its provider boundary.
+        # HostProvider's standalone default is not the server's identity rule.
+        tree = ast.parse(Path("mcp/wp-server/server.py").read_text())
+        contract = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "_host_memory_contract")
+        namespace = {"Path": Path, "_re": re,
+                     "os": SimpleNamespace(environ={}),
+                     "_live_runtime_revision": lambda: "synthetic-revision"}
+        exec(compile(ast.Module(body=[contract], type_ignores=[]),
+                     "authenticated-contract", "exec"), namespace)
+        for raw in ("a" * 32, "  " + "B" * 32 + "\n"):
+            with self.subTest(raw=raw), \
+                 patch.object(Path, "read_text", return_value=raw), \
+                 patch("sandbox.resources.host_memory.remote.validate_request",
+                       return_value={"action": "host_memory_status"}), \
+                 patch("sandbox.resources.host_memory.provider.HostProvider",
+                       side_effect=RuntimeError("captured-provider")) as provider:
+                with self.assertRaisesRegex(RuntimeError, "captured-provider"):
+                    namespace["_host_memory_contract"]({})
+                expected = provider.call_args.kwargs["target_identity"]
+                self.assertEqual(staging_helper._projected_machine_identity(), expected)
+                self.assertRegex(expected, r"^[0-9a-f]{24}$")
+                self.assertNotIn(raw.strip().lower(), expected)
+
+    def test_helper_rejects_unavailable_or_invalid_machine_identity(self):
+        from unittest.mock import patch
+        from sandbox.hosting.images import staging_helper
+        for raw in ("", "a" * 31, "a" * 33, "g" * 32, "private-host-identity"):
+            with self.subTest(raw=raw), \
+                 patch.object(staging_helper.Path, "read_text", return_value=raw), \
+                 self.assertRaisesRegex(ValueError, "observation_invalid"):
+                staging_helper._projected_machine_identity()
+        with patch.object(staging_helper.Path, "read_text", side_effect=OSError("private-path")), \
+             self.assertRaisesRegex(ValueError, "observation_invalid"):
+            staging_helper._projected_machine_identity()
 
     def test_unit_identity_is_request_bound_not_pid_bound(self):
         from sandbox.hosting.images.staging_worker import unit_name

@@ -204,6 +204,8 @@ generation, recovery may observe an empty runtime as the exact prior state.
 The observation must succeed with stable target/daemon identities; partial
 service sets and malformed observations remain refused. This closes recovery
 without promoting a generation or retrying a runtime effect.
+Retained v2 replacement intents use their observation-bound projection directly;
+they do not require a candidate generation merely to enter recovery.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

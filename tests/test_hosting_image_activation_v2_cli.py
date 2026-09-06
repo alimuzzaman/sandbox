@@ -105,6 +105,7 @@ class FreshProcessV2RecoveryTests(unittest.TestCase):
         from sandbox.commands.hosting import _cmd_host_image
 
         state, _prior = recovery_state()
+        state["active"]["phase"] = "uncertain"
         intent = activation_recovery_intent_v2(state)
         persistent = tuple(row["service"] for row in intent["service_image_bindings"])
         validated = {"project": "widget", "compose": {

@@ -43,3 +43,9 @@ first activation with stable observation identities and no retained prior genera
 Partial or malformed runtime observations remain refused. Local durable job
 `c3701a77c27811e6548b6f93441bf966` passed 52 activation/recovery/private-source
 and edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Retained-v2 recovery projection repair
+`ab6c83d544ba64ca6bbab16ef37ba7a0a5a8eaac` merged cleanly. It defers the
+unused legacy candidate projection while retaining mandatory observation-bound
+v2 validation. Local durable job `1a18a1e6928d94a668d10fc04e32f3c6` passed
+52 recovery/v2/private-source/edge-cache tests, lifecycle `succeeded`, exit 0.

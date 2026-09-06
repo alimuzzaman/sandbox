@@ -12,7 +12,7 @@ from .inventory import SandboxRemoteInventory
 from sandbox.services.process import BoundedProcessRunner
 
 
-def recovery_service(root: str | Path) -> RecoveryService:
+def recovery_service(root: str | Path, *, materializer=None) -> RecoveryService:
     root = Path(root)
     # Recovery plaintext is never staged in the checkout.  Keep all transient
     # material under the Sandbox-owned machine state directory instead.
@@ -43,4 +43,5 @@ def recovery_service(root: str | Path) -> RecoveryService:
         drive=drive,
         capture=capture,
         pending_root=pending_root,
+        materializer=materializer,
     )

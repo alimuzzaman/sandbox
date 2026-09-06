@@ -139,6 +139,11 @@ sets before invoking an adapter.
 The CLI accepts repeated explicit materialized inputs with the recovery create command:
 --backup-id SET --profile PROFILE --artifact NAME=PATH. It does not discover paths from the
 host; unresolved catalog roots remain blocked.
+
+When no `--artifact` is supplied, CLI and MCP capture requests use the controller-owned
+materialization entry point. A controller adapter must be explicitly configured for the
+selected remote; otherwise the operation returns `recovery_not_configured` without staging,
+uploading, or discovering a local substitute.
 # Scoped recovery safety boundaries
 
 Recovery staging, retry ciphertext, and capture inputs are machine-state data. The
@@ -152,3 +157,18 @@ and allowed-root labels. Restore planning rejects a catalog whose dependency gra
 not match that immutable binding. The `schedule` command only renders disabled units.
 Its reserved `create --scheduled --confirm` invocation fails closed until owned
 materialization is configured; it neither installs a timer nor captures data.
+
+Controller integrations may configure `ScopedMaterializer` and call
+`RecoveryService.create_materialized`. This entry point accepts profile declarations,
+not caller-supplied artifact paths. Its adapter must validate capabilities and resolve
+all selected declarations in `observe`, bind them to the remote machine identity,
+installed revision and source digest, and validate every native dump/archive before
+returning capture files. The hosted adapter derives one deterministic request ID from
+the complete declaration and source binding; its controller must use that ID for a
+durable, replay-safe remote operation. The coordinator checks that every profile
+returns nonempty owner-controlled regular files inside its private output directory
+and that the binding still matches after capture. It preserves the original symbolic
+roots in the published manifest. Source-specific coverage and dump-format validation
+remain adapter responsibilities; the generic coordinator cannot certify them. No
+production adapter is installed by this abstraction alone. Existing explicit-file and
+scheduled CLI gates remain intact.

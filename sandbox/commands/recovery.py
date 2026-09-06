@@ -135,8 +135,17 @@ def cmd_recovery(_cfg, args) -> None:
                 raise SystemExit(1)
             try:
                 artifacts = _parse_artifacts(getattr(args, "artifact", []))
-                payload = service.create(args.backup_id, artifacts, tuple(args.profile),
-                                         confirm=True, remote=args.remote)
+                if artifacts:
+                    payload = service.create(args.backup_id, artifacts, tuple(args.profile),
+                                             confirm=True, remote=args.remote)
+                else:
+                    # Symbolic host declarations must be materialized by an
+                    # authenticated controller adapter.  Do not turn an empty
+                    # artifact map into a local capture or infer host paths.
+                    payload = service.create_materialized(
+                        args.backup_id, tuple(args.profile),
+                        confirm=True, remote=args.remote,
+                    )
             except ValueError as exc:
                 payload = result(False, "create", remote=args.remote,
                                  error=RecoveryError(str(exc), "invalid_artifact"))

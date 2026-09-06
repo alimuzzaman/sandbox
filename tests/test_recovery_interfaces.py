@@ -43,6 +43,18 @@ class TestRecoveryInterfaces(unittest.TestCase):
                 patch("sandbox.commands.recovery.recovery_service", return_value=service):
             cmd_recovery(None, args)
 
+    def test_cli_create_routes_symbolic_profiles_to_controller_materializer(self):
+        calls = []
+        service = SimpleNamespace(create_materialized=lambda *args, **kwargs: calls.append((args, kwargs)) or {
+            "action": "create", "ok": True, "status": "complete", "data": {}
+        })
+        args = self._args("create", profile=["fixture"], backup_id="set-1", confirm=True)
+        with patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True), \
+                patch("sandbox.commands.recovery.recovery_service", return_value=service):
+            cmd_recovery(None, args)
+        self.assertEqual(calls, [(("set-1", ("fixture",)),
+                                  {"confirm": True, "remote": None})])
+
     def test_cli_create_rejects_malformed_artifact_declaration(self):
         args = self._args("create", profile=["fixture"], backup_id="set-1", artifact=["malformed"])
         with self.assertRaises(SystemExit), patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True):

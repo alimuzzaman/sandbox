@@ -36,3 +36,10 @@ jobs `b5163a1e09cbd7f648f2f24188381722` (54 regression tests) and
 `0cc23a31a170fe9f83915757f5d63bd5` (two recovery CLI tests) both completed
 `succeeded`, exit 0. The live uncertain transaction remains owned by the
 production task; this branch performed no runtime effects.
+
+Zero-container recovery repair `caa9a46ee8021d907d3e60a370835e1c748f06a1`
+merged cleanly. The empty-runtime exception remains limited to a generation-zero
+first activation with stable observation identities and no retained prior generation.
+Partial or malformed runtime observations remain refused. Local durable job
+`c3701a77c27811e6548b6f93441bf966` passed 52 activation/recovery/private-source
+and edge-cache tests, lifecycle `succeeded`, exit 0.

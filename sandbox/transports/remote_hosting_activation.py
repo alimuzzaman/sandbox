@@ -792,7 +792,8 @@ class RegisteredRemoteActivationTransport:
                            compose_project: str, topology_digest: str,
                            compose_config_hashes: dict[str, str],
                            snapshot_digest: str,
-                           image_identities: dict[str, dict[str, str]]) -> dict:
+                           image_identities: dict[str, dict[str, str]],
+                           allow_empty_genesis: bool = False) -> dict:
         """Observe against the retained private-render identity, not labels."""
         selector = self._compose_selector_v2
         if type(image_identities) is not dict or set(image_identities) != set(services):
@@ -839,7 +840,8 @@ class RegisteredRemoteActivationTransport:
         except (TypeError, json.JSONDecodeError):
             raise RemoteActivationError("runtime_mismatch") from None
         if result["returncode"] != 0 or result["terminated"] is not True \
-                or type(rows) is not list or len(rows) != len(services):
+                or type(rows) is not list or (len(rows) != len(services)
+                    and not (allow_empty_genesis is True and rows == [])):
             raise RemoteActivationError("runtime_mismatch")
         normalized = []
         allowed = {"service", "compose_project", "runtime_identity", "declared_image",
@@ -859,7 +861,8 @@ class RegisteredRemoteActivationTransport:
                 raise RemoteActivationError("runtime_mismatch")
             normalized.append({**row, "topology_identity": topology_digest,
                                "compose_config_hash": compose_config_hashes[service]})
-        if {row["service"] for row in normalized} != set(services):
+        if ({row["service"] for row in normalized} != set(services)
+                and not (allow_empty_genesis is True and normalized == [])):
             raise RemoteActivationError("runtime_mismatch")
         end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
         end_target = self._observed_target(end_epoch)

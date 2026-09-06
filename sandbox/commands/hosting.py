@@ -4070,13 +4070,20 @@ def _host_image_v2_recovery_observation(state: dict, transport, intent: dict):
         }
         for row in intent["service_image_bindings"]
     }
+    active = state.get("active") or {}
+    allow_empty_genesis = (state.get("generation") == 0
+        and state.get("current") is None and state.get("previous") is None
+        and active.get("starting_generation") == 0
+        and active.get("operation") == "activate"
+        and active.get("effect_entered") is True)
     observed = transport.observe_running_v2(
         target=intent["target"], services=services,
         compose_project=intent["compose_project"],
         topology_digest=intent["topology_digest"],
         compose_config_hashes=config_hashes,
-        snapshot_digest=snapshot["snapshot_digest"], image_identities=image_identities)
-    rows = observed.get("services") or []
+        snapshot_digest=snapshot["snapshot_digest"], image_identities=image_identities,
+        allow_empty_genesis=allow_empty_genesis)
+    rows = observed["services"]
     projection = activation_recovery_projection(
         state, observed_services=rows)
     probe = {"target_epoch_start": observed["target_epoch_start"],
@@ -4287,7 +4294,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  try:raw=json.loads(x.stdout)[0]",
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  cfg=raw.get('Config') or {};labels=cfg.get('Labels') or {};name=labels.get('com.docker.compose.service')",
-            "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:continue",
+            "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:raise ValueError('runtime_mismatch')",
             "  image_id=raw.get('Image');expected_identity=identities.get(name) if isinstance(identities,dict) else None",
             "  if not isinstance(image_id,str) or (expected_identity is not None and cfg.get('Image')!=expected_identity.get('image_ref')):raise ValueError('runtime_mismatch')",
             "  ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",

@@ -59,5 +59,23 @@ class TestRecoveryInventory(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaisesRegex(RecoveryError, "invalid data"):
                 SandboxRemoteInventory().discover("test")
 
+    @patch("sandbox.core._remote.ssh_run")
+    @patch("sandbox.core._remote.resolve_sandbox_home", return_value="/home/sandbox")
+    @patch("sandbox.core._remote.get_remote", return_value={"provisioned": True})
+    def test_remote_inventory_accepts_bind_mount_without_name(self, get_remote, resolve_home, ssh_run):
+        payload = {
+            "host_projects": ["site"], "runtime_environments": {"site": ["default"]},
+            "managed_containers": ["sandbox-host-site"],
+            "mounts": {"sandbox-host-site": [{
+                "type": "bind", "name": None, "destination": "/app", "rw": True,
+            }]},
+            "repositories": {"site": {
+                "head": "abc", "branch": "main", "dirty_count": 0, "untracked_count": 0,
+            }}, "warnings": [],
+        }
+        ssh_run.return_value = CompletedProcess([], 0, json.dumps(payload) + "\n", "")
+        result = SandboxRemoteInventory().discover("test")
+        self.assertIsNone(result["mounts"]["sandbox-host-site"][0]["name"])
+
 
 if __name__ == "__main__": unittest.main()

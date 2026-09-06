@@ -21,7 +21,10 @@ def _valid_mounts(value):
         and all(
             isinstance(record, dict)
             and set(record) == fields
-            and all(_safe_text(record[field]) for field in fields - {"rw"})
+            and _safe_text(record["type"], allow_empty=False)
+            and _safe_text(record["destination"], allow_empty=False)
+            and (record["name"] is None or _safe_text(record["name"]))
+            and (record["type"] == "bind" or _safe_text(record["name"], allow_empty=False))
             and isinstance(record["rw"], bool)
             for record in records
         )

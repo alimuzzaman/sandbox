@@ -172,3 +172,13 @@ roots in the published manifest. Source-specific coverage and dump-format valida
 remain adapter responsibilities; the generic coordinator cannot certify them. No
 production adapter is installed by this abstraction alone. Existing explicit-file and
 scheduled CLI gates remain intact.
+
+The default registered-remote adapter covers the reviewed `amarsonar-bangla` production
+declaration. It proves the production WordPress and MariaDB containers plus their named
+root/uploads/database volumes before capture, binds the result to the remote machine, installed
+Sandbox revision, and an inventory digest, and captures a native MariaDB logical dump together
+with the complete WordPress tree. The database credential is accepted only through the brokered
+`SANDBOX_RECOVERY_DB_PASSWORD` child environment; it is never placed in an argument or output.
+The adapter also materializes a non-secret control-plane declaration for the profile dependency.
+It does not capture the `alimuzzaman-me` Git profile or any other hosted project, and a stale
+remote runtime is rejected until the supported remote service migration has completed.

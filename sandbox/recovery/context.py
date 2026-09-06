@@ -9,6 +9,8 @@ from .crypto import GpgCrypto
 from .drive import RcloneDrive
 from .service import RecoveryService
 from .inventory import SandboxRemoteInventory
+from .hosted import HostedRecoveryMaterializer
+from .materialize import ScopedMaterializer
 from sandbox.services.process import BoundedProcessRunner
 
 
@@ -37,6 +39,15 @@ def recovery_service(root: str | Path, *, materializer=None) -> RecoveryService:
                 pending_root=pending_root,
                 materialization_root=materialization_root,
             )
+    if materializer is None and capture is not None:
+        # The concrete controller is opt-in through the explicit remote passed
+        # to ``create_materialized``.  It never invents a local source when the
+        # caller omits a remote or the configured capture channel is absent.
+        from sandbox.transports.remote_recovery import RegisteredRemoteRecoveryController
+        materializer = ScopedMaterializer(
+            materialization_root,
+            HostedRecoveryMaterializer(RegisteredRemoteRecoveryController()),
+        )
     return RecoveryService(
         load_catalog(root / "config" / "recovery-profiles.json"),
         inventory=SandboxRemoteInventory(),

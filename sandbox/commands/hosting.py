@@ -4238,6 +4238,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " for name,svc in services.items():",
             "  if not isinstance(svc,dict):out['services'][name]={'invalid':True};continue",
             "  env=svc.get('environment');deps=svc.get('depends_on');labels=svc.get('labels')",
+            "  if deps is None:deps={}",
             "  image=svc.get('image');image=image if isinstance(image,str) and re.fullmatch(r'[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}',image) else None",
             "  pull=svc.get('pull_policy');pull=pull if pull in ('never','missing-refused') else None",
             "  platform=svc.get('platform');platform=platform if isinstance(platform,str) and re.fullmatch(r'[a-z0-9]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?',platform) else None",

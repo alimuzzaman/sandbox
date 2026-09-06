@@ -479,6 +479,38 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         self.assertNotIn(secret, "".join(command + frame for command, frame in captured))
         self.assertIn("/proc/self/fd/", "".join(command for command, _ in captured))
 
+    def test_real_helper_projects_absent_dependencies_as_empty(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); docker = root / "docker"
+            closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+            def ssh_run(entry, command, **kwargs):
+                return run_test_process(shlex.split(command),
+                    env=synthetic_environment(closed), input=kwargs.get("input_data"),
+                    text=True, capture_output=True)
+            for service, expected in (({}, {}), ({"depends_on": None}, {}),
+                    ({"depends_on": {}}, {}), ({"depends_on": {"db": {}}}, {"db": {}}),
+                    ({"depends_on": []}, {"__invalid__": {}}),
+                    ({"depends_on": "db"}, {"__invalid__": {}})):
+                docker.write_text("\n".join(("#!/usr/bin/env python3", "import sys",
+                    "if '--hash' in sys.argv: print('worker ' + 'a'*64); sys.exit(0)",
+                    "print(" + repr(json.dumps({"services": {"worker": service}})) + ")")))
+                docker.chmod(0o700)
+                with self.subTest(service=service), patch(
+                        "sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run):
+                    result = _host_image_argv_runner({"name": "synthetic"})(
+                        argv=("docker", "compose", "--file", "compose.yml",
+                              "--project-directory", str(root), "--project-name", "synthetic", "config",
+                              "--format", "json"), environment=closed,
+                        private_environment={CONFIGURATION_KEY_ENV: base64.b64encode(
+                            CONFIGURATION_KEY).decode()}, private_environment_source={},
+                        redact_environment_keys=None, timeout_seconds=30,
+                        max_output_bytes=4096)
+                    self.assertEqual(result["returncode"], 0)
+                    self.assertEqual(json.loads(result["stdout"])["services"]["worker"][
+                        "depends_on"], expected)
+
     def test_real_helper_marks_every_unsnapshotted_resource_for_refusal(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from sandbox.transports.remote_hosting_activation import (

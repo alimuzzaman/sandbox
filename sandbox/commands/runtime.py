@@ -39,7 +39,7 @@ _GUIDES = {
         ("status", "./sb status",
          "Inspect the declared runtime after init/ensure; unregistered projects get a bootstrap hint."),
         ("wp", "./sb wp [--remote <name>] --timeout 60 -- <wp-cli args...>",
-         "Run bounded WP-CLI locally or against an existing deployed remote instance."),
+         "Run bounded WP-CLI locally or against an existing deployed remote instance; use --async for long work."),
         ("test", "./sb test [--local] --timeout <seconds>",
          "Run the configured test mode with a configured remote by default."),
         ("jobs", "./sb job-status <job-id> && ./sb job-output <job-id>",

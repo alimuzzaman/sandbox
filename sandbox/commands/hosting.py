@@ -3369,9 +3369,30 @@ class _HostImageEdgeAdapter:
 
     def observe_plan(self):
         from sandbox.hosting.images.activation.models import activation_digest
-        _verify_edge(self.validated["routes"],
-                     healthcheck_path=self.validated["healthcheck"]["path"],
-                     basic_auth_enabled=bool(self.validated.get("basic_auth")))
+        # A first immutable activation may legitimately have no origin yet:
+        # the runtime effect below is what creates the web listener behind the
+        # already-declared edge.  Keep the live edge proof for every existing
+        # or non-empty transaction, and for the post-effect
+        # ``apply_generation_v2`` call, which invokes this method again.
+        bootstrap = False
+        if self.activation_repository is not None and self.target_identity is not None:
+            snapshot = getattr(self.activation_repository, "snapshot", None)
+            if callable(snapshot):
+                state = snapshot(self.target_identity)
+                bootstrap = (
+                    state.get("generation") == 0
+                    and state.get("current") is None
+                    and state.get("previous") is None
+                    and state.get("active") is None
+                    and not state.get("results")
+                    and not state.get("tombstones")
+                    and state.get("recovery_provisional") is None
+                    and not state.get("recovery_results")
+                )
+        if not bootstrap:
+            _verify_edge(self.validated["routes"],
+                         healthcheck_path=self.validated["healthcheck"]["path"],
+                         basic_auth_enabled=bool(self.validated.get("basic_auth")))
         health_path = self.validated["healthcheck"]["path"]
         routes = sorted(({
             "hostname": item["hostname"], "mode": item["mode"],

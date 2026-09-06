@@ -4196,7 +4196,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "   for svc in c.get('services',{}).values():",
             "    if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
             " got=configuration_identity(q.stdout,v2)",
-            " if s.get('kind')!='compose_prepare_v2' and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
+            " if s.get('kind') not in ('compose_prepare_v2','compose_snapshot_v2') and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
             " if s.get('kind') in ('compose_replace_v1','compose_replace_v2'):",
             "  for svc in c.get('services',{}).values():vals.extend((svc.get('environment') or {}).values())",
             "  render=q.stdout",

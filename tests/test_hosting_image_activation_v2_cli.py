@@ -11,7 +11,7 @@ from tests.test_hosting_image_activation_v2 import (
 )
 
 
-def recovery_state():
+def recovery_state(*, genesis=False):
     from sandbox.hosting.images.activation.repository import (
         ActivationRepository, decode_activation_state,
     )
@@ -29,13 +29,15 @@ def recovery_state():
         "admission_deadline": "2999-01-01T00:00:00Z",
         "stage_ledger_authority": "feature-050-stage-ledger-v2",
         "stage_ledger_revision": 1}
-    assert ActivationServiceV2(repository=repository, runtime_adapter=FakeRuntimeV2(),
-        edge_adapter=FakeEdgeV2(), rollback_grant_verifier=FakeGrantVerifier(),
-        clock=lambda: 100).execute(first, rollback_grant=first_grant, **common)["ok"]
+    if not genesis:
+        assert ActivationServiceV2(repository=repository, runtime_adapter=FakeRuntimeV2(),
+            edge_adapter=FakeEdgeV2(), rollback_grant_verifier=FakeGrantVerifier(),
+            clock=lambda: 100).execute(first, rollback_grant=first_grant, **common)["ok"]
     prior = deepcopy(host.state["current"])
-    second_grant = grant_for(plan, proof, generation=1,
-                             prior_digest=prior["generation_digest"])
-    second = request_for(plan, proof, snapshot, second_grant, generation=1,
+    generation = 0 if genesis else 1
+    second_grant = grant_for(plan, proof, generation=generation,
+                             prior_digest=None if prior is None else prior["generation_digest"])
+    second = request_for(plan, proof, snapshot, second_grant, generation=generation,
                          request_id="fresh-process-recovery-v2")
     runtime = FakeRuntimeV2(); runtime.crash_during_replace = True
     service = ActivationServiceV2(repository=repository, runtime_adapter=runtime,
@@ -97,6 +99,20 @@ class Transport:
 
 
 class FreshProcessV2RecoveryTests(unittest.TestCase):
+    def test_empty_genesis_observation_uses_sentinel_and_classifies_prior(self):
+        from sandbox.hosting.images.activation.v2_repository import activation_recovery_projection
+        state, prior = recovery_state(genesis=True)
+        self.assertIsNone(prior)
+        state["active"]["phase"] = "uncertain"
+        projection = activation_recovery_projection(state, observed_services=[])
+        self.assertEqual(projection.expected_generation, 0)
+        self.assertIsNone(projection.prior_generation_digest)
+        self.assertTrue(all(row["runtime_identity"].startswith("replacement-intent-")
+                            for row in projection.new_services))
+        result = _host_image_v2_recovery_observation(
+            state, Transport([]), activation_recovery_intent_v2(state))
+        self.assertEqual(result.classification, "exact_prior")
+
     def test_recovery_render_includes_manifest_initializers(self):
         from contextlib import nullcontext, redirect_stdout
         from io import StringIO

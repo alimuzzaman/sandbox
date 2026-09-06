@@ -489,7 +489,9 @@ def _intent_projection_services(intent: ReplacementIntentV2,
     compose = {row["service"]: row for row in intent.compose_projection}
     expected_names = list(bindings)
     exact = None
-    if observed_services is not None:
+    # An observed empty runtime has no candidate container identities. Use the
+    # sentinel directly; genesis eligibility belongs to recovery classification.
+    if observed_services is not None and observed_services != []:
         try:
             exact = _validate_service_projection(
                 observed_services, services=expected_names,

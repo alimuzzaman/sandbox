@@ -206,6 +206,8 @@ service sets and malformed observations remain refused. This closes recovery
 without promoting a generation or retrying a runtime effect.
 Retained v2 replacement intents use their observation-bound projection directly;
 they do not require a candidate generation merely to enter recovery.
+Empty observations use the retained intent sentinel without attempting candidate
+service validation; generation and epoch checks still decide prior-state eligibility.
 Runtime observation accepts a local image ID equal to the verified config
 digest, full repository digest reference, or that reference's manifest digest.
 Unrelated or malformed local IDs remain refused before the remote observation.

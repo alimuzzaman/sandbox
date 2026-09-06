@@ -72,3 +72,9 @@ merged cleanly. Observation accepts exactly one profile matching the retained
 configuration digest; absent, ambiguous, or mismatched profiles refuse.
 Local durable job `aaf84d8168f8590eedfa808b2450e0e4` passed 54
 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Empty-runtime projection repair `4cafa44c360954d0c3154d1c1355a1a66b6eec90`
+merged cleanly. Empty observation uses retained-intent sentinel identities;
+generation-zero eligibility remains owned by recovery classification.
+Local durable job `5b530f03c44762b708ce718f2905a5c1` passed 55
+recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.

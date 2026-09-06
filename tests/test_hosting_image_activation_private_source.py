@@ -91,13 +91,14 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         }, "x-sandbox-configuration-digest": "sha256:" + "c" * 64}
         calls = []
 
-        def runner(*, argv, **_kwargs):
+        def runner(*, argv, **kwargs):
             calls.append(argv)
             if "--profiles" in argv:
                 return {"returncode": 0, "stdout": "object-storage\njob-orchestration\n",
                         "stderr": "", "terminated": True}
             if "--profile" in argv:
                 profile = argv[argv.index("--profile") + 1]
+                self.assertEqual(kwargs["environment"].get("COMPOSE_PROFILES"), profile)
                 rendered = profiled if profile == "job-orchestration" else base
             else:
                 rendered = base

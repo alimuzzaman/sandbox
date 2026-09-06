@@ -240,8 +240,10 @@ class RegisteredRemoteActivationTransport:
                 argv.extend(("--file", path))
             argv.extend(("--project-directory", directory, "--project-name",
                          project, "config", "--format", "json"))
+            render_environment = (environment if profile is None else
+                                  {**environment, "COMPOSE_PROFILES": profile})
             result = self._invoke(tuple(argv), timeout_seconds=60,
-                                  environment=environment,
+                                  environment=render_environment,
                                   private_environment_source=source)
             try:
                 rendered = json.loads(result["stdout"])

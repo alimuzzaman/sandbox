@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
 import signal
@@ -294,9 +293,16 @@ def _anonymous_denied(repository: str, manifest_digest: str) -> bool:
 
 
 def _projected_machine_identity() -> str:
-    """Recreate Feature 046's authenticated stable host projection."""
+    """Match the authenticated server's machine-id projection, not its provider default."""
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip().lower()
+    except (OSError, UnicodeError):
+        raise ValueError("observation_invalid") from None
+    if re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ValueError("observation_invalid")
     return hashlib.sha256(
-        platform.node().encode("utf-8", "replace")).hexdigest()[:24]
+        b"sandbox-host-machine-id-v1\0" + machine_id.encode("ascii")
+    ).hexdigest()[:24]
 
 
 def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,

@@ -413,6 +413,24 @@ def deploy_exact_working_tree(
     push_timeout = normalize_remote_push_timeout(
         REMOTE_PUSH_TIMEOUT_DEFAULT_SECONDS if push_timeout is None else push_timeout
     )
+    # A missing source cannot be inspected by the local Git capture pass.  Run
+    # the bounded capacity gate first in that case so a blocked deploy returns
+    # its admission decision instead of leaking a local cwd error.  Existing
+    # source trees still pass the public dirty-overlay size/byte limits before
+    # the remote probe; those limits are part of the deploy envelope contract.
+    network_capacity = None
+    if not root.is_dir():
+        admitted_remote_name = remote_name
+        if not (isinstance(admitted_remote_name, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", admitted_remote_name)):
+            candidate = remote.get("_remote_name") if isinstance(remote, dict) else None
+            admitted_remote_name = candidate if isinstance(candidate, str) \
+                and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", candidate) else None
+        network_capacity = remote_network_capacity_admission(
+            remote, required_subnets=required_subnets, remote_name=admitted_remote_name,
+        )
+        if network_capacity.get("ok") is not True:
+            raise NetworkCapacityAdmissionError(network_capacity)
     resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
     overlay = snapshot_dirty_overlay(root, diff_text, untracked)
@@ -425,11 +443,12 @@ def deploy_exact_working_tree(
         candidate = remote.get("_remote_name") if isinstance(remote, dict) else None
         admitted_remote_name = candidate if isinstance(candidate, str) \
             and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", candidate) else None
-    network_capacity = remote_network_capacity_admission(
-        remote, required_subnets=required_subnets, remote_name=admitted_remote_name,
-    )
-    if network_capacity.get("ok") is not True:
-        raise NetworkCapacityAdmissionError(network_capacity)
+    if network_capacity is None:
+        network_capacity = remote_network_capacity_admission(
+            remote, required_subnets=required_subnets, remote_name=admitted_remote_name,
+        )
+        if network_capacity.get("ok") is not True:
+            raise NetworkCapacityAdmissionError(network_capacity)
     target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     branch = current_branch(root) if resolved_source is None else None
     pushed_sha = push_commits(

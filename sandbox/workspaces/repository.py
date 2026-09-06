@@ -728,8 +728,8 @@ class WorkspaceRepository:
 
         Non-SQLite bytes remain ordinary runtime data for backwards-compatible
         relocation tests. A file bearing SQLite's header, however, must be
-        checkpointed under the same shared base lock used by all repository
-        connections; a busy or malformed index stops before its source moves.
+        checkpointed under the exclusive base lock used by relocation; a busy
+        or malformed index stops before its source moves.
         """
         index = Path(index_path).expanduser().absolute()
         if not index.exists():
@@ -746,8 +746,14 @@ class WorkspaceRepository:
         if not is_sqlite:
             return
         base = index.parent.parent.parent
+        wal_path = index.with_name(index.name + "-wal")
+        shm_path = index.with_name(index.name + "-shm")
         try:
-            with _base_maintenance_lock(base, exclusive=False):
+            # Relocation copies the whole workspace directory.  Use the
+            # exclusive maintenance lock while checkpointing and cleaning the
+            # sidecars so no repository connection can recreate or write them
+            # between the checkpoint and the copy.
+            with _base_maintenance_lock(base, exclusive=True):
                 connection = sqlite3.connect(
                     f"{index.as_uri()}?mode=rw", uri=True,
                     timeout=0.0, isolation_level=None,
@@ -761,6 +767,15 @@ class WorkspaceRepository:
                         )
                 finally:
                     connection.close()
+                # SQLite 3.51 can retain empty WAL/SHM files after a
+                # successful TRUNCATE checkpoint.  They are not part of the
+                # durable index and copying them can leave a destination with
+                # stale journal state.  The exclusive lock makes removal safe.
+                for sidecar in (wal_path, shm_path):
+                    try:
+                        sidecar.unlink()
+                    except FileNotFoundError:
+                        pass
         except WorkspaceIndexError:
             raise
         except (BaseMaintenanceBusy, OSError, sqlite3.Error, TypeError, ValueError) as exc:

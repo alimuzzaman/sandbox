@@ -366,8 +366,24 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # the same path it does in the fpm `wp` service, or every symlinked
       # plugin's assets 404 and its admin UI renders blank.
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg, ro=True)}
-      - {ROOT}/config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
+      - {ROOT}/config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro{_server_config_nginx_mount(inst_cfg)}
 """
+
+
+def _server_config_nginx_mount(inst_cfg: dict) -> str:
+    incarnation = inst_cfg.get("instance_incarnation_id")
+    if not incarnation:
+        return ""
+    try:
+        base_dir = Path(RUNTIME_DIR) / "server-config"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base_dir.chmod(0o700)
+        inc_dir = base_dir / incarnation
+        inc_dir.mkdir(parents=True, exist_ok=True)
+        inc_dir.chmod(0o700)
+    except OSError:
+        pass
+    return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/etc/nginx/sandbox-fragments:ro"
 
 
 def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
@@ -400,8 +416,25 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - {RUNTIME_DIR}/wp-{instance}:{docroot}
       - {RUNTIME_DIR}/seeds:/seeds
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
-      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
+      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache{_server_config_ols_mount(inst_cfg)}
 """
+
+
+def _server_config_ols_mount(inst_cfg: dict) -> str:
+    incarnation = inst_cfg.get("instance_incarnation_id")
+    if not incarnation:
+        return ""
+    try:
+        base_dir = Path(RUNTIME_DIR) / "server-config"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base_dir.chmod(0o700)
+        inc_dir = base_dir / incarnation
+        inc_dir.mkdir(parents=True, exist_ok=True)
+        inc_dir.chmod(0o700)
+    except OSError:
+        pass
+    return f"\n      - {RUNTIME_DIR}/server-config/{incarnation}:/usr/local/lsws/conf/vhosts-include:ro"
+
 
 
 def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:

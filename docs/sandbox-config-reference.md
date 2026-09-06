@@ -1299,3 +1299,63 @@ The generated profile runs the absolute remote `sb mcp` command with the same
 catalog, and uses manual terminal approval with dangerous cron commands denied.
 See [hermes-agent.md](hermes-agent.md) for the operator workflow and trust
 boundary.
+
+## Instance-scoped server configuration fragments
+
+Sandbox provides safe, validated, instance-scoped web server configuration fragments
+through the `sb server config` command family. This enables page caching, custom rewrite
+rules, and header manipulation without modifying global server templates, container
+mounts, or shared host infrastructure.
+
+### Supported web servers
+
+- `nginx`: Supported via isolated container syntax validation (`nginx -t`) and graceful reload.
+- `litespeed` (OpenLiteSpeed): Supported via isolated exact-image container syntax check and graceful restart.
+- `apache`, `herd`: Explicitly unsupported. Any mutation attempt on an instance using Apache or Herd is refused with `server_unsupported` without modifying runtime or disk state.
+
+### Commands
+
+- `sb server config apply --name <NAME> (--file <PATH> | --stdin) [--authority <AUTH>] [--json]`
+  Validates, activates, and reloads the server configuration with the supplied fragment.
+  If the fragment is identical to the current active fragment, it returns `no_op` without reloading.
+- `sb server config list [--json]`
+  Lists active server configuration fragments and their metadata (name, authority, size, digest).
+- `sb server config show <NAME> [--content | --output <PATH>] [--json]`
+  Shows fragment metadata. With `--content`, writes raw exact fragment bytes directly to stdout buffer (incompatible with `--json`). With `--output <PATH>`, exports raw bytes to an owner-only (0600) regular file with safe parent directory validation.
+- `sb server config revert <NAME> [--json]`
+  Reverts and removes the named fragment, validates the remaining configuration, and reloads the server.
+
+### Bounds and input validation
+
+- **Size bounds**: 1 to 262,144 bytes (256 KB). Empty input and oversized files are refused.
+- **Naming**: 1 to 64 lowercase alphanumeric characters, dashes, and underscores (`^[a-z0-9-_]{1,64}$`).
+- **Forbidden directives**: Refuses global listener, SSL, upstream, resolver, module, and admin directives.
+- **Secret detection**: Refuses payloads matching high-confidence credential or secret token patterns.
+- **Safe source checks**: Refuses device files (`/dev/null`, `/dev/zero`), FIFOs, symlinks, directories, and mid-read mutated files.
+
+### Transaction phases and terminal outcomes
+
+Mutations proceed through ordered transaction phases:
+1. `requested`: Payload received, bounds validated, lock acquired.
+2. `prepared`: Generation rendered and published to staging directory.
+3. `validated`: Syntax and policy validated inside isolated exact-image container (`--network none`, read-only root).
+4. `activating`: Staged configuration promoted to instance runtime mount.
+5. `reloading`: Web server gracefully reloaded.
+6. `observing_ready`: Container readiness and effective vhost verified.
+7. `committed`: State record updated with new generation.
+
+Terminal outcomes:
+- `active`: Configuration successfully applied and verified.
+- `no_op`: Fragment already active with identical content digest; zero runtime mutation.
+- `refused`: Validation failed, unsafe input rejected, or instance not ready; zero runtime mutation.
+- `rolled_back`: Post-validation activation/reload failure triggered automatic restoration of prior generation.
+- `recovery_needed`: Rollback failed or state journal is corrupted; requires manual inspection and recovery.
+- `conflict`: Another mutation holds the instance lock or deadline exceeded.
+
+### Lifecycle gates and isolation
+
+- **Incarnation binding**: Fragments are bound to the instance's unique incarnation ID. Recreating an instance generates a new incarnation; old fragments are disassociated.
+- **Server switch gate**: Changing an instance's web server (`sb switch`) is refused if active fragments, unresolved transactions, or recovery-needed states exist. Revert all fragments first.
+- **Deletion gate**: Deleting an instance with active fragments requires explicit confirmation (`--confirm-server-config` / confirmation prompt).
+- **Restart preservation**: Committed fragments persist across ordinary `sb stop` and `sb start`. On restart, the committed generation is verified and readiness observed before reporting ready.
+- **Legacy mount remedy**: Instances created prior to Feature 053 with unattached fragment mounts refuse mutations with `mount_unattached`. Upgrade the instance by running `sb apply-config` or recreating the instance.

@@ -141,6 +141,154 @@ def install_owner_only_json(path: Path, value: dict[str, Any]) -> str:
             except OSError: pass
 
 
+def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | None = None) -> str:
+    """Install/renew v2 authority while the caller holds the target mutation lock.
+
+    Renewal requires both old leases to have expired. Keep the old document as
+    owner-only evidence; publish the replacement with one atomic rename.
+    """
+    from sandbox.hosting.images.plan_set import read_stable_file
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                info.st_ctime_ns, info.st_uid, info.st_mode, info.st_nlink)
+
+    def validate(raw):
+        if (type(raw) is not dict or set(raw) != {"schema_version", "compose_snapshot",
+                "rollback_grant", "rollback_grant_public_key", "stage_ledger"}
+                or type(raw["schema_version"]) is not int or raw["schema_version"] != 2):
+            raise ProvisioningError("conflict")
+        snapshot = PrivateComposeInputSnapshotV2.from_mapping(raw["compose_snapshot"])
+        grant = RollbackCompatibilityGrantV2.from_mapping(raw["rollback_grant"])
+        ledger = raw["stage_ledger"]
+        if (type(ledger) is not dict or set(ledger) != {"authority", "revision"}
+                or ledger["authority"] != "feature-050-stage-ledger-v2"
+                or type(ledger["revision"]) is not int or ledger["revision"] < 1
+                or type(raw["rollback_grant_public_key"]) is not str
+                or snapshot.target != grant.target
+                or snapshot.plan_set_digest != grant.candidate_plan_set_digest
+                or not SshRollbackGrantVerifier(raw["rollback_grant_public_key"],
+                    grant.authority_id).verify(grant)):
+            raise ProvisioningError("conflict")
+        return snapshot, grant
+
+    try:
+        fresh_snapshot, fresh_grant = validate(value)
+        try:
+            return install_owner_only_json(path, value)
+        except ProvisioningError as exc:
+            if exc.code != "conflict":
+                raise
+        before = path.lstat()
+        retained = read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True)
+        old = _load_json_bytes(retained)
+        snapshot, grant = validate(old)
+        instant = int(time.time()) if now is None else now
+        if (snapshot.expires_at > instant or grant.expires_at > instant
+                or fresh_snapshot.expires_at <= instant or fresh_grant.expires_at <= instant
+                or fresh_grant.issued_at > instant
+                or snapshot.target != fresh_snapshot.target
+                or grant.authority_id != fresh_grant.authority_id
+                or grant.authority_revision != fresh_grant.authority_revision
+                or old["rollback_grant_public_key"] != value["rollback_grant_public_key"]
+                or grant.expected_generation > fresh_grant.expected_generation
+                or (grant.expected_generation == fresh_grant.expected_generation
+                    and grant.prior_generation_digest != fresh_grant.prior_generation_digest)):
+            raise ProvisioningError("conflict")
+        archive = path.with_name(path.name + ".expired-" + hashlib.sha256(retained).hexdigest())
+        install_owner_only_json(archive, old)
+        descriptor, temporary = tempfile.mkstemp(prefix=".provision-", dir=path.parent)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+                handle.flush(); os.fsync(handle.fileno())
+            # Cooperating writers hold the same target lock. Also detect a
+            # replaced/edited pathname before publishing against retained data.
+            if (identity(path.lstat()) != identity(before) or read_stable_file(path,
+                    MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True) != retained):
+                raise ProvisioningError("conflict")
+            os.replace(temporary, path)
+            parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try: os.fsync(parent)
+            finally: os.close(parent)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+        return "installed"
+    except ProvisioningError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise ProvisioningError("conflict") from None
+
+
+def replace_expired_stage_bundle(path: Path, value: dict[str, Any]) -> str:
+    """Rotate one expired stage binding without replacing live authority.
+
+    Stage bundles are keyed by the immutable image plan, so a retained bundle
+    can outlive its short credential lease.  The normal owner-only installer
+    must keep refusing overwrites; this narrow helper permits replacement only
+    when the existing document is a valid, ready binding whose expiry has
+    passed.  Revoked, malformed, live, or otherwise conflicting authority is
+    never replaced.
+    """
+    if not isinstance(path, Path) or type(value) is not dict:
+        raise ProvisioningError("artifact_invalid")
+    from sandbox.isolation.credential_binding import CredentialBinding
+
+    existing = _read_owner_only_json(path)
+    if existing is None:
+        return install_owner_only_json(path, value)
+    try:
+        binding_value = existing.get("binding")
+        binding = CredentialBinding.from_dict(binding_value)
+    except (AttributeError, TypeError, ValueError):
+        raise ProvisioningError("conflict") from None
+    if binding.state != "ready" or not binding.is_expired():
+        raise ProvisioningError("conflict")
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    if len(data) > MAX_PROVISIONING_DOCUMENT_BYTES:
+        raise ProvisioningError("artifact_invalid")
+    _owned_directory(path.parent, create=False)
+    temporary = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(descriptor)
+            current = b""
+            while True:
+                chunk = os.read(descriptor, min(65536, MAX_PROVISIONING_DOCUMENT_BYTES + 1 - len(current)))
+                if not chunk:
+                    break
+                current += chunk
+                if len(current) > MAX_PROVISIONING_DOCUMENT_BYTES:
+                    raise ProvisioningError("artifact_invalid")
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ProvisioningError("path_unsafe")
+        finally:
+            os.close(descriptor)
+        if current != json.dumps(existing, sort_keys=True, separators=(",", ":")).encode() + b"\n":
+            raise ProvisioningError("conflict")
+        descriptor, temporary = tempfile.mkstemp(prefix=".provision-", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try: os.fsync(parent)
+        finally: os.close(parent)
+        return "rotated"
+    except ProvisioningError:
+        raise
+    except OSError:
+        raise ProvisioningError("path_unsafe") from None
+    finally:
+        if temporary is not None:
+            try: os.unlink(temporary)
+            except OSError: pass
+
+
 def install_owner_only_json_pair(entries: tuple[tuple[Path, dict[str, Any]], ...]) -> tuple[str, ...]:
     """Preflight a small authority set so known conflicts publish nothing."""
     if not entries or len(entries) > 4:
@@ -165,6 +313,49 @@ def install_owner_only_json_pair(entries: tuple[tuple[Path, dict[str, Any]], ...
         if existing != data:
             raise ProvisioningError("conflict")
     return tuple(install_owner_only_json(path, value) for path, value in entries)
+
+
+def _read_owner_only_json(path: Path) -> dict[str, Any] | None:
+    """Read one bounded owner-only document without following a link."""
+    if not isinstance(path, Path):
+        raise ProvisioningError("artifact_invalid")
+    try:
+        _owned_directory(path.parent, create=False)
+    except ProvisioningError:
+        if not path.parent.exists():
+            return None
+        raise
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise ProvisioningError("path_unsafe") from None
+    try:
+        info = os.fstat(descriptor)
+        data = b""
+        while True:
+            chunk = os.read(
+                descriptor, min(65536, MAX_PROVISIONING_DOCUMENT_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MAX_PROVISIONING_DOCUMENT_BYTES:
+                raise ProvisioningError("artifact_invalid")
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ProvisioningError("path_unsafe")
+        value = json.loads(data)
+    except ProvisioningError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ProvisioningError("artifact_invalid") from None
+    finally:
+        os.close(descriptor)
+    if type(value) is not dict:
+        raise ProvisioningError("artifact_invalid")
+    return value
 
 
 def prepare_machine_policy(*, receipt_bytes: bytes, authority_id: str,
@@ -196,6 +387,81 @@ def prepare_machine_policy(*, receipt_bytes: bytes, authority_id: str,
             "sandbox.hosting.images.machine-plan-set-policy.v2", body)})
     except (TypeError, ValueError):
         raise ProvisioningError("artifact_invalid") from None
+
+
+def prepare_stage_binding(*, plan: VerifiedImagePlanSet, target: StagingTarget,
+        machine_identity: str, source_reference: str, expires_at: str,
+        owner: str):
+    """Mint the deterministic metadata-only credential binding for one plan."""
+    from sandbox.isolation.credential_binding import CredentialBinding, canonical_timestamp
+    try:
+        if type(plan) is not VerifiedImagePlanSet or type(target) is not StagingTarget \
+                or target.machine_identity != machine_identity:
+            raise ValueError
+        canonical_expires_at = canonical_timestamp(expires_at)
+        seed = json.dumps({"target": target.as_mapping(),
+            "plan_set_digest": plan.plan_set_digest,
+            "source_reference": source_reference, "expires_at": canonical_expires_at},
+            sort_keys=True, separators=(",", ":")).encode()
+        binding_hex = hashlib.sha256(
+            b"sandbox-hosting-stage-binding-v2\0" + seed).hexdigest()
+        return CredentialBinding(
+            binding_id="image-stage-" + binding_hex[:32],
+            instance_id="host-" + hashlib.sha256(machine_identity.encode()).hexdigest()[:32],
+            source_reference=source_reference,
+            policy_digest=hashlib.sha256(b"policy\0" + seed).hexdigest(),
+            egress_digest=hashlib.sha256(b"egress\0" + seed).hexdigest(),
+            broker_digest=hashlib.sha256(b"broker\0" + seed).hexdigest(),
+            scheme="https", host="ghcr.io", port=443, method="GET", path="/token",
+            auth_form="authorization_bearer", expires_at=canonical_expires_at, owner=owner,
+            version=1, state="ready")
+    except (TypeError, ValueError):
+        raise ProvisioningError("artifact_invalid") from None
+
+
+def reuse_owner_only_stage_bundle(path: Path, *, plan: VerifiedImagePlanSet,
+        target: StagingTarget, helper: HelperIdentity, machine_identity: str,
+        source_reference: str, owner: str, credential_reference_revision: str,
+        secret_sources: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return one exact, live stage policy or refuse retained ambiguity."""
+    from sandbox.hosting.images.staging_v2 import StagingPolicySet
+    from sandbox.isolation.credential_binding import CredentialBinding
+    value = _read_owner_only_json(path)
+    if value is None:
+        return None
+    try:
+        if set(value) != {"policy", "binding", "secret_sources"}:
+            raise ProvisioningError("artifact_invalid")
+        policy = StagingPolicySet.from_mapping(value["policy"])
+        binding = CredentialBinding.from_dict(value["binding"])
+    except ProvisioningError:
+        raise
+    except (TypeError, ValueError):
+        raise ProvisioningError("artifact_invalid") from None
+    # An expired ready lease is safe to rotate for this same immutable plan.
+    # Other non-ready or mismatched authority remains a hard conflict.
+    if not binding.admits_use():
+        if binding.state == "ready" and binding.is_expired():
+            return None
+        raise ProvisioningError("conflict")
+    expected_binding = prepare_stage_binding(
+        plan=plan, target=target, machine_identity=machine_identity,
+        source_reference=source_reference, expires_at=binding.expires_at, owner=owner)
+    if binding.to_dict() != expected_binding.to_dict():
+        raise ProvisioningError("conflict")
+    expected = prepare_stage_bundle(
+        plan=plan, target=target, helper=helper, binding=expected_binding,
+        credential_reference_revision=credential_reference_revision,
+        secret_sources=secret_sources)
+    # Older bundles may retain the pre-canonical serialized spelling (for
+    # example ``.466000Z``) even though the binding model normalizes it.  The
+    # binding identity and all authority fields above are still exact; compare
+    # a normalized view so equivalent timestamp spellings replay safely while
+    # returning the original owner-only document unchanged.
+    normalized_value = {**value, "binding": binding.to_dict()}
+    if normalized_value != expected or policy.policy_digest != expected["policy"]["policy_digest"]:
+        raise ProvisioningError("conflict")
+    return value
 
 
 def prepare_stage_bundle(*, plan: VerifiedImagePlanSet, target: StagingTarget,

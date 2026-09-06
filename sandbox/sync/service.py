@@ -45,11 +45,13 @@ class SyncService:
 
     def __init__(self, repository: SyncRepository, transport_factory: Callable[[], Any],
                  *, identity_resolver: Callable = _default_identity_resolver,
-                 coordinator: RelationshipCoordinator | None = None):
+                 coordinator: RelationshipCoordinator | None = None,
+                 pin_reconciler: Callable[[], Any] | None = None):
         self.repository = repository
         self.transport_factory = transport_factory
         self.identity_resolver = identity_resolver
         self.coordinator = coordinator or RelationshipCoordinator(repository)
+        self.pin_reconciler = pin_reconciler
 
     def _relationship(self, project_dir: str | Path, remote: str, workspace_id: str,
                       *, mode: str = "off", lifecycle: str = "stopped",
@@ -104,6 +106,33 @@ class SyncService:
                 not require_request_id
                 or result.get("request_id") == generation.request_id
             )
+        )
+
+    def _ownership_conflict_envelope(
+        self, relationship: SynchronizationRelationship,
+        generation=None,
+    ) -> dict | None:
+        if (
+            generation is not None
+            and generation.lifecycle == "refused"
+            and generation.refusal_code == "ownership_conflict"
+        ):
+            request_id = generation.request_id
+        elif relationship.lifecycle == "conflicted":
+            request_id = (
+                relationship.conflict_request_id
+                or relationship.relationship_id
+            )
+        else:
+            return None
+        return failure_envelope(
+            code="ownership_conflict", status="conflicted",
+            relationship_id=relationship.relationship_id,
+            remote_name=relationship.remote_name,
+            request_id=request_id,
+            accepted_generation=relationship.accepted_generation_id,
+            pending_generation=relationship.pending_generation_id,
+            retryable=False,
         )
 
     def _reconcile_generation(self, relationship, generation, *, remote: str) -> dict:
@@ -178,6 +207,21 @@ class SyncService:
         relationship = self._relationship(project_dir, remote, workspace_id)
         if participant_id is not None:
             self.coordinator.participant(relationship.relationship_id, participant_id)
+        prior = self.repository.lookup_request(
+            relationship.relationship_id, request_id,
+        )
+        if (
+            prior is not None
+            and prior.lifecycle == "refused"
+            and prior.refusal_code == "ownership_conflict"
+        ):
+            current = (
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship
+            )
+            conflict = self._ownership_conflict_envelope(current, prior)
+            if conflict is not None:
+                return conflict
         # A checkpoint is an explicit request marker. It deliberately does not
         # change the persistent mode and follows the same screened transfer.
         _ = checkpoint
@@ -220,6 +264,23 @@ class SyncService:
                 self.repository.get_relationship(relationship.relationship_id) or relationship,
                 generation, status="accepted", active_generation=generation.generation_id,
             )
+        if (
+            replay
+            and generation.lifecycle == "refused"
+            and generation.refusal_code == "ownership_conflict"
+        ):
+            current = (
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship
+            )
+            return self._ownership_conflict_envelope(current, generation) or failure_envelope(
+                code="ownership_conflict", status="conflicted",
+                relationship_id=current.relationship_id, remote_name=remote,
+                request_id=generation.request_id,
+                accepted_generation=current.accepted_generation_id,
+                pending_generation=current.pending_generation_id,
+                retryable=False,
+            )
         if replay and generation.lifecycle == "transferring":
             current = (self.repository.get_relationship(relationship.relationship_id)
                        or relationship)
@@ -231,6 +292,26 @@ class SyncService:
                 request_id=request_id,
                 accepted_generation=relationship.accepted_generation_id,
                 pending_generation=generation.generation_id, retryable=False,
+            )
+        if self.pin_reconciler is not None:
+            self.pin_reconciler()
+        active_pins = self.repository.active_pins(relationship.relationship_id)
+        blocking = tuple(
+            pin for pin in active_pins
+            if pin.generation_id != generation.generation_id
+        )
+        if blocking:
+            active_generation = (
+                blocking[0].generation_id
+                if all(pin.generation_id == blocking[0].generation_id
+                       for pin in blocking)
+                else relationship.accepted_generation_id
+            )
+            return success_envelope(
+                self.repository.get_relationship(relationship.relationship_id)
+                or relationship,
+                generation, status="pending",
+                active_generation=active_generation,
             )
         generation, claimed = self.repository.claim_generation_transfer(
             generation.generation_id)
@@ -257,20 +338,44 @@ class SyncService:
             # Keep the pending generation visible for a safe replay. The public
             # envelope intentionally uses only the stable error code.
             code = getattr(exc, "code", "remote_unavailable")
-            if code not in {"remote_unavailable", "transport_unknown", "unstable_capture"}:
+            if code not in {
+                "ownership_conflict", "remote_unavailable", "transport_unknown",
+                "unstable_capture",
+            }:
                 code = "transport_unknown"
-            status = "unknown" if code == "transport_unknown" else "failed"
+            status = (
+                "conflicted" if code == "ownership_conflict"
+                else "unknown" if code == "transport_unknown"
+                else "failed"
+            )
+            if code == "ownership_conflict":
+                self.repository.transition_generation(
+                    generation.generation_id, "refused",
+                    refusal_code="ownership_conflict",
+                )
+                relationship = (
+                    self.repository.get_relationship(relationship.relationship_id)
+                    or relationship
+                )
             self.repository.record_metrics(
                 relationship.relationship_id,
-                outcome="unknown" if status == "unknown" else "failed",
+                outcome=(
+                    "refused" if code == "ownership_conflict"
+                    else "unknown" if status == "unknown"
+                    else "failed"
+                ),
                 file_count=generation.file_count, byte_count=generation.byte_count,
             )
             return failure_envelope(
                 code=code, status=status, relationship_id=relationship.relationship_id,
                 remote_name=remote, request_id=request_id,
                 accepted_generation=relationship.accepted_generation_id,
-                pending_generation=generation.generation_id,
-                retryable=(False if code == "transport_unknown" else
+                pending_generation=(
+                    relationship.pending_generation_id
+                    if code == "ownership_conflict"
+                    else generation.generation_id
+                ),
+                retryable=(False if code in {"ownership_conflict", "transport_unknown"} else
                            bool(getattr(exc, "retryable", True))),
             )
         accepted = self.repository.transition_generation(
@@ -285,6 +390,10 @@ class SyncService:
 
     def status(self, project_dir: str | Path, *, remote: str, workspace_id: str) -> dict:
         relationship = self._relationship(project_dir, remote, workspace_id, create=False)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         generation_id = relationship.pending_generation_id or relationship.accepted_generation_id
         generation = self.repository.get_generation(generation_id) if generation_id else None
         status = ("pending" if relationship.pending_generation_id else
@@ -300,6 +409,10 @@ class SyncService:
         if mode not in {"live", "checkpoint"}:
             raise SyncServiceError("synchronization mode is invalid", "ownership_conflict")
         relationship = self._relationship(project_dir, remote, workspace_id)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         updated = self.repository.set_mode(
             relationship.relationship_id, mode, lifecycle="active",
         )
@@ -315,6 +428,10 @@ class SyncService:
     def stop(self, project_dir: str | Path, *, remote: str, workspace_id: str,
              participant_id: str | None = None) -> dict:
         relationship = self._relationship(project_dir, remote, workspace_id)
+        if relationship.lifecycle == "conflicted":
+            conflict = self._ownership_conflict_envelope(relationship)
+            if conflict is not None:
+                return conflict
         updated = self.repository.set_mode(
             relationship.relationship_id, "off", lifecycle="stopped",
         )

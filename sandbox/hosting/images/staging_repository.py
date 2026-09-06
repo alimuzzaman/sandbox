@@ -27,7 +27,7 @@ from .staging_models import (
     ProofCustodyPort, StageProofActivationLease, StageProofTombstone, StageRequest,
     StageResult, StagedImageProof, StagingContractError, canonical_bytes,
 )
-from .staging_v2 import StageRequestSet, StageResultSet, StagedImageProofSet
+from .staging_v2 import PullFailure, StageRequestSet, StageResultSet, StagedImageProofSet
 
 TERMINAL_PHASES = frozenset({"succeeded", "refused", "failed", "cancelled", "uncertain"})
 EFFECT_PHASES = frozenset({"pulling", "cleanup_pending", "observing", "succeeded"})
@@ -45,12 +45,15 @@ _RECORD_FIELDS = frozenset({
 })
 _OWNER_FIELDS = _RECORD_FIELDS - {"ledger_revision", "result"}
 _PROCESS_FIELDS = frozenset({"unit_inactive", "cgroup_empty_or_removed"})
+_BOOTSTRAP_FIELDS = frozenset({"bootstrap_phase", "bootstrap_code"})
 _PROCESS_VARIANTS = frozenset({
     _PROCESS_FIELDS,
     _PROCESS_FIELDS | {"not_launched"},
     _PROCESS_FIELDS | {"cleanup_complete"},
     _PROCESS_FIELDS | {"unit_name"},
     _PROCESS_FIELDS | {"unit_name", "cgroup", "delegated", "escape_allowed"},
+    _PROCESS_FIELDS | _BOOTSTRAP_FIELDS,
+    _PROCESS_FIELDS | {"not_launched"} | _BOOTSTRAP_FIELDS,
 })
 
 
@@ -77,6 +80,14 @@ def _validate_process(value: object) -> None:
         raise ValueError
     if "cleanup_complete" in value and type(value["cleanup_complete"]) is not bool:
         raise ValueError
+    if "bootstrap_phase" in value:
+        allowed = {"inode": {"inode_os", "inode_json", "inode_key", "inode_exec"},
+                   "plan": {"plan_invalid"}, "cgroup": {"cgroup_invalid"},
+                   "workspace": {"workspace_invalid"},
+                   "unknown": {"bootstrap_unavailable"}}
+        if value["bootstrap_phase"] not in allowed \
+                or value["bootstrap_code"] not in allowed[value["bootstrap_phase"]]:
+            raise ValueError
 
 
 def _validate_cleanup(value: object) -> None:
@@ -161,12 +172,17 @@ def _result_from(raw: object, request_id: str, proof=None):
     if type(raw) is not dict:
         raise StageRepositoryError("ledger_invalid")
     try:
-        values = (raw["schema_version"], raw["ok"], raw["result_class"], raw["code"],
-                  request_id, raw["generation"], proof)
+        pull_failure = PullFailure.from_mapping(raw["pull_failure"]) \
+            if "pull_failure" in raw else None
         if raw.get("schema_version") == 1:
-            return StageResult(*values)
+            if pull_failure is not None:
+                raise StagingContractError()
+            return StageResult(raw["schema_version"], raw["ok"], raw["result_class"],
+                               raw["code"], request_id, raw["generation"], proof)
         if raw.get("schema_version") == 2:
-            return StageResultSet(*values)
+            return StageResultSet(raw["schema_version"], raw["ok"], raw["result_class"],
+                                  raw["code"], request_id, raw["generation"], proof,
+                                  pull_failure)
     except (KeyError, TypeError, ValueError, StagingContractError):
         pass
     raise StageRepositoryError("ledger_invalid")
@@ -337,9 +353,10 @@ class StageRepository:
                     if proof is not None or record["phase"] == "succeeded":
                         raise ValueError
                     continue
-                if type(result) is not dict or set(result) != {
-                        "schema_version", "ok", "result_class", "code",
-                        "request_id", "generation"}:
+                result_fields = {"schema_version", "ok", "result_class", "code",
+                                 "request_id", "generation"}
+                if type(result) is not dict or frozenset(result) not in {
+                        frozenset(result_fields), frozenset(result_fields | {"pull_failure"})}:
                     raise ValueError
                 parsed_result = _result_from(result, result["request_id"], proof)
                 if result != self._stored_result(parsed_result) \
@@ -631,6 +648,78 @@ class StageRepository:
             self._write_unlocked(target, state)
             return result
 
+    def close_precredential_uncertain(self, request, *, expected_ledger_revision: int):
+        """Atomically terminalize one exact v2 pre-effect uncertain owner."""
+        from .staging_v2 import StageRequestSet, StageResultSet
+        if type(request) is not StageRequestSet or type(expected_ledger_revision) is not int:
+            raise StageRepositoryError("request_conflict")
+        target = request.target.target_identity
+        with self.target_lock(target):
+            state = self._load_unlocked(target)
+            record = state["records"].get(request.request_id)
+            owner = state["active_owner"]
+            existing = self.lookup_result_unlocked(state, request.request_id)
+            if type(record) is not dict or type(owner) is not dict \
+                    or type(existing) is not StageResultSet \
+                    or existing.result_class != "uncertain" \
+                    or record["phase"] != "uncertain" \
+                    or record["effect_entered"] is not False \
+                    or record["request_digest"] != request.request_digest \
+                    or record["generation"] != state["generation"] \
+                    or record["ledger_revision"] != expected_ledger_revision \
+                    or owner != {key: record[key] for key in _OWNER_FIELDS}:
+                raise StageRepositoryError("request_conflict")
+            result = StageResultSet(2, False, "failed", "precredential_bootstrap_failed",
+                                    request.request_id, record["generation"])
+            record["phase"] = "failed"
+            record["process"] = {"unit_inactive": True,
+                                 "cgroup_empty_or_removed": True}
+            record["cleanup"] = {"complete": True}
+            record["result"] = self._stored_result(result)
+            self._advance_counter(state, "ledger_revision")
+            record["ledger_revision"] = state["ledger_revision"]
+            state["active_owner"] = None
+            state["reserved_terminal_bytes"] = 0
+            self._assert_reserved_bound(state)
+            self._write_unlocked(target, state)
+            return result
+
+    def close_posteffect_uncertain(self, request, *, expected_ledger_revision: int):
+        """Atomically close one exact v2 effect-entered cleanup uncertainty."""
+        from .staging_v2 import StageRequestSet, StageResultSet
+        if type(request) is not StageRequestSet or type(expected_ledger_revision) is not int:
+            raise StageRepositoryError("request_conflict")
+        target = request.target.target_identity
+        with self.target_lock(target):
+            state = self._load_unlocked(target)
+            record = state["records"].get(request.request_id)
+            owner = state["active_owner"]
+            existing = self.lookup_result_unlocked(state, request.request_id)
+            if type(record) is not dict or type(owner) is not dict \
+                    or type(existing) is not StageResultSet \
+                    or existing.result_class != "uncertain" \
+                    or record["phase"] != "uncertain" \
+                    or record["effect_entered"] is not True \
+                    or record["request_digest"] != request.request_digest \
+                    or record["generation"] != state["generation"] \
+                    or record["ledger_revision"] != expected_ledger_revision \
+                    or owner != {key: record[key] for key in _OWNER_FIELDS}:
+                raise StageRepositoryError("request_conflict")
+            result = StageResultSet(2, False, "failed", "cleanup_reconciled",
+                                    request.request_id, record["generation"])
+            record["phase"] = "failed"
+            record["process"] = {"unit_inactive": True,
+                                 "cgroup_empty_or_removed": True}
+            record["cleanup"] = {"complete": True}
+            record["result"] = self._stored_result(result)
+            self._advance_counter(state, "ledger_revision")
+            record["ledger_revision"] = state["ledger_revision"]
+            state["active_owner"] = None
+            state["reserved_terminal_bytes"] = 0
+            self._assert_reserved_bound(state)
+            self._write_unlocked(target, state)
+            return result
+
     def record_status(self, target_identity: str, request_id: str) -> dict | None:
         """Return private durable phase evidence for read-only reconciliation."""
         with self.target_lock(target_identity):
@@ -643,6 +732,15 @@ class StageRepository:
         with self.target_lock(target_identity):
             state = self._load_unlocked(target_identity)
             return state["generation"], state["ledger_revision"]
+
+    @contextmanager
+    def policy_provisioning_snapshot(self, target_identity: str):
+        """Hold an idle exact ledger snapshot while a stage policy is provisioned."""
+        with self.target_lock(target_identity):
+            state = self._load_unlocked(target_identity)
+            if state["active_owner"] is not None:
+                raise StageRepositoryError("target_busy")
+            yield state["generation"], state["ledger_revision"]
 
     def fence_possible_effect(self, request, *, code: str = "unknown_effect"):
         generation = self.transition(request, "uncertain")

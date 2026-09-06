@@ -173,3 +173,8 @@ class TestMcpResourceTier(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], code)
         self.assertEqual(self.scope.calls, [])
         self.assertEqual(self.reclaim.calls, [])
+
+    def test_mcp_resources_tier_tools_do_not_expose_host_memory_operations(self):
+        self.assertFalse(hasattr(self.resources, "host_memory_apply"))
+        self.assertFalse(hasattr(self.resources, "swap_apply"))
+        self.assertFalse(hasattr(self.resources, "swap_disable"))

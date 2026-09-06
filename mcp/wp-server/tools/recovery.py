@@ -1,4 +1,4 @@
-"""Read-only scoped recovery planning tools."""
+"""Scoped recovery planning and protected capture tools."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,7 +40,11 @@ def recovery_create(remote: str | None = None, backup_id: str | None = None,
                     profiles: list[str] | None = None,
                     artifacts: dict[str, str] | None = None,
                     confirm: bool = False) -> dict:
-    """Capture explicit materialized artifacts; secrets are inherited, never arguments."""
+    """Capture explicit artifacts or controller-materialized profiles.
+
+    Secrets are inherited by the configured capture/controller adapters, never
+    accepted as tool arguments.
+    """
     from sandbox.recovery.errors import RecoveryError, result
     if not confirm:
         return result(False, "create", remote=remote,
@@ -56,7 +60,15 @@ def recovery_create(remote: str | None = None, backup_id: str | None = None,
     except (TypeError, ValueError):
         return result(False, "create", remote=remote,
                       error=RecoveryError("artifacts must map names to paths", "invalid_artifact"))
-    return _service().create(backup_id, materialized, tuple(profiles), confirm=True, remote=remote)
+    service = _service()
+    if materialized:
+        return service.create(backup_id, materialized, tuple(profiles), confirm=True, remote=remote)
+    # Empty artifact maps are not permission to discover host paths locally.
+    # A configured controller adapter must resolve the symbolic declarations
+    # and return validated artifacts through the same service boundary.
+    return service.create_materialized(
+        backup_id, tuple(profiles), confirm=True, remote=remote,
+    )
 
 
 @mcp.tool()

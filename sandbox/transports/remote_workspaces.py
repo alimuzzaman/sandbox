@@ -56,7 +56,9 @@ class WorkspaceCreateRequest:
 
 def _safe_detail(value: object, *, limit: int = 1024) -> str:
     """Bound remote diagnostics without forwarding credentials."""
-    if not isinstance(value, str):
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="replace")
+    elif not isinstance(value, str):
         return ""
     return redact_text(value.strip())[-limit:]
 
@@ -100,7 +102,12 @@ def _parse_envelope(stdout: object) -> dict[str, Any]:
     last JSON line.  A warning, nested envelope, or multiple documents makes
     the response ambiguous and is rejected as a protocol error.
     """
-    if not isinstance(stdout, str):
+    if isinstance(stdout, (bytes, bytearray)):
+        try:
+            stdout = stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is not text") from None
+    elif not isinstance(stdout, str):
         raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is not text")
     if len(stdout.encode("utf-8", errors="replace")) > _MAX_REMOTE_JSON_BYTES:
         raise RemoteWorkspaceError("workspace_protocol_invalid", "remote response is too large")
@@ -181,6 +188,7 @@ class RemoteWorkspaceTransport:
         *,
         remote_lookup: Callable[[str], Mapping[str, Any] | None],
         ssh_run: Callable[..., object],
+        ssh_process: Callable[..., object] | None = None,
         deploy: Callable[[WorkspaceCreateRequest], Mapping[str, Any] | None] | None = None,
         register: Callable[
             [WorkspaceCreateRequest, Mapping[str, Any] | None], Mapping[str, Any] | None
@@ -194,6 +202,7 @@ class RemoteWorkspaceTransport:
             raise ValueError("timeout_seconds must be a positive integer")
         self.remote_lookup = remote_lookup
         self.ssh_run = ssh_run
+        self.ssh_process = ssh_process
         self.deploy = deploy
         self.register = register
         self.remote_sb_path = remote_sb_path or (lambda _remote: "sb")
@@ -298,6 +307,75 @@ class RemoteWorkspaceTransport:
         args = ["workspace", "status", "--workspace-id", self._workspace_id(workspace_id)]
         if project_identity is not None:
             args += ["--project-identity", self._project_identity(project_identity)]
+        return self._control(remote_name, args)
+
+    def publish_sync(
+        self,
+        remote_name: str,
+        workspace_id: str,
+        project_identity: str,
+        generation_id: str,
+        manifest_digest: str,
+        archive_manifest_digest: str,
+        file_count: int,
+        byte_count: int,
+        expected_index_generation: int,
+        archive_bytes: bytes,
+    ) -> dict[str, Any]:
+        """Ask the controller to re-authorize and publish staged bytes under lock."""
+        for value, label in (
+            (file_count, "file_count"),
+            (byte_count, "byte_count"),
+            (expected_index_generation, "expected_index_generation"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RemoteWorkspaceError(
+                    "workspace_request_invalid", f"{label} must be non-negative")
+        args = [
+            "workspace", "publish-sync",
+            "--workspace-id", self._workspace_id(workspace_id),
+            "--project-identity", self._project_identity(project_identity),
+            "--generation-id", _safe_id(generation_id, "generation_id"),
+            "--manifest-digest", _safe_id(manifest_digest, "manifest_digest"),
+            "--archive-manifest-digest", _safe_id(
+                archive_manifest_digest, "archive_manifest_digest"),
+            "--file-count", str(file_count),
+            "--byte-count", str(byte_count),
+            "--expected-index-generation", str(expected_index_generation),
+        ]
+        if not callable(self.ssh_process) or not isinstance(archive_bytes, bytes):
+            raise RemoteWorkspaceError(
+                "workspace_remote_unavailable", "controller archive transport is unavailable")
+        remote = self._remote(remote_name)
+        command = self._command(remote, args)
+        try:
+            result = self.ssh_process(
+                remote, command, input_data=archive_bytes,
+                timeout=max(self.timeout_seconds, 120),
+            )
+        except Exception:
+            raise RemoteWorkspaceError(
+                "workspace_remote_failed", "remote controller upload failed") from None
+        payload = _parse_envelope(_last_result_field(result, "stdout"))
+        if _last_result_field(result, "returncode") not in (0, None) or payload.get("ok") is not True:
+            raise _remote_error(payload) if payload.get("ok") is False else RemoteWorkspaceError(
+                "workspace_remote_failed", "remote controller upload failed")
+        return _success(payload, "workspace sync publication")
+
+    def reconcile_sync(
+        self, remote_name: str, workspace_id: str, project_identity: str,
+        generation_id: str, manifest_digest: str, file_count: int,
+        byte_count: int, expected_index_generation: int,
+    ) -> dict[str, Any]:
+        args = [
+            "workspace", "reconcile-sync",
+            "--workspace-id", self._workspace_id(workspace_id),
+            "--project-identity", self._project_identity(project_identity),
+            "--generation-id", _safe_id(generation_id, "generation_id"),
+            "--manifest-digest", _safe_id(manifest_digest, "manifest_digest"),
+            "--file-count", str(file_count), "--byte-count", str(byte_count),
+            "--expected-index-generation", str(expected_index_generation),
+        ]
         return self._control(remote_name, args)
 
     def migration_plan(

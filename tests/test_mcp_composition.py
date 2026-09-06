@@ -1,14 +1,31 @@
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.subprocess_support import run_test_process
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
 sys.path.insert(0, str(MCP_ROOT))
 
 
 class TestMcpComposition(unittest.TestCase):
+    def test_root_tools_package_resolves_mcp_manifest(self):
+        """A repository-root import must work before the MCP server starts."""
+        process = run_test_process(
+            [
+                sys.executable,
+                "-c",
+                "import tools.audit_agent_usage; import tools.manifest; import composition; import dependencies",
+            ],
+            cwd=str(MCP_ROOT.parent.parent),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+
     def test_ensure_returns_the_cli_typed_mount_refusal_envelope(self):
         from tools import instances
 
@@ -100,7 +117,7 @@ class TestMcpComposition(unittest.TestCase):
             "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
             "resources", "feedback",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
-            "secrets", "plugin_check", "remote", "hermes", "recovery", "sync",
+            "secrets", "plugin_check", "remote", "hermes", "recovery", "sync", "owned_storage",
         )
         self.assertEqual(BUILTIN_TOOL_GROUPS, expected)
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
@@ -159,7 +176,7 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync", "owned_storage"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
@@ -181,10 +198,11 @@ class TestMcpComposition(unittest.TestCase):
                 "feedback": ("feedback_service_factory",),
                 "secrets": ("secret_service_factory",),
                 "sync": ("sync_service",),
+                "owned_storage": (),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync", "owned_storage"}))
 
     def test_domains_group_declares_the_full_ingress_transport_contract(self):
         from tools.manifest import BUILTIN_TOOL_NAMES

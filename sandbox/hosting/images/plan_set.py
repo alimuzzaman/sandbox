@@ -26,6 +26,10 @@ from .models import TargetScope, canonical_digest, canonical_json
 MAX_V2_DOCUMENT_BYTES = 128 * 1024
 MAX_V2_BUNDLE_BYTES = 1024 * 1024
 MAX_V2_BUNDLE_SET_BYTES = 5 * 1024 * 1024
+MAX_SIGSTORE_BUNDLE_DEPTH = 16
+MAX_SIGSTORE_BUNDLE_NODES = 16 * 1024
+MAX_SIGSTORE_BUNDLE_KEY_BYTES = 256
+MAX_SIGSTORE_BUNDLE_STRING_BYTES = 256 * 1024
 IMAGE_NAMES = ("queue", "web", "worker")
 OCI_MEDIA_TYPES = frozenset({
     "application/vnd.oci.image.manifest.v1+json",
@@ -97,6 +101,75 @@ def _load_json_bytes(data: bytes) -> dict[str, Any]:
         raise PlanSetContractError() from None
     canonical_json(value)
     if type(value) is not dict:
+        raise PlanSetContractError()
+    return value
+
+
+def _load_sigstore_bundle_json(data: bytes) -> dict[str, Any]:
+    """Parse a bounded Sigstore bundle without policy-document limits.
+
+    Sigstore v0.3 bundles contain certificate and transparency-proof values
+    that legitimately exceed the canonical policy model's depth and 512-byte
+    string limits. The raw bundle byte cap remains the primary bound; this
+    traversal adds structural limits before the offline cosign verifier makes
+    the cryptographic trust decision.
+    """
+    if type(data) is not bytes or not data or len(data) > MAX_V2_BUNDLE_BYTES:
+        raise PlanSetContractError("input_too_large")
+    try:
+        def no_duplicates(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise PlanSetContractError()
+                result[key] = item
+            return result
+
+        value = json.loads(
+            data.decode("utf-8"), object_pairs_hook=no_duplicates,
+            parse_constant=lambda _value: (_ for _ in ()).throw(PlanSetContractError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        raise PlanSetContractError() from None
+    if type(value) is not dict:
+        raise PlanSetContractError()
+
+    nodes = 0
+    stack: list[tuple[object, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_SIGSTORE_BUNDLE_NODES or depth > MAX_SIGSTORE_BUNDLE_DEPTH:
+            raise PlanSetContractError("input_too_large")
+        if item is None or type(item) is bool:
+            continue
+        if type(item) is int:
+            if not -(2**63 - 1) <= item <= 2**63 - 1:
+                raise PlanSetContractError("input_too_large")
+            continue
+        if type(item) is str:
+            try:
+                item_bytes = item.encode("utf-8")
+            except UnicodeEncodeError:
+                raise PlanSetContractError() from None
+            if len(item_bytes) > MAX_SIGSTORE_BUNDLE_STRING_BYTES:
+                raise PlanSetContractError("input_too_large")
+            continue
+        if type(item) is list:
+            stack.extend((child, depth + 1) for child in item)
+            continue
+        if type(item) is dict:
+            for key, child in item.items():
+                try:
+                    key_bytes = key.encode("utf-8") if type(key) is str else b""
+                except UnicodeEncodeError:
+                    raise PlanSetContractError() from None
+                if (type(key) is not str or not key
+                        or len(key_bytes) > MAX_SIGSTORE_BUNDLE_KEY_BYTES
+                        or any(ord(char) < 32 or ord(char) == 127 for char in key)):
+                    raise PlanSetContractError()
+                stack.append((child, depth + 1))
+            continue
         raise PlanSetContractError()
     return value
 
@@ -485,7 +558,7 @@ class VerifiedImagePlanSet:
 
 
 def _validate_sigstore_bundle(data: bytes) -> None:
-    raw = _load_json_bytes(data)
+    raw = _load_sigstore_bundle_json(data)
     if set(raw) != {"mediaType", "verificationMaterial", "messageSignature"} \
             or raw["mediaType"] != "application/vnd.dev.sigstore.bundle.v0.3+json" \
             or type(raw["verificationMaterial"]) is not dict or not raw["verificationMaterial"] \

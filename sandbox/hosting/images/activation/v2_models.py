@@ -20,6 +20,19 @@ from .models import (
 
 
 _ENVIRONMENT_VARIABLE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_REPOSITORY_DIGEST = re.compile(
+    r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z")
+
+
+def _local_image_id(value: object, image_ref: object) -> str:
+    """Accept the receipt config digest or Docker 29's manifest image ID."""
+    if (type(image_ref) is not str
+            or _REPOSITORY_DIGEST.fullmatch(image_ref) is None
+            or type(value) is not str
+            or (value != image_ref and _DIGEST.fullmatch(value) is None)):
+        raise ActivationContractError("local_image_mismatch")
+    return value
 
 
 def _target(value: object) -> dict[str, str]:
@@ -143,9 +156,12 @@ class ReplacementIntentV2:
             row = _closed(item, frozenset({
                 "name", "image_ref", "config_digest", "platform", "local_image_id"}))
             _text(row["name"], identity=True); _text(row["image_ref"])
-            _digest(row["config_digest"]); _digest(row["local_image_id"])
+            _digest(row["config_digest"])
+            _local_image_id(row["local_image_id"], row["image_ref"])
+            manifest_digest = row["image_ref"].rsplit("@", 1)[-1]
             if row["platform"] != {"os": "linux", "architecture": "amd64"} \
-                    or row["config_digest"] != row["local_image_id"]:
+                    or row["local_image_id"] not in {
+                        row["config_digest"], row["image_ref"], manifest_digest}:
                 raise ActivationContractError("local_image_mismatch")
             images[row["name"]] = row
         if len(images) != len(self.images):
@@ -375,6 +391,7 @@ class GenerationBoundEdgeReceiptV2:
     observation_digest: str
     terminal: bool
     receipt_digest: str
+    cache_purge_receipt: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 2 or self.terminal is not True:
@@ -384,6 +401,32 @@ class GenerationBoundEdgeReceiptV2:
         for value in (self.request_digest, self.generation_subject_digest,
                       self.route_digest, self.observation_digest, self.receipt_digest):
             _digest(value)
+        if self.cache_purge_receipt is not None:
+            purge = self.cache_purge_receipt
+            if (type(purge) is not dict or purge.get("schema_version") != 1
+                    or purge.get("status") != "complete"
+                    or purge.get("provider") != "cloudflare"
+                    or purge.get("scope") != "zone_all"
+                    or not _DIGEST.fullmatch(str(purge.get("request_digest")))
+                    or purge.get("activation_request_digest") != self.request_digest
+                    or not isinstance(purge.get("project"), str)
+                    or not isinstance(purge.get("environment"), str)
+                    or not isinstance(purge.get("routes"), list)
+                    or not isinstance(purge.get("policy_digest"), str)
+                    or not _DIGEST.fullmatch(purge["policy_digest"])
+                    or not _DIGEST.fullmatch(str(purge.get("receipt_digest")))):
+                raise ActivationContractError("edge_incomplete")
+            if (not isinstance(purge.get("zones"), list)
+                    or len(purge["zones"]) > 32):
+                raise ActivationContractError("edge_incomplete")
+            for zone in purge["zones"]:
+                if (type(zone) is not dict or set(zone) !=
+                        {"zone_id", "zone", "state", "provider_id"}
+                        or zone.get("state") != "acknowledged"
+                        or not isinstance(zone.get("zone_id"), str)
+                        or not isinstance(zone.get("zone"), str)
+                        or not isinstance(zone.get("provider_id"), str)):
+                    raise ActivationContractError("edge_incomplete")
         if self.receipt_digest != activation_digest(
                 "sandbox.hosting.images.generation-bound-edge-receipt.v2",
                 self.body_mapping()):
@@ -391,14 +434,22 @@ class GenerationBoundEdgeReceiptV2:
 
     def body_mapping(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__
-                if name != "receipt_digest"}
+                if name != "receipt_digest" and
+                (name != "cache_purge_receipt" or getattr(self, name) is not None)}
 
     def as_mapping(self) -> dict[str, Any]:
         return {**self.body_mapping(), "receipt_digest": self.receipt_digest}
 
     @classmethod
     def from_mapping(cls, value: object) -> "GenerationBoundEdgeReceiptV2":
-        raw = _closed(value, frozenset(cls.__dataclass_fields__))
+        if type(value) is not dict:
+            raise ActivationContractError("edge_incomplete")
+        fields = frozenset(cls.__dataclass_fields__)
+        if not set(value) <= fields or "cache_purge_receipt" not in value:
+            if set(value) != fields - {"cache_purge_receipt"}:
+                raise ActivationContractError("edge_incomplete")
+            value = {**value, "cache_purge_receipt": None}
+        raw = _closed(value, fields)
         return cls(**raw)
 
 
@@ -442,8 +493,12 @@ class VerifiedActivationGenerationV2:
             row = _closed(item, frozenset({
                 "name", "image_ref", "config_digest", "platform", "local_image_id"}))
             _text(row["name"], identity=True); _text(row["image_ref"])
-            _digest(row["config_digest"]); _digest(row["local_image_id"])
-            if row["local_image_id"] != row["config_digest"] or row["platform"] != {
+            _digest(row["config_digest"])
+            _local_image_id(row["local_image_id"], row["image_ref"])
+            manifest_digest = row["image_ref"].rsplit("@", 1)[-1]
+            if row["local_image_id"] not in {
+                    row["config_digest"], row["image_ref"], manifest_digest} \
+                    or row["platform"] != {
                     "os": "linux", "architecture": "amd64"}:
                 raise ActivationContractError("local_image_mismatch")
             images[row["name"]] = row

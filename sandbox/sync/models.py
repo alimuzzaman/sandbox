@@ -109,6 +109,9 @@ class SynchronizationRelationship:
     owner_generation: int = 0
     accepted_generation_id: str | None = None
     pending_generation_id: str | None = None
+    conflict_code: str | None = None
+    conflict_request_id: str | None = None
+    conflict_generation_id: str | None = None
     updated_at: str = "1970-01-01T00:00:00Z"
 
     def __post_init__(self) -> None:
@@ -123,6 +126,18 @@ class SynchronizationRelationship:
         validate_count(self.owner_generation, "owner generation", maximum=2**63 - 1)
         _optional_identifier(self.accepted_generation_id, "accepted generation id")
         _optional_identifier(self.pending_generation_id, "pending generation id")
+        conflict = (
+            self.conflict_code,
+            self.conflict_request_id,
+            self.conflict_generation_id,
+        )
+        if any(value is not None for value in conflict):
+            if not all(value is not None for value in conflict):
+                raise ValueError("relationship conflict identity is incomplete")
+            if self.conflict_code != "ownership_conflict":
+                raise ValueError("relationship conflict code is invalid")
+            validate_identifier(self.conflict_request_id, "conflict request id")
+            validate_identifier(self.conflict_generation_id, "conflict generation id")
         object.__setattr__(self, "updated_at", validate_timestamp(self.updated_at, "updated at"))
 
     @property

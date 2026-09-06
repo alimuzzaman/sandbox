@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,12 @@ from unittest.mock import MagicMock, patch
 from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.registry import JobRepository
+from sandbox.jobs.scheduler import WorkspaceBusy
 from sandbox.jobs.storage import JobStorage
+from sandbox.jobs.supervisor import run_descriptor
+from sandbox.sync.models import SynchronizationRelationship
+from sandbox.sync.projection import SyncJobGateway
+from sandbox.sync.repository import SyncRepository
 
 
 class JobServiceTests(unittest.TestCase):
@@ -30,6 +36,619 @@ class JobServiceTests(unittest.TestCase):
                 service.submit(item)
             self.assertEqual(repository.list(), [])
             repository.close()
+
+    def test_synchronized_submission_pins_accepted_generation_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="request",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1, commit="1" * 40,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            projected = Path(temp) / "generation"
+            projected.mkdir()
+            gateway = SyncJobGateway(sync, materialize=lambda decision, _submission: {
+                "project_root": str(projected),
+                "source_identity": "sha256:" + "a" * 64,
+            })
+            launched = []
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launched.append, sync_gateway=gateway,
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=generation.generation_id,
+                source_access="managed_read_only",
+                parallel_safe=True,
+            ))
+            row = jobs.get(accepted["job_id"])
+            self.assertEqual(row["project_root"], str(projected))
+            self.assertEqual(accepted["generation"], {
+                "relationship_id": "relationship",
+                "generation_id": generation.generation_id,
+                "source_access": "managed_read_only",
+            })
+            self.assertEqual(service.get(accepted["job_id"], reconcile=False)["generation"],
+                             accepted["generation"])
+            self.assertEqual(len(launched), 1)
+            self.assertEqual(len(sync.active_pins("relationship")), 1)
+            jobs.transition(accepted["job_id"], "running")
+            jobs.transition(accepted["job_id"], "succeeded")
+            service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(sync.active_pins("relationship"), ())
+            jobs.close()
+
+    def test_newest_pending_generation_blocks_stale_job_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="request",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda path: launched.append(path),
+                sync_gateway=SyncJobGateway(
+                    sync, materialize=lambda *_args: {
+                        "project_root": str(Path(temp) / "pending-generation"),
+                        "source_identity": "sha256:" + "d" * 64,
+                    }),
+            )
+            launched = []
+            submission = JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=generation.generation_id,
+                request_id="job-pending-replay",
+            )
+            accepted = service.submit(submission)
+            self.assertEqual(accepted["queue"]["reason"], "sync_generation_pending")
+            self.assertEqual(jobs.get(accepted["job_id"])["sync_generation_id"],
+                             pending.generation_id)
+            self.assertEqual(service.get(
+                accepted["job_id"], reconcile=False,
+            )["queue"]["reason"], "sync_generation_pending")
+            self.assertEqual(launched, [])
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            newest, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="newest",
+                request_digest="e" * 64, manifest_digest="f" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:04Z",
+            )
+            queued = service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(queued["queue"]["reason"], "sync_generation_pending")
+            self.assertEqual(jobs.get(accepted["job_id"])["sync_generation_id"],
+                             newest.generation_id)
+            sync.claim_generation_transfer(newest.generation_id)
+            sync.transition_generation(
+                newest.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:05Z",
+            )
+            (Path(temp) / "pending-generation").mkdir()
+            service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(len(launched), 1)
+            self.assertEqual(jobs.get(accepted["job_id"])["source_identity"],
+                             "sha256:" + "d" * 64)
+            replay = service.submit(submission)
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(replay["job_id"], accepted["job_id"])
+            jobs.close()
+
+    def test_failed_pending_generation_terminates_queued_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: self.fail("failed generation must not launch"),
+                sync_gateway=SyncJobGateway(
+                    sync, materialize=lambda *_args: self.fail("must not materialize")),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            sync.transition_generation(pending.generation_id, "failed")
+            terminal = service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(terminal["lifecycle"], "failed")
+            self.assertEqual(terminal["termination_reason"],
+                             "sync_generation_failed")
+            jobs.close()
+
+    def test_promoted_pending_generation_launch_failure_releases_pin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: (_ for _ in ()).throw(OSError("launch")),
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "d" * 64,
+                }),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            projected.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
+                service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(jobs.get(accepted["job_id"])["lifecycle"], "failed")
+            self.assertEqual(sync.active_pins("relationship"), ())
+            jobs.close()
+
+    def test_concurrent_pending_promotion_has_one_launch_owner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            launched = []
+            started = threading.Event()
+            release = threading.Event()
+            def launcher(path):
+                launched.append(path)
+                started.set()
+                release.wait(5)
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launcher,
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "d" * 64,
+                }),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+                parallel_safe=True,
+            ))
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            projected.mkdir()
+            errors = []
+            def promote():
+                try:
+                    service.get(accepted["job_id"], reconcile=False)
+                except Exception as exc:
+                    errors.append(exc)
+            first = threading.Thread(
+                target=promote,
+            )
+            first.start()
+            self.assertTrue(started.wait(5))
+            try:
+                second = service.get(accepted["job_id"], reconcile=False)
+                self.assertEqual(second["queue"]["reason"],
+                                 "sync_generation_launch_committed")
+                observer_jobs = JobRepository(Path(temp) / "registry.sqlite")
+                observer = JobService(
+                    observer_jobs, JobStorage(temp, free_disk_reserve=0), None,
+                    launcher=lambda _path: self.fail("observer must not launch"),
+                    sync_gateway=service.sync_gateway,
+                )
+                startup = observer.reconcile_startup()
+                self.assertEqual(startup["interrupted"], [])
+                self.assertEqual(jobs.get(accepted["job_id"])["lifecycle"],
+                                 "queued")
+                observer_jobs.close()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                release.set()
+                first.join(5)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(launched), 1)
+            self.assertEqual(len(sync.active_pins("relationship")), 1)
+            jobs.close()
+
+    def test_cancel_wins_before_pending_launch_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            admission_started = threading.Event()
+            release_admission = threading.Event()
+            class Scheduler:
+                def acquire(self, *_args, **_kwargs):
+                    admission_started.set()
+                    release_admission.wait(5)
+                def release(self, _job_id):
+                    pass
+                def queue_details(self, _row):
+                    return {"reason": "busy", "position": 1,
+                            "blocking_jobs": []}
+                def reconcile_stale(self):
+                    return []
+            launched = []
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launched.append, scheduler=Scheduler(),
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "d" * 64,
+                }),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            projected.mkdir()
+            errors = []
+            def promote():
+                try:
+                    service.get(accepted["job_id"], reconcile=False)
+                except Exception as exc:
+                    errors.append(exc)
+            promoter = threading.Thread(target=promote)
+            promoter.start()
+            self.assertTrue(admission_started.wait(5))
+            service.cancel(accepted["job_id"])
+            release_admission.set()
+            promoter.join(5)
+            self.assertEqual(errors, [])
+            self.assertEqual(launched, [])
+            self.assertEqual(jobs.get(accepted["job_id"])["lifecycle"],
+                             "cancelled")
+            self.assertEqual(sync.active_pins("relationship"), ())
+            jobs.close()
+
+    def test_pending_launch_claim_requeues_after_scheduler_contention(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            class Scheduler:
+                attempts = 0
+                def acquire(self, *_args, **_kwargs):
+                    self.attempts += 1
+                    if self.attempts == 1:
+                        raise WorkspaceBusy("busy")
+                def queue_details(self, _row):
+                    return {"reason": "workspace_or_capacity_busy",
+                            "position": 1, "blocking_jobs": []}
+                def release(self, _job_id):
+                    pass
+            scheduler = Scheduler()
+            launched = []
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launched.append, scheduler=scheduler,
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "d" * 64,
+                }),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            projected.mkdir()
+            blocked = service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(blocked["queue_reason"], "workspace_or_capacity_busy")
+            self.assertEqual(jobs.get(accepted["job_id"])["queue_reason"],
+                             "sync_generation_pending")
+            service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(len(launched), 1)
+            jobs.close()
+
+    def test_synchronized_request_race_replays_original_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="generation",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            projected = Path(temp) / "generation"
+            projected.mkdir()
+            submission = JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), request_id="job-race",
+                sync_relationship_id="relationship",
+                sync_generation_id=generation.generation_id,
+            )
+            original_replay = jobs.replay
+            inserted = []
+            def racing_replay(value):
+                result = original_replay(value)
+                if not inserted and result is None:
+                    jobs.accept(submission)
+                    inserted.append(True)
+                return result
+            jobs.replay = racing_replay
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: self.fail("replay must not launch"),
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "a" * 64,
+                }),
+            )
+            replay = service.submit(submission)
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(len(jobs.list()), 1)
+            jobs.close()
+
+    def test_startup_reconciliation_releases_terminal_generation_pin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            generation, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="request",
+                request_digest="b" * 64, manifest_digest="a" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:00Z",
+            )
+            sync.claim_generation_transfer(generation.generation_id)
+            sync.transition_generation(
+                generation.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:01Z",
+            )
+            projected = Path(temp) / "generation"
+            projected.mkdir()
+            gateway = SyncJobGateway(sync, materialize=lambda *_args: {
+                "project_root": str(projected),
+                "source_identity": "sha256:" + "a" * 64,
+            })
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: None, sync_gateway=gateway,
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=generation.generation_id,
+            ))
+            jobs.transition(accepted["job_id"], "running")
+            jobs.transition(accepted["job_id"], "succeeded")
+            self.assertEqual(len(sync.active_pins("relationship")), 1)
+            service.reconcile_startup()
+            self.assertEqual(sync.active_pins("relationship"), ())
+            jobs.close()
+
+    def test_startup_gives_committed_launch_bounded_supervisor_handoff_grace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            submission = JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id="generation",
+            )
+            row, _ = jobs.accept(submission)
+            jobs.transition(
+                row["job_id"], "queued",
+                queue_reason="sync_generation_pending",
+            )
+            jobs.claim_pending_sync_launch(
+                row["job_id"], owner_boot_id="dead-boot",
+                owner_pid=99999999, owner_start_identity="dead-start",
+            )
+            jobs.commit_pending_sync_launch(
+                row["job_id"], owner_boot_id="dead-boot",
+                owner_pid=99999999, owner_start_identity="dead-start",
+            )
+            gateway = MagicMock()
+            gateway.release_terminal_jobs.return_value = ()
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: None, sync_gateway=gateway,
+            )
+            fresh = service.reconcile_startup()
+            self.assertEqual(fresh["interrupted"], [])
+            self.assertEqual(jobs.get(row["job_id"])["lifecycle"], "queued")
+            future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+            jobs.connection.execute(
+                "UPDATE jobs SET updated_at=? WHERE job_id=?",
+                (future, row["job_id"]),
+            )
+            stale = service.reconcile_startup()
+            self.assertEqual(stale["interrupted"], [row["job_id"]])
+            self.assertEqual(jobs.get(row["job_id"])["lifecycle"], "interrupted")
+            jobs.close()
+
+    def test_delayed_real_supervisor_survives_dead_claimant_handoff_grace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            start_supervisor = threading.Event()
+            supervisor_results = []
+            supervisor_threads = []
+            def delayed_launcher(path):
+                def supervise():
+                    start_supervisor.wait(5)
+                    supervisor_results.append(run_descriptor(path))
+                thread = threading.Thread(target=supervise)
+                thread.start()
+                supervisor_threads.append(thread)
+            gateway = SyncJobGateway(sync, materialize=lambda *_args: {
+                "project_root": str(projected),
+                "source_identity": "sha256:" + "d" * 64,
+            })
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=delayed_launcher, sync_gateway=gateway,
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            sync.claim_generation_transfer(pending.generation_id)
+            sync.transition_generation(
+                pending.generation_id, "accepted",
+                accepted_at="2026-08-26T00:00:03Z",
+            )
+            projected.mkdir()
+            service.get(accepted["job_id"], reconcile=False)
+            jobs.connection.execute(
+                "UPDATE jobs SET launch_owner_boot_id='dead-boot', "
+                "launch_owner_pid=99999999, launch_owner_start_identity='dead-start' "
+                "WHERE job_id=?", (accepted["job_id"],),
+            )
+            observer_jobs = JobRepository(Path(temp) / "registry.sqlite")
+            observer = JobService(
+                observer_jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=lambda _path: self.fail("observer must not launch"),
+                sync_gateway=gateway,
+            )
+            recovery = observer.reconcile_startup()
+            self.assertEqual(recovery["interrupted"], [])
+            self.assertEqual(observer_jobs.get(accepted["job_id"])["queue_reason"],
+                             "sync_generation_launch_committed")
+            start_supervisor.set()
+            supervisor_threads[0].join(10)
+            self.assertEqual(supervisor_results, [0])
+            self.assertEqual(observer_jobs.get(accepted["job_id"])["lifecycle"],
+                             "succeeded")
+            observer_jobs.close()
+            jobs.close()
 
     def test_default_launcher_uses_package_root_when_cli_was_called_by_absolute_path(self):
         with tempfile.TemporaryDirectory() as temp, \

@@ -689,6 +689,29 @@ def _ensure_litespeed_htaccess(inst: str) -> None:
     info("litespeed: reloading OpenLiteSpeed to load the new .htaccess…")
     compose("exec", "-T", "wp", "/usr/local/lsws/bin/lswsctrl", "restart",
             instance=inst, check=False)
+    _ensure_litespeed_vhost_include(inst)
+
+
+def _ensure_litespeed_vhost_include(inst: str) -> None:
+    """Ensure the OpenLiteSpeed virtualhost template includes the server-config fragments directory.
+
+    Proven by T004: PlainConf natively supports include inside virtualhostconfig in
+    conf/templates/docker.conf. This does not touch plugin/WordPress .htaccess or
+    host-global configuration, and fails closed on drift.
+    """
+    try:
+        chk = compose("exec", "-T", "wp", "grep", "-q", "vhosts-include",
+                      "/usr/local/lsws/conf/templates/docker.conf",
+                      instance=inst, check=False, capture=True)
+        if getattr(chk, "returncode", 1) != 0:
+            compose("exec", "-T", "wp", "sh", "-c",
+                    'echo "  include /usr/local/lsws/conf/vhosts-include/*.conf" >> /usr/local/lsws/conf/templates/docker.conf',
+                    instance=inst, check=False)
+            compose("exec", "-T", "wp", "/usr/local/lsws/bin/lswsctrl", "restart",
+                    instance=inst, check=False)
+    except Exception:
+        pass
+
 
 
 def _pin_db_creds_in_config(inst: str) -> None:

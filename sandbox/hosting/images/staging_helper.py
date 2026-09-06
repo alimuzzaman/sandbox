@@ -18,6 +18,7 @@ import urllib.request
 
 FIXED_ENTRY = "sandbox-image-stage-helper-v1"
 FIXED_ENTRY_V2 = "sandbox-image-stage-helper-v2"
+FIXED_CHECK_ENTRY = "sandbox-image-stage-helper-check-v1"
 MAX_STAGE_FRAME_BYTES = 1024 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
 TOPOLOGY_LABEL = "org.sandbox.application-topology.v1"
@@ -28,6 +29,56 @@ _REPOSITORY = re.compile(
 _SERVICE = re.compile(r"[a-z0-9](?:[a-z0-9_.-]{0,62}[a-z0-9])?\Z")
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 V2_CAPABILITY_REVISION = "systemd-cgroup-v2-batch-stage-v2"
+_PULL_FAILURE_CLASSES = frozenset({
+    "denied", "not_found", "network", "timeout", "no_space", "daemon",
+})
+
+
+def _classify_pull_failure(stdout: object, stderr: object) -> str:
+    """Reduce Docker output to one closed class without retaining its contents."""
+    def bounded(value: object) -> bytes:
+        if type(value) is str:
+            return value.encode("utf-8", "ignore")[-16384:]
+        if type(value) is bytes:
+            return value[-16384:]
+        return b""
+    detail = (bounded(stderr) + b"\n" + bounded(stdout)).lower()
+    rules = (
+        ("no_space", (b"no space left on device",)),
+        ("timeout", (b"context deadline exceeded", b"i/o timeout", b"timed out",
+                     b"timeout awaiting response", b"client.timeout exceeded")),
+        ("denied", (b"unauthorized", b"authentication required", b"access denied",
+                    b"pull access denied", b"requested access to the resource is denied",
+                    b"denied:")),
+        ("not_found", (b"manifest unknown", b"manifest not found", b"name unknown",
+                       b"repository does not exist", b"not found")),
+        ("network", (b"network is unreachable", b"no such host", b"connection refused",
+                     b"connection reset", b"tls handshake timeout", b"temporary failure in name",
+                     b"unexpected eof")),
+    )
+    return next((kind for kind, markers in rules if any(item in detail for item in markers)),
+                "daemon")
+
+
+def _bootstrap_failure(phase: str, code: str) -> int:
+    allowed = {"plan": {"plan_invalid"}, "cgroup": {"cgroup_invalid"},
+               "workspace": {"workspace_invalid"}}
+    if phase not in allowed or code not in allowed[phase]:
+        phase, code = "plan", "plan_invalid"
+    frame = {"schema_version": 1, "ok": False, "phase": phase, "code": code}
+    output = b"BOOTSTRAP " + json.dumps(
+        frame, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    os.write(1, output)
+    return 0
+
+
+def _self_check_unit() -> str:
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    unified = next((line.split("::", 1)[1] for line in lines if line.startswith("0::")), "")
+    unit = unified.rsplit("/", 1)[-1]
+    if re.fullmatch(r"sandbox-image-stage-check-[0-9a-f]{32}\.service", unit) is None:
+        raise ValueError("process_unproven")
+    return unit
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -160,19 +211,25 @@ def _cgroup_identity(unit_name: str) -> str:
         raise ValueError("capability_mismatch")
     lines = Path("/proc/self/cgroup").read_text().splitlines()
     unified = next((line.split("::", 1)[1] for line in lines if line.startswith("0::")), None)
-    if not unified or unit_name not in unified or ".." in unified:
+    uid = os.geteuid()
+    expected = (f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/"
+                f"{unit_name}")
+    if unified != expected:
         raise ValueError("process_unproven")
     return unified
 
 
-def _verify_workspace_parent(run_root: Path = Path("/run/sandbox-image-stage"), *,
+def _verify_workspace_parent(run_root: Path | None = None, *,
                              mountinfo_text: str | None = None,
-                             required_uid: int = 0) -> Path:
+                             required_uid: int | None = None) -> Path:
     """Prove the credential workspace is volatile before asking for bytes."""
+    required_uid = os.geteuid() if required_uid is None else required_uid
+    if run_root is None:
+        run_root = Path("/run/user") / str(required_uid) / "sandbox-image-stage"
     try:
         parent = os.lstat(run_root.parent)
         if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) \
-                or parent.st_uid != required_uid:
+                or parent.st_uid != required_uid or stat.S_IMODE(parent.st_mode) != 0o700:
             raise ValueError("capability_mismatch")
         mount_lines = (mountinfo_text if mountinfo_text is not None
                        else Path("/proc/self/mountinfo").read_text()).splitlines()
@@ -188,17 +245,28 @@ def _verify_workspace_parent(run_root: Path = Path("/run/sandbox-image-stage"), 
                     candidates.append((len(mount_point), mount_point, after[0]))
         if not candidates or max(candidates)[2] != "tmpfs":
             raise ValueError("capability_mismatch")
+        parent_fd = os.open(run_root.parent,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
         try:
-            existing = os.lstat(run_root)
-        except FileNotFoundError:
-            os.mkdir(run_root, 0o700)
-            existing = os.lstat(run_root)
-            parent_fd = os.open(run_root.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try: os.fsync(parent_fd)
-            finally: os.close(parent_fd)
-        if not stat.S_ISDIR(existing.st_mode) or stat.S_ISLNK(existing.st_mode) \
-                or existing.st_uid != required_uid or stat.S_IMODE(existing.st_mode) != 0o700:
-            raise ValueError("capability_mismatch")
+            try:
+                child_fd = os.open(run_root.name,
+                                   os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                                   dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(run_root.name, 0o700, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+                child_fd = os.open(run_root.name,
+                                   os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                                   dir_fd=parent_fd)
+            try:
+                existing = os.fstat(child_fd)
+                if (not stat.S_ISDIR(existing.st_mode) or existing.st_uid != required_uid
+                        or stat.S_IMODE(existing.st_mode) != 0o700):
+                    raise ValueError("capability_mismatch")
+            finally:
+                os.close(child_fd)
+        finally:
+            os.close(parent_fd)
     except (OSError, UnicodeError):
         raise ValueError("capability_mismatch") from None
     return run_root
@@ -224,9 +292,23 @@ def _anonymous_denied(repository: str, manifest_digest: str) -> bool:
         raise ValueError("registry_observation_failed") from None
 
 
+def _projected_machine_identity() -> str:
+    """Match the authenticated server's machine-id projection, not its provider default."""
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip().lower()
+    except (OSError, UnicodeError):
+        raise ValueError("observation_invalid") from None
+    if re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ValueError("observation_invalid")
+    return hashlib.sha256(
+        b"sandbox-host-machine-id-v1\0" + machine_id.encode("ascii")
+    ).hexdigest()[:24]
+
+
 def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
             runner=_run, anonymous_probe=_anonymous_denied,
             cgroup_identity=_cgroup_identity, machine_epoch_reader=None,
+            projected_identity_reader=_projected_machine_identity,
             remover=shutil.rmtree) -> dict:
     plan = _closed_plan(plan)
     if type(credential) is not bytes or not credential or len(credential) > MAX_CREDENTIAL_BYTES:
@@ -234,7 +316,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
     cgroup = cgroup_identity(plan["unit_name"])
     run_root = _verify_workspace_parent() if run_root is None else run_root
     machine_epoch_reader = machine_epoch_reader or (
-        lambda: Path("/etc/machine-id").read_text().strip())
+        lambda: Path("/etc/machine-id").read_text())
     workspace = Path(tempfile.mkdtemp(prefix="operation-", dir=run_root))
     os.chmod(workspace, 0o700)
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
@@ -255,7 +337,8 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
         remover(workspace / "docker", ignore_errors=False)
         cleanup_complete = not (workspace / "docker").exists()
         if not cleanup_complete: raise ValueError("cleanup_unproven")
-        target_start = machine_epoch_reader()
+        machine_epoch_start = machine_epoch_reader()
+        projected_identity = projected_identity_reader()
         epoch_start = runner(("docker", "info", "--format", "{{.ID}}"), environment=environment,
                            timeout=15)
         inspect = runner(("docker", "image", "inspect", plan["repository_qualified_digest"],
@@ -264,22 +347,30 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
                          environment=environment, timeout=15)
         if any(item.returncode != 0 for item in (epoch_start, inspect, epoch_end)):
             raise ValueError("observation_invalid")
-        target_end = machine_epoch_reader()
+        machine_epoch_end = machine_epoch_reader()
+        projected_identity_end = projected_identity_reader()
         start = epoch_start.stdout.decode().strip(); end = epoch_end.stdout.decode().strip()
-        if not start or start != end or not target_start or target_start != target_end \
-                or target_start != plan["target"]["machine_identity"] \
+        if not start or start != end or not machine_epoch_start \
+                or machine_epoch_start != machine_epoch_end \
+                or projected_identity != projected_identity_end \
+                or projected_identity != plan["target"]["machine_identity"] \
                 or start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
         raw = json.loads(inspect.stdout)
         repo_digests = raw.get("RepoDigests")
         if type(repo_digests) is not list or repo_digests.count(plan["repository_qualified_digest"]) != 1:
             raise ValueError("observation_invalid")
-        # Docker's immutable image ID is the sha256 digest of the image config
-        # JSON. Bind it as the config digest while retaining a separate local
-        # image-ID field in the observation/proof contract.
-        config_digest = raw.get("Id")
-        if config_digest != plan["config_digest"]:
+        # Docker 29's containerd image store may expose the pulled manifest
+        # digest as ``Id`` instead of the config digest. The signed receipt
+        # still binds the config digest, while RepoDigests proves the exact
+        # pulled manifest; retain both identities instead of rejecting a
+        # valid pull solely on the engine's image-ID representation.
+        local_image_id = raw.get("Id")
+        if local_image_id not in {
+                plan["config_digest"], plan["manifest_digest"],
+                plan["repository_qualified_digest"]}:
             raise ValueError("observation_invalid")
+        config_digest = plan["config_digest"]
         platform = {"os": raw.get("Os"), "architecture": raw.get("Architecture")}
         if raw.get("Variant"): platform["variant"] = raw["Variant"]
         if platform != plan["platform"]: raise ValueError("observation_invalid")
@@ -298,10 +389,11 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
                     "authenticated_exact_manifest": "succeeded"}
         registry["observation_digest"] = staging_digest(
             "sandbox.hosting.images.registry-observation.v1", registry)
-        observation = {"target_epoch_start": target_start, "target_epoch_end": target_end,
+        observation = {"target_epoch_start": projected_identity,
+            "target_epoch_end": projected_identity_end,
             "daemon_epoch_start": start, "daemon_epoch_end": end, "target": plan["target"],
             "repository": plan["repository"], "repo_digest": plan["repository_qualified_digest"],
-            "config_digest": config_digest, "platform": platform, "local_image_id": raw.get("Id"),
+            "config_digest": config_digest, "platform": platform, "local_image_id": local_image_id,
             "topology_digest": topology_digest, "observed_topology": observed_topology, **registry}
         observation["observation_id"] = staging_digest(
             "sandbox.hosting.images.local-observation.v1", observation)
@@ -328,6 +420,7 @@ def execute(plan: dict, credential: bytes, *, run_root: Path | None = None,
 def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                runner=_run, anonymous_probe=_anonymous_denied,
                cgroup_identity=_cgroup_identity, machine_epoch_reader=None,
+               projected_identity_reader=_projected_machine_identity,
                remover=shutil.rmtree) -> dict:
     """Pull and observe the whole plan set in one measured process and lease."""
     plan = _closed_plan_v2(plan)
@@ -336,12 +429,12 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
     cgroup = cgroup_identity(plan["unit_name"])
     run_root = _verify_workspace_parent() if run_root is None else run_root
     machine_epoch_reader = machine_epoch_reader or (
-        lambda: Path("/etc/machine-id").read_text().strip())
+        lambda: Path("/etc/machine-id").read_text())
     workspace = Path(tempfile.mkdtemp(prefix="operation-", dir=run_root))
     os.chmod(workspace, 0o700)
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
                    "HOME": str(workspace), "DOCKER_CONFIG": str(workspace / "docker")}
-    code = "staged"; observation = None
+    code = "staged"; observation = None; pull_failure = None
     try:
         for image in plan["images"]:
             if not anonymous_probe(image["repository"], image["manifest_digest"]):
@@ -350,15 +443,25 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                         "--password-stdin"), environment=environment,
                        input_data=credential + b"\n", timeout=30)
         if login.returncode != 0: raise ValueError("broker_unavailable")
-        target_start = machine_epoch_reader()
+        machine_epoch_start = machine_epoch_reader()
+        projected_identity = projected_identity_reader()
         daemon_start_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                      environment=environment, timeout=15)
         if daemon_start_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_start = daemon_start_result.stdout.decode().strip()
         for image in plan["images"]:
-            pull = runner(("docker", "pull", image["repository_qualified_digest"]),
-                          environment=environment, timeout=600)
-            if pull.returncode != 0: raise ValueError("pull_failed")
+            try:
+                pull = runner(("docker", "pull", image["repository_qualified_digest"]),
+                              environment=environment, timeout=600)
+            except subprocess.TimeoutExpired:
+                pull_failure = {"image": image["name"], "class": "timeout"}
+                raise ValueError("pull_failed") from None
+            if pull.returncode != 0:
+                failure_class = _classify_pull_failure(pull.stdout, pull.stderr)
+                if failure_class not in _PULL_FAILURE_CLASSES:
+                    failure_class = "daemon"
+                pull_failure = {"image": image["name"], "class": failure_class}
+                raise ValueError("pull_failed")
         # Remove the one credential workspace before any image inspection/result.
         remover(workspace / "docker", ignore_errors=False)
         if (workspace / "docker").exists(): raise ValueError("cleanup_unproven")
@@ -369,29 +472,35 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                 environment=environment, timeout=30)
             if inspect.returncode != 0: raise ValueError("observation_invalid")
             raw = json.loads(inspect.stdout)
+            local_image_id = raw.get("Id")
             if type(raw.get("RepoDigests")) is not list \
                     or raw["RepoDigests"].count(image["repository_qualified_digest"]) != 1 \
-                    or raw.get("Id") != image["config_digest"]:
+                    or local_image_id not in {
+                        image["config_digest"], image["manifest_digest"],
+                        image["repository_qualified_digest"]}:
                 raise ValueError("observation_invalid")
             platform = f'{raw.get("Os")}/{raw.get("Architecture")}'
             if raw.get("Variant"): platform += f'/{raw["Variant"]}'
             if platform != image["platform"]: raise ValueError("observation_invalid")
             observations.append({"name": image["name"], "repository": image["repository"],
                 "repo_digest": image["repository_qualified_digest"],
-                "config_digest": raw["Id"], "platform": platform,
-                "local_image_id": raw["Id"], "anonymous_exact_manifest": "denied",
+                "config_digest": image["config_digest"], "platform": platform,
+                "local_image_id": local_image_id, "anonymous_exact_manifest": "denied",
                 "authenticated_exact_manifest": "succeeded"})
         daemon_end_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                    environment=environment, timeout=15)
-        target_end = machine_epoch_reader()
+        machine_epoch_end = machine_epoch_reader()
+        projected_identity_end = projected_identity_reader()
         if daemon_end_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_end = daemon_end_result.stdout.decode().strip()
-        if not target_start or target_start != target_end \
-                or target_start != plan["target"]["machine_identity"] \
+        if not machine_epoch_start or machine_epoch_start != machine_epoch_end \
+                or projected_identity != projected_identity_end \
+                or projected_identity != plan["target"]["machine_identity"] \
                 or not daemon_start or daemon_start != daemon_end \
                 or daemon_start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
-        body = {"target_epoch_start": target_start, "target_epoch_end": target_end,
+        body = {"target_epoch_start": projected_identity,
+                "target_epoch_end": projected_identity_end,
                 "daemon_epoch_start": daemon_start, "daemon_epoch_end": daemon_end,
                 "target": plan["target"], "images": observations}
         observation = {**body, "observation_digest": staging_digest(
@@ -413,6 +522,8 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
         payload["observation"] = observation
         return {"schema_version": 2, "ok": True, "code": "staged", "payload": payload}
     if not cleanup_complete: code = "cleanup_unproven"
+    if code == "pull_failed" and pull_failure is not None:
+        payload["pull_failure"] = pull_failure
     return {"schema_version": 2, "ok": False, "code": code, "payload": payload}
 
 
@@ -420,16 +531,47 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     response = None
     response_version = 2 if argv == [FIXED_ENTRY_V2] else 1
+    if argv == [FIXED_CHECK_ENTRY]:
+        try:
+            unit = _self_check_unit()
+            _cgroup_identity(unit)
+        except Exception:
+            return _bootstrap_failure("cgroup", "cgroup_invalid")
+        try:
+            _verify_workspace_parent()
+        except Exception:
+            return _bootstrap_failure("workspace", "workspace_invalid")
+        os.write(1, b"READY\n")
+        try:
+            if sys.stdin.buffer.read(6) != b"CHECK\n" or sys.stdin.buffer.read(1):
+                return 74
+        except Exception:
+            return 74
+        os.write(1, b"CHECKED\n")
+        # A fixed retained failed state lets the controller prove the exact
+        # terminal unit before reset-failed; success/inactive user units may
+        # be collected before that observation can be made.
+        return 74
     try:
-        if argv not in ([FIXED_ENTRY], [FIXED_ENTRY_V2]): raise ValueError("protocol_invalid")
+        if argv not in ([FIXED_ENTRY], [FIXED_ENTRY_V2]):
+            return _bootstrap_failure("plan", "plan_invalid")
         plan = json.loads(_read_frame(sys.stdin.buffer, MAX_STAGE_FRAME_BYTES))
         # This handshake proves the measured helper is already inside its
         # transient cgroup before the broker resolves credential bytes.
         if plan.get("schema_version") == 1 and argv == [FIXED_ENTRY]: _closed_plan(plan)
         elif plan.get("schema_version") == 2 and argv == [FIXED_ENTRY_V2]: _closed_plan_v2(plan)
         else: raise ValueError("protocol_invalid")
+    except Exception:
+        return _bootstrap_failure("plan", "plan_invalid")
+    try:
         _cgroup_identity(plan["unit_name"])
+    except Exception:
+        return _bootstrap_failure("cgroup", "cgroup_invalid")
+    try:
         _verify_workspace_parent()
+    except Exception:
+        return _bootstrap_failure("workspace", "workspace_invalid")
+    try:
         sys.stdout.buffer.write(b"READY\n"); sys.stdout.buffer.flush()
         credential = _read_frame(sys.stdin.buffer, MAX_CREDENTIAL_BYTES)
         if sys.stdin.buffer.read(1): raise ValueError("protocol_invalid")

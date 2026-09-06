@@ -13,7 +13,7 @@ from .models import (
 )
 from .v2_models import (
     ActivationRequestV2, GenerationBoundEdgeReceiptV2,
-    ReplacementIntentV2, VerifiedActivationGenerationV2,
+    ReplacementIntentV2, VerifiedActivationGenerationV2, _local_image_id,
 )
 
 
@@ -48,12 +48,15 @@ def _validate_service_projection(value: object, *, services: list[str],
                     "repository_digest"):
             _text(row[key], identity=(key in {
                 "service", "runtime_identity", "compose_project"}))
-        for key in ("local_image_id", "config_digest", "topology_identity",
-                    "compose_config_hash"):
+        for key in ("config_digest", "topology_identity", "compose_config_hash"):
             _digest(row[key])
+        _local_image_id(row["local_image_id"], row["repository_digest"])
         if (row["platform"] != _PLATFORM or row["healthy"] is not True
                 or row["compose_project"] != compose_project
-                or row["topology_identity"] != topology_digest):
+                or row["topology_identity"] != topology_digest
+                or row["local_image_id"] not in {
+                    row["config_digest"], row["repository_digest"],
+                    row["repository_digest"].rsplit("@", 1)[-1]}):
             raise ActivationContractError()
         rows.append(row)
     if [row["service"] for row in rows] != services:
@@ -93,8 +96,11 @@ def _validate_subject_v2(value: object, *, request_digest: str, target: dict,
     for item in images_value:
         row = _closed(item, _IMAGE_FIELDS)
         _text(row["name"], identity=True); _text(row["image_ref"])
-        _digest(row["config_digest"]); _digest(row["local_image_id"])
-        if row["platform"] != _PLATFORM or row["local_image_id"] != row["config_digest"]:
+        _digest(row["config_digest"])
+        _local_image_id(row["local_image_id"], row["image_ref"])
+        if row["platform"] != _PLATFORM or row["local_image_id"] not in {
+                row["config_digest"], row["image_ref"],
+                row["image_ref"].rsplit("@", 1)[-1]}:
             raise ActivationContractError()
         images[row["name"]] = row
     if len(images) != len(images_value):
@@ -273,14 +279,28 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
             prepared_fields = {"schema_version", "phase", "request_digest", "generation",
                 "generation_subject_digest", "route_digest", "observation_digest",
                 "terminal", "receipt_digest"}
-            if set(edge) != prepared_fields or edge.get("schema_version") != 2 \
+            if (set(edge) not in (prepared_fields, prepared_fields | {"zones"})
+                    or edge.get("schema_version") != 2 \
                     or edge.get("phase") != "prepared" or edge.get("terminal") is not False \
-                    or edge.get("receipt_digest") is not None:
+                    or edge.get("receipt_digest") is not None):
                 raise ActivationContractError()
             for key in ("request_digest", "generation_subject_digest", "route_digest",
                         "observation_digest"):
                 _digest(edge[key])
             _integer(edge["generation"], minimum=1)
+            if "zones" in edge:
+                zones = edge["zones"]
+                if type(zones) is not list or len(zones) > 32:
+                    raise ActivationContractError()
+                for zone in zones:
+                    if (type(zone) is not dict
+                            or set(zone) != {"zone", "zone_id", "state"}
+                            or type(zone["zone"]) is not str
+                            or type(zone["zone_id"]) is not str
+                            or zone["state"] not in {
+                                "prepared", "effect_entered", "acknowledged",
+                                "acceptance_unknown", "refused"}):
+                        raise ActivationContractError()
     if raw["candidate_generation"] is not None:
         candidate = VerifiedActivationGenerationV2.from_mapping(candidate)
     if raw["phase"] == "accepted" and (replacement is not None or raw["effect_entered"]
@@ -469,7 +489,9 @@ def _intent_projection_services(intent: ReplacementIntentV2,
     compose = {row["service"]: row for row in intent.compose_projection}
     expected_names = list(bindings)
     exact = None
-    if observed_services is not None:
+    # An observed empty runtime has no candidate container identities. Use the
+    # sentinel directly; genesis eligibility belongs to recovery classification.
+    if observed_services is not None and observed_services != []:
         try:
             exact = _validate_service_projection(
                 observed_services, services=expected_names,

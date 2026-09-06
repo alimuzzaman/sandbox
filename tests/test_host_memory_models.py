@@ -104,3 +104,28 @@ class HostMemoryModelsTest(unittest.TestCase):
         bad = sample(); bad["source_path"] = "/proc/meminfo"
         with self.assertRaises((TypeError, ValueError)):
             AggregateMemorySample.from_dict(bad)
+
+    def test_history_window_enforces_ordering_and_bounds(self):
+        s1 = sample("2026-08-30T11:55:00Z")
+        s2 = sample("2026-08-30T12:00:00Z")
+        # Unordered samples (older first when latest-first is expected)
+        unordered = (s1, s2)
+        with self.assertRaises(ValueError):
+            HistoryWindow(
+                requested_range={"since": None, "until": None},
+                observed_range={"since": "2026-08-30T11:55:00Z", "until": "2026-08-30T12:00:00Z"},
+                samples=unordered,
+                counts={"returned": 2, "valid": 2, "partial": 0, "failed": 0, "malformed": 0, "missing": 0},
+                freshness="fresh", complete=True, truncated=False,
+            )
+
+        # Exceeds maximum 1000 samples
+        large_samples = tuple(sample(f"2026-08-30T12:00:{i%60:02d}Z") for i in range(1001))
+        with self.assertRaises(ValueError):
+            HistoryWindow(
+                requested_range={"since": None, "until": None},
+                observed_range=None,
+                samples=large_samples,
+                counts={"returned": 1001, "valid": 1001, "partial": 0, "failed": 0, "malformed": 0, "missing": 0},
+                freshness="fresh", complete=True, truncated=False,
+            )

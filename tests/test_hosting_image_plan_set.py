@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 from sandbox.hosting.images.models import canonical_digest
 from sandbox.hosting.images.plan_set import (
-    IMAGE_NAMES, PlanSetContractError, SIGNATURE_MODE, _load_json_bytes,
+    IMAGE_NAMES, MAX_SIGSTORE_BUNDLE_DEPTH, MAX_SIGSTORE_BUNDLE_NODES,
+    PlanSetContractError, SIGNATURE_MODE, _load_json_bytes,
+    _load_sigstore_bundle_json,
     validate_verified_image_plan_set, verify_release_bundle,
 )
 
@@ -55,6 +57,24 @@ def bundle_bytes():
         "verificationMaterial": {"certificate": "synthetic"},
         "messageSignature": {"messageDigest": "synthetic"}},
         sort_keys=True, separators=(",", ":")).encode()
+
+
+def realistic_bundle_bytes():
+    return json.dumps({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "verificationMaterial": {
+            "certificate": {"rawBytes": "c" * 5400},
+            "tlogEntries": [{"inclusionProof": {
+                "checkpoint": {"envelope": "e" * 2700},
+                "hashes": ["h" * 96 for _ in range(17)],
+                "logIndex": "1", "rootHash": "r" * 44,
+            }}],
+        },
+        "messageSignature": {
+            "messageDigest": {"algorithm": "SHA2_256", "digest": "d" * 44},
+            "signature": "s" * 956,
+        },
+    }, sort_keys=True, separators=(",", ":")).encode()
 
 
 def payload_bytes(repository, manifest):
@@ -217,6 +237,49 @@ class TestVerifiedImagePlanSet(unittest.TestCase):
                 {key: value for key, value in policy.items() if key != "policy_digest"})
             with self.assertRaises(PlanSetContractError):
                 verify_release_bundle(policy, root, FakeVerifier())
+
+    def test_sigstore_parser_accepts_realistic_certificate_and_proof_shape(self):
+        bundle = _load_sigstore_bundle_json(realistic_bundle_bytes())
+
+        self.assertEqual(
+            bundle["mediaType"],
+            "application/vnd.dev.sigstore.bundle.v0.3+json",
+        )
+        self.assertGreater(
+            len(bundle["verificationMaterial"]["certificate"]["rawBytes"]),
+            512,
+        )
+
+    def test_sigstore_parser_refuses_duplicate_deep_and_excessive_shapes(self):
+        with self.assertRaises(PlanSetContractError) as duplicate:
+            _load_sigstore_bundle_json(b'{"mediaType":"a","mediaType":"b"}')
+        self.assertEqual(duplicate.exception.code, "input_invalid")
+
+        deep: object = "leaf"
+        for _ in range(MAX_SIGSTORE_BUNDLE_DEPTH + 1):
+            deep = {"nested": deep}
+        with self.assertRaises(PlanSetContractError) as too_deep:
+            _load_sigstore_bundle_json(json.dumps(deep).encode())
+        self.assertEqual(too_deep.exception.code, "input_too_large")
+
+        with self.assertRaises(PlanSetContractError) as too_many:
+            _load_sigstore_bundle_json(json.dumps(
+                {"items": [None] * MAX_SIGSTORE_BUNDLE_NODES},
+            ).encode())
+        self.assertEqual(too_many.exception.code, "input_too_large")
+
+    def test_sigstore_parser_refuses_oversized_value_before_verification(self):
+        with self.assertRaises(PlanSetContractError) as raised:
+            _load_sigstore_bundle_json(json.dumps({
+                "value": "x" * (256 * 1024 + 1),
+            }).encode())
+        self.assertEqual(raised.exception.code, "input_too_large")
+
+    def test_sigstore_parser_maps_lone_surrogates_to_stable_refusal(self):
+        for data in (b'{"value":"\\ud800"}', b'{"\\ud800":"value"}'):
+            with self.subTest(data=data), self.assertRaises(PlanSetContractError) as raised:
+                _load_sigstore_bundle_json(data)
+            self.assertEqual(raised.exception.code, "input_invalid")
 
     def test_boolean_receipt_version_refuses(self):
         with tempfile.TemporaryDirectory() as temp:

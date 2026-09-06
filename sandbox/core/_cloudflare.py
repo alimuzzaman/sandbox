@@ -17,7 +17,9 @@ API_BASE = "https://api.cloudflare.com/client/v4"
 
 
 class CloudflareError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str = "provider_failed"):
+        self.code = code
+        super().__init__(message)
 
 
 def cloudflare_token() -> str:
@@ -72,19 +74,37 @@ class Client:
                 detail = "; ".join(str(item.get("message", item)) for item in payload.get("errors", []))
             except (ValueError, OSError):
                 pass
-            raise CloudflareError(f"Cloudflare request failed: HTTP {exc.code}{': ' + detail if detail else ''}") from exc
+            code = ("provider_auth" if exc.code in {401, 403} else
+                    "provider_rate_limited" if exc.code == 429 else
+                    "provider_failed")
+            raise CloudflareError(
+                f"Cloudflare request failed: HTTP {exc.code}{': ' + detail if detail else ''}",
+                code,
+            ) from exc
         except (urllib.error.URLError, ValueError) as exc:
-            raise CloudflareError(f"Cloudflare request failed: {exc}") from exc
+            code = "provider_timeout" if isinstance(exc, urllib.error.URLError) and \
+                isinstance(getattr(exc, "reason", None), TimeoutError) else "provider_failed"
+            raise CloudflareError(f"Cloudflare request failed: {code}", code) from exc
         if not data.get("success"):
             messages = "; ".join(str(e.get("message", e)) for e in data.get("errors", []))
             raise CloudflareError(f"Cloudflare rejected the request: {messages or 'unknown error'}")
         return data
 
+    def purge_cache(self, zone_id: str) -> dict:
+        """Request a zone-wide purge for one already validated zone."""
+        result = self._request(
+            "POST", f"/zones/{zone_id}/purge_cache",
+            {"purge_everything": True},
+        ).get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise CloudflareError("Cloudflare purge response is invalid", "provider_response_invalid")
+        return {"id": result["id"]}
+
     def zone(self, hostname: str) -> dict:
         data = self._request("GET", "/zones?name=" + urllib.parse.quote(hostname))
         rows = data.get("result") or []
         if not rows:
-            raise CloudflareError(f"no Cloudflare zone found for {hostname}")
+            raise CloudflareError(f"no Cloudflare zone found for {hostname}", "zone_not_found")
         return rows[0]
 
     def records(self, zone_id: str, hostname: str) -> list[dict]:

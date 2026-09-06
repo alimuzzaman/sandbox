@@ -337,6 +337,20 @@ class TestValidation(unittest.TestCase):
         self.assertIn('root / "cron_scripts" / script', script)
         self.assertNotIn("todo_md_monitor.py", script)
 
+    def test_remote_install_staging_helper_uses_provisioning_owner(self):
+        installer = (ROOT / "scripts/install-remote.sh").read_text()
+        provisioner = (ROOT / "scripts/provision_image_stage_helper.py").read_text()
+        # The owner-scoped provisioning logic moved out of the generated
+        # bootstrap shell into the checked-in Python provisioner.  Keep this
+        # assertion on the authority that actually creates and verifies the
+        # helper, while retaining the installer handoff check.
+        self.assertIn("provision_image_stage_helper.py", installer)
+        self.assertIn("owner_uid = os.geteuid()", provisioner)
+        self.assertIn("protected_index = len(home_parts) + 1", provisioner)
+        self.assertIn("info.st_uid != owner_uid", provisioner)
+        self.assertNotIn("info.st_uid != 0", provisioner)
+        self.assertIn('STAGING_RUNTIME_REVISION="${SANDBOX_RUNTIME_REVISION:-}"', installer)
+
     def test_remote_install_upgrades_cloudflared_for_token_file_connectors(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()
         self.assertIn('cloudflared tunnel run --help 2>&1 | grep -q -- "--token-file"', script)

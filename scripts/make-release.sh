@@ -69,6 +69,23 @@ if [ ! -f "$STAGE/sandbox/config/sandbox-web.js" ]; then
   exit 1
 fi
 
+# Sanity: owned storage authority runtime assets MUST be present
+if [ ! -d "$STAGE/sandbox/sandbox/owned_storage" ] || \
+   [ ! -d "$STAGE/sandbox/sandbox/owned_storage_lifecycle" ] || \
+   [ ! -f "$STAGE/sandbox/tools/owned-storage-service.py" ] || \
+   [ ! -f "$STAGE/sandbox/tools/owned-storage-controller.py" ] || \
+   [ ! -f "$STAGE/sandbox/tools/owned-storage-mount-controller.py" ] || \
+   [ ! -f "$STAGE/sandbox/config/systemd/sandbox-owned-storage.service" ]; then
+  echo "✗ owned storage authority runtime assets missing from the archive" >&2
+  exit 1
+fi
+
+# Sanity: specs and .specify MUST remain pruned
+if [ -d "$STAGE/sandbox/specs" ] || [ -d "$STAGE/sandbox/.specify" ]; then
+  echo "✗ specs or .specify leaked into the release archive" >&2
+  exit 1
+fi
+
 # COPYFILE_DISABLE stops macOS bsdtar from writing ._* / xattr headers that
 # GNU tar on Linux warns about ("Ignoring unknown extended header keyword").
 COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGE" sandbox

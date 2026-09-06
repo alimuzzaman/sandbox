@@ -190,7 +190,7 @@ class TestImageStagingSecrets(unittest.TestCase):
         plan["helper"]["artifact_digest"] = "sha256:" + hashlib.sha256(
             helper_path.read_bytes()).hexdigest()
 
-        branches = ("success", "login_failure", "pull_failure", "signal",
+        branches = ("success", "projection_drift", "login_failure", "pull_failure", "signal",
                     "timeout", "crash", "credential_cleanup_failure", "final_cleanup_failure")
         for branch in branches:
             with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
@@ -220,7 +220,9 @@ class TestImageStagingSecrets(unittest.TestCase):
                     if command[:2] == ("docker", "info"):
                         return subprocess.CompletedProcess(command, 0, stdout=b"daemon-a\n", stderr=b"")
                     topology = plan["topology"]
-                    inspect = {"Id": plan["config_digest"],
+                    # Docker 29 may expose the exact pulled manifest as the
+                    # local image ID; config_digest remains receipt-bound.
+                    inspect = {"Id": plan["repository_qualified_digest"],
                         "RepoDigests": [plan["repository_qualified_digest"]],
                         "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
                             staging_helper.TOPOLOGY_LABEL: json.dumps(topology,
@@ -242,16 +244,31 @@ class TestImageStagingSecrets(unittest.TestCase):
                     binding_id="helper-lifecycle", binding_version=1,
                     deadline=datetime.now(timezone.utc) + timedelta(minutes=1),
                     lease_id="helper-lifecycle", material=canary, snapshot_bound=True)
+                projection_epochs = iter(("machine-a", "machine-b"))
                 response = lease.consume(lambda credential: staging_helper.execute(
                     plan, credential, run_root=verified, runner=runner,
                     anonymous_probe=lambda *_args: True,
-                    cgroup_identity=lambda _unit: "/system.slice/" + plan["unit_name"],
-                    machine_epoch_reader=lambda: "machine-a", remover=remover))
+                    cgroup_identity=lambda _unit: (
+                        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                        + plan["unit_name"]),
+                    machine_epoch_reader=lambda: "raw-machine-a",
+                    projected_identity_reader=lambda: (next(projection_epochs)
+                        if branch == "projection_drift" else "machine-a"), remover=remover))
                 self.assertIsNone(lease._material)
                 captured_bytes = repr({"argv": captured["argv"],
                     "environment": captured["environment"], "logs": captured["logs"],
                     "frame": plan, "result": response}).encode()
                 self.assertNotIn(canary, captured_bytes)
+                self.assertNotIn(b"raw-machine-a", captured_bytes)
+                if branch == "success":
+                    self.assertTrue(response["ok"])
+                    observation = response["payload"]["observation"]
+                    self.assertEqual(observation["target_epoch_start"], "machine-a")
+                    self.assertEqual(observation["target_epoch_end"], "machine-a")
+                if branch == "projection_drift":
+                    self.assertFalse(response["ok"])
+                    self.assertEqual(response["code"], "observation_invalid")
+                    self.assertNotIn("observation", response["payload"])
                 leftovers = tuple(verified.glob("operation-*"))
                 if branch == "final_cleanup_failure":
                     self.assertEqual(response["code"], "cleanup_unproven")

@@ -76,6 +76,15 @@ class StagingCaptureCoordinator:
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
     def _stage(self) -> Path:
+        if self.staging_root is not None:
+            if self.staging_root.is_symlink():
+                raise RecoveryError("recovery staging root is invalid", "invalid_staging_root")
+            self.staging_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            metadata = self.staging_root.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise RecoveryError("recovery staging root is not owner-controlled", "invalid_staging_root")
+            if stat.S_IMODE(metadata.st_mode) & 0o077:
+                os.chmod(self.staging_root, 0o700)
         directory = Path(tempfile.mkdtemp(prefix="set-", dir=self.staging_root))
         os.chmod(directory, 0o700)
         return directory

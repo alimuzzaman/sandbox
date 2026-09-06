@@ -994,6 +994,38 @@ class TestHostMemoryRemoteTransport(unittest.TestCase):
                 _remote.remote_host_memory_request({}, {"action":"host_memory_status","remote_name":"fixture","path":"/tmp/x"})
         request.assert_not_called()
 
+    def test_transport_rejects_non_canonical_apply_before_control(self):
+        from sandbox.core import _remote
+        plan = {"plan_id":"a"*64, "operation":"enable", "target_identity":"host",
+                "service_ownership_marker":"a"*24, "runtime_revision":"b"*24,
+                "expires_at":"2026-08-30T12:15:00Z", "observation_digest":"b"*64,
+                "effective_policy":{"size_gib":99}, "intended_artifact_digests":[],
+                "rollback_scope":[]}
+        payloads = [
+            {"action":"host_memory_apply","remote_name":"fixture","operation_id":"c"*64,
+             "plan":plan,"confirmed":True,"budget_seconds":15},
+            {"action":"host_memory_apply","remote_name":"fixture","operation_id":"c"*64,
+             "plan":{k: v for k, v in plan.items() if k != "rollback_scope"},
+             "confirmed":True,"budget_seconds":15},
+            {"action":"host_memory_apply","remote_name":"fixture","operation_id":"c"*64,
+             "plan":{**plan,"effective_policy":{"size_gib":4}},"confirmed":True,
+             "budget_seconds":15,"size_gib":8},
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with mock.patch.object(_remote,"_remote_control_request") as request:
+                    with self.assertRaises(Exception):
+                        _remote.remote_host_memory_request({}, payload)
+                request.assert_not_called()
+
+
+    def test_transport_rejects_arbitrary_actions_and_unknown_fields(self):
+        from sandbox.core import _remote
+        with mock.patch.object(_remote, "_remote_control_request") as request:
+            for bad_action in ["host_memory_destroy", "host_memory_exec", "rm_rf"]:
+                with self.assertRaises(Exception):
+                    _remote.remote_host_memory_request({}, {"action": bad_action, "remote_name": "fixture", "budget_seconds": 15})
+        request.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

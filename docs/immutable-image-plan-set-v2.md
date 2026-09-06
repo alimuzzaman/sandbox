@@ -44,6 +44,11 @@ cosign sign-blob --yes --bundle worker.bundle worker.payload.json
 
 Each output bundle must be the Sigstore protobuf JSON media type
 `application/vnd.dev.sigstore.bundle.v0.3+json` with a `messageSignature`.
+Sandbox parses these bundles with dedicated byte, nesting, node, key, and value
+limits sized for Sigstore certificate and transparency-proof material. The
+smaller canonical policy-document limits do not apply to bundle internals.
+Passing structural validation does not establish trust: the offline Cosign
+signature and exact workflow certificate checks remain authoritative.
 Record the SHA-256 digest of each exact payload and bundle in the corresponding
 receipt image row. After the receipt is complete, sign its exact bytes the same
 way and produce the exact checksum file:
@@ -69,6 +74,12 @@ The machine policy is a closed schema-version 2 object. It pins:
 - exact sorted `activation_environment_bindings` rows shaped as
   `{image,environment_variable}`; and
 - `signature_mode: cosign_keyless_offline_bundle_v1`.
+
+Each receipt-bound machine policy is stored under an immutable,
+content-addressed path. A later release installs a new policy without replacing
+or conflicting with the prior release policy; replaying the same receipt is
+inert. The target's rollback-signing authority remains a separate stable file
+and must match exactly across release rotation.
 
 For the current Lenzora overlay the machine-owned activation bindings are
 `queue -> LENZORA_PRODUCTION_QUEUE_IMAGE`,
@@ -109,7 +120,32 @@ outer fields remain `policy`, `binding`, and `secret_sources`; a v2 plan require
 a `StagingPolicySet` with capability
 `systemd-cgroup-v2-batch-stage-v2` and helper entry
 `sandbox-image-stage-helper-v2`. The installer retains v1 `manifest.json` and
-adds `manifest-v2.json` in the same content-addressed helper directory.
+adds `manifest-v2.json` in the same immutable digest-and-runtime-revision helper
+directory. Confirmed remote-service migration refreshes this authority before
+restarting the user service; it never rewrites an active revision's directory.
+
+Provisioning the same plan again may return `replayed` only while the retained
+owner-only bundle is structurally exact, its binding remains ready and unexpired,
+the credential-source opaque revision is unchanged, the target and measured helper
+still match, and the stage ledger has no active or uncertain owner. The replay
+returns the retained policy digest and the current idle stage generation; it does
+not mint replacement authority. Expired ready evidence is rotated in place only
+after the same exact plan, owner-only file, and binding state are rechecked;
+malformed, mismatched, revoked, active, or uncertain evidence still refuses
+without overwriting the retained file or opening a staging effect.
+
+The helper runs as an exact transient `systemd --user` unit. Its executable and
+manifests are owned by that authenticated Sandbox service user with directory,
+helper, and manifest modes `0700`, `0500`, and `0600`. Credential scratch space
+is derived internally as `/run/user/<effective-uid>/sandbox-image-stage`, proved
+owner-only on tmpfs before READY, and is never caller- or environment-selected.
+Before credential delivery, Sandbox proves the exact launch Description,
+effective-user cgroup path, `KillMode=control-group`, `Delegate=no`, and enabled
+`NoNewPrivileges`, `RestrictSUIDSGID`, and `ProtectControlGroups`. Normal completion
+accepts the exact loaded inactive attempt or systemd's exact not-found/inactive
+unloaded state, then checks the helper-reported launch cgroup is empty or removed.
+Cleanup of a running attempt first re-proves its launch Description. A colliding
+deterministic unit name with another launch Description is never killed or stopped.
 
 One credential lease and one measured helper stage all three exact images. The
 result proves stable machine and Docker-daemon epochs plus each RepoDigest,
@@ -134,6 +170,14 @@ Atomic activation
   --json
 ```
 
+Activation provisioning can renew a retained v2 bundle only after both its
+snapshot and signed rollback grant expire. The target and signing authority
+must match, and generation authority cannot move backwards. Under the target
+mutation lock, provisioning retains an owner-only `.expired-<digest>` evidence
+copy and atomically installs the fresh bundle, returning `installed`. Live,
+malformed, unsigned, or conflicting authority is refused; exact replay remains
+`replayed`.
+
 The owner-only activation bundle is selected from the registered target and has
 exactly these fields: `schema_version`, `compose_snapshot`, `rollback_grant`,
 `rollback_grant_public_key`, and `stage_ledger`. There is no public
@@ -145,6 +189,36 @@ is `sandbox.hosting.images.private-compose-input-snapshot.v2`. Exact private
 renders are represented outside the host by target-scoped HMAC identities under
 `sandbox-hosting-private-compose-render.v2`; raw environment values, raw config
 hashes, paths, and credentials never cross that boundary or enter durable state.
+
+Before the first runtime effect, edge reachability may be deferred at generation
+zero with no current, previous, active, tombstone, or recovery state. Retained
+terminal refusals at generation zero permit this same bootstrap path; uncertain
+or successful history does not. Post-effect edge verification remains required.
+
+The public Compose projection treats absent/null `depends_on` as an empty
+dependency map. Explicit malformed non-map values retain an invalid marker.
+Recovery profile discovery admits the manifest's persistent and initializer
+services while retaining only the selected persistent service projection.
+For an entered first activation at generation zero with no current or previous
+generation, recovery may observe an empty runtime as the exact prior state.
+The observation must succeed with stable target/daemon identities; partial
+service sets and malformed observations remain refused. This closes recovery
+without promoting a generation or retrying a runtime effect.
+Retained v2 replacement intents use their observation-bound projection directly;
+they do not require a candidate generation merely to enter recovery.
+Empty observations use the retained intent sentinel without attempting candidate
+service validation; generation and epoch checks still decide prior-state eligibility.
+Recovery target identities accept the activation contract's bounded slash-separated
+registered target names. Machine and daemon epoch identity rules remain unchanged.
+Runtime observation accepts a local image ID equal to the verified config
+digest, full repository digest reference, or that reference's manifest digest.
+Unrelated or malformed local IDs remain refused before the remote observation.
+The private observation runner enforces the same verified identity alternatives.
+Observation also reuses the retained public image/profile environment bindings
+so the private Compose render resolves the same immutable service images.
+If that observation render differs, bounded profile discovery must find exactly
+one profile with the retained render digest and all requested services. Missing
+or ambiguous matches refuse observation; profile selection performs no effects.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

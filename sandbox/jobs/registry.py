@@ -16,7 +16,7 @@ from sandbox.services.redaction import require_safe_argv
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MAX_SUBMISSION_SNAPSHOT_BYTES = 65_536
 MAX_SUBMISSION_ITEMS = 256
 MAX_SUBMISSION_TEXT = 4_096
@@ -258,6 +258,9 @@ class JobRepository:
             failure_policy TEXT NOT NULL DEFAULT 'fail-fast',
             queue_reason TEXT,
             queue_position INTEGER,
+            launch_owner_boot_id TEXT,
+            launch_owner_pid INTEGER,
+            launch_owner_start_identity TEXT,
             command_json TEXT NOT NULL,
             cwd_relative TEXT NOT NULL,
             environment_keys_json TEXT NOT NULL,
@@ -422,6 +425,9 @@ class JobRepository:
                 ("parallel_safe", "INTEGER NOT NULL DEFAULT 0"),
                 ("workspace_id", "TEXT"),
                 ("workspace_authority_digest", "TEXT"),
+                ("launch_owner_boot_id", "TEXT"),
+                ("launch_owner_pid", "INTEGER"),
+                ("launch_owner_start_identity", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -483,6 +489,7 @@ class JobRepository:
     def accept(self, submission: JobSubmission, *,
                workspace_id: str | None = None,
                workspace_authority_digest: str | None = None,
+               request_digest: str | None = None,
                ) -> tuple[dict[str, Any], bool]:
         # Persisted argv is later executed verbatim. Refuse credential-bearing
         # forms instead of redacting them into a different command.
@@ -495,7 +502,9 @@ class JobRepository:
                 (not isinstance(workspace_authority_digest, str) or
                  not re.fullmatch(r"sha256:[0-9a-f]{64}", workspace_authority_digest))):
             raise ValueError("workspace authority digest is invalid")
-        digest = submission.canonical_digest()
+        digest = request_digest or submission.canonical_digest()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("request digest is invalid")
         now = _now()
         with self.transaction(immediate=True) as connection:
             if submission.request_id is not None:
@@ -566,6 +575,135 @@ class JobRepository:
         if row is None:
             raise JobNotFound(f"job {job_id!r} was not found")
         return dict(row)
+
+    def bind_sync_projection(self, job_id: str, submission: JobSubmission, *,
+                             workspace_id: str | None = None,
+                             workspace_authority_digest: str | None = None) -> dict[str, Any]:
+        """Bind a queued synchronized job to its now-accepted source projection."""
+        validate_job_id(job_id)
+        if submission.sync_relationship_id is None:
+            raise JobRepositoryError("synchronized projection identity is missing")
+        snapshot = _canonical_submission_snapshot(submission)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFound(f"job {job_id!r} was not found")
+            if row["lifecycle"] != Lifecycle.QUEUED.value:
+                raise JobRepositoryError("only a queued job can bind a synchronization projection")
+            if (
+                row["sync_relationship_id"] != submission.sync_relationship_id
+                or row["sync_generation_id"] != submission.sync_generation_id
+                or row["project_identity"] != submission.project_identity
+            ):
+                raise JobRepositoryError("synchronization projection identity changed")
+            connection.execute(
+                "UPDATE jobs SET project_root=?, workspace_mode=?, source_identity=?, "
+                "source_commit=?, source_dirty_digest=?, workspace_id=?, "
+                "workspace_authority_digest=?, submission_json=?, updated_at=? WHERE job_id=?",
+                (
+                    submission.project_root, submission.workspace_mode,
+                    submission.source.identity, submission.source.commit,
+                    submission.source.dirty_digest, workspace_id,
+                    workspace_authority_digest, snapshot, _now(), job_id,
+                ),
+            )
+            rebound = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            return dict(rebound)
+
+    def retarget_pending_sync(self, job_id: str, submission: JobSubmission) -> dict[str, Any]:
+        """Move an unlaunched pending job to the relationship's newer generation."""
+        validate_job_id(job_id)
+        snapshot = _canonical_submission_snapshot(submission)
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFound(f"job {job_id!r} was not found")
+            if (
+                row["lifecycle"] != Lifecycle.QUEUED.value
+                or row["queue_reason"] != "sync_generation_pending"
+                or row["sync_relationship_id"] != submission.sync_relationship_id
+                or row["project_identity"] != submission.project_identity
+            ):
+                raise JobRepositoryError("pending synchronization identity changed")
+            connection.execute(
+                "UPDATE jobs SET sync_generation_id=?, submission_json=?, updated_at=? "
+                "WHERE job_id=?",
+                (submission.sync_generation_id, snapshot, _now(), job_id),
+            )
+            rebound = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            return dict(rebound)
+
+    def claim_pending_sync_launch(
+        self, job_id: str, *, owner_boot_id: str, owner_pid: int,
+        owner_start_identity: str,
+    ) -> dict[str, Any] | None:
+        """Atomically give one observer ownership of a queued sync launch."""
+        validate_job_id(job_id)
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE jobs SET queue_reason='sync_generation_launching', "
+                "launch_owner_boot_id=?, launch_owner_pid=?, "
+                "launch_owner_start_identity=?, updated_at=? "
+                "WHERE job_id=? AND lifecycle='queued' "
+                "AND queue_reason='sync_generation_pending'",
+                (owner_boot_id, owner_pid, owner_start_identity, _now(), job_id),
+            ).rowcount
+            if changed != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            return dict(row)
+
+    def commit_pending_sync_launch(
+        self, job_id: str, *, owner_boot_id: str, owner_pid: int,
+        owner_start_identity: str,
+    ) -> dict[str, Any] | None:
+        """Commit one live claim after admission and before supervisor launch."""
+        validate_job_id(job_id)
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE jobs SET queue_reason='sync_generation_launch_committed', "
+                "updated_at=? WHERE job_id=? AND lifecycle='queued' "
+                "AND queue_reason='sync_generation_launching' "
+                "AND launch_owner_boot_id=? AND launch_owner_pid=? "
+                "AND launch_owner_start_identity=?",
+                (_now(), job_id, owner_boot_id, owner_pid,
+                 owner_start_identity),
+            ).rowcount
+            if changed != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            return dict(row)
+
+    def reset_pending_sync_launch(self, job_id: str) -> dict[str, Any]:
+        """Return an unlaunched sync claim to its replayable pending queue."""
+        validate_job_id(job_id)
+        with self.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE jobs SET queue_reason='sync_generation_pending', "
+                "launch_owner_boot_id=NULL, launch_owner_pid=NULL, "
+                "launch_owner_start_identity=NULL, updated_at=? "
+                "WHERE job_id=? AND lifecycle='queued' "
+                "AND queue_reason='sync_generation_launching'",
+                (_now(), job_id),
+            ).rowcount
+            if changed != 1:
+                raise JobRepositoryError("synchronization launch claim changed")
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            return dict(row)
 
     def submission_snapshot(self, job_id: str) -> dict[str, Any] | None:
         """Return bounded canonical input, or None for legacy/corrupt rows."""

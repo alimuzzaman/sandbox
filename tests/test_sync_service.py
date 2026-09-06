@@ -54,6 +54,63 @@ class SyncServiceTests(unittest.TestCase):
         self.assertEqual(first["generation"]["id"], replay["generation"]["id"])
         self.assertEqual(len(self.transfers), 1)
 
+    def test_new_generation_waits_until_active_job_releases_accepted_pin(self):
+        first = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-a",
+        )
+        relationship = self.repository.list_relationships()[0]
+        self.repository.pin_job(
+            job_id="job-active", relationship_id=relationship.relationship_id,
+            generation_id=first["generation"]["id"],
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        (self.root / "source.txt").write_text("next generation\n")
+        pending = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertTrue(pending["ok"])
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["job"]["active_generation"],
+                         first["generation"]["id"])
+        self.assertEqual(len(self.transfers), 1)
+        self.repository.release_job("job-active")
+        accepted = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(len(self.transfers), 2)
+
+    def test_generation_gate_reconciles_terminal_pins_before_blocking(self):
+        first = self.service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-a",
+        )
+        relationship = self.repository.list_relationships()[0]
+        self.repository.pin_job(
+            job_id="job-terminal", relationship_id=relationship.relationship_id,
+            generation_id=first["generation"]["id"],
+            source_access="managed_read_only", parallel_safe=True,
+        )
+        reconciled = []
+        service = SyncService(
+            self.repository, self.service.transport_factory,
+            identity_resolver=self.service.identity_resolver,
+            pin_reconciler=lambda: (
+                reconciled.append("called"),
+                self.repository.release_job("job-terminal"),
+            ),
+        )
+        (self.root / "source.txt").write_text("next generation\n")
+        accepted = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-generation-b",
+        )
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(reconciled, ["called"])
+
     def test_status_does_not_create_a_relationship(self):
         result = self.service.status(self.root, remote="remote", workspace_id="workspace")
         self.assertTrue(result["ok"])
@@ -375,6 +432,121 @@ class SyncServiceTests(unittest.TestCase):
                 self.root, remote="remote", workspace_id="workspace",
                 request_id="request-conflict",
             )
+
+    def test_remote_workspace_owner_conflict_remains_bounded_and_non_retryable(self):
+        accepting = {"enabled": False}
+
+        class ConflictingTransport:
+            def transfer(self, _project_dir, manifest, _relationship, generation):
+                if accepting["enabled"]:
+                    return {
+                        "status": "accepted",
+                        "accepted_generation": generation.generation_id,
+                        "manifest_digest": manifest.manifest_digest,
+                        "file_count": manifest.file_count,
+                        "byte_count": manifest.byte_count,
+                    }
+                error = RuntimeError("private remote ownership detail")
+                error.code = "ownership_conflict"
+                error.retryable = False
+                raise error
+
+        service = SyncService(
+            self.repository, lambda: ConflictingTransport(),
+            identity_resolver=lambda _root, *, remote: {
+                "identity": "project:fixture", "root": str(self.root),
+            },
+        )
+        result = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-remote-conflict",
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "ownership_conflict")
+        self.assertEqual(result["status"], "conflicted")
+        self.assertFalse(result["retryable"])
+        self.assertNotIn("private", repr(result).lower())
+        relationship = self.repository.list_relationships()[0]
+        self.assertEqual(
+            self.repository.metrics(relationship.relationship_id)["refused"], 1,
+        )
+        stored = self.repository.get_relationship(relationship.relationship_id)
+        self.assertEqual(stored.lifecycle, "conflicted")
+        generation = self.repository.lookup_request(
+            relationship.relationship_id, "request-remote-conflict",
+        )
+        self.assertEqual(generation.lifecycle, "refused")
+        (self.root / "source.txt").write_text("changed after conflict\n")
+        replay = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-remote-conflict",
+        )
+        status = service.status(
+            self.root, remote="remote", workspace_id="workspace",
+        )
+        for conflict in (replay, status):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["status"], "conflicted")
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
+        started = service.start(
+            self.root, remote="remote", workspace_id="workspace", mode="live",
+        )
+        stopped = service.stop(
+            self.root, remote="remote", workspace_id="workspace",
+        )
+        for conflict in (started, stopped):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["status"], "conflicted")
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
+        self.assertEqual(
+            self.repository.get_relationship(relationship.relationship_id).lifecycle,
+            "conflicted",
+        )
+        stored = self.repository.get_relationship(relationship.relationship_id)
+        self.assertEqual(stored.conflict_code, "ownership_conflict")
+        self.assertEqual(stored.conflict_request_id, "request-remote-conflict")
+        self.assertEqual(stored.conflict_generation_id, generation.generation_id)
+
+        for index in range(257):
+            manifest_digest = f"{index + 1:064x}"
+            self.repository.reserve_generation(
+                relationship_id=relationship.relationship_id,
+                request_id=f"later-request-{index}",
+                request_digest=self.repository.canonical_request_digest({
+                    "request": index, "manifest": manifest_digest,
+                }),
+                manifest_digest=manifest_digest,
+                file_count=1, byte_count=1,
+            )
+        bounded = self.repository.list_generations(relationship.relationship_id)
+        self.assertEqual(len(bounded), 256)
+        self.assertNotIn(generation.generation_id, {
+            item.generation_id for item in bounded
+        })
+        for conflict in (
+            service.status(self.root, remote="remote", workspace_id="workspace"),
+            service.start(
+                self.root, remote="remote", workspace_id="workspace", mode="live",
+            ),
+            service.stop(self.root, remote="remote", workspace_id="workspace"),
+        ):
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["code"], "ownership_conflict")
+            self.assertEqual(conflict["request_id"], "request-remote-conflict")
+
+        accepting["enabled"] = True
+        accepted = service.once(
+            self.root, remote="remote", workspace_id="workspace",
+            request_id="request-after-reviewed-adoption",
+        )
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(
+            self.repository.get_relationship(relationship.relationship_id).lifecycle,
+            "stopped",
+        )
 
     def test_lost_acknowledgment_reconciles_with_original_request(self):
         class Reconciling:

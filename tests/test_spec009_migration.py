@@ -200,7 +200,10 @@ class TestSpec009MigrationSafety(unittest.TestCase):
                 old_runtime, new_base / "runtime", old_base, new_base, []), 0)
 
         self.assertIsNotNone(migrate._load_journal(new_base))
-        self.assertFalse((new_base / "runtime" / "workspaces" / "index.sqlite3-wal").exists())
+        for suffix in ("-wal", "-shm"):
+            self.assertFalse(
+                (new_base / "runtime" / "workspaces" / f"index.sqlite3{suffix}").exists()
+            )
         with patch.object(migrate, "RUNTIME_DIR", new_base / "runtime"):
             result = migrate._rebase_workspace_index_from_journal(new_base)
         self.assertEqual(result["rows_rebased"], 1)

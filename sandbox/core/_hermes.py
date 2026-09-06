@@ -3177,7 +3177,15 @@ def update_apply(remote_name: str, version: str, commit: str | None, confirm: bo
                          what="could not resume Hermes gateway after rollback")
         except (HermesError, KeyError, TypeError):
             pass
-        _record_v2_evidence(entry, _paths(entry), "update_rollback", {"reason": exc.code})
+        # Evidence is useful but strictly best effort.  In particular, a
+        # remote-home lookup can fail after the update failure (or in a test
+        # seam that already supplied the remote entry); it must not replace
+        # the stable update_rolled_back result or hide that restoration was
+        # attempted.
+        try:
+            _record_v2_evidence(entry, _paths(entry), "update_rollback", {"reason": exc.code})
+        except (HermesError, KeyError, OSError, TypeError, ValueError):
+            pass
         raise HermesError(f"update failed and restore was attempted: {exc}", "update_rolled_back", True) from exc
     return result(True, "update_apply", remote_name, version=installed["version"], commit=installed["commit"],
                   status="updated", data={"backup_id": backup_id, "changed": True,

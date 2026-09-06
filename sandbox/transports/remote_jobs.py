@@ -341,10 +341,12 @@ class RemoteJobTransport:
     """Deploy then exchange compact job-control JSON, never child stdio pipes."""
 
     def __init__(self, *, deploy: Callable, ssh_run: Callable, remote_lookup: Callable,
-                 remote_sb_path: Callable | None = None) -> None:
+                 remote_sb_path: Callable | None = None,
+                 sync_submit: Callable | None = None) -> None:
         self.deploy = deploy
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
+        self.sync_submit = sync_submit
         self._deploy_accepts_push_timeout = self._accepts_keyword(
             deploy, "push_timeout"
         )
@@ -456,11 +458,49 @@ class RemoteJobTransport:
             raise RemoteJobTransportError(
                 "remote job command contains credential-like material"
             ) from None
-        if submission.sync_relationship_id is not None:
+        if submission.sync_relationship_id is not None and self.sync_submit is None:
             raise RemoteJobTransportError(
                 "synchronized job execution is unavailable without an enforced source authority"
             )
         remote = self._execution_remote(submission.remote_name)
+        if submission.sync_relationship_id is not None:
+            capabilities = remote.get("capabilities")
+            if not isinstance(capabilities, (list, tuple, set)) or \
+                    "job.sync-generation.v1" not in capabilities:
+                raise RemoteJobTransportError(
+                    "remote does not support generation-pinned job execution"
+                )
+            try:
+                accepted = redact_structure(self.sync_submit(remote, submission))
+                _require_submission_ack(accepted)
+                generation = accepted.get("generation")
+                projection = accepted.get("projection")
+                expected_projection = {
+                    "read_only": submission.source_access == "managed_read_only",
+                    "isolated": submission.source_access == "isolated_copy",
+                    "artifact_only_output": submission.source_access == "isolated_copy",
+                }
+                if not isinstance(generation, dict) or generation != {
+                    "relationship_id": submission.sync_relationship_id,
+                    "generation_id": submission.sync_generation_id,
+                    "source_access": submission.source_access,
+                }:
+                    raise ValueError("generation-pinned acceptance identity is incomplete")
+                if not isinstance(projection, dict) or projection != expected_projection:
+                    raise ValueError("generation-pinned projection proof is incomplete")
+            except RemoteJobTransportError:
+                raise
+            except Exception:
+                raise RemoteJobTransportError(
+                    "generation-pinned job acceptance is invalid"
+                ) from None
+            allowed = (
+                "ok", "status", "job_id", "kind", "target", "workspace",
+                "output_profile", "source", "deadline", "execution_policy",
+                "cleanup_policy", "idempotent_replay", "generation",
+                "projection", "queue", "lifecycle", "termination_reason",
+            )
+            return {key: accepted[key] for key in allowed if key in accepted}
         deployed = self._deploy(
             remote, submission.project_root,
             deployment_timeout=submission.deadline_seconds,
@@ -478,6 +518,10 @@ class RemoteJobTransport:
         """
         if not submissions:
             return []
+        if any(item.sync_relationship_id is not None for item in submissions):
+            raise RemoteJobTransportError(
+                "synchronized matrix execution requires an explicit batch source authority"
+            )
         for item in submissions:
             try:
                 require_safe_argv(item.argv)

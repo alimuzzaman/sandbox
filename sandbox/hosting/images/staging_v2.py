@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 from .plan_set import PlanSetContractError, VerifiedImagePlanSet
 from .staging_models import (
     HelperIdentity, MAX_PERSISTED_LEDGER_COUNTER, StagingContractError,
-    StagingTarget, _closed, _digest, _text, staging_digest,
+    StagingTarget, _closed, _digest, _local_image_id, _text, staging_digest,
 )
 
 
@@ -154,8 +154,14 @@ class BatchImageObservation:
         for value in (self.name, self.repository, self.repo_digest, self.platform,
                       self.anonymous_exact_manifest, self.authenticated_exact_manifest):
             _text(value)
-        _digest(self.config_digest); _digest(self.local_image_id)
-        if self.local_image_id != self.config_digest \
+        _digest(self.config_digest)
+        _local_image_id(self.local_image_id, self.repo_digest)
+        # Docker 29's containerd image store may expose the pulled manifest
+        # digest (``sha256:…``) as ``.Id``.  Keep the receipt-bound config
+        # digest and qualified RepoDigest checks, while accepting that
+        # equivalent engine identity without widening the repository ref.
+        manifest_digest = self.repo_digest.rsplit("@", 1)[-1]
+        if self.local_image_id not in {self.config_digest, manifest_digest, self.repo_digest} \
                 or self.anonymous_exact_manifest != "denied" \
                 or self.authenticated_exact_manifest != "succeeded":
             raise StagingContractError("observation_invalid")
@@ -321,6 +327,26 @@ class StagedImageProofSet:
 
 
 @dataclass(frozen=True, slots=True)
+class PullFailure:
+    image: str
+    failure_class: str
+
+    def __post_init__(self) -> None:
+        if self.image not in {"queue", "web", "worker"} \
+                or self.failure_class not in {
+                    "denied", "not_found", "network", "timeout", "no_space", "daemon"}:
+            raise StagingContractError()
+
+    def as_mapping(self) -> dict[str, str]:
+        return {"image": self.image, "class": self.failure_class}
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "PullFailure":
+        raw = _closed(value, frozenset({"image", "class"}))
+        return cls(raw["image"], raw["class"])
+
+
+@dataclass(frozen=True, slots=True)
 class StageResultSet:
     schema_version: int
     ok: bool
@@ -329,6 +355,7 @@ class StageResultSet:
     request_id: str
     generation: int
     proof: StagedImageProofSet | None = None
+    pull_failure: PullFailure | None = None
 
     def __post_init__(self) -> None:
         from .staging_models import _RESULT_CLASSES, _RESULT_CODES
@@ -341,6 +368,10 @@ class StageResultSet:
                 or (self.ok and type(self.proof) is not StagedImageProofSet) \
                 or (not self.ok and self.proof is not None):
             raise StagingContractError()
+        if self.pull_failure is not None and (
+                type(self.pull_failure) is not PullFailure or self.ok
+                or self.result_class != "failed" or self.code != "pull_failed"):
+            raise StagingContractError()
         _text(self.request_id, identity=True)
 
     def as_mapping(self) -> dict[str, Any]:
@@ -348,6 +379,8 @@ class StageResultSet:
                  "result_class": self.result_class, "code": self.code,
                  "request_id": self.request_id, "generation": self.generation}
         if self.proof is not None: value["proof"] = self.proof.as_mapping()
+        if self.pull_failure is not None:
+            value["pull_failure"] = self.pull_failure.as_mapping()
         return value
 
 

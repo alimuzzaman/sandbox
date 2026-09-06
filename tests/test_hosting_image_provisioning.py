@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -12,8 +13,9 @@ from unittest.mock import patch
 
 from sandbox.hosting.images.provisioning import (
     ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
-    install_owner_only_json_pair,
-    prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
+    install_owner_only_json_pair, install_activation_bundle,
+    prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
+    prepare_stage_bundle, replace_expired_stage_bundle, reuse_owner_only_stage_bundle,
     target_policy_selector,
 )
 from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
@@ -22,6 +24,222 @@ from tests.test_hosting_image_staging_v2 import observation, plan_set, policy_se
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_activation_rotation_expiry_authority_and_atomic_publication(self):
+        from sandbox.hosting.images.activation.models import activation_digest
+        from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
+        from tests.test_hosting_image_activation_v2 import artifacts, grant_for
+        plan, proof, snapshot = artifacts()
+        grant = grant_for(plan, proof)
+
+        def bundle(expiry, **grant_changes):
+            snap = snapshot.body_mapping()
+            snap.pop("schema_version")
+            snap["selected_services"] = tuple(snap["selected_services"])
+            snap["expires_at"] = expiry
+            body = {**grant.body_mapping(), "expires_at": expiry, **grant_changes}
+            return {"schema_version": 2,
+                "compose_snapshot": PrivateComposeInputSnapshotV2.create(**snap).as_mapping(),
+                "rollback_grant": {**body, "grant_digest": activation_digest(
+                    "sandbox.hosting.images.rollback-grant.v2", body)},
+                "rollback_grant_public_key": "ssh-ed25519 Zml4dHVyZQ==",
+                "stage_ledger": {"authority": "feature-050-stage-ledger-v2", "revision": 7}}
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp, patch(
+                "sandbox.hosting.images.provisioning.SshRollbackGrantVerifier.verify",
+                return_value=True):
+            root = Path(temp); root.chmod(0o700)
+            path = root / "activation.json"
+            old, fresh = bundle(100), bundle(300)
+            install_owner_only_json(path, old)
+            original = path.read_bytes()
+            for invalid in (bundle(300, authority_revision="other"),
+                            bundle(300, prior_generation_digest="sha256:" + "f" * 64),
+                            {**fresh, "unexpected": True}):
+                with self.assertRaises(ProvisioningError):
+                    install_activation_bundle(path, invalid, now=200)
+                self.assertEqual(path.read_bytes(), original)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                install_activation_bundle(path, fresh, now=50)
+            with patch("sandbox.hosting.images.provisioning.SshRollbackGrantVerifier.verify",
+                       return_value=False), self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            with patch("sandbox.hosting.images.provisioning.os.replace",
+                       side_effect=OSError("synthetic failure")), self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(install_activation_bundle(path, fresh, now=200), "installed")
+            self.assertEqual(json.loads(path.read_bytes()), fresh)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            archived = list(root.glob("activation.json.expired-*"))
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived[0].read_bytes(), original)
+            self.assertEqual(archived[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(install_activation_bundle(path, fresh, now=200), "replayed")
+            self.assertEqual(list(root.glob(".provision-*")), [])
+            for retained in ({**old, "compose_snapshot": fresh["compose_snapshot"]},
+                             {**old, "rollback_grant": fresh["rollback_grant"]},
+                             {**old, "stage_ledger": {}},
+                             bundle(100, expected_generation=1)):
+                path.unlink(); install_owner_only_json(path, retained)
+                with self.assertRaises(ProvisioningError):
+                    install_activation_bundle(path, fresh, now=200)
+                self.assertEqual(json.loads(path.read_bytes()), retained)
+            path.chmod(0o644)
+            with self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            path.unlink(); path.symlink_to(archived[0])
+            with self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+
+    @staticmethod
+    def _stage_bundle_fixture(root: Path, *, expires_at: str = "2999-01-01T00:00:00Z"):
+        plan = plan_set(); scope = plan.policy.target_scope
+        target = StagingTarget("machine-a",
+            f"{scope.remote}/{scope.project}/{scope.environment}", "daemon-a")
+        helper = HelperIdentity("sha256:" + "9" * 64,
+            "sandbox-image-stage-helper-v2", "a" * 40,
+            "systemd-cgroup-v2-batch-stage-v2")
+        binding = prepare_stage_binding(
+            plan=plan, target=target, machine_identity="machine-a",
+            source_reference="personal/GHCR_TOKEN", expires_at=expires_at,
+            owner="personal")
+        bundle = prepare_stage_bundle(
+            plan=plan, target=target, helper=helper, binding=binding,
+            credential_reference_revision="credential-revision-a",
+            secret_sources={})
+        path = root / "policies" / "stage.json"
+        install_owner_only_json(path, bundle)
+        return plan, target, helper, bundle, path
+
+    def test_stage_bundle_reuses_exact_unexpired_policy_despite_new_requested_expiry(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            reused = reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+        self.assertEqual(reused, bundle)
+
+    def test_stage_bundle_replays_legacy_millisecond_expiry_after_reload(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(
+                root, expires_at="2999-01-01T00:00:00.466Z")
+            # Reproduce a bundle written before timestamp hashing used the
+            # binding model's canonical form: the persisted field had six
+            # fractional digits while its binding id was derived from .466Z.
+            legacy = {**bundle, "binding": {
+                **bundle["binding"], "expires_at": "2999-01-01T00:00:00.466000Z"}}
+            path.unlink(); install_owner_only_json(path, legacy)
+            reused = reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+        self.assertEqual(reused, legacy)
+
+    def test_stage_bundle_reuse_refuses_expired_policy(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            expired_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2000-01-01T00:00:00Z", owner="personal")
+            bundle["binding"] = expired_binding.to_dict()
+            path.unlink(); install_owner_only_json(path, bundle)
+            self.assertIsNone(reuse_owner_only_stage_bundle(
+                path, plan=plan, target=target, helper=helper,
+                machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN", owner="personal",
+                credential_reference_revision="credential-revision-a",
+                secret_sources={}))
+
+    def test_stage_bundle_rotates_only_an_expired_ready_policy(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+            expired_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2000-01-01T00:00:00Z", owner="personal")
+            bundle["binding"] = expired_binding.to_dict()
+            path.unlink(); install_owner_only_json(path, bundle)
+            fresh_binding = prepare_stage_binding(
+                plan=plan, target=target, machine_identity="machine-a",
+                source_reference="personal/GHCR_TOKEN",
+                expires_at="2999-01-01T00:00:00Z", owner="personal")
+            replacement = prepare_stage_bundle(
+                plan=plan, target=target, helper=helper, binding=fresh_binding,
+                credential_reference_revision="credential-revision-a",
+                secret_sources={})
+            self.assertEqual(replace_expired_stage_bundle(path, replacement), "rotated")
+            self.assertEqual(json.loads(path.read_text()), replacement)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                replace_expired_stage_bundle(path, bundle)
+
+    def test_stage_bundle_reuse_refuses_malformed_or_mismatched_authority(self):
+        mutations = {
+            "schema": lambda value: value.update(extra="unexpected"),
+            "plan": lambda value: value["policy"].update(
+                plan_set_digest="sha256:" + "f" * 64),
+            "target": lambda value: value["policy"]["target"].update(
+                daemon_identity="daemon-b"),
+            "helper": lambda value: value["policy"]["helper"].update(
+                runtime_revision="b" * 40),
+            "capability": lambda value: value["policy"].update(
+                capability_revision="other-capability"),
+            "source": lambda value: value["binding"].update(
+                source_reference="personal/OTHER_TOKEN"),
+            "reference_revision": lambda value: value["policy"].update(
+                credential_reference_revision="credential-revision-b"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+                root = Path(temp); root.chmod(0o700)
+                plan, target, helper, bundle, path = self._stage_bundle_fixture(root)
+                mutate(bundle); path.unlink(); install_owner_only_json(path, bundle)
+                with self.assertRaises(ProvisioningError):
+                    reuse_owner_only_stage_bundle(
+                        path, plan=plan, target=target, helper=helper,
+                        machine_identity="machine-a",
+                        source_reference="personal/GHCR_TOKEN", owner="personal",
+                        credential_reference_revision="credential-revision-a",
+                        secret_sources={})
+
+    def test_image_identity_accepts_partial_resource_evidence_but_recovery_stays_strict(self):
+        from sandbox.commands.hosting import _authenticated_machine_identity
+        from sandbox.resources.host_memory import HostMemoryStatusProjection
+        from sandbox.hosting.recovery.service import RecoveryAuthorityError
+
+        status = {
+            "target_identity": "a" * 24,
+            "observed_at": "2026-09-03T00:00:00Z",
+            "evidence_state": "partial",
+        }
+
+        class Service:
+            def status(self, _budget):
+                return {"ok": False, "data": status}
+
+            def projection(self, value):
+                return HostMemoryStatusProjection(
+                    value["target_identity"], value["observed_at"],
+                    value["evidence_state"], None, None, 0, 0,
+                    "absent", "missing", None, "unknown", None,
+                )
+
+        with patch("sandbox.resources.context._build_host_memory_service",
+                   return_value=Service()):
+            self.assertEqual(_authenticated_machine_identity(
+                "scaleway-sandbox", allow_partial=True), "a" * 24)
+            with self.assertRaises(RecoveryAuthorityError):
+                _authenticated_machine_identity("scaleway-sandbox")
+
     def test_missing_authority_refuses_before_target_mutation_port_is_opened(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
         class Recovery:
@@ -88,44 +306,137 @@ class ProvisioningTests(unittest.TestCase):
             for item in outputs:
                 self.assertNotIn(str(private), json.dumps(item))
 
+    def test_machine_policy_cli_retains_prior_receipt_policy_for_release_rotation(self):
+        from sandbox.commands.hosting import _cmd_host_image_provision
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp); root.chmod(0o700)
+            first_receipt = root / "first"; first_receipt.mkdir()
+            second_receipt = root / "second"; second_receipt.mkdir()
+            first_digest = make_bundle(first_receipt)
+            make_bundle(second_receipt)
+            second = json.loads((second_receipt / "receipt.json").read_text())
+            second_sha = "a" * 40
+            second["source_sha"] = second_sha
+            second["sentry_sha"] = second_sha
+            second["workflow"]["sha"] = second_sha
+            second_bytes = json.dumps(second, sort_keys=True, separators=(",", ":")).encode()
+            (second_receipt / "receipt.json").write_bytes(second_bytes)
+            (second_receipt / "receipt.sha256").write_text(
+                f"{__import__('hashlib').sha256(second_bytes).hexdigest()}  receipt.json\n")
+            template = policy_mapping(first_digest)
+            private = root / "signer"
+            subprocess.run(("/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                "-f", str(private)), check=True)
+            public = private.with_suffix(".pub"); public.chmod(0o600)
+            class Port:
+                @contextmanager
+                def target_mutation_transaction(self, _target): yield
+            class Recovery:
+                def target_mutation_port(self, _name): return Port()
+            validated = {"project": "lenzora", "environment": "production", "compose": {
+                "service": "lenzora-web",
+                "background_services": [item for item in template["persistent_services"]
+                                        if item != "lenzora-web"],
+                "init_services": template["one_shot_services"],
+            }}
+            args = SimpleNamespace(remote="production", environment="production",
+                provision_phase="machine-policy", confirm=True,
+                signed_receipt_directory=str(first_receipt),
+                policy_authority_id=template["authority_id"], policy_revision=1,
+                rollback_public_key=str(public),
+                rollback_authority_id="rollback-authority/controller-a",
+                rollback_authority_revision="rollback-v2",
+                compose_provider_revision="compose-provider-v2",
+                service_image_binding=[f"{row['service']}={row['image']}"
+                    for row in template["service_image_bindings"]],
+                activation_environment_binding=[
+                    f"{row['image']}={row['environment_variable']}"
+                    for row in template["activation_environment_bindings"]])
+            outputs = []
+            with patch("sandbox.commands.hosting.RUNTIME_DIR", root / "runtime"), \
+                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()):
+                for receipt in (first_receipt, second_receipt, second_receipt):
+                    args.signed_receipt_directory = str(receipt)
+                    stream = StringIO()
+                    with redirect_stdout(stream): _cmd_host_image_provision({}, validated, args)
+                    outputs.append(json.loads(stream.getvalue()))
+
+            self.assertEqual([item["result_class"] for item in outputs],
+                             ["installed", "installed", "replayed"])
+            self.assertEqual([item["authority_result_class"] for item in outputs],
+                             ["installed", "replayed", "replayed"])
+            self.assertNotEqual(outputs[0]["installed_path"], outputs[1]["installed_path"])
+            self.assertEqual(outputs[1]["installed_path"], outputs[2]["installed_path"])
+            self.assertTrue(Path(outputs[0]["installed_path"]).is_file())
+            self.assertTrue(Path(outputs[1]["installed_path"]).is_file())
+
     def test_stage_bundle_cli_mints_fixed_binding_without_printing_secret(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository
         with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
             root = Path(temp); root.chmod(0o700); project = root / "project"; project.mkdir()
             personal = root / ".env"; canary = "secret-stage-canary-never-output"
             personal.write_text(f"GHCR_TOKEN={canary}\n"); personal.chmod(0o600)
             plan = plan_set(); plan_path = root / "plan.json"
             plan_path.write_text(json.dumps(plan.as_mapping()))
-            class Port:
-                @contextmanager
-                def target_mutation_transaction(self, _target): yield
-            class Recovery:
-                def target_mutation_port(self, _name): return Port()
+            class ShortTimeoutRecoveryRepository(RecoveryRepository):
+                def target_mutation_port(self, capability, *, timeout_seconds=0.05):
+                    return super().target_mutation_port(
+                        capability, timeout_seconds=timeout_seconds)
             validated = {"project": "lenzora", "environment": "production",
                 "project_root": str(project), "compose": {}}
             args = SimpleNamespace(remote="production", environment="production",
                 provision_phase="stage-bundle", confirm=True, verified_plan=str(plan_path),
                 expected_generation=0, credential_source_reference="personal/GHCR_TOKEN",
                 credential_expires_at="2999-01-01T00:00:00Z")
-            output = StringIO()
+            outputs = []
             runtime = root / "runtime"
             (runtime / "hosting").mkdir(parents=True, mode=0o700)
+            recovery = ShortTimeoutRecoveryRepository(
+                runtime / "hosts.json", runtime / "hosting" / "locks")
+            stage = StageRepository(runtime / "hosting" / "image-staging")
+            target_id = "production/lenzora/production"
+            with stage.target_lock(target_id):
+                state = stage._load_unlocked(target_id)
+                state.update(generation=1, ledger_revision=7)
+                stage._write_unlocked(target_id, state)
+            # A retained policy from an earlier plan must not block this exact
+            # v2 plan.  V2 storage is digest-scoped; the legacy target-scoped
+            # filename remains inert evidence.
+            scope_id = hashlib.sha256(b"production\0lenzora\0production").hexdigest()
+            legacy_path = runtime / "hosting" / "image-staging" / "policies" / f"{scope_id}.json"
+            legacy_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            legacy_path.write_text(json.dumps({"retained": "prior-plan"}))
             with patch("sandbox.commands.hosting.RUNTIME_DIR", runtime), \
                     patch("sandbox.core._paths.RUNTIME_DIR", runtime), \
                     patch("sandbox.hosting.images.staging_repository.RUNTIME_DIR", runtime), \
-                    patch("sandbox.core._paths.ENV_LOCAL", personal), \
-                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()), \
+                    patch("sandbox.commands.hosting.personal_secrets.secret_file",
+                          return_value=personal), \
+                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=recovery), \
                     patch("sandbox.commands.hosting._authenticated_machine_identity",
                           return_value="machine-a"), \
                     patch("sandbox.transports.remote_hosting_images.RegisteredRemoteImageTransport.observe_authority",
-                          return_value={"daemon_identity": "daemon-a", "helper": {}}), \
-                    redirect_stdout(output):
-                try: _cmd_host_image_provision({}, validated, args)
-                except SystemExit: pass
-            payload = json.loads(output.getvalue())
+                          return_value={"daemon_identity": "daemon-a", "helper": {}}):
+                for expiry in ("2999-01-01T00:00:00Z", "2999-02-01T00:00:00Z"):
+                    args.credential_expires_at = expiry
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        try: _cmd_host_image_provision({}, validated, args)
+                        except SystemExit: pass
+                    outputs.append((json.loads(output.getvalue()), output.getvalue()))
+            payload = outputs[0][0]
             self.assertTrue(payload["ok"], payload)
-            self.assertEqual(payload["stage_generation"], 0)
-            self.assertNotIn(canary, output.getvalue())
+            self.assertEqual(payload["target"]["target_identity"], target_id)
+            self.assertEqual(payload["stage_generation"], 1)
+            self.assertEqual(payload["stage_ledger_revision"], 7)
+            self.assertEqual(payload["activation_generation"], 0)
+            self.assertEqual([item[0]["result_class"] for item in outputs],
+                             ["installed", "replayed"])
+            self.assertEqual([item[0]["stage_generation"] for item in outputs], [1, 1])
+            self.assertEqual([item[0]["staging_policy_digest"] for item in outputs],
+                             [payload["staging_policy_digest"], payload["staging_policy_digest"]])
+            self.assertNotIn(canary, "".join(item[1] for item in outputs))
             installed = json.loads(Path(payload["installed_path"]).read_text())
             self.assertEqual(installed["binding"]["owner"], "personal")
             self.assertNotIn(canary, json.dumps(installed))

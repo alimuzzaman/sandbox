@@ -21,8 +21,14 @@ sb resources status --remote scaleway-sandbox --refresh --json
 sb resources status --remote scaleway-sandbox --fast --json
 sb resources monitor --json
 sb resources monitor --remote scaleway-sandbox --scheduled --dry-run --json
+sb resources schedule --remote scaleway-sandbox --json  # render only
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
+sb resources swap-status --remote scaleway-sandbox --json
+sb resources swap-plan --remote scaleway-sandbox --json
+sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+sb resources swap-disable --remote scaleway-sandbox --confirm --json
+sb resources swap-history --remote scaleway-sandbox --json
 # tiered reclamation of deploy-src (classes, reasons, manifest, retention)
 sb resources status --remote scaleway-sandbox --deep --budget 180 --json
 sb resources plan --remote scaleway-sandbox --tier safe --json
@@ -139,6 +145,14 @@ reclamation and real reaping are off by default; policy is resolved before any
 host-facing service is constructed. Normal/warning/skipped runs exit zero;
 critical, unknown, refusal, or action failure exits one.
 
+`sb resources schedule` renders a disabled local systemd user service/timer or
+review-only launchd plist for the fixed monitor argv. Rendering writes nothing. Launchd
+activation refuses because it cannot enforce the configured timeout. Installing systemd
+or removing a receipt-bound installation is protected: use `--activate --confirm` or
+`--deactivate --confirm` only after reviewing the target policy and live
+read-only evidence. The target remote is reached by the monitor command, not by
+installing a timer on that host.
+
 Deep status is diagnostic only. `existing_cache_scope` and
 `existing_stale_scope` may reference only eligibility independently established
 by the ordinary resource inventory; deleted-open files and anonymous host
@@ -168,7 +182,112 @@ out; extend with `sb workspace ttl <name> --ttl 14d` when you need it longer.
 Every deletion is recorded in
 `$SANDBOX_HOME/runtime/resources/deletions/<run_id>.jsonl` before it happens.
 
+## Host swap and memory operations (Feature 046)
+
+Feature 046 provides authenticated host memory telemetry, controller-owned swap planning,
+protected apply, safe disable, and aggregate history queries:
+
+```sh
+# Read-only telemetry and health observation
+sb resources swap-status --remote scaleway-sandbox --json
+
+# Controller-owned planning (size in 1..8 GiB, default 4)
+sb resources swap-plan --remote scaleway-sandbox --json
+sb resources swap-plan --remote scaleway-sandbox --size-gib 8 --json
+sb resources swap-plan --remote scaleway-sandbox --operation disable --json
+
+# Protected apply (requires exact confirmation)
+sb resources swap-apply --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+
+# Safe owned-only disable (reverses units/files, preserves aggregate history log)
+sb resources swap-disable --remote scaleway-sandbox --confirm --json
+
+# Aggregate telemetry history window (limit 1..1000, default 288)
+sb resources swap-history --remote scaleway-sandbox --limit 144 --json
+sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z --until 2026-09-05T00:00:00Z --json
+```
+
+### CLI-first operator rules and constraints
+
+- **CLI-First Reflex**: Always use `sb resources swap-*` commands. **Never fall back to SSH**
+  (`sb remote ssh`) or manual host manipulation (e.g. running `mkswap` or modifying sysctl manually).
+  All communications flow over the authenticated control plane using fixed wire actions
+  (`host_memory_status`, `host_memory_plan`, `host_memory_apply`, `host_memory_disable`, `host_memory_history`).
+- **Controller-Owned Planning**: Swap planning is strictly read-only and performed locally on the
+  controller. The resulting plan is cryptographically bound to the target identity, runtime revision,
+  and observation digest.
+- **Confirmation Rules**: All mutating operations (`swap-apply` and `swap-disable`) require explicit
+  `--confirm`. Missing confirmation fails closed immediately with `confirmation_required` without touching the host.
+- **Replay & Concurrency Rules**: Replaying the same `plan_id` or `operation_id` performs a durable
+  ledger lookup and returns the recorded terminal outcome (`applied`, `already_current`, `rollback_complete`)
+  without duplicating side effects. Never generate or inject a second operation identity for an in-flight operation.
+  If an operation is already in progress or a prior rollback was incomplete, further operations are refused
+  with `operation_in_progress` or `rollback_incomplete`.
+- **Fault Recovery & Rollback**: Any failure during apply triggers an automatic reverse teardown of owned
+  artifacts. Aggregate history (`/var/log/sandbox/host-memory.jsonl`) and unowned files are strictly preserved.
+
 ## Durable remote-first jobs
+
+### Failed hosting apply recovery
+
+Use recovery when the first safe step must be observation. Do not substitute ordinary
+`host apply`, because apply may stage source before deciding replay safety.
+
+```sh
+sb host status --project-dir DIR --environment ENV --remote NAME --json
+sb host recover --project-dir DIR --environment ENV --remote NAME \
+  --job-id JOB_ID --original-request-id APPLY_REQUEST \
+  --request-id RECOVERY_REQUEST --expected-generation N --json
+```
+
+Only a current-contract terminal failed apply with a pre-effect receipt can reconcile.
+Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
+before protected effects. Receipt-only success is not deployment or public production
+proof. Continue the sole pending edge only with a separate identity, the successful
+observation/evidence IDs, unchanged generation, authorizing governance, and `--confirm`.
+Feature 047 does not yet publish that governance projection, so public continuation
+currently refuses with `governance_unavailable`; do not describe the tested edge adapter
+seam as a reachable public recovery path.
+Recovery never resolves or parses secrets. It accepts only exact owner-only opaque
+binding metadata created by an eligible apply; missing, stale, environment-backed, or
+manually changed secret-source metadata refuses. Missing, symbolic-link, non-regular,
+or non-owner-only secret sources and binding keys never carry authorizing epoch/identity.
+The broker revision is guarded from validation through commit, and the raw digest of
+secret-bearing `environment.env` is never a receipt field. `host sync --watch` uses only
+a target effect lease after its short active-owner state check, so unrelated targets are
+not locked for the watch duration.
+The finite broker transaction shares the canonical per-source secret lock with generic
+secret writes. Apply computes only an owner-keyed environment/config identity inside that
+transaction; legacy refusal creates no target or broker lock artifacts.
+All locked apply state writes use the durable file-and-parent-fsync writer. Binding-key
+publication and newly created authority-directory entries are parent-fsynced before
+host state can depend on them.
+Recovery binds the normalized registered SSH/control endpoints, transport, Tailscale
+host, MCP port, remote name, and runtime home without binding or exposing the bearer
+token. It also requires Feature 046's authenticated stable machine identity from the
+original apply and fresh observation; endpoint configuration alone never authorizes
+recovery. Missing, rebuilt, repointed, or legacy identity refuses. Registration is
+re-resolved after target ownership and guarded through durable commit against supported
+re-registration. Apply without that projection keeps no recovery authority.
+Apply rebuilds every origin/DNS/Cloudflare precondition from the guarded registration.
+Recovery binds a canonical non-secret edge intent digest, rechecks it during observation
+and immediately before edge authority, and uses only its bound records for continuation.
+Same-machine origin drift refuses before effects. Unsafe or linked registration lock
+directories/files are non-authorizing.
+The bound intent carries Origin CA certificate hostnames. Recovery authority is limited
+to 64 routes, 128 DNS records, 64 unique certificate hostnames, 64 KiB edge intent, and
+128 KiB total operation; overflow leaves no recoverable authority.
+The exact prospective envelope is checked with an in-memory prepared key before a key or
+metadata directory is published. Recovery writes only a non-authorizing provisional marker,
+re-observes immediately, then promotes matching evidence in a separate atomic commit. Only the
+same pre-effect or provisional observation owner may resume its matching phase; effect-entered
+and malformed state stays fenced. Exact edge replay returns its recorded edge terminal class
+without re-entry.
+Its command-owned predispatch skips compatibility migration/finalization and
+Compose/environment writers. Hosted login receipt writes remain target-locked and use
+the durable recovery repository writer.
+Never repeat `effect_unknown` or work around a refusal with raw DNS, Caddy, SSH, Docker,
+or another apply.
 
 When a project configures `runtime.default: "remote"`, use the configured
 provisioned remote by default. Pass `--local` only when deliberately running on
@@ -433,6 +552,12 @@ attested, `sb ensure` returns `instance_mount_drift` or
 state, then use the explicit `sb apply --project-dir .`; do not retry ensure as
 a substitute for reconciliation. Herd has no Docker mount attestation.
 
+If a registered Compose instance is stopped, resume it with
+`sb up --instance NAME --json` before retrying ensure. A missing managed network
+returns a nonzero, typed `stale_container_network` JSON envelope with the exact
+targeted `down`/`up` recovery command; machine callers must branch on that code,
+not parse the human message.
+
 After source-mount attestation and canonical reachability, `sb ensure` also
 runs a bounded, read-only `wp core is-installed` check. A successful result
 keeps the ready fast path. Only an empty `rc=1` result followed by a successful
@@ -460,3 +585,48 @@ after the push succeeds.
 Use `sb mcp --project-dir .` only when an MCP client needs live tool calls.
 It remains runtime-scoped, so a generic project does not receive WordPress
 tools and a WordPress project does not receive generic container-exec tools.
+
+## Server configuration fragments
+
+Use the CLI-first `sb server config` command family for web-tier fragments;
+never substitute raw Docker (`docker exec`, `docker cp`), SSH, or manual vhost
+editing:
+
+```sh
+# Apply a fragment from file or stdin
+sb server config apply --name page-cache --file /path/to/cache.conf
+cat rules.conf | sb server config apply --name rewrite-rules --stdin
+
+# List active fragments (bounded metadata only)
+sb server config list --json
+
+# Show fragment metadata (content is never emitted in default inspection)
+sb server config show page-cache
+
+# Deliberate exact content inspection (human stdout only; incompatible with --json)
+sb server config show page-cache --content
+
+# Export exact content to an owner-only (0600) file
+sb server config show page-cache --output ./exported.conf
+
+# Revert a fragment safely
+sb server config revert page-cache
+```
+
+### Exact-content warning
+
+`sb server config show` intentionally returns only bounded metadata by default.
+Routine channels (list, default show, JSON payloads, logs, error messages, phase
+evidence) never contain raw fragment bytes. To inspect exact content, operators
+must explicitly pass `--content` (which emits raw bytes directly to stdout buffer)
+or `--output <PATH>`. `--content` and `--json` are mutually exclusive.
+
+### Live evidence requirements
+
+When verifying server configuration changes:
+1. Prove live HTTP behavior before and after mutation using supported HTTP tools
+   (`http_fetch`, `curl` through instance URL).
+2. For cache fragments, demonstrate origin pass-through before apply, cache hit
+   after warming, and origin pass-through after revert.
+3. Compare target and control instances before and after every mutation to prove
+   the control instance remains 100% unchanged.

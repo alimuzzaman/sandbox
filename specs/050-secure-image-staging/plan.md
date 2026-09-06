@@ -17,7 +17,7 @@ dependency on Compose, init, edge, activation, adoption, or rollback.
 **Language/Version**: Python 3.11+; fixed remote helper uses the installed Sandbox Python
 
 **Primary Dependencies**: Feature 049 models/projection; existing secret broker;
-registered remote transport; durable repository/locking; systemd transient services on
+registered remote transport; durable repository/locking; systemd user transient services on
 cgroup v2; Docker CLI only behind the measured helper
 
 **Storage**: Owner-only stage ledger under `$SANDBOX_HOME/runtime/`; volatile helper-owned
@@ -97,9 +97,11 @@ sandbox/secrets/
 sandbox/commands/
 └── hosting.py                    # public stage dispatch only
 
-scripts/install-remote.sh         # measured helper provisioning
+scripts/provision_image_stage_helper.py  # shared measured helper provisioning
+scripts/install-remote.sh                # remote bootstrap caller
 
 tests/
+├── test_image_stage_helper_provisioning.py
 ├── test_hosting_image_staging_policy.py
 ├── test_hosting_image_staging_repository.py
 ├── test_hosting_image_staging_service.py
@@ -125,6 +127,15 @@ Every arrow is generation/request bound. The helper receives a closed non-secret
 and a separate bounded credential frame. Credentials are absent before broker lease and after
 cleanup. Proof observation begins only after cleanup. Repository commits never serialize
 frames, stdout/stderr, argv, environment, or private paths.
+Pre-READY refusal is reduced to one 512-byte maximum ASCII frame with fixed inode, plan,
+cgroup, or workspace phase/code values. The same measured wrapper can run a fixed
+credential-free self-check entry that proves only user-unit hardening, cgroup identity, and
+volatile workspace readiness; it cannot call the broker, registry, or Docker.
+The protected v2 reconcile intent never calls `_execute_accepted`. It validates the exact
+retained uncertain request and policy, observes only the derived deterministic unit and
+cgroup, and uses one repository write to replace uncertainty with the bounded terminal
+`precredential_bootstrap_failed` result and release ownership. A failed write leaves the old
+uncertain owner durable.
 
 Feature 051 proof custody is distinct from the broker credential lease and target effect
 lease. It uses this cross-store handoff:

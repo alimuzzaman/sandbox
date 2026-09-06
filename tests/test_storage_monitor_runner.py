@@ -336,5 +336,15 @@ class MonitorRunnerCase(unittest.TestCase):
         self.assertEqual(stored["errors"], errors)
 
 
+    def test_storage_monitor_runner_never_accesses_host_memory_service(self):
+        with mock.patch("sandbox.resources.context.host_memory_status", side_effect=AssertionError("host_memory_status")), \
+             mock.patch("sandbox.resources.context.host_memory_apply", side_effect=AssertionError("host_memory_apply")):
+            provider = _Provider(self.capacity(50))
+            _service, payload = self.run_monitor(provider)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "normal")
+            self.assertNotIn("swap", payload["data"])
+            self.assertNotIn("memory", payload["data"])
+
 if __name__ == "__main__":
     unittest.main()

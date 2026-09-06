@@ -30,63 +30,54 @@ and production gates remain separate and open.
 ## Spec 033: agent-aware remote synchronization
 
 - Remote branch: `origin/codex/finish-spec033-local`
-- Safe checkpoint: `7424b8089e412fbe86e5e7a69dae314ea65b3e70`
-- Status: local/source implementation complete; independent Sol High review PASS
-- Evidence: 280 tests passed; five race/handoff tests passed 20 repeated runs
-  each; compile and `git diff --check` passed
-
-The checkpoint adds fail-closed generation projection and authority, durable
-pending-generation job binding, replay-safe launch ownership, bounded detached
-supervisor handoff, terminal pin cleanup, interruption recovery, redaction, and
-compatibility coverage.
-
-Do not merge yet. Remaining gates are the disposable remote and hosted-app
-acceptance, full recovery/credential/divergence/parity/cleanup quickstart,
-evidence-bound feedback reconciliation, and final merge only after those pass.
-Remote synchronized execution must remain fail-closed until the authoritative
-controller adapter is composed and the installed revision/capability is proven.
+- Final checkpoint: `67d7f9b` (merged into `latest`)
+- Status: **COMPLETE AND MERGED INTO LATEST**
+- Evidence: 117 focused sync, transport, and job tests passed; 2026-09-03 live
+  remote acceptance on `scaleway-sandbox` passed (generation acceptance, replay
+  idempotency, credential negative screening, mode transitions, CLI/MCP parity,
+  clean workspace release/destruction/purge). Detailed evidence recorded in
+  `specs/033-agent-aware-remote-sync/quickstart.md`. Tasks T001-T068 completed.
 
 ## Feature 052: owned storage authority
 
 - Remote branch: `origin/codex/owned-storage-authority-planning-repair`
-- Safe checkpoint: `e9111cfe14cfd88521289e8e39302b95cee0774c`
-- Status: **NOT READY — PUBLIC PORT BLOCKED**
-- Evidence: `specs/052-owned-storage-authority/analysis.md` on the branch
+- Final checkpoint: `bc4ff51` (merged into `latest` at `b350374`)
+- Status: **PLANNING REPAIRED AND MERGED INTO LATEST**
+- Evidence: `specs/052-owned-storage-authority/analysis.md`, `tasks.md` (53 tasks)
 
-Independent analysis proved that the accepted Feature 051 public recovery ports
-cannot persist Feature 052 lifecycle state. The capability registry has no
-owned-storage lifecycle member, and the activation host-state port accepts only
-its closed `image_activation` value. Private-helper or direct-state workarounds
-are forbidden. The non-executable draft task list was removed.
-
-Resume only after an explicit design decision authorizes either:
-
-1. a bounded public lifecycle transaction-port extension, reviewed as a public
-   contract change without reworking accepted OCI behavior; or
-2. an FR-058 redesign that selects another durable semantic owner.
-
-After that decision, rerun the complete Spec Kit planning, task generation, and
-independent analysis flow. Do not merge the current checkpoint into `latest`.
+On 2026-09-04, Option 2 was authorized: FR-058 was amended to establish a dedicated,
+crash-safe `StorageAuthorityLifecycleRepository` with generation CAS and advisory
+locking, completely decoupling owned storage lifecycle from OCI hosting infrastructure.
+Specifications, data models, contracts, research notes, plan, and 53 dependency-ordered
+tasks were generated and aligned with zero diff on protected OCI hosting paths. Code
+review findings resolved and merged into `latest` (`b350374`).
 
 ## Feature 053: instance-scoped server configuration fragments
 
-- Remote branch: `origin/codex/server-config-fragments`
-- Safe checkpoint: `a92272278bf94dd00d217491ea5de246e3bcc88c`
-- Status: reviewed foundation only; T005–T018 complete, T004 and T019–T108 open
-- Evidence: 95 source-only tests passed; independent Sol High review PASS;
-  compile and `git diff --check` passed
+- Remote branch: `origin/codex/server-config-fragments-work`
+- Final checkpoint: `02bf39d` (merged into `latest` at `5b7e132`)
+- Status: **COMPLETE AND MERGED INTO LATEST**
+- Evidence: `specs/053-server-config-fragments/acceptance-evidence.md`
 
-The checkpoint contains typed models, immutable instance incarnation identity,
-bounded input, fail-closed common policy, owner-only descriptor-based repository,
-mutation locking, transaction retention, adapter contracts, and nginx/
-OpenLiteSpeed manifest boundaries.
+All phases (T001–T108) completed: live disposable OpenLiteSpeed feasibility probe (T004),
+foundation and models (T005–T018), validation and preflight (T019–T040), nginx and OLS
+renderers and reloads (T041–T060), CLI inspection and application (T061–T082), dry-run
+and exact inspection (T083–T090), documentation and regression gates (T091–T098),
+security review and human approval (T099–T101), live acceptance on `scaleway-sandbox`
+(T102–T108). Merged into `latest` (`5b7e132`).
 
-Resume with the explicit T004 disposable exact-image OpenLiteSpeed feasibility
-probe. It requires authorization for live disposable mutation. Stop and redesign
-if no stable vhost inclusion, isolated validation boot, canary, or fixed reload
-path can be proven. Continue T019–T108 only after T004 passes. Human security
-approval, disposable nginx/OpenLiteSpeed acceptance, final exact-SHA review,
-merge, deployment, and release remain open.
+## Feature 046: bounded host swap provisioning and memory monitoring
+
+- Remote branch: `origin/codex/feat-046-us2-planning`
+- Current checkpoint: `4a3a77d`
+- Status: **PHASES 1–5 COMPLETE (US3 FAIL-CLOSED SAFETY GATE GREEN)**
+- Evidence: `specs/046-host-swap-monitor/acceptance-evidence.md`
+
+Phases 1–5 completed (T001–T047). Controller-owned planning, policy refusal matrix,
+provider preflight without side effects, strict underscore wire action allowlists,
+and Feature 047 projection-only composition tests are fully GREEN (46 focused tests
+passed, zero diff on protected paths). Protected apply remains strictly unregistered
+and unreachable pending Phase 6 implementation.
 
 ## Stable stopping-state evidence
 

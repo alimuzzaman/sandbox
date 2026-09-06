@@ -66,7 +66,8 @@ class RuntimeObserverV2:
         proven = []
         for image in expected:
             observed = self.adapter.observe_local_image(
-                target=target, repository_digest=image["repo_digest"])
+                target=target, repository_digest=image["repo_digest"],
+                config_digest=image["config_digest"])
             comparable = {
                 "repository": image["repository"].split("/", 1)[1],
                 "repo_digest": image["repo_digest"],
@@ -91,7 +92,8 @@ class RuntimeObserverV2:
             raise ActivationContractError("local_image_mismatch")
         for image in generation.images:
             observed = self.adapter.observe_local_image(
-                target=generation.target, repository_digest=image["image_ref"])
+                target=generation.target, repository_digest=image["image_ref"],
+                config_digest=image["config_digest"])
             expected = {"repository": image["image_ref"].split("@", 1)[0].split("/", 1)[1],
                         "repo_digest": image["image_ref"],
                         "config_digest": image["config_digest"],
@@ -111,11 +113,21 @@ class RuntimeObserverV2:
                 topology_digest: str, compose_config_hashes: dict[str, str],
                 edge_identity: str, snapshot_digest: str) -> dict[str, Any]:
         selected = tuple(item["service"] for item in bindings)
+        by_service = {item["service"]: item for item in bindings}
+        by_image = {item["name"]: item for item in images}
+        image_identities = {
+            service: {
+                "image_ref": by_image[binding["image"]]["image_ref"],
+                "config_digest": by_image[binding["image"]]["config_digest"],
+                "local_image_id": by_image[binding["image"]]["local_image_id"],
+            }
+            for service, binding in by_service.items()
+        }
         raw = self.adapter.observe_running_v2(
             target=target, services=selected, compose_project=compose_project,
             topology_digest=topology_digest,
             compose_config_hashes=compose_config_hashes,
-            snapshot_digest=snapshot_digest)
+            snapshot_digest=snapshot_digest, image_identities=image_identities)
         if type(raw) is not dict or set(raw) != {
                 "target_epoch_start", "target_epoch_end", "target_identity_start",
                 "target_identity_end", "runtime_epoch_start", "runtime_epoch_end", "services"}:
@@ -127,8 +139,6 @@ class RuntimeObserverV2:
                 or raw["runtime_epoch_start"] != raw["runtime_epoch_end"]
                 or raw["runtime_epoch_start"] != target["daemon_identity"]):
             raise ActivationContractError("runtime_mismatch")
-        by_service = {item["service"]: item for item in bindings}
-        by_image = {item["name"]: item for item in images}
         rows = raw["services"]
         if type(rows) is not list or len(rows) != len(bindings):
             raise ActivationContractError("runtime_mismatch")

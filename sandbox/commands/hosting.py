@@ -29,6 +29,7 @@ import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
+from sandbox.hosting import edge_cache
 from sandbox.hosting.recovery.models import (
     MAX_RECEIPT_BYTES, RecoveryAction, RecoveryRequest, TargetIdentity,
     canonical_digest, validate_edge_intent,
@@ -1531,7 +1532,7 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
     """Return the canonical non-secret edge and DNS intent for one registration."""
     plan = hosting.desired_plan(
         validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
-    return validate_edge_intent({
+    intent = {
         "records": sorted(({
             "hostname": item.get("hostname"), "address": item.get("address"),
             "proxied": item.get("proxied"), "mode": item.get("mode"),
@@ -1547,7 +1548,11 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
             "enabled": bool(validated.get("basic_auth")),
             "username": (validated.get("basic_auth") or {}).get("username"),
         },
-    })
+    }
+    cache_purge = (validated.get("cloudflare") or {}).get("cache_purge") or {}
+    if cache_purge.get("enabled") is True:
+        intent["cache_purge"] = cache_purge
+    return validate_edge_intent(intent)
 
 
 def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
@@ -1575,19 +1580,33 @@ def _guarded_host_apply_plan(validated: dict, entry: dict, remote_name: str,
     return plan
 
 
-def _authenticated_machine_identity(remote_name: str) -> str:
-    """Read Feature 046's authenticated stable host projection."""
-    from sandbox.resources.context import host_memory_status_projection
+def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = False) -> str:
+    """Read Feature 046's authenticated stable host projection.
+
+    Image staging needs the authenticated machine identity, but it must not
+    accidentally become dependent on the optional host-memory/swap monitor.
+    The remote status envelope still authenticates the service/runtime and
+    carries a typed target identity when resource evidence is partial.  Keep
+    the complete-evidence requirement for ordinary hosting recovery; the
+    immutable-image path opts into the identity-only projection explicitly.
+    """
+    from sandbox.resources.context import _build_host_memory_service
 
     try:
-        projection = host_memory_status_projection(remote_name, budget_seconds=15)
+        service = _build_host_memory_service(remote_name)
+        status = service.status(15)
+        data = status.get("data") if isinstance(status, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("host-memory status data is unavailable")
+        projection = service.projection(data)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RecoveryAuthorityError(
             "stable machine identity is unavailable") from exc
     identity = getattr(projection, "target_identity", None)
     evidence_state = getattr(projection, "evidence_state", None)
     if (not isinstance(identity, str) or not identity or len(identity) > 128 or
-            evidence_state != "known"):
+            (not allow_partial and evidence_state != "known") or
+            (allow_partial and evidence_state in {"unknown", "malformed", "unsupported"})):
         raise RecoveryAuthorityError("stable machine identity is unavailable")
     return identity
 
@@ -1641,6 +1660,7 @@ def _nonsecret_host_intent(validated: dict) -> str:
         "routes": validated.get("routes"),
         "healthcheck": validated.get("healthcheck"),
         "cloudflare": validated.get("cloudflare"),
+        "edge_cache": (validated.get("cloudflare") or {}).get("cache_purge"),
         "basic_auth": {key: value for key, value in
                        (validated.get("basic_auth") or {}).items()
                        if key != "password"},
@@ -2117,6 +2137,16 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         recorded_runtime["source_revision"] = _safe_source_revision_receipt(
             recorded_runtime.get("source_revision"),
         )
+    edge_cache_receipt = recorded.get("edge_cache_purge")
+    if edge_cache_receipt is None:
+        # v2 activation owns its receipt inside the shared host record's
+        # additive image-activation envelope.  Project only the closed cache
+        # receipt into status; never parse a second state file here.
+        activation = recorded.get("image_activation")
+        current = activation.get("current") if isinstance(activation, dict) else None
+        edge_receipt = current.get("edge_receipt") if isinstance(current, dict) else None
+        if isinstance(edge_receipt, dict):
+            edge_cache_receipt = edge_receipt.get("cache_purge_receipt")
     services = [
         validated["compose"]["service"],
         *validated["compose"].get("background_services", []),
@@ -2132,6 +2162,7 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "observed_runtime_revision": recorded.get("observed_runtime_revision"),
         "runtime": recorded_runtime,
         "edge": recorded.get("edge") or {"state": "unknown"},
+        "edge_cache_purge": edge_cache_receipt,
         "generation": recorded.get("generation", 0),
         "latest_recovery": _latest_recovery_summary(recorded),
         "state_record": "present" if recorded else "missing",
@@ -2804,7 +2835,8 @@ def _resolve_host_source_commit(project_root: str) -> str:
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
-                progress=None, recovery_repository=None) -> dict:
+                progress=None, recovery_repository=None,
+                purge_edge_cache: bool = False) -> dict:
     durable_save = (recovery_repository._write if recovery_repository is not None
                     else hosting.save_host_state)
     broker_guard = (personal_secrets.hosting_binding_broker_lock()
@@ -2958,6 +2990,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     previous_caddy = _read_remote_optional(entry, caddy_path)
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
+    edge_cache_receipt = None
 
     def rollback() -> None:
         nonlocal reservation
@@ -2988,7 +3021,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             raise hosting.HostingError("; ".join(failures))
 
     def apply() -> None:
-        nonlocal reservation
+        nonlocal reservation, edge_cache_receipt
         if stream_progress is not None:
             stream_progress(f"source reset to {sha}")
             stream_progress(f"apply log: {apply_log}")
@@ -3148,6 +3181,58 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         _verify_edge(validated["routes"], **verify_kwargs)
+        cache_policy = (validated.get("cloudflare") or {}).get("cache_purge") or {}
+        if cache_policy.get("on_deploy") is True or purge_edge_cache:
+            if cache_policy.get("enabled") is not True:
+                raise RuntimeError("edge-cache purge requested without an approved cache policy")
+            cache_request_id = (
+                f"host-cache-{validated['project']}-{validated['environment']}-"
+                f"{sha[:24]}"
+            )
+            purge = edge_cache.build_purge_plan(
+                policy=cache_policy, project=validated["project"],
+                environment=validated["environment"], request_id=cache_request_id,
+                deployment_revision=sha,
+            )
+            retained = previous_entry.get("edge_cache_purge")
+            if isinstance(retained, dict) and retained.get("request_digest") == purge["request_digest"] \
+                    and retained.get("status") == "complete":
+                edge_cache_receipt = retained
+            else:
+                prepared = {"schema_version": 1, "status": "prepared",
+                             "request_id": purge["request_id"],
+                             "request_digest": purge["request_digest"],
+                             "policy_digest": purge["policy_digest"],
+                             "scope": purge["scope"], "zones": [
+                                 {"zone": zone, "state": "prepared"}
+                                 for zone in purge["zones"]]}
+                state["hosts"][key]["edge_cache_purge"] = prepared
+                durable_save(state)
+                def before_zone(zone):
+                    current = state["hosts"][key]["edge_cache_purge"]
+                    for item in current["zones"]:
+                        if item.get("zone") == zone["name"]:
+                            item["zone_id"] = zone["id"]
+                            item["state"] = "effect_entered"
+                    durable_save(state)
+                def after_zone(item):
+                    current = state["hosts"][key]["edge_cache_purge"]
+                    for row in current["zones"]:
+                        if row.get("zone") == item["zone"]:
+                            row.update(item)
+                    durable_save(state)
+                try:
+                    edge_cache_receipt = edge_cache.purge_plan(
+                        client=client, plan=purge,
+                        before_zone=before_zone, after_zone=after_zone,
+                    )
+                except edge_cache.EdgeCacheError as exc:
+                    current = state["hosts"][key].get("edge_cache_purge") or {}
+                    current["status"] = "acceptance_unknown" if exc.code == "acceptance_unknown" else "refused"
+                    durable_save(state)
+                    raise RuntimeError(f"edge-cache purge failed ({exc.code})") from None
+                state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
+                durable_save(state)
         _release_host_apply_reservation(entry, reservation)
         reservation = None
         state["hosts"][key].update({
@@ -3160,6 +3245,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "caddy_name": caddy_name,
             "edge": {"state": "ready"},
         })
+        if edge_cache_receipt is not None:
+            state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
         durable_save(state)
 
     hosting.apply_with_rollback(apply, rollback)
@@ -3171,6 +3258,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "observed_runtime_revision": state["hosts"][key].get("observed_runtime_revision"),
         "runtime": state["hosts"][key].get("runtime"),
         "edge": state["hosts"][key].get("edge"),
+        "edge_cache_purge": state["hosts"][key].get("edge_cache_purge"),
         "derived_environment": runtime.get("derived_environment", []),
     }
     if progress is not None:
@@ -3193,11 +3281,14 @@ def _cmd_host_stage(args) -> None:
         if getattr(args, "expected_generation", None) is None: missing.append("--expected-generation")
         die("host stage requires explicit " + ", ".join(missing) + "; no staging state was opened")
     status_only = getattr(args, "stage_status", False)
+    reconcile = getattr(args, "reconcile", False)
+    if status_only and reconcile:
+        die("host stage --stage-status cannot be combined with --reconcile")
     if not status_only and not getattr(args, "confirm", False):
         die("host stage is protected; pass --confirm after reviewing the exact verified plan")
     response_schema = 0
     try:
-        from sandbox.core._paths import ENV_LOCAL, RUNTIME_DIR
+        from sandbox.core._paths import RUNTIME_DIR
         from sandbox.hosting.images import validate_verified_image_plan
         from sandbox.hosting.images.plan_set import VerifiedImagePlanSet
         from sandbox.hosting.images.staging_models import StageRequest, StagingPolicy
@@ -3225,13 +3316,13 @@ def _cmd_host_stage(args) -> None:
             raise ValueError("verified plan target scope does not match explicit stage selectors")
         scope_id = hashlib.sha256(
             f"{args.remote}\0{scope.project}\0{args.environment}".encode()).hexdigest()
-        policy_path = RUNTIME_DIR / "hosting" / "image-staging" / "policies" / f"{scope_id}.json"
+        policy_path = _host_image_staging_policy_path(
+            scope_id, plan.plan_set_digest if is_v2 else None)
         private = json.loads(policy_path.read_text())
         if type(private) is not dict or set(private) != {"policy", "binding", "secret_sources"}:
             raise ValueError("machine staging policy is invalid")
         policy = StagingPolicySet.from_mapping(private["policy"]) if is_v2 \
             else StagingPolicy.from_mapping(private["policy"])
-        binding = CredentialBinding.from_dict(private["binding"])
         request = (StageRequestSet.create(
             request_id=args.request_id, expected_generation=args.expected_generation,
             plan_set=plan, staging_policy_digest=policy.policy_digest, target=policy.target,
@@ -3243,9 +3334,32 @@ def _cmd_host_stage(args) -> None:
         if status_only:
             service_type = ImagePlanSetStagingService if is_v2 else ImageStagingService
             result = service_type(repository=repository, broker=None, worker=None).status(request)
+        elif reconcile:
+            if not is_v2:
+                raise ValueError("pre-credential reconciliation requires schema v2")
+            transport = RegisteredRemoteImageTransport()
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=None, worker=None)
+            def observe_absence(supplied_request, record):
+                from sandbox.hosting.images.staging_worker import unit_name
+                unit = unit_name(supplied_request.request_id, supplied_request.request_digest)
+                observed = transport.observe_precredential_absence(args.remote, unit)
+                return {"schema_version": 1,
+                    "request_id": supplied_request.request_id,
+                    "request_digest": supplied_request.request_digest,
+                    "generation": record["generation"],
+                    "ledger_revision": record["ledger_revision"], **observed}
+            def observe_cleanup(supplied_request, _record):
+                from sandbox.hosting.images.staging_worker import unit_name
+                unit = unit_name(supplied_request.request_id, supplied_request.request_digest)
+                return transport.observe_posteffect_cleanup(args.remote, unit)
+            result = service.reconcile_uncertain_failure(
+                request, policy, observe_absence, observe_cleanup)
         else:
+            binding = CredentialBinding.from_dict(private["binding"])
             registry = SourceRegistry(
-                project_root, private["secret_sources"], personal_path=ENV_LOCAL,
+                project_root, private["secret_sources"],
+                personal_path=personal_secrets.secret_file(),
                 project_scope=str(project_root),
             )
             resolver = SecretReferenceResolver(registry, owner=binding.owner)
@@ -3275,7 +3389,10 @@ def _cmd_host_stage(args) -> None:
         raise SystemExit(1)
     payload = result.as_mapping()
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    if not result.ok and result.result_class != "in_progress": raise SystemExit(1)
+    if not result.ok and result.result_class != "in_progress" \
+            and not (reconcile and result.code in {
+                "precredential_bootstrap_failed", "cleanup_reconciled"}):
+        raise SystemExit(1)
 
 
 def _cmd_host_image_verify(args) -> None:
@@ -3323,12 +3440,69 @@ class _HostImageEdgeAdapter:
         self.activation_repository = activation_repository
         self.target_identity = target_identity
         self.results = {}
+        self._generation_checkpoint = None
+
+    def set_generation_checkpoint(self, callback) -> None:
+        """Install the target-owner callback used around each provider POST."""
+        self._generation_checkpoint = callback
+
+    def clear_generation_checkpoint(self) -> None:
+        self._generation_checkpoint = None
 
     def observe_plan(self):
         from sandbox.hosting.images.activation.models import activation_digest
-        _verify_edge(self.validated["routes"],
-                     healthcheck_path=self.validated["healthcheck"]["path"],
-                     basic_auth_enabled=bool(self.validated.get("basic_auth")))
+        # A first immutable activation may legitimately have no origin yet:
+        # the runtime effect below is what creates the web listener behind the
+        # already-declared edge. Retained terminal refusals at generation zero
+        # do not establish an origin. Keep live proof for effect-bearing history
+        # and for the post-effect
+        # ``apply_generation_v2`` call, which invokes this method again.
+        bootstrap = False
+        if self.activation_repository is not None and self.target_identity is not None:
+            snapshot = getattr(self.activation_repository, "snapshot", None)
+            if callable(snapshot):
+                state = snapshot(self.target_identity)
+                results = state.get("results")
+                only_refusals = type(results) is dict and all(
+                    type(entry) is dict and type(entry.get("result")) is dict
+                    and entry["result"].get("result_class") == "refused"
+                    and entry["result"].get("ok") is False
+                    and entry["result"].get("starting_generation") == 0
+                    and entry["result"].get("resulting_generation") == 0
+                    and entry["result"].get("generation_digest") is None
+                    for entry in results.values())
+                recoveries = state.get("recovery_results")
+                only_effect_free_recoveries = type(recoveries) is dict and all(
+                    type(result) is dict
+                    and result.get("code") == "recovery_no_effect"
+                    and result.get("ok") is False
+                    and result.get("promoted") is False
+                    and type(result.get("starting_generation")) is int
+                    and result["starting_generation"] == 0
+                    and type(result.get("resulting_generation")) is int
+                    and result["resulting_generation"] == 0
+                    and type(results) is dict
+                    and type(result.get("activation_request_id")) is str
+                    and result.get("activation_request_id") in results
+                    and type(results[result["activation_request_id"]]) is dict
+                    and type(results[result["activation_request_id"]].get("result")) is dict
+                    and results[result["activation_request_id"]]["result"].get("code")
+                        == "recovery_no_effect"
+                    for result in recoveries.values())
+                bootstrap = (
+                    state.get("generation") == 0
+                    and state.get("current") is None
+                    and state.get("previous") is None
+                    and state.get("active") is None
+                    and only_refusals
+                    and not state.get("tombstones")
+                    and state.get("recovery_provisional") is None
+                    and only_effect_free_recoveries
+                )
+        if not bootstrap:
+            _verify_edge(self.validated["routes"],
+                         healthcheck_path=self.validated["healthcheck"]["path"],
+                         basic_auth_enabled=bool(self.validated.get("basic_auth")))
         health_path = self.validated["healthcheck"]["path"]
         routes = sorted(({
             "hostname": item["hostname"], "mode": item["mode"],
@@ -3372,15 +3546,75 @@ class _HostImageEdgeAdapter:
             "sandbox.hosting.images.generation-bound-edge-receipt.v2", body)}
 
     def apply_generation_v2(self, **values) -> dict:
-        receipt = self._v2_receipt(**values)
+        cache_purge_receipt = None
+        cache_policy = (self.validated.get("cloudflare") or {}).get("cache_purge") or {}
+        if cache_policy.get("on_deploy") is True:
+            from sandbox.hosting.edge_cache import build_purge_plan, purge_plan, EdgeCacheError
+            durable = None
+            if self.activation_repository is not None and self.target_identity is not None:
+                state = self.activation_repository.snapshot(self.target_identity)
+                active = state.get("active") if isinstance(state, dict) else None
+                durable = active.get("edge_result") if isinstance(active, dict) else None
+                if isinstance(durable, dict):
+                    if (durable.get("request_digest") != values.get("request_digest")
+                            or durable.get("generation") != values.get("generation")
+                            or durable.get("generation_subject_digest") !=
+                            values.get("generation_subject_digest")):
+                        raise RuntimeError("edge cache request conflict")
+                    if durable.get("terminal") is True:
+                        return durable
+                    states = {row.get("state") for row in durable.get("zones", [])
+                              if isinstance(row, dict)}
+                    if states & {"effect_entered", "acknowledged", "acceptance_unknown"}:
+                        raise EdgeCacheError("acceptance_unknown")
+            request_id = (
+                f"host-cache-{self.validated['project']}-{self.validated['environment']}-"
+                f"{values['request_digest'].removeprefix('sha256:')[:24]}"
+            )
+            try:
+                purge = build_purge_plan(
+                    policy=cache_policy, project=self.validated["project"],
+                    environment=self.validated["environment"], request_id=request_id,
+                    generation_subject_digest=values.get("generation_subject_digest"),
+                    activation_request_digest=values["request_digest"],
+                )
+                def before_zone(zone):
+                    if self._generation_checkpoint is not None:
+                        self._generation_checkpoint({
+                            "zone": zone["name"], "zone_id": zone["id"],
+                            "state": "effect_entered"})
+                def after_zone(item):
+                    if self._generation_checkpoint is not None:
+                        self._generation_checkpoint(item)
+                def prepare_zones(zones):
+                    if self._generation_checkpoint is not None:
+                        for zone in zones:
+                            self._generation_checkpoint({
+                                "zone": zone["name"], "zone_id": zone["id"],
+                                "state": "prepared"})
+                cache_purge_receipt = purge_plan(
+                    client=cloudflare.Client(), plan=purge,
+                    before_zone=before_zone, after_zone=after_zone,
+                    prepare_zones=prepare_zones)
+            except EdgeCacheError as exc:
+                raise RuntimeError(f"edge-cache purge failed ({exc.code})") from None
+        receipt = self._v2_receipt(**values, cache_purge_receipt=cache_purge_receipt)
         self.results[(values["request_digest"], values["generation"])] = receipt
         return receipt
 
     def observe_generation_v2(self, **values) -> dict:
         # Rerun the manifest-derived route observation.  Stored state is only a
         # comparison target; it is not evidence that the edge is ready now.
-        current = self._v2_receipt(**values)
         retained = self.results.get((values["request_digest"], values["generation"]))
+        current = self._v2_receipt(
+            **values,
+            cache_purge_receipt=(retained or {}).get("cache_purge_receipt")
+            if isinstance(retained, dict) else None,
+        )
+        if (self.validated.get("cloudflare") or {}).get("cache_purge", {}).get("on_deploy") is True \
+                and (not isinstance(retained, dict) or retained.get("cache_purge_receipt") is None):
+            from sandbox.hosting.images.activation.models import ActivationContractError
+            raise ActivationContractError("edge_incomplete")
         if retained is not None and retained != current:
             from sandbox.hosting.images.activation.models import ActivationContractError
             raise ActivationContractError("edge_uncertain")
@@ -3520,8 +3754,34 @@ def _provision_pairs(values, label: str) -> dict[str, str]:
     return result
 
 
+def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None = None) -> Path:
+    """Return the owner-only staging policy path for one immutable plan.
+
+    Legacy v1 staging keeps its original target-scoped filename.  V2 plans are
+    immutable and may legitimately advance while an earlier failed attempt is
+    still retained, so key their local policy by the exact plan digest.  This
+    preserves replay for the same plan without letting a stale plan block a
+    new one or requiring deletion of retained authority evidence.
+    """
+    if type(scope_id) is not str or not scope_id:
+        raise ValueError("staging policy selector is invalid")
+    if plan_set_digest is None:
+        name = f"{scope_id}.json"
+    else:
+        if (type(plan_set_digest) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", plan_set_digest) is None):
+            raise ValueError("staging plan digest is invalid")
+        name = f"{scope_id}-{plan_set_digest.removeprefix('sha256:')}.json"
+    # Resolve at call time so the host-stage command and its isolated tests can
+    # honor the same runtime root as the rest of Sandbox's path layer.
+    from sandbox.core import _paths
+    return _paths.RUNTIME_DIR / "hosting" / "image-staging" / "policies" / name
+
+
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
+    from sandbox.transports.remote_hosting_activation import RemoteActivationError
+
     phase = getattr(args, "provision_phase", None)
     if phase not in {"machine-policy", "stage-bundle", "activation-bundle"}:
         die("host image provision requires --provision-phase; no authority was opened")
@@ -3539,14 +3799,15 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
             read_stable_file,
         )
         from sandbox.hosting.images.provisioning import (
-            SshAgentRollbackSigner, install_owner_only_json,
+            ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
             install_owner_only_json_pair,
-            prepare_activation_bundle, prepare_machine_policy, prepare_stage_bundle,
+            prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
+            prepare_stage_bundle, reuse_owner_only_stage_bundle,
+            replace_expired_stage_bundle, install_activation_bundle,
         )
         from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_v2 import StagedImageProofSet
-        from sandbox.core._paths import ENV_LOCAL
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
         from sandbox.transports.remote_hosting_images import RegisteredRemoteImageTransport
 
@@ -3600,7 +3861,9 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     "rollback_public_key": signer.public_key,
                     "compose_provider_revision": args.compose_provider_revision}
                 authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
-                path = root / "image-verification" / "policies" / f"{selector}.json"
+                policy_identity = policy.policy_digest.removeprefix("sha256:")
+                path = (root / "image-verification" / "policies"
+                        / f"{selector}-{policy_identity}.json")
                 authority_disposition, disposition = install_owner_only_json_pair((
                     (authority_path, authority), (path, policy.as_mapping())))
                 response.update(ok=True, result_class=disposition, code="prepared",
@@ -3619,67 +3882,84 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     raise ValueError("verified plan target changed")
                 helper_path = Path(__file__).parents[1] / "hosting" / "images" / "staging_helper.py"
                 helper_digest = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
-                revision = subprocess.run(("git", "rev-parse", "HEAD"), cwd=Path(__file__).parents[2],
+                # Bind the remote helper to the revision that actually owns
+                # its source file. Controller-only changes must not make an
+                # unchanged installed staging helper look like a new runtime.
+                revision = subprocess.run(("git", "log", "-1", "--format=%H", "--",
+                    str(helper_path.relative_to(Path(__file__).parents[2]))),
+                    cwd=Path(__file__).parents[2],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True,
                     env={"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C"}).stdout.strip()
                 helper = HelperIdentity(helper_digest, "sandbox-image-stage-helper-v2", revision,
                     "systemd-cgroup-v2-batch-stage-v2")
-                machine = _authenticated_machine_identity(args.remote)
+                machine = _authenticated_machine_identity(args.remote, allow_partial=True)
                 observed = RegisteredRemoteImageTransport().observe_authority(args.remote, helper)
                 target = StagingTarget(machine, target_id, observed["daemon_identity"])
                 response["target"] = target.as_mapping()
                 if phase == "stage-bundle":
-                    stage_generation, stage_ledger_revision = \
-                        StageRepository().target_revision(target_id)
-                    if args.expected_generation != stage_generation:
-                        raise ValueError("stage generation changed")
-                    from sandbox.isolation.credential_binding import CredentialBinding
+                    stage = StageRepository()
+                    activation = ActivationRepository(
+                        host_state_port=recovery.activation_host_state_port(),
+                        stage_repository=stage,
+                        target_mutation_port=recovery.target_mutation_port("activate"))
+                    activation_generation = activation.snapshot_under_target_mutation(
+                        target_id)["generation"]
+                    if args.expected_generation != activation_generation:
+                        raise ProvisioningError("generation_mismatch")
                     from sandbox.isolation.credential_resolver import SecretReferenceResolver
                     from sandbox.config.secrets import normalize_secret_config
                     from sandbox.secrets.sources import SourceRegistry
                     from sandbox.secrets.writer import load_revision_key
                     secrets = normalize_secret_config({"root": validated["project_root"],
                         "secrets": cfg.get("secrets", {})})["sources"]
-                    registry = SourceRegistry(validated["project_root"], secrets,
-                        personal_path=ENV_LOCAL, project_scope=validated["project_root"])
+                    registry = SourceRegistry(
+                        validated["project_root"], secrets,
+                        personal_path=personal_secrets.secret_file(),
+                        project_scope=validated["project_root"],
+                    )
                     source_alias = args.credential_source_reference.split("/", 1)[0]
                     source_descriptor = secrets.get(source_alias)
                     owner = (source_descriptor.get("owner")
                         if isinstance(source_descriptor, dict)
                         and isinstance(source_descriptor.get("owner"), str)
                         else registry.policy(source_alias).scope)
-                    binding_seed = json.dumps({"target": target.as_mapping(),
-                        "plan_set_digest": plan.plan_set_digest,
-                        "source_reference": args.credential_source_reference,
-                        "expires_at": args.credential_expires_at},
-                        sort_keys=True, separators=(",", ":")).encode()
-                    binding_hex = hashlib.sha256(
-                        b"sandbox-hosting-stage-binding-v2\0" + binding_seed).hexdigest()
-                    binding = CredentialBinding(
-                        binding_id="image-stage-" + binding_hex[:32],
-                        instance_id="host-" + hashlib.sha256(machine.encode()).hexdigest()[:32],
-                        source_reference=args.credential_source_reference,
-                        policy_digest=hashlib.sha256(b"policy\0" + binding_seed).hexdigest(),
-                        egress_digest=hashlib.sha256(b"egress\0" + binding_seed).hexdigest(),
-                        broker_digest=hashlib.sha256(b"broker\0" + binding_seed).hexdigest(),
-                        scheme="https", host="ghcr.io", port=443, method="GET",
-                        path="/token", auth_form="authorization_bearer",
-                        expires_at=args.credential_expires_at, owner=owner,
-                        version=1, state="ready")
                     resolver = SecretReferenceResolver(registry, owner=owner)
                     revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
-                    credential_revision = resolver.observe_reference_revision(
-                        binding, revision_key=revision_key)
-                    bundle = prepare_stage_bundle(plan=plan, target=target, helper=helper,
-                        binding=binding, credential_reference_revision=credential_revision,
-                        secret_sources=secrets)
-                    path = root / "image-staging" / "policies" / f"{selector}.json"
-                    disposition = install_owner_only_json(path, bundle)
+                    path = _host_image_staging_policy_path(
+                        selector, plan.plan_set_digest)
+                    with stage.policy_provisioning_snapshot(target_id) as (
+                            stage_generation, stage_ledger_revision):
+                        binding = prepare_stage_binding(
+                            plan=plan, target=target, machine_identity=machine,
+                            source_reference=args.credential_source_reference,
+                            expires_at=args.credential_expires_at, owner=owner)
+                        credential_revision = resolver.observe_reference_revision(
+                            binding, revision_key=revision_key)
+                        bundle = reuse_owner_only_stage_bundle(
+                            path, plan=plan, target=target, helper=helper,
+                            machine_identity=machine,
+                            source_reference=args.credential_source_reference, owner=owner,
+                            credential_reference_revision=credential_revision,
+                            secret_sources=secrets)
+                        if bundle is None:
+                            bundle = prepare_stage_bundle(
+                                plan=plan, target=target, helper=helper, binding=binding,
+                                credential_reference_revision=credential_revision,
+                                secret_sources=secrets)
+                            try:
+                                disposition = install_owner_only_json(path, bundle)
+                            except ProvisioningError as exc:
+                                if exc.code != "conflict":
+                                    raise
+                                disposition = replace_expired_stage_bundle(path, bundle)
+                        else:
+                            disposition = "replayed"
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,
                         staging_policy_digest=bundle["policy"]["policy_digest"],
                         stage_generation=stage_generation,
                         stage_ledger_revision=stage_ledger_revision,
+                        activation_generation=activation_generation,
                         installed_path=str(path))
                 else:
                     proof = StagedImageProofSet.from_mapping(_load_json_bytes(read_stable_file(
@@ -3697,7 +3977,13 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         host_state_port=recovery.activation_host_state_port(),
                         stage_repository=stage,
                         target_mutation_port=recovery.target_mutation_port("activate"))
-                    state = activation.snapshot(target_id)
+                    # The provisioning command already owns the target through
+                    # the image-provision capability.  Reacquiring the
+                    # activation lock here uses a separate file descriptor and
+                    # deadlocks until the bounded lock timeout, surfacing as
+                    # the opaque artifact_invalid refusal.  Read the nested
+                    # activation state through the under-lock port instead.
+                    state = activation.snapshot_under_target_mutation(target_id)
                     generation = state["generation"]
                     if args.expected_generation != generation:
                         raise ValueError("activation generation changed")
@@ -3741,6 +4027,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         compose_files=prepare_selector["compose_files"],
                         project_name=prepare_selector["project_name"],
                         selected_services=plan.policy.persistent_services,
+                        allowed_services=(plan.policy.persistent_services
+                                          + plan.policy.one_shot_services),
                         service_image_bindings=images, environment_bindings=env_bindings,
                         target=target.as_mapping(), snapshot_id=snapshot_id,
                         provider_revision=provider_revision)
@@ -3759,7 +4047,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         authority_revision=signer_config["rollback_authority_revision"],
                         signer=signer, grant_ttl_seconds=args.grant_ttl_seconds)
                     path = root / "image-activation" / "policies" / f"{selector}.json"
-                    disposition = install_owner_only_json(path, bundle)
+                    disposition = install_activation_bundle(path, bundle)
                     response.update(ok=True, result_class=disposition, code="prepared",
                         plan_set_digest=plan.plan_set_digest,
                         proof_set_digest=proof.proof_digest,
@@ -3770,6 +4058,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         activation_generation=generation, installed_path=str(path))
     except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         response["code"] = getattr(exc, "code", "artifact_invalid")
+        # Preserve the public refusal code while exposing only fixed adapter
+        # reasons. Never forward arbitrary exception messages or remote output.
+        if isinstance(exc, RemoteActivationError) and str(exc) in {
+                "topology_mismatch", "runtime_mismatch", "local_image_mismatch",
+                "init_mismatch", "effect_unknown"}:
+            response["reason"] = str(exc)
     print(json.dumps(response, sort_keys=True, separators=(",", ":")))
     if response["ok"] is not True: raise SystemExit(1)
 
@@ -3785,13 +4079,29 @@ def _host_image_v2_recovery_observation(state: dict, transport, intent: dict):
     services = tuple(snapshot["selected_services"])
     config_hashes = {row["service"]: row["compose_config_hash"]
                      for row in intent["compose_projection"]}
+    images = {row["name"]: row for row in intent["images"]}
+    image_identities = {
+        row["service"]: {
+            "image_ref": images[row["image"]]["image_ref"],
+            "config_digest": images[row["image"]]["config_digest"],
+            "local_image_id": images[row["image"]]["local_image_id"],
+        }
+        for row in intent["service_image_bindings"]
+    }
+    active = state.get("active") or {}
+    allow_empty_genesis = (state.get("generation") == 0
+        and state.get("current") is None and state.get("previous") is None
+        and active.get("starting_generation") == 0
+        and active.get("operation") == "activate"
+        and active.get("effect_entered") is True)
     observed = transport.observe_running_v2(
         target=intent["target"], services=services,
         compose_project=intent["compose_project"],
         topology_digest=intent["topology_digest"],
         compose_config_hashes=config_hashes,
-        snapshot_digest=snapshot["snapshot_digest"])
-    rows = observed.get("services") or []
+        snapshot_digest=snapshot["snapshot_digest"], image_identities=image_identities,
+        allow_empty_genesis=allow_empty_genesis)
+    rows = observed["services"]
     projection = activation_recovery_projection(
         state, observed_services=rows)
     probe = {"target_epoch_start": observed["target_epoch_start"],
@@ -3834,7 +4144,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                          "provider_revision", "target"}
             v2_prepare = v2_common - {"snapshot_digest"}
             v2_effect = v2_common | {"services", "render_digest", "topology_digest"}
-            v2_observe = v2_effect | {"compose_config_hashes"}
+            v2_observe = v2_effect | {"compose_config_hashes", "image_identities"}
             source_fields = set(private_environment_source)
             is_v2 = frozenset(source_fields) in {
                 frozenset(v2_prepare), frozenset(v2_common),
@@ -3870,6 +4180,25 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                         or re.fullmatch(r"sha256:[0-9a-f]{64}",
                                         private_environment_source["topology_digest"] or "") is None):
                     raise ValueError("activation private source is invalid")
+                if kind == "compose_observe_v2":
+                    identities = private_environment_source["image_identities"]
+                    services = private_environment_source["services"]
+                    if type(identities) is not dict or set(identities) != set(services):
+                        raise ValueError("activation private source is invalid")
+                    for identity in identities.values():
+                        if (type(identity) is not dict
+                                or set(identity) != {"image_ref", "config_digest", "local_image_id"}
+                                or type(identity["image_ref"]) is not str
+                                or re.fullmatch(r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", identity["image_ref"]) is None
+                                or type(identity["config_digest"]) is not str
+                                or re.fullmatch(r"sha256:[0-9a-f]{64}", identity["config_digest"]) is None
+                                or type(identity["local_image_id"]) is not str
+                                or (identity["local_image_id"] != identity["image_ref"]
+                                    and re.fullmatch(r"sha256:[0-9a-f]{64}", identity["local_image_id"]) is None)
+                                or identity["local_image_id"] not in {
+                                    identity["config_digest"], identity["image_ref"],
+                                    identity["image_ref"].rsplit("@", 1)[-1]}):
+                            raise ValueError("activation private source is invalid")
                 trusted = {"compose_files", "project_name", "project_directory",
                            "environment_file", "render_digest"}
                 provider_fields = ((v2_prepare - {"kind"}) | (trusted - {"render_digest"})
@@ -3935,6 +4264,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " for name,svc in services.items():",
             "  if not isinstance(svc,dict):out['services'][name]={'invalid':True};continue",
             "  env=svc.get('environment');deps=svc.get('depends_on');labels=svc.get('labels')",
+            "  if deps is None:deps={}",
             "  image=svc.get('image');image=image if isinstance(image,str) and re.fullmatch(r'[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}',image) else None",
             "  pull=svc.get('pull_policy');pull=pull if pull in ('never','missing-refused') else None",
             "  platform=svc.get('platform');platform=platform if isinstance(platform,str) and re.fullmatch(r'[a-z0-9]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?',platform) else None",
@@ -3971,6 +4301,8 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " return out",
             "def observe_running(project,names):",
             " if configuration_key is None:raise ValueError('configuration_binding_unavailable')",
+            " identities=s.get('image_identities')",
+            " if identities is not None and (not isinstance(identities,dict) or set(identities)!=set(names)):raise ValueError('runtime_mismatch')",
             " p=subprocess.run(['docker','ps','--filter','label=com.docker.compose.project='+project,'--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             " if p.returncode!=0 or p.stderr:raise ValueError('runtime_mismatch')",
             " out=[]",
@@ -3981,16 +4313,22 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             "  try:raw=json.loads(x.stdout)[0]",
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  cfg=raw.get('Config') or {};labels=cfg.get('Labels') or {};name=labels.get('com.docker.compose.service')",
-            "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:continue",
-            "  image_id=raw.get('Image');ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
+            "  if x.returncode!=0 or x.stderr or labels.get('com.docker.compose.project')!=project or name not in names:raise ValueError('runtime_mismatch')",
+            "  image_id=raw.get('Image');expected_identity=identities.get(name) if isinstance(identities,dict) else None",
+            "  if not isinstance(image_id,str) or (expected_identity is not None and cfg.get('Image')!=expected_identity.get('image_ref')):raise ValueError('runtime_mismatch')",
+            "  ii=subprocess.run(['docker','image','inspect',image_id],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             "  try:ir=json.loads(ii.stdout)[0]",
             "  except Exception:raise ValueError('runtime_mismatch')",
             "  if ii.returncode!=0 or ii.stderr or ir.get('Id')!=image_id:raise ValueError('runtime_mismatch')",
+            "  repo_digests=ir.get('RepoDigests')",
+            "  manifest_digest=expected_identity['image_ref'].rsplit('@',1)[-1] if expected_identity is not None else None",
+            "  if expected_identity is not None and (not isinstance(repo_digests,list) or repo_digests.count(expected_identity['image_ref'])!=1 or image_id not in (expected_identity['config_digest'],expected_identity['image_ref'],manifest_digest)):raise ValueError('runtime_mismatch')",
+            "  config_digest=expected_identity['config_digest'] if expected_identity is not None else image_id",
             "  platform={'os':ir.get('Os'),'architecture':ir.get('Architecture')}",
             "  if ir.get('Variant'):platform['variant']=ir['Variant']",
-            "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':image_id,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
+            "  out.append({'service':name,'runtime_identity':raw.get('Id'),'compose_project':project,'declared_image':cfg.get('Image'),'repository_digest':cfg.get('Image'),'local_image_id':image_id,'config_digest':config_digest,'platform':platform,'topology_identity':labels.get('org.sandbox.application-topology.v1'),'compose_config_hash':config_hash_identity(name,labels.get('com.docker.compose.config-hash')),'healthy':(raw.get('State') or {}).get('Health',{}).get('Status')=='healthy'})",
             " return out",
-            "vals=[];render=None;environment_fd=None;environment_before=None",
+            "vals=[];render=None;environment_fd=None;environment_before=None;list_profiles=False",
             "if s:",
             " if configuration_key is None:sys.stderr.write('configuration_binding_unavailable');sys.exit(91)",
             " e.update(s['environment'])",
@@ -4011,21 +4349,50 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " else:runtime_epoch=s['runtime_epoch']",
             " before=subprocess.run(['docker','info','--format','{{.ID}}'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(command_timeout,30))",
             " if before.returncode!=0 or before.stderr or before.stdout.decode().strip()!=runtime_epoch:sys.stderr.write('compose_daemon_mismatch');sys.exit(91)",
+            " raw_args=sys.argv[2:];profiles=[];i=0",
+            " while i<len(raw_args):",
+            "  if raw_args[i]=='--profile':",
+            "   if i+1>=len(raw_args) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',raw_args[i+1]) is None or raw_args[i+1] in profiles:sys.stderr.write('compose_profile_invalid');sys.exit(91)",
+            "   profiles.append(raw_args[i+1]);i+=2",
+            "  else:i+=1",
+            " list_profiles='--profiles' in raw_args and 'config' in raw_args",
             " a=['docker','compose']",
+            " for profile in profiles:a+=['--profile',profile]",
             " if v2:a+=['--env-file','/proc/self/fd/'+str(environment_fd)]",
             " for f in s['compose_files']:a+=['--file',f]",
-            " a+=['--project-directory',s['project_directory'],'--project-name',s['project_name'],'config','--format','json']",
+            " a+=['--project-directory',s['project_directory'],'--project-name',s['project_name'],'config']",
+            " if list_profiles:a+=['--profiles']",
+            " else:a+=['--format','json']",
             " q=subprocess.run(a,env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=((environment_fd,) if environment_fd is not None else ()),timeout=min(command_timeout,60))",
+            " if s.get('kind')=='compose_observe_v2':",
+            "  def matches(candidate):",
+            "   if candidate.returncode!=0 or candidate.stderr or len(candidate.stdout)>1048576:return False",
+            "   try:document=json.loads(candidate.stdout);services=document.get('services')",
+            "   except Exception:return False",
+            "   return isinstance(services,dict) and set(s['services'])<=set(services) and configuration_identity(candidate.stdout,True)==s['render_digest']",
+            "  if not matches(q):",
+            "   listing=subprocess.run(a[:-2]+['--profiles'],env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=(environment_fd,),timeout=min(command_timeout,30))",
+            "   if listing.returncode!=0 or listing.stderr or len(listing.stdout)>8192:sys.stderr.write('compose_profile_unavailable');sys.exit(91)",
+            "   candidates=listing.stdout.decode().split()",
+            "   if not candidates or len(candidates)>16 or len(candidates)!=len(set(candidates)) or any(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',name) is None for name in candidates):sys.stderr.write('compose_profile_invalid');sys.exit(91)",
+            "   matches_found=[]",
+            "   for profile in candidates:",
+            "    candidate=subprocess.run(a[:2]+['--profile',profile]+a[2:],env={**e,'COMPOSE_PROFILES':profile},stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=(environment_fd,),timeout=min(command_timeout,30))",
+            "    if matches(candidate):matches_found.append(candidate)",
+            "   if len(matches_found)!=1:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
+            "   q=matches_found[0]",
             " if q.returncode!=0 or q.stderr:sys.stderr.write('compose_source_refused');sys.exit(91)",
             " if len(q.stdout)>1048576:sys.stderr.write('compose_source_oversized');sys.exit(91)",
-            " try:c=json.loads(q.stdout)",
-            " except Exception:sys.stderr.write('compose_source_malformed');sys.exit(91)",
-            " if not v2:vals.extend(strings(c))",
+            " if list_profiles:c={}",
             " else:",
-            "  for svc in c.get('services',{}).values():",
-            "   if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
+            "  try:c=json.loads(q.stdout)",
+            "  except Exception:sys.stderr.write('compose_source_malformed');sys.exit(91)",
+            "  if not v2:vals.extend(strings(c))",
+            "  else:",
+            "   for svc in c.get('services',{}).values():",
+            "    if isinstance(svc,dict):vals.extend(str(value) for value in (svc.get('environment') or {}).values() if isinstance(value,(str,int,float,bool)))",
             " got=configuration_identity(q.stdout,v2)",
-            " if s.get('kind')!='compose_prepare_v2' and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
+            " if s.get('kind') not in ('compose_prepare_v2','compose_snapshot_v2') and got!=s['render_digest']:sys.stderr.write('compose_source_mismatch');sys.exit(91)",
             " if s.get('kind') in ('compose_replace_v1','compose_replace_v2'):",
             "  for svc in c.get('services',{}).values():vals.extend((svc.get('environment') or {}).values())",
             "  render=q.stdout",
@@ -4061,7 +4428,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " if tuple(getattr(environment_before,n) for n in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_uid','st_nlink'))!=tuple(getattr(environment_after,n) for n in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_uid','st_nlink')):r=subprocess.CompletedProcess([],92,b'',b'compose_environment_changed')",
             " os.close(environment_fd)",
             "o=r.stdout;d=r.stderr",
-            "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode==0:",
+            "if 'compose' in sys.argv[2:] and 'config' in sys.argv[2:] and r.returncode==0 and not list_profiles:",
             " raw=o",
             " if configuration_key is None:r=subprocess.CompletedProcess([],91,b'',b'configuration_binding_unavailable');o=b'';d=r.stderr",
             " else:",
@@ -4189,7 +4556,11 @@ def _cmd_host_image(validated: dict, args) -> None:
                         or (prior and (prior.get("target") != authority_target \
                             or prior.get("compose_project") != compose_project)):
                     raise ValueError("activation generation authority is unavailable")
-                projection = ActivationTransitionProjection(
+                # Retained v2 intents build their projection after observation.
+                # The legacy candidate-only projection cannot represent an
+                # uncertain replacement that has not minted a generation yet.
+                projection = None if (active_schema == 2 and
+                    active.get("replacement_intent") is not None) else ActivationTransitionProjection(
                     transaction_digest=transaction_digest,
                     request_digest=active["request_digest"], operation=active["operation"],
                     phase=active["phase"], effect_entered=active["effect_entered"],
@@ -4224,7 +4595,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     argv_runner=_host_image_argv_runner(
                         entry, compose_snapshot_provider=v2_selector),
                     target_identity_observer=lambda: {
-                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "machine_identity": _authenticated_machine_identity(
+                            args.remote, allow_partial=active_schema == 2),
                         "target_identity": target_key},
                     configuration_binding_key=configuration_binding_key)
                 services = tuple(selected_services)
@@ -4240,6 +4612,9 @@ def _cmd_host_image(validated: dict, args) -> None:
                         compose_files=v2_selector["compose_files"],
                         project_name=v2_selector["project_name"],
                         selected_services=services,
+                        allowed_services=tuple(sorted((validated["compose"]["service"],
+                            *validated["compose"].get("background_services", ()))))
+                            + tuple(sorted(validated["compose"].get("init_services", ()))),
                         service_image_bindings=service_images,
                         environment_bindings=environment_bindings,
                         topology_digest=v2_intent["topology_digest"],
@@ -4364,7 +4739,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     remote.registered_remote_lock():
                 entry = remote.get_remote(args.remote)
                 if not entry or proof_target["target_identity"] != hosting.state_key(args.remote, validated) \
-                        or proof_target["machine_identity"] != _authenticated_machine_identity(args.remote):
+                        or proof_target["machine_identity"] != _authenticated_machine_identity(
+                            args.remote, allow_partial=is_v2):
                     raise ValueError("registered target identity changed")
                 configuration_binding_master, _configuration_binding_key_version = \
                     personal_secrets.hosting_binding_key(create=False)
@@ -4377,7 +4753,8 @@ def _cmd_host_image(validated: dict, args) -> None:
                     argv_runner=_host_image_argv_runner(
                         entry, compose_snapshot_provider=selector),
                     target_identity_observer=lambda: {
-                        "machine_identity": _authenticated_machine_identity(args.remote),
+                        "machine_identity": _authenticated_machine_identity(
+                            args.remote, allow_partial=is_v2),
                         "target_identity": hosting.state_key(args.remote, validated)},
                     configuration_binding_key=configuration_binding_key)
                 edge = _HostImageEdgeAdapter(
@@ -4541,6 +4918,9 @@ def cmd_host(cfg, args) -> None:
             print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
             print(f"  health: {result['health']['state']}")
             print(f"  generation: {result['generation']}")
+            cache = result.get("edge_cache_purge")
+            if isinstance(cache, dict):
+                print(f"  edge cache purge: {cache.get('status', 'unknown')}")
             if result.get("latest_recovery"):
                 print(f"  latest recovery: {result['latest_recovery']['result_class']}")
             for service in result["services"]:
@@ -4631,6 +5011,7 @@ def cmd_host(cfg, args) -> None:
             "username": (validated.get("basic_auth") or {}).get("username"),
         }
         plan["cloudflare"] = _cloudflare_drift(plan)
+        plan["edge_cache_purge"] = (validated.get("cloudflare") or {}).get("cache_purge")
         _emit({"ok": True, **plan}, args.json)
         return
     progress = (lambda _message: None) if args.json else (
@@ -4662,6 +5043,7 @@ def cmd_host(cfg, args) -> None:
                     validated, current_entry, args.remote, runtime, state,
                     bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
                     recovery_repository=recovery_repository,
+                    purge_edge_cache=bool(getattr(args, "purge_edge_cache", False)),
                 )
     except TimeoutError:
         die("another host apply or recovery owns this target")
@@ -4679,6 +5061,8 @@ def cmd_host(cfg, args) -> None:
     }
     if result.get("apply_log"):
         evidence["apply_log"] = result["apply_log"]
+    if result.get("edge_cache_purge") is not None:
+        evidence["edge_cache_purge"] = result["edge_cache_purge"]
     if args.json:
         print(json.dumps(evidence))
     else:

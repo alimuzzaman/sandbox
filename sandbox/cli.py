@@ -882,6 +882,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
     host_p.add_argument("--confirm", action="store_true",
         help="allow protected host apply or separately confirmed edge continuation")
+    host_p.add_argument("--purge-edge-cache", action="store_true",
+        help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",
@@ -928,6 +930,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="exact active transaction digest for `host image recover`")
     host_p.add_argument("--stage-status", action="store_true",
         help="read the exact Feature 050 request status without helper or credential access")
+    host_p.add_argument("--reconcile", action="store_true",
+        help="with confirmed host stage, close only a fully proven v2 cleanup uncertainty")
     host_p.add_argument("--job-id", default=None,
         help="failed durable host-apply job identity for recovery")
     host_p.add_argument("--original-request-id", default=None,
@@ -1079,12 +1083,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     sec.add_argument("name", nargs="?",
         help="instance to secure (default: the targeted/main instance)")
 
-    srv = sub.add_parser("server",
-        help="Switch an instance's web server in place (apache|nginx|litespeed)")
-    srv.add_argument("name", nargs="?",
-        help="instance to switch (default: the targeted/main instance)")
-    srv.add_argument("server_type", choices=list(SERVERS),
-        help="web server to switch to")
+
 
     ob = sub.add_parser("onboard",
         help="Guided setup for an existing instance (plugins, https, focus)")

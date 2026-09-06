@@ -14,7 +14,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 006 | In-product skill authoring (auto-matched playbooks) | Complete | Novamira parity #4 |
 | 007 | Headless debugging tools: Query Monitor + dump/dd + Xdebug | Complete | Debugging ask |
 | 008 | DB-only snapshots & reset-to-fresh-install (extends 002) | In progress | Snapshot/reset ask |
-| 033 | Agent-aware incremental remote sync | PRD | Remote development ask |
+| 033 | Agent-aware incremental remote sync | In progress | Remote development ask |
 
 `Complete` means the task ledger has no open item and records the required
 implementation and acceptance evidence. `In progress` means implementation exists

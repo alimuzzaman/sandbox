@@ -351,6 +351,26 @@ data, second-oldest selection, and every registry/pull path.
 - **FR-041**: Local implementation validation MUST use synthetic artifacts/fakes; live
   registry, secrets, remote mutation, edge, deployment, and production require separate
   authorization.
+- **FR-042**: A hosting environment MAY declare an explicit `cloudflare.cache_purge`
+  policy. When enabled it MUST use `scope: zone_all`, an explicit bounded zone allowlist,
+  and a route-covered zone set. Invalid or unavailable policy MUST refuse before deployment
+  effects; policy absence MUST preserve existing behavior.
+- **FR-043**: A zone-wide purge MUST resolve and validate every approved Cloudflare zone
+  before its first provider write, then record one bounded per-zone receipt. A provider
+  acknowledgement proves API acceptance only, not global propagation or frontend-generation
+  delivery.
+- **FR-044**: Purge operations MUST bind target, deployment request/revision, generation
+  subject when present, route and policy digests, ordered zone identities, and `zone_all`
+  scope through the existing target owner. Durable state MUST record preparation before
+  effect entry, `effect_entered` before each POST, and the acknowledgement immediately
+  afterward. Exact terminal replay MUST not send another POST; possible submission without
+  exact acknowledgement MUST remain `acceptance_unknown` and MUST not be replayed by
+  observation recovery.
+- **FR-045**: Feature 051 v2 activation/rollback and ordinary hosting apply MUST use the
+  admitted purge policy before final edge/runtime proof and generation/edge-ready commit.
+  Recovery observation and adoption MUST perform zero purge writes; rollback MUST use a new
+  admitted purge operation. Lenzora production and development manifests MUST retain their
+  existing v2 and ordinary-apply deployment paths respectively.
 
 ### Key Entities
 
@@ -373,6 +393,10 @@ data, second-oldest selection, and every registry/pull path.
 - **ActivationRecoveryProvisional**: Feature 051-owned bounded non-authorizing pre-
   observation fence; it is never a receipt, promotion, generation, or effect authority.
 - **Activation Result**: Stable bounded terminal/replay/uncertainty envelope.
+- **Edge-Cache Purge Policy**: Explicit provider, `zone_all` scope, route-covered zone
+  allowlist, and policy digest for one hosting environment.
+- **Edge-Cache Purge Operation**: Target-bound durable per-zone state machine and immutable
+  receipt for Cloudflare cache invalidation.
 
 ## Success Criteria *(mandatory)*
 

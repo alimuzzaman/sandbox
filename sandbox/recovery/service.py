@@ -42,12 +42,52 @@ def _retention_timestamp_valid(value: object) -> bool:
 
 class RecoveryService:
     def __init__(self, catalog: RecoveryCatalog, *, inventory=None, drive=None, capture=None,
-                 pending_root: str | Path | None = None) -> None:
+                 pending_root: str | Path | None = None, materializer=None) -> None:
         self.catalog = catalog
         self.inventory = inventory
         self.drive = drive
         self.capture = capture
         self.pending_root = Path(pending_root) if pending_root else None
+        self.materializer = materializer
+
+    def create_materialized(self, set_id: str, profiles: tuple[str, ...], *,
+                            confirm: bool = False, remote: str | None = None) -> dict:
+        """Capture selected declarations through the configured controller adapter.
+
+        Arbitrary caller paths never authorize symbolic source materialization.
+        The ordinary explicit-artifact entry point retains its existing gate.
+        """
+        try:
+            from .capture import _valid_set_id
+            if not confirm:
+                raise RecoveryError("recovery create requires explicit confirmation", "confirmation_required")
+            if not profiles:
+                raise RecoveryError("recovery create requires selected profiles", "missing_profiles")
+            if not _valid_set_id(set_id):
+                raise RecoveryError("recovery set id is invalid", "invalid_set_id")
+            plan = build_plan(self.catalog, profiles)
+            if not remote or self.materializer is None or self.capture is None:
+                raise RecoveryError("controller materialization is not configured", "recovery_not_configured")
+            by_id = self.catalog.by_id()
+            bindings = {
+                profile_id: {"dependencies": list(by_id[profile_id].dependencies),
+                             "restore_target": by_id[profile_id].restore_target,
+                             "allowed_roots": list(by_id[profile_id].allowed_roots)}
+                for profile_id in plan.profiles
+            }
+            manifest = self.materializer.publish(remote, plan, self.capture, set_id, bindings)
+        except RecoveryError as exc:
+            return result(False, "create", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError):
+            return result(False, "create", remote=remote, error=RecoveryError(
+                "recovery materialization failed", "materialization_failed"))
+        except Exception:
+            # Adapter implementations are controller-owned extensions. Keep
+            # an unexpected implementation failure inside the stable recovery
+            # envelope instead of leaking private paths or transport details.
+            return result(False, "create", remote=remote, error=RecoveryError(
+                "recovery materialization failed", "materialization_failed"))
+        return result(True, "create", remote=remote, status="complete", data={"manifest": manifest})
 
     def profiles(self, remote: str | None = None) -> dict:
         return result(True, "profiles", remote=remote, status="ready", data={

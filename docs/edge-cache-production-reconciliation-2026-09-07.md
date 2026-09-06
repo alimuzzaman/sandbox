@@ -49,3 +49,9 @@ Retained-v2 recovery projection repair
 unused legacy candidate projection while retaining mandatory observation-bound
 v2 validation. Local durable job `1a18a1e6928d94a668d10fc04e32f3c6` passed
 52 recovery/v2/private-source/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Image observation repair `9fd6323286176d77613b1f44b2e4ea1602d94c83`
+merged cleanly. It accepts the already-verified manifest digest alongside the
+config digest and qualified image reference at the v2 observation boundary.
+Local durable job `8d5290c738c5007e78285b5b386c8444` passed 52
+recovery/v2/private-source/edge-cache tests, lifecycle `succeeded`, exit 0.

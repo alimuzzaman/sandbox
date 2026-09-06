@@ -929,7 +929,8 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
                                  for item in plan.receipt.images}
                 stdout = json.dumps([{"service": name, "compose_project": "lenzora",
                     "runtime_identity": f"container-{name}", "declared_image": image,
-                    "repository_digest": image, "local_image_id": image,
+                    "repository_digest": image,
+                    "local_image_id": image_identities[name]["local_image_id"],
                     "config_digest": config_by_ref[image],
                     "platform": {"os": "linux", "architecture": "amd64"},
                     "healthy": True} for name, image in images.items()])
@@ -975,6 +976,18 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
             topology_digest=proof.observation.observation_digest,
             compose_config_hashes={name: DIGEST_A for name in selected},
             snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
+        for identity in image_identities.values():
+            identity["local_image_id"] = identity["image_ref"].rsplit("@", 1)[-1]
+        manifest_observed = transport.observe_running_v2(**observe_args)
+        self.assertEqual([row["local_image_id"] for row in manifest_observed["services"]],
+                         [images[name].rsplit("@", 1)[-1] for name in images])
+        for invalid in ("sha256:" + "0" * 64, "malformed"):
+            bad = {name: {**identity, "local_image_id": invalid}
+                   for name, identity in image_identities.items()}
+            before_calls = len(calls)
+            with self.assertRaises(RemoteActivationError):
+                transport.observe_running_v2(**{**observe_args, "image_identities": bad})
+            self.assertEqual(len(calls), before_calls)
         original_invoke = transport._invoke
         def empty_invoke(argv, **kwargs):
             if argv[0] == "sandbox-activation-observe-running-v2":

@@ -811,7 +811,8 @@ class RegisteredRemoteActivationTransport:
                         and not re.fullmatch(r"sha256:[0-9a-f]{64}",
                                               identity["local_image_id"]))
                     or identity["local_image_id"] not in {
-                        identity["config_digest"], identity["image_ref"]}):
+                        identity["config_digest"], identity["image_ref"],
+                        identity["image_ref"].rsplit("@", 1)[-1]}):
                 raise RemoteActivationError("runtime_mismatch")
             normalized_identities[service] = dict(identity)
         if (not selector or services != selector.get("selected_services")

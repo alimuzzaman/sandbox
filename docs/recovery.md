@@ -144,6 +144,11 @@ When no `--artifact` is supplied, CLI and MCP capture requests use the controlle
 materialization entry point. A controller adapter must be explicitly configured for the
 selected remote; otherwise the operation returns `recovery_not_configured` without staging,
 uploading, or discovering a local substitute.
+
+The CLI may receive a non-secret validated rclone destination with `--destination`; when it is
+omitted, `RECOVERY_RCLONE_DESTINATION` remains the source. This allows a brokered child command
+to carry the destination as an ordinary reviewed argument while keeping `RECOVERY_PASSPHRASE`
+and source credentials out of argv.
 # Scoped recovery safety boundaries
 
 Recovery staging, retry ciphertext, and capture inputs are machine-state data. The

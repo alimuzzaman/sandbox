@@ -16,6 +16,8 @@ def configure_recovery(parser) -> None:
     parser.description = "Plan and operate scoped encrypted recovery profiles"
     parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule"))
     parser.add_argument("--remote", default=None)
+    parser.add_argument("--destination", default=None,
+                        help="validated rclone destination (non-secret; defaults to RECOVERY_RCLONE_DESTINATION)")
     parser.add_argument("--profile", action="append", default=[])
     parser.add_argument("--backup-id", default=None)
     parser.add_argument("--artifact", action="append", default=[],
@@ -101,7 +103,7 @@ def _parse_artifacts(values: list[str]) -> dict[str, Path]:
 
 
 def cmd_recovery(_cfg, args) -> None:
-    service = recovery_service(ROOT)
+    service = recovery_service(ROOT, destination=getattr(args, "destination", None))
     if args.action == "profiles":
         payload = service.profiles(args.remote)
     elif args.action == "plan":

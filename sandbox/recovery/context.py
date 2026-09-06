@@ -14,7 +14,8 @@ from .materialize import ScopedMaterializer
 from sandbox.services.process import BoundedProcessRunner
 
 
-def recovery_service(root: str | Path, *, materializer=None) -> RecoveryService:
+def recovery_service(root: str | Path, *, materializer=None,
+                     destination: str | None = None) -> RecoveryService:
     root = Path(root)
     # Recovery plaintext is never staged in the checkout.  Keep all transient
     # material under the Sandbox-owned machine state directory instead.
@@ -22,7 +23,7 @@ def recovery_service(root: str | Path, *, materializer=None) -> RecoveryService:
     staging_root = state_root / "staging"
     pending_root = state_root / "pending"
     materialization_root = state_root / "materialized"
-    destination = os.environ.get("RECOVERY_RCLONE_DESTINATION")
+    destination = destination or os.environ.get("RECOVERY_RCLONE_DESTINATION")
     passphrase = os.environ.get("RECOVERY_PASSPHRASE")
     drive = None
     capture = None

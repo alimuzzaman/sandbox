@@ -84,3 +84,10 @@ merged cleanly. The target identity accepts its registered slash-separated form;
 machine/daemon epoch validation stays restricted and identity drift still refuses.
 Local durable job `54f8530f0b9bd695daf27d18e190f74b` passed 56
 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Effect-free recovery bootstrap repair `652e9647e791b9157fb1ca36b7bf67432c0db944`
+merged cleanly with Git's three-way merge; no manual adaptation was needed.
+It admits only linked, non-promoted generation-zero recovery-no-effect records
+while retaining origin verification for effect-bearing or active history.
+Local durable job `72a9404eec49bd907bab7f452ed6a628` passed 60
+bootstrap/recovery/v2/edge-cache tests, lifecycle `succeeded`, exit 0.

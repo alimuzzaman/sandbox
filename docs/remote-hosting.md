@@ -1440,6 +1440,10 @@ atomically terminalizes the interrupted original activation as well as its separ
 exact-prior is a stable refused `recovery_no_effect` result and exits nonzero, while exact-new
 promotion alone is successful. The retained terminal pin is closed and validates canonical lease,
 holder, proof digest, and host-acceptance identities before it can release Feature 050 custody.
+At generation zero with no current, previous, or active generation, terminal refusals and
+non-promoted `recovery_no_effect` records bound to retained refusals do not establish a live
+origin. Only this effect-free history may defer the pre-activation edge probe; active effects,
+uncertain recovery, tombstones, and the post-effect probe still require live edge evidence.
 Initializer values come only from the already rendered bound Compose service environment or a narrow
 opaque provider. Values exist only in the synthetic child environment and private inspect comparison;
 they are not placed in activation state, receipts, output, or command arguments. Running OS and

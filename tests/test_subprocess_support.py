@@ -22,6 +22,13 @@ class TestSubprocessSupport(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "parent environment"):
             synthetic_environment(parent)
 
+    def test_synthetic_environment_supports_scoped_mutation(self):
+        child = synthetic_environment({"REMOVE_SYNTHETIC": "yes"})
+        child["PATH"] = "/synthetic/override"
+        child.pop("REMOVE_SYNTHETIC")
+        self.assertEqual(child["PATH"], "/synthetic/override")
+        self.assertNotIn("REMOVE_SYNTHETIC", child)
+
     @patch("tests.subprocess_support.subprocess.run")
     def test_runner_owns_explicit_environment_timeout_and_shell(self, run):
         run_test_process(("fixture",), env={"ONLY_SYNTHETIC": "yes"}, timeout=3)

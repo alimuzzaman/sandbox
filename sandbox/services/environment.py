@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 import os
 
 
@@ -27,8 +27,14 @@ _COMPATIBILITY_KEYS = (
 )
 
 
-class ExplicitEnvironment(Mapping[str, str]):
-    """A private Popen mapping that never renders or JSON-serializes values."""
+class ExplicitEnvironment(MutableMapping[str, str]):
+    """A private Popen mapping that never renders or JSON-serializes values.
+
+    The mapping owns its values, so callers may make narrow test or command
+    overrides after construction without touching ``os.environ``.  Keeping
+    this as a mapping rather than a ``dict`` subclass preserves the deliberate
+    refusal of implicit JSON serialization.
+    """
 
     __slots__ = ("_values",)
 
@@ -37,6 +43,12 @@ class ExplicitEnvironment(Mapping[str, str]):
 
     def __getitem__(self, key: str) -> str:
         return self._values[key]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._values[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._values[key]
 
     def __iter__(self):
         return iter(self._values)

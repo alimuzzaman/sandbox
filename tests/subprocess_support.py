@@ -6,12 +6,15 @@ from collections.abc import Mapping, Sequence
 import subprocess
 from typing import Any
 
-from sandbox.services.environment import compatible_subprocess_environment
+from sandbox.services.environment import (
+    ExplicitEnvironment,
+    compatible_subprocess_environment,
+)
 
 
 def synthetic_environment(
     overrides: Mapping[str, str] | None = None,
-) -> dict[str, str]:
+) -> ExplicitEnvironment:
     """Build a compatibility-only child environment with synthetic overrides."""
     return compatible_subprocess_environment(overrides)
 

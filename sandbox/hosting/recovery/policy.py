@@ -10,7 +10,7 @@ from pathlib import Path
 from .models import (
     MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, ActivationRecoveryObservation,
     ActivationTransitionProjection, RecoveryRequest, RecoveryAction, canonical_digest,
-    validate_edge_intent, validate_observation,
+    validate_edge_intent, validate_observation, _ACTIVATION_TARGET_ID,
 )
 
 
@@ -315,7 +315,9 @@ def classify_activation_transition(
     epochs = tuple(observation[name] for name in (
         "target_epoch_start", "target_epoch_end", "target_identity_start",
         "target_identity_end", "runtime_epoch_start", "runtime_epoch_end"))
-    if any(not isinstance(value, str) or not _PHASE_ID.fullmatch(value) for value in epochs):
+    if any(not isinstance(value, str) or not (
+            _ACTIVATION_TARGET_ID if index in (2, 3) else _PHASE_ID).fullmatch(value)
+           for index, value in enumerate(epochs)):
         raise ValueError("activation observation is invalid")
     services = observation["services"]
     empty_genesis = (projection.expected_generation == 0

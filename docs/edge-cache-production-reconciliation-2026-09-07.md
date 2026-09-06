@@ -78,3 +78,9 @@ merged cleanly. Empty observation uses retained-intent sentinel identities;
 generation-zero eligibility remains owned by recovery classification.
 Local durable job `5b530f03c44762b708ce718f2905a5c1` passed 55
 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Registered target-path repair `4f73173e17b03edf6d0d4eca4fd3e361c0e7f2dc`
+merged cleanly. The target identity accepts its registered slash-separated form;
+machine/daemon epoch validation stays restricted and identity drift still refuses.
+Local durable job `54f8530f0b9bd695daf27d18e190f74b` passed 56
+recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.

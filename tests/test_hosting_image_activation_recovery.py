@@ -36,6 +36,29 @@ class ActivationRecoveryTests(unittest.TestCase):
         self.assertEqual(result.classification, "exact_new"); self.assertEqual(calls, ["read"])
         self.assertFalse(hasattr(observer, "repository"))
 
+    def test_registered_target_paths_are_allowed_only_for_target_identity(self):
+        from dataclasses import replace
+        from sandbox.hosting.recovery.policy import classify_activation_transition
+        path = "scaleway-sandbox/lenzora/production"
+        base = self.projection()
+        projection = replace(base, target={**base.target, "target_identity": path})
+        observed = {**self.observation(DIGEST_A),
+                    "target_identity_start": path, "target_identity_end": path}
+        self.assertEqual(classify_activation_transition(projection, observed).classification, "exact_new")
+        changed = {**observed, "target_identity_end": "scaleway-sandbox/lenzora/development"}
+        self.assertEqual(classify_activation_transition(projection, changed).classification, "ambiguous")
+        for invalid in ("a" * 257, "target name", "target\nname"):
+            with self.assertRaises(ValueError):
+                replace(base, target={**base.target, "target_identity": invalid})
+            with self.assertRaises(ValueError):
+                classify_activation_transition(projection, {**observed, "target_identity_start": invalid})
+        for field in ("machine_identity", "daemon_identity"):
+            with self.assertRaises(ValueError):
+                replace(base, target={**base.target, field: path})
+        for field in ("target_epoch_start", "runtime_epoch_start"):
+            with self.assertRaises(ValueError):
+                classify_activation_transition(projection, {**observed, field: path})
+
     def test_changed_epochs_are_ambiguous_and_never_authorize(self):
         observed = self.observation(DIGEST_A); observed["runtime_epoch_end"] = "runtime-b"
         from sandbox.hosting.recovery.policy import classify_activation_transition

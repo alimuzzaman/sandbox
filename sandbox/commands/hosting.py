@@ -3589,6 +3589,8 @@ def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None =
 
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
+    from sandbox.transports.remote_hosting_activation import RemoteActivationError
+
     phase = getattr(args, "provision_phase", None)
     if phase not in {"machine-policy", "stage-bundle", "activation-bundle"}:
         die("host image provision requires --provision-phase; no authority was opened")
@@ -3854,6 +3856,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         activation_generation=generation, installed_path=str(path))
     except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         response["code"] = getattr(exc, "code", "artifact_invalid")
+        # Preserve the public refusal code while exposing only fixed adapter
+        # reasons. Never forward arbitrary exception messages or remote output.
+        if isinstance(exc, RemoteActivationError) and str(exc) in {
+                "topology_mismatch", "runtime_mismatch", "local_image_mismatch",
+                "init_mismatch", "effect_unknown"}:
+            response["reason"] = str(exc)
     print(json.dumps(response, sort_keys=True, separators=(",", ":")))
     if response["ok"] is not True: raise SystemExit(1)
 

@@ -1451,3 +1451,5 @@ services. Therefore accepted/preflight/init-pending/runtime-pending recovery rem
 a candidate exists: exact prior, including an empty generation-zero runtime, closes as no-effect;
 anything else stays unpromoted. Rollback also compares the retained prior Compose project before its
 first runtime effect.
+
+Image staging samples the authenticated machine projection at both observation boundaries. A projection change fails closed even when the private raw machine epoch and Docker daemon remain stable; raw machine identity is never emitted.

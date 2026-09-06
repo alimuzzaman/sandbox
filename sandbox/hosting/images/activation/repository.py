@@ -356,7 +356,8 @@ def commit_candidate(state: object, request: ActivationRequest, result: Activati
     return encode_activation_state(candidate)
 
 
-def recovery_decision(transaction: dict[str, Any], classification: str) -> tuple[str, bool, bool]:
+def recovery_decision(transaction: dict[str, Any], classification: str, *,
+                      empty_genesis: bool = False) -> tuple[str, bool, bool]:
     """Return result code, promote, and close-active for the exhaustive contract matrix."""
     if classification not in RECOVERY_CLASSES:
         raise ActivationRepositoryError("recovery_conflict")
@@ -365,6 +366,12 @@ def recovery_decision(transaction: dict[str, Any], classification: str) -> tuple
     entered = transaction.get("effect_entered") is True
     if operation not in {"activate", "rollback"}:
         return "recovery_ineligible", False, False
+    if (empty_genesis is True and transaction.get("schema_version") == 2
+            and transaction.get("starting_generation") == 0
+            and operation == "activate" and entered
+            and phase in {"runtime_pending", "uncertain"}
+            and classification == "exact_prior"):
+        return "recovery_no_effect", False, True
     if phase in {"accepted", "preflight", "init_pending"} and not entered:
         if classification == "exact_prior": return "recovery_no_effect", False, True
         return "recovery_conflict", False, False
@@ -794,7 +801,9 @@ class ActivationRepository:
                 elif first.as_mapping() != second.as_mapping():
                     code, promote, close = "evidence_changed", False, False
                 else:
-                    code, promote, close = recovery_decision(active, first.classification)
+                    code, promote, close = recovery_decision(active, first.classification,
+                        empty_genesis=(state.get("generation") == 0
+                            and state.get("current") is None and state.get("previous") is None))
 
                 def finalize(current):
                     nested = decode_activation_state(current)

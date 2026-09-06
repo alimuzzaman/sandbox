@@ -199,6 +199,11 @@ The public Compose projection treats absent/null `depends_on` as an empty
 dependency map. Explicit malformed non-map values retain an invalid marker.
 Recovery profile discovery admits the manifest's persistent and initializer
 services while retaining only the selected persistent service projection.
+For an entered first activation at generation zero with no current or previous
+generation, recovery may observe an empty runtime as the exact prior state.
+The observation must succeed with stable target/daemon identities; partial
+service sets and malformed observations remain refused. This closes recovery
+without promoting a generation or retrying a runtime effect.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

@@ -969,6 +969,22 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
         self.assertIn("--no-build", effects[0]["argv"])
         self.assertEqual(effects[0]["argv"][effects[0]["argv"].index("--pull") + 1], "never")
         self.assertNotIn("DB_PASSWORD", json.dumps(calls))
+        from unittest.mock import patch
+        from sandbox.transports.remote_hosting_activation import RemoteActivationError
+        observe_args = dict(target=TARGET, services=selected, compose_project="lenzora",
+            topology_digest=proof.observation.observation_digest,
+            compose_config_hashes={name: DIGEST_A for name in selected},
+            snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
+        original_invoke = transport._invoke
+        def empty_invoke(argv, **kwargs):
+            if argv[0] == "sandbox-activation-observe-running-v2":
+                return {"returncode": 0, "stdout": "[]", "stderr": "", "terminated": True}
+            return original_invoke(argv, **kwargs)
+        with patch.object(transport, "_invoke", side_effect=empty_invoke):
+            with self.assertRaises(RemoteActivationError):
+                transport.observe_running_v2(**observe_args)
+            self.assertEqual(transport.observe_running_v2(
+                **observe_args, allow_empty_genesis=True)["services"], [])
 
 
 if __name__ == "__main__":

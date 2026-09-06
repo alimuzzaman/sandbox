@@ -97,6 +97,46 @@ class Transport:
 
 
 class FreshProcessV2RecoveryTests(unittest.TestCase):
+    def test_recovery_render_includes_manifest_initializers(self):
+        from contextlib import nullcontext, redirect_stdout
+        from io import StringIO
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from sandbox.commands.hosting import _cmd_host_image
+
+        state, _prior = recovery_state()
+        intent = activation_recovery_intent_v2(state)
+        persistent = tuple(row["service"] for row in intent["service_image_bindings"])
+        validated = {"project": "widget", "compose": {
+            "service": persistent[0], "background_services": list(persistent[1:]),
+            "init_services": ["migrate", "seed", "validate"]}}
+        repository = SimpleNamespace(operation_transaction=lambda _: nullcontext(),
+                                     snapshot=lambda _: state)
+        # Stop immediately after capturing the render admission; this test owns
+        # the CLI's declared service scope, not remote effects or reconciliation.
+        render = Mock(side_effect=ValueError("synthetic render stop"))
+        runtime = SimpleNamespace(render_topology_v2=render)
+        args = SimpleNamespace(image_action="recover", project_dir="/synthetic",
+            environment="development", remote="synthetic", request_id="recover/scope",
+            expected_generation=state["generation"],
+            activation_transaction=state["active"]["transaction_digest"], confirm=True)
+        with patch("sandbox.commands.hosting.RecoveryRepository"), \
+                patch("sandbox.commands.hosting.hosting.state_key", return_value=TARGET["target_identity"]), \
+                patch("sandbox.commands.hosting.personal_secrets.hosting_binding_key",
+                      return_value=(b"k" * 32, "binding-v1")), \
+                patch("sandbox.commands.hosting.remote.registered_remote_lock", return_value=nullcontext()), \
+                patch("sandbox.commands.hosting.remote.get_remote", return_value={"name": "synthetic"}), \
+                patch("sandbox.commands.hosting._host_image_v2_runtime_selector", return_value={
+                    "project_name": intent["compose_project"], "compose_files": ("compose.yml",)}), \
+                patch("sandbox.hosting.images.activation.repository.ActivationRepository", return_value=repository), \
+                patch("sandbox.transports.remote_hosting_activation.RegisteredRemoteActivationTransport",
+                      return_value=runtime), redirect_stdout(StringIO()), self.assertRaises(SystemExit):
+            _cmd_host_image(validated, args)
+        render.assert_called_once()
+        self.assertEqual(render.call_args.kwargs["selected_services"], persistent)
+        self.assertEqual(render.call_args.kwargs["allowed_services"],
+                         tuple(sorted(persistent)) + ("migrate", "seed", "validate"))
+
     def test_exact_new_exact_prior_and_mismatch_are_closed_reads(self):
         state, prior = recovery_state()
         intent = activation_recovery_intent_v2(state)

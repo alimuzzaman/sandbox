@@ -4423,6 +4423,9 @@ def _cmd_host_image(validated: dict, args) -> None:
                         compose_files=v2_selector["compose_files"],
                         project_name=v2_selector["project_name"],
                         selected_services=services,
+                        allowed_services=tuple(sorted((validated["compose"]["service"],
+                            *validated["compose"].get("background_services", ()))))
+                            + tuple(sorted(validated["compose"].get("init_services", ()))),
                         service_image_bindings=service_images,
                         environment_bindings=environment_bindings,
                         topology_digest=v2_intent["topology_digest"],

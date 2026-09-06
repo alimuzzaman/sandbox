@@ -4178,7 +4178,8 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
                                 or (identity["local_image_id"] != identity["image_ref"]
                                     and re.fullmatch(r"sha256:[0-9a-f]{64}", identity["local_image_id"]) is None)
                                 or identity["local_image_id"] not in {
-                                    identity["config_digest"], identity["image_ref"]}):
+                                    identity["config_digest"], identity["image_ref"],
+                                    identity["image_ref"].rsplit("@", 1)[-1]}):
                             raise ValueError("activation private source is invalid")
                 trusted = {"compose_files", "project_name", "project_directory",
                            "environment_file", "render_digest"}

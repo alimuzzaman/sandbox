@@ -55,3 +55,9 @@ merged cleanly. It accepts the already-verified manifest digest alongside the
 config digest and qualified image reference at the v2 observation boundary.
 Local durable job `8d5290c738c5007e78285b5b386c8444` passed 52
 recovery/v2/private-source/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Private observer parity repair `04cdda8bc29a7895aeb0326b71bc912bae859251`
+merged cleanly. Local durable job `c84902f20e75da9ab1e19c1b5fb7fad3`
+passed 53 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`,
+exit 0. This aligns the private-source validator with verified manifest image
+identities already admitted by the transport.

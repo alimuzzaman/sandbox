@@ -479,6 +479,39 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         self.assertNotIn(secret, "".join(command + frame for command, frame in captured))
         self.assertIn("/proc/self/fd/", "".join(command for command, _ in captured))
 
+    def test_private_observer_admits_only_verified_manifest_local_identity(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+        from types import SimpleNamespace
+        digest = "sha256:" + "a" * 64
+        image = "ghcr.io/acme/widget@" + digest
+        target = {"machine_identity": "machine-a", "target_identity": "target-a",
+                  "daemon_identity": "daemon-a"}
+        provider = {"snapshot_id": "compose-snapshot/test-v2", "snapshot_digest": digest,
+            "provider_revision": "provider-v2", "target": target,
+            "compose_files": ("/synthetic/compose.yml",), "project_name": "widget",
+            "project_directory": "/synthetic", "environment_file": "/synthetic/environment.env",
+            "render_digest": digest}
+        source = {key: provider[key] for key in (
+            "snapshot_id", "snapshot_digest", "provider_revision", "target", "render_digest")}
+        source.update(kind="compose_observe_v2", services=("web",), topology_digest=digest,
+            compose_config_hashes={"web": digest}, image_identities={"web": {
+                "image_ref": image, "config_digest": "sha256:" + "b" * 64,
+                "local_image_id": digest}})
+        runner = _host_image_argv_runner({"name": "synthetic"}, compose_snapshot_provider=provider)
+        with patch("sandbox.commands.hosting.remote.ssh_run", return_value=SimpleNamespace(
+                returncode=0, stdout="[]", stderr="")) as remote_call:
+            kwargs = dict(argv=("sandbox-activation-observe-running-v2", "widget", "web"),
+                environment={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                private_environment={CONFIGURATION_KEY_ENV: base64.b64encode(CONFIGURATION_KEY).decode()},
+                private_environment_source=source, redact_environment_keys=None,
+                timeout_seconds=30, max_output_bytes=4096)
+            self.assertEqual(runner(**kwargs)["returncode"], 0)
+            remote_call.assert_called_once(); remote_call.reset_mock()
+            for invalid in ("sha256:" + "c" * 64, "malformed"):
+                source["image_identities"]["web"]["local_image_id"] = invalid
+                with self.assertRaises(ValueError): runner(**kwargs)
+            remote_call.assert_not_called()
+
     def test_real_helper_projects_absent_dependencies_as_empty(self):
         from sandbox.commands.hosting import _host_image_argv_runner
 

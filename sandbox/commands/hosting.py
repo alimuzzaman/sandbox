@@ -3691,7 +3691,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     raise ValueError("verified plan target changed")
                 helper_path = Path(__file__).parents[1] / "hosting" / "images" / "staging_helper.py"
                 helper_digest = "sha256:" + hashlib.sha256(helper_path.read_bytes()).hexdigest()
-                revision = subprocess.run(("git", "rev-parse", "HEAD"), cwd=Path(__file__).parents[2],
+                # Bind the remote helper to the revision that actually owns
+                # its source file. Controller-only changes must not make an
+                # unchanged installed staging helper look like a new runtime.
+                revision = subprocess.run(("git", "log", "-1", "--format=%H", "--",
+                    str(helper_path.relative_to(Path(__file__).parents[2]))),
+                    cwd=Path(__file__).parents[2],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True,
                     env={"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C"}).stdout.strip()
                 helper = HelperIdentity(helper_digest, "sandbox-image-stage-helper-v2", revision,

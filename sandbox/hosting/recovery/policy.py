@@ -10,7 +10,7 @@ from pathlib import Path
 from .models import (
     MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, ActivationRecoveryObservation,
     ActivationTransitionProjection, RecoveryRequest, RecoveryAction, canonical_digest,
-    validate_edge_intent, validate_observation,
+    validate_edge_intent, validate_observation, _ACTIVATION_TARGET_ID,
 )
 
 
@@ -315,16 +315,24 @@ def classify_activation_transition(
     epochs = tuple(observation[name] for name in (
         "target_epoch_start", "target_epoch_end", "target_identity_start",
         "target_identity_end", "runtime_epoch_start", "runtime_epoch_end"))
-    if any(not isinstance(value, str) or not _PHASE_ID.fullmatch(value) for value in epochs):
+    if any(not isinstance(value, str) or not (
+            _ACTIVATION_TARGET_ID if index in (2, 3) else _PHASE_ID).fullmatch(value)
+           for index, value in enumerate(epochs)):
         raise ValueError("activation observation is invalid")
     services = observation["services"]
+    empty_genesis = (projection.expected_generation == 0
+                     and projection.prior_generation_digest is None
+                     and not projection.prior_services
+                     and projection.operation == "activate"
+                     and projection.effect_entered is True)
     ambiguous = (epochs[0] != epochs[1] or epochs[2] != epochs[3] or
                  epochs[4] != epochs[5] or
                  epochs[0] != projection.target["machine_identity"] or
                  epochs[2] != projection.target["target_identity"] or
                  epochs[4] != projection.target["daemon_identity"] or
                  not isinstance(services, list) or len(services) > MAX_SERVICES or
-                 (not services and (projection.new_services or projection.prior_services)) or
+                 (not services and (projection.new_services or projection.prior_services)
+                  and not empty_genesis) or
                  any(not isinstance(item, dict) for item in services))
     if not ambiguous:
         identities = [item.get("service") for item in services]

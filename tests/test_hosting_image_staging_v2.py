@@ -1047,14 +1047,16 @@ class TestV2BatchStaging(unittest.TestCase):
                     "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {}}}
                 return subprocess.CompletedProcess(command, 0,
                     stdout=json.dumps(inspected).encode(), stderr=b"")
-            result = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
-                runner=runner, anonymous_probe=lambda *_: True,
-                cgroup_identity=lambda unit: "/app.slice/" + unit,
-                machine_epoch_reader=lambda: "raw-machine-a",
-                projected_identity_reader=lambda: "machine-b", remover=shutil.rmtree)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "observation_invalid")
-        self.assertEqual(set(result["payload"]), {"process", "cleanup"})
+            for epochs in (("machine-b", "machine-b"), ("machine-a", "machine-b")):
+                projection_epochs = iter(epochs)
+                result = staging_helper.execute_v2(frame, b"canary", run_root=Path(temp),
+                    runner=runner, anonymous_probe=lambda *_: True,
+                    cgroup_identity=lambda unit: "/app.slice/" + unit,
+                    machine_epoch_reader=lambda: "raw-machine-a",
+                    projected_identity_reader=lambda: next(projection_epochs), remover=shutil.rmtree)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "observation_invalid")
+                self.assertEqual(set(result["payload"]), {"process", "cleanup"})
 
 
 if __name__ == "__main__":

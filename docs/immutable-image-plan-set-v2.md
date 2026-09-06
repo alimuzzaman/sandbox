@@ -170,6 +170,14 @@ Atomic activation
   --json
 ```
 
+Activation provisioning can renew a retained v2 bundle only after both its
+snapshot and signed rollback grant expire. The target and signing authority
+must match, and generation authority cannot move backwards. Under the target
+mutation lock, provisioning retains an owner-only `.expired-<digest>` evidence
+copy and atomically installs the fresh bundle, returning `installed`. Live,
+malformed, unsigned, or conflicting authority is refused; exact replay remains
+`replayed`.
+
 The owner-only activation bundle is selected from the registered target and has
 exactly these fields: `schema_version`, `compose_snapshot`, `rollback_grant`,
 `rollback_grant_public_key`, and `stage_ledger`. There is no public
@@ -181,6 +189,36 @@ is `sandbox.hosting.images.private-compose-input-snapshot.v2`. Exact private
 renders are represented outside the host by target-scoped HMAC identities under
 `sandbox-hosting-private-compose-render.v2`; raw environment values, raw config
 hashes, paths, and credentials never cross that boundary or enter durable state.
+
+Before the first runtime effect, edge reachability may be deferred at generation
+zero with no current, previous, active, tombstone, or recovery state. Retained
+terminal refusals at generation zero permit this same bootstrap path; uncertain
+or successful history does not. Post-effect edge verification remains required.
+
+The public Compose projection treats absent/null `depends_on` as an empty
+dependency map. Explicit malformed non-map values retain an invalid marker.
+Recovery profile discovery admits the manifest's persistent and initializer
+services while retaining only the selected persistent service projection.
+For an entered first activation at generation zero with no current or previous
+generation, recovery may observe an empty runtime as the exact prior state.
+The observation must succeed with stable target/daemon identities; partial
+service sets and malformed observations remain refused. This closes recovery
+without promoting a generation or retrying a runtime effect.
+Retained v2 replacement intents use their observation-bound projection directly;
+they do not require a candidate generation merely to enter recovery.
+Empty observations use the retained intent sentinel without attempting candidate
+service validation; generation and epoch checks still decide prior-state eligibility.
+Recovery target identities accept the activation contract's bounded slash-separated
+registered target names. Machine and daemon epoch identity rules remain unchanged.
+Runtime observation accepts a local image ID equal to the verified config
+digest, full repository digest reference, or that reference's manifest digest.
+Unrelated or malformed local IDs remain refused before the remote observation.
+The private observation runner enforces the same verified identity alternatives.
+Observation also reuses the retained public image/profile environment bindings
+so the private Compose render resolves the same immutable service images.
+If that observation render differs, bounded profile discovery must find exactly
+one profile with the retained render digest and all requested services. Missing
+or ambiguous matches refuse observation; profile selection performs no effects.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

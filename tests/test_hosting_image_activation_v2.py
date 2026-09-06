@@ -929,7 +929,8 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
                                  for item in plan.receipt.images}
                 stdout = json.dumps([{"service": name, "compose_project": "lenzora",
                     "runtime_identity": f"container-{name}", "declared_image": image,
-                    "repository_digest": image, "local_image_id": image,
+                    "repository_digest": image,
+                    "local_image_id": image_identities[name]["local_image_id"],
                     "config_digest": config_by_ref[image],
                     "platform": {"os": "linux", "architecture": "amd64"},
                     "healthy": True} for name, image in images.items()])
@@ -964,11 +965,45 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
             snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
         self.assertTrue(all(row["topology_identity"] == proof.observation.observation_digest
                             for row in observed["services"]))
+        observation_calls = [call for call in calls
+            if call["argv"][0] == "sandbox-activation-observe-running-v2"]
+        self.assertEqual(len(observation_calls), 1)
+        for key, image_ref in environment.items():
+            self.assertEqual(observation_calls[0]["environment"][key], image_ref)
+        self.assertNotIn("DB_PASSWORD", observation_calls[0]["environment"])
         effects = [call for call in calls if "up" in call["argv"]]
         self.assertEqual(len(effects), 1)
         self.assertIn("--no-build", effects[0]["argv"])
         self.assertEqual(effects[0]["argv"][effects[0]["argv"].index("--pull") + 1], "never")
         self.assertNotIn("DB_PASSWORD", json.dumps(calls))
+        from unittest.mock import patch
+        from sandbox.transports.remote_hosting_activation import RemoteActivationError
+        observe_args = dict(target=TARGET, services=selected, compose_project="lenzora",
+            topology_digest=proof.observation.observation_digest,
+            compose_config_hashes={name: DIGEST_A for name in selected},
+            snapshot_digest=snapshot.snapshot_digest, image_identities=image_identities)
+        for identity in image_identities.values():
+            identity["local_image_id"] = identity["image_ref"].rsplit("@", 1)[-1]
+        manifest_observed = transport.observe_running_v2(**observe_args)
+        self.assertEqual([row["local_image_id"] for row in manifest_observed["services"]],
+                         [images[name].rsplit("@", 1)[-1] for name in images])
+        for invalid in ("sha256:" + "0" * 64, "malformed"):
+            bad = {name: {**identity, "local_image_id": invalid}
+                   for name, identity in image_identities.items()}
+            before_calls = len(calls)
+            with self.assertRaises(RemoteActivationError):
+                transport.observe_running_v2(**{**observe_args, "image_identities": bad})
+            self.assertEqual(len(calls), before_calls)
+        original_invoke = transport._invoke
+        def empty_invoke(argv, **kwargs):
+            if argv[0] == "sandbox-activation-observe-running-v2":
+                return {"returncode": 0, "stdout": "[]", "stderr": "", "terminated": True}
+            return original_invoke(argv, **kwargs)
+        with patch.object(transport, "_invoke", side_effect=empty_invoke):
+            with self.assertRaises(RemoteActivationError):
+                transport.observe_running_v2(**observe_args)
+            self.assertEqual(transport.observe_running_v2(
+                **observe_args, allow_empty_genesis=True)["services"], [])
 
 
 if __name__ == "__main__":

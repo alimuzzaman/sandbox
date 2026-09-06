@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from sandbox.hosting.images.provisioning import (
     ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
-    install_owner_only_json_pair,
+    install_owner_only_json_pair, install_activation_bundle,
     prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
     prepare_stage_bundle, replace_expired_stage_bundle, reuse_owner_only_stage_bundle,
     target_policy_selector,
@@ -24,6 +24,73 @@ from tests.test_hosting_image_staging_v2 import observation, plan_set, policy_se
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_activation_rotation_expiry_authority_and_atomic_publication(self):
+        from sandbox.hosting.images.activation.models import activation_digest
+        from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
+        from tests.test_hosting_image_activation_v2 import artifacts, grant_for
+        plan, proof, snapshot = artifacts()
+        grant = grant_for(plan, proof)
+
+        def bundle(expiry, **grant_changes):
+            snap = snapshot.body_mapping()
+            snap.pop("schema_version")
+            snap["selected_services"] = tuple(snap["selected_services"])
+            snap["expires_at"] = expiry
+            body = {**grant.body_mapping(), "expires_at": expiry, **grant_changes}
+            return {"schema_version": 2,
+                "compose_snapshot": PrivateComposeInputSnapshotV2.create(**snap).as_mapping(),
+                "rollback_grant": {**body, "grant_digest": activation_digest(
+                    "sandbox.hosting.images.rollback-grant.v2", body)},
+                "rollback_grant_public_key": "ssh-ed25519 Zml4dHVyZQ==",
+                "stage_ledger": {"authority": "feature-050-stage-ledger-v2", "revision": 7}}
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp, patch(
+                "sandbox.hosting.images.provisioning.SshRollbackGrantVerifier.verify",
+                return_value=True):
+            root = Path(temp); root.chmod(0o700)
+            path = root / "activation.json"
+            old, fresh = bundle(100), bundle(300)
+            install_owner_only_json(path, old)
+            original = path.read_bytes()
+            for invalid in (bundle(300, authority_revision="other"),
+                            bundle(300, prior_generation_digest="sha256:" + "f" * 64),
+                            {**fresh, "unexpected": True}):
+                with self.assertRaises(ProvisioningError):
+                    install_activation_bundle(path, invalid, now=200)
+                self.assertEqual(path.read_bytes(), original)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                install_activation_bundle(path, fresh, now=50)
+            with patch("sandbox.hosting.images.provisioning.SshRollbackGrantVerifier.verify",
+                       return_value=False), self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            with patch("sandbox.hosting.images.provisioning.os.replace",
+                       side_effect=OSError("synthetic failure")), self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(install_activation_bundle(path, fresh, now=200), "installed")
+            self.assertEqual(json.loads(path.read_bytes()), fresh)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            archived = list(root.glob("activation.json.expired-*"))
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived[0].read_bytes(), original)
+            self.assertEqual(archived[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(install_activation_bundle(path, fresh, now=200), "replayed")
+            self.assertEqual(list(root.glob(".provision-*")), [])
+            for retained in ({**old, "compose_snapshot": fresh["compose_snapshot"]},
+                             {**old, "rollback_grant": fresh["rollback_grant"]},
+                             {**old, "stage_ledger": {}},
+                             bundle(100, expected_generation=1)):
+                path.unlink(); install_owner_only_json(path, retained)
+                with self.assertRaises(ProvisioningError):
+                    install_activation_bundle(path, fresh, now=200)
+                self.assertEqual(json.loads(path.read_bytes()), retained)
+            path.chmod(0o644)
+            with self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+            path.unlink(); path.symlink_to(archived[0])
+            with self.assertRaises(ProvisioningError):
+                install_activation_bundle(path, fresh, now=200)
+
     @staticmethod
     def _stage_bundle_fixture(root: Path, *, expires_at: str = "2999-01-01T00:00:00Z"):
         plan = plan_set(); scope = plan.policy.target_scope

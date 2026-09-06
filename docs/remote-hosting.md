@@ -1049,9 +1049,13 @@ cannot measure Feature 046 identity, apply may continue but no recovery authorit
 Immutable image staging uses the same authenticated Feature 046 machine identity
 even when the optional resource monitor reports partial evidence; capacity and
 swap authority remain fail-closed until that monitor is complete. The measured
-staging helper independently recreates the same stable node projection and
-requires an exact policy match. It reads the raw machine ID only before and after
-staging as an internal host-epoch stability fence; raw identity is never returned.
+staging helper independently recreates the authenticated server projection from
+`mcp/wp-server/server.py`: normalize `/etc/machine-id` with strip/lower, require
+32 hexadecimal characters, then hash the `sandbox-host-machine-id-v1` domain
+plus a NUL byte and the normalized ID, retaining 24 hexadecimal characters.
+The standalone host-memory provider's hostname-based default is not this
+server contract. Staging requires an exact policy match and independently fences
+the raw machine epoch before and after staging. Raw identity is never returned.
 Apply recomputes all registration-derived planning, canonical DNS records, origin checks,
 and Cloudflare preconditions from the entry held under that guard. Recovery authority
 stores a canonical non-secret desired edge intent plus digest; observation and immediate
@@ -1436,6 +1440,10 @@ atomically terminalizes the interrupted original activation as well as its separ
 exact-prior is a stable refused `recovery_no_effect` result and exits nonzero, while exact-new
 promotion alone is successful. The retained terminal pin is closed and validates canonical lease,
 holder, proof digest, and host-acceptance identities before it can release Feature 050 custody.
+At generation zero with no current, previous, or active generation, terminal refusals and
+non-promoted `recovery_no_effect` records bound to retained refusals do not establish a live
+origin. Only this effect-free history may defer the pre-activation edge probe; active effects,
+uncertain recovery, tombstones, and the post-effect probe still require live edge evidence.
 Initializer values come only from the already rendered bound Compose service environment or a narrow
 opaque provider. Values exist only in the synthetic child environment and private inspect comparison;
 they are not placed in activation state, receipts, output, or command arguments. Running OS and
@@ -1472,3 +1480,5 @@ services. Therefore accepted/preflight/init-pending/runtime-pending recovery rem
 a candidate exists: exact prior, including an empty generation-zero runtime, closes as no-effect;
 anything else stays unpromoted. Rollback also compares the retained prior Compose project before its
 first runtime effect.
+
+Image staging samples the authenticated machine projection at both observation boundaries. A projection change fails closed even when the private raw machine epoch and Docker daemon remain stable; raw machine identity is never emitted.

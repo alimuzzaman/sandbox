@@ -36,6 +36,29 @@ class ActivationRecoveryTests(unittest.TestCase):
         self.assertEqual(result.classification, "exact_new"); self.assertEqual(calls, ["read"])
         self.assertFalse(hasattr(observer, "repository"))
 
+    def test_registered_target_paths_are_allowed_only_for_target_identity(self):
+        from dataclasses import replace
+        from sandbox.hosting.recovery.policy import classify_activation_transition
+        path = "scaleway-sandbox/lenzora/production"
+        base = self.projection()
+        projection = replace(base, target={**base.target, "target_identity": path})
+        observed = {**self.observation(DIGEST_A),
+                    "target_identity_start": path, "target_identity_end": path}
+        self.assertEqual(classify_activation_transition(projection, observed).classification, "exact_new")
+        changed = {**observed, "target_identity_end": "scaleway-sandbox/lenzora/development"}
+        self.assertEqual(classify_activation_transition(projection, changed).classification, "ambiguous")
+        for invalid in ("a" * 257, "target name", "target\nname"):
+            with self.assertRaises(ValueError):
+                replace(base, target={**base.target, "target_identity": invalid})
+            with self.assertRaises(ValueError):
+                classify_activation_transition(projection, {**observed, "target_identity_start": invalid})
+        for field in ("machine_identity", "daemon_identity"):
+            with self.assertRaises(ValueError):
+                replace(base, target={**base.target, field: path})
+        for field in ("target_epoch_start", "runtime_epoch_start"):
+            with self.assertRaises(ValueError):
+                classify_activation_transition(projection, {**observed, field: path})
+
     def test_changed_epochs_are_ambiguous_and_never_authorize(self):
         observed = self.observation(DIGEST_A); observed["runtime_epoch_end"] = "runtime-b"
         from sandbox.hosting.recovery.policy import classify_activation_transition
@@ -70,6 +93,36 @@ class ActivationRecoveryTests(unittest.TestCase):
         prior_shaped = self.observation(DIGEST_B)
         self.assertEqual(classify_activation_transition(
             projection, prior_shaped).classification, "neither")
+
+    def test_empty_genesis_after_effect_is_exact_prior_only_with_coherent_epoch(self):
+        from dataclasses import replace
+        from sandbox.hosting.recovery.policy import classify_activation_transition
+        from sandbox.hosting.images.activation.repository import recovery_decision
+        genesis = replace(self.projection(phase="runtime_pending"), expected_generation=0,
+                          prior_generation_digest=None, prior_services=())
+        empty = {**self.observation(None), "services": []}
+        result = classify_activation_transition(genesis, empty)
+        self.assertEqual(result.classification, "exact_prior")
+        transaction = {"schema_version": 2, "starting_generation": 0,
+                       "operation": "activate", "phase": "runtime_pending", "effect_entered": True}
+        self.assertEqual(recovery_decision(transaction, result.classification, empty_genesis=True),
+            ("recovery_no_effect", False, True))
+        self.assertEqual(recovery_decision(transaction, result.classification),
+                         ("effect_unknown", False, False))
+        self.assertEqual(recovery_decision({**transaction, "phase": "uncertain"},
+            result.classification, empty_genesis=True), ("recovery_no_effect", False, True))
+        for changed in ({"schema_version": 1}, {"starting_generation": 1},
+                        {"operation": "rollback"}, {"phase": "init_pending"}):
+            self.assertFalse(recovery_decision({**transaction, **changed},
+                result.classification, empty_genesis=True)[2])
+        for changed in (replace(genesis, expected_generation=1),
+                        replace(genesis, prior_generation_digest=DIGEST_B,
+                                prior_services=self.projection().prior_services)):
+            self.assertEqual(classify_activation_transition(changed, empty).classification, "ambiguous")
+        self.assertEqual(classify_activation_transition(genesis,
+            {**empty, "runtime_epoch_end": "changed"}).classification, "ambiguous")
+        self.assertEqual(classify_activation_transition(genesis,
+            {**empty, "services": [{}]}).classification, "ambiguous")
 
     def test_phase_aware_projection_allows_missing_candidate_without_promotion(self):
         from sandbox.hosting.images.activation.repository import recovery_decision

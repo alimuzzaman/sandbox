@@ -55,7 +55,8 @@ def _validate_service_projection(value: object, *, services: list[str],
                 or row["compose_project"] != compose_project
                 or row["topology_identity"] != topology_digest
                 or row["local_image_id"] not in {
-                    row["config_digest"], row["repository_digest"]}):
+                    row["config_digest"], row["repository_digest"],
+                    row["repository_digest"].rsplit("@", 1)[-1]}):
             raise ActivationContractError()
         rows.append(row)
     if [row["service"] for row in rows] != services:
@@ -98,7 +99,8 @@ def _validate_subject_v2(value: object, *, request_digest: str, target: dict,
         _digest(row["config_digest"])
         _local_image_id(row["local_image_id"], row["image_ref"])
         if row["platform"] != _PLATFORM or row["local_image_id"] not in {
-                row["config_digest"], row["image_ref"]}:
+                row["config_digest"], row["image_ref"],
+                row["image_ref"].rsplit("@", 1)[-1]}:
             raise ActivationContractError()
         images[row["name"]] = row
     if len(images) != len(images_value):
@@ -487,7 +489,9 @@ def _intent_projection_services(intent: ReplacementIntentV2,
     compose = {row["service"]: row for row in intent.compose_projection}
     expected_names = list(bindings)
     exact = None
-    if observed_services is not None:
+    # An observed empty runtime has no candidate container identities. Use the
+    # sentinel directly; genesis eligibility belongs to recovery classification.
+    if observed_services is not None and observed_services != []:
         try:
             exact = _validate_service_projection(
                 observed_services, services=expected_names,

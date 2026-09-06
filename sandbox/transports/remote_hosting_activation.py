@@ -102,6 +102,7 @@ class RegisteredRemoteActivationTransport:
 
     def render_topology_v2(self, *, compose_files: tuple[str, ...], project_name: str,
                            selected_services: tuple[str, ...],
+                           allowed_services: tuple[str, ...] | None = None,
                            service_image_bindings: dict[str, str],
                            environment_bindings: dict[str, str],
                            topology_digest: str, private_compose_snapshot: dict) -> dict:
@@ -130,29 +131,87 @@ class RegisteredRemoteActivationTransport:
                     or image not in images.values():
                 raise RemoteActivationError("topology_mismatch")
             environment[variable] = image
-        argv = ["docker", "compose"]
-        for path in compose_files:
-            argv.extend(("--file", path))
         project_directory = os.path.dirname(os.path.abspath(compose_files[0]))
-        argv.extend(("--project-directory", project_directory,
-                     "--project-name", self._service(project_name),
-                     "config", "--format", "json"))
         source = {"kind": "compose_snapshot_v2",
                   "snapshot_id": private_compose_snapshot["snapshot_id"],
                   "snapshot_digest": private_compose_snapshot["snapshot_digest"],
                   "provider_revision": private_compose_snapshot["provider_revision"],
                   "target": private_compose_snapshot["target"]}
-        result = self._invoke(tuple(argv), timeout_seconds=60, environment=environment,
-                              private_environment_source=source)
-        try:
-            rendered = json.loads(result["stdout"])
-        except (TypeError, json.JSONDecodeError):
-            raise RemoteActivationError("topology_mismatch") from None
+        expected_services = set(selected_services if allowed_services is None
+                                else allowed_services)
+
+        def render(profile: str | None = None) -> tuple[dict, dict]:
+            argv = ["docker", "compose"]
+            if profile is not None:
+                argv.extend(("--profile", profile))
+            for path in compose_files:
+                argv.extend(("--file", path))
+            argv.extend(("--project-directory", project_directory,
+                         "--project-name", self._service(project_name),
+                         "config", "--format", "json"))
+            render_environment = (environment if profile is None else
+                                  {**environment, "COMPOSE_PROFILES": profile})
+            result = self._invoke(tuple(argv), timeout_seconds=60,
+                                  environment=render_environment,
+                                  private_environment_source=source)
+            try:
+                rendered = json.loads(result["stdout"])
+            except (TypeError, json.JSONDecodeError):
+                raise RemoteActivationError("topology_mismatch") from None
+            return result, rendered
+
+        result, rendered = render()
         services = rendered.get("services") if isinstance(rendered, dict) else None
-        if result["returncode"] != 0 or result["terminated"] is not True \
-                or not isinstance(services, dict):
+        render_digest = (rendered.get("x-sandbox-configuration-digest")
+                         if isinstance(rendered, dict) else None)
+        # A v2 snapshot may have been captured with the sole profile that
+        # renders the complete immutable topology. The default Compose render
+        # can omit those profile-gated services, so discover and select exactly
+        # the retained profile before validating its digest and projection.
+        if (result["returncode"] != 0 or result["terminated"] is not True
+                or not isinstance(services, dict)):
             raise RemoteActivationError("topology_mismatch")
-        render_digest = rendered.pop("x-sandbox-configuration-digest", None)
+        if set(services) != expected_services or \
+                render_digest != private_compose_snapshot["configuration_digest"]:
+            profile_argv = ["docker", "compose"]
+            for path in compose_files:
+                profile_argv.extend(("--file", path))
+            profile_argv.extend(("--project-directory", project_directory,
+                                 "--project-name", self._service(project_name),
+                                 "config", "--profiles"))
+            profiles_result = self._invoke(
+                tuple(profile_argv), timeout_seconds=60, environment=environment,
+                private_environment_source=source)
+            if (profiles_result["returncode"] != 0
+                    or profiles_result["terminated"] is not True):
+                raise RemoteActivationError("topology_mismatch")
+            names = profiles_result["stdout"].splitlines()
+            if (not names or len(names) > 16
+                    or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)
+                           is None for name in names)
+                    or len(set(names)) != len(names)):
+                raise RemoteActivationError("topology_mismatch")
+            matches = []
+            for profile in names:
+                candidate_result, candidate = render(profile)
+                candidate_services = (candidate.get("services")
+                                      if isinstance(candidate, dict) else None)
+                candidate_digest = (candidate.get("x-sandbox-configuration-digest")
+                                    if isinstance(candidate, dict) else None)
+                if (candidate_result["returncode"] == 0
+                        and candidate_result["terminated"] is True
+                        and isinstance(candidate_services, dict)
+                        and set(candidate_services) == expected_services
+                        and candidate_digest == private_compose_snapshot["configuration_digest"]):
+                    matches.append((candidate_result, candidate))
+            if len(matches) != 1:
+                raise RemoteActivationError("topology_mismatch")
+            result, rendered = matches[0]
+            services = rendered["services"]
+            render_digest = rendered["x-sandbox-configuration-digest"]
+        services = rendered.get("services") if isinstance(rendered, dict) else None
+        render_digest = (rendered.pop("x-sandbox-configuration-digest", None)
+                         if isinstance(rendered, dict) else None)
         hashes = rendered.pop("x-sandbox-compose-config-hashes", None)
         markers = tuple(rendered.pop(name, None) for name in (
             "x-sandbox-has-configs", "x-sandbox-has-secrets",
@@ -163,8 +222,14 @@ class RegisteredRemoteActivationTransport:
                        for value in hashes.values())
                 or markers[0] is not False or markers[2] is not False
                 or type(markers[1]) is not bool or set(rendered) != {"services"}
-                or set(services) != set(selected_services)):
+                or set(services) != expected_services
+                or not set(selected_services) <= expected_services):
             raise RemoteActivationError("topology_mismatch")
+        # Compose renders the declared one-shot initializers alongside the
+        # persistent services.  Keep the full-render digest above, but expose
+        # only the persistent projection to the activation contract.
+        services = {name: services[name] for name in selected_services}
+        hashes = {name: hashes[name] for name in selected_services}
         normalized = {}
         for name in selected_services:
             value = services.get(name)
@@ -195,6 +260,7 @@ class RegisteredRemoteActivationTransport:
 
     def prepare_compose_snapshot_v2(self, *, compose_files: tuple[str, ...],
             project_name: str, selected_services: tuple[str, ...],
+            allowed_services: tuple[str, ...] | None = None,
             service_image_bindings: dict[str, str],
             environment_bindings: dict[str, str], target: dict[str, str],
             snapshot_id: str, provider_revision: str) -> str:
@@ -214,25 +280,88 @@ class RegisteredRemoteActivationTransport:
                     or image not in images.values():
                 raise RemoteActivationError("topology_mismatch")
             environment[variable] = image
-        argv = ["docker", "compose"]
-        for path in compose_files: argv.extend(("--file", path))
-        directory = os.path.dirname(os.path.abspath(compose_files[0]))
-        argv.extend(("--project-directory", directory, "--project-name",
-                     self._service(project_name), "config", "--format", "json"))
         source = {"kind": "compose_prepare_v2", "snapshot_id": snapshot_id,
                   "provider_revision": provider_revision, "target": target}
-        result = self._invoke(tuple(argv), timeout_seconds=60, environment=environment,
-                              private_environment_source=source)
-        try: rendered = json.loads(result["stdout"])
-        except (TypeError, json.JSONDecodeError):
-            raise RemoteActivationError("topology_mismatch") from None
+        expected_services = set(selected_services if allowed_services is None
+                                else allowed_services)
+
+        directory = os.path.dirname(os.path.abspath(compose_files[0]))
+        project = self._service(project_name)
+
+        def render(profile: str | None = None) -> tuple[dict, dict]:
+            argv = ["docker", "compose"]
+            if profile is not None:
+                argv.extend(("--profile", profile))
+            for path in compose_files:
+                argv.extend(("--file", path))
+            argv.extend(("--project-directory", directory, "--project-name",
+                         project, "config", "--format", "json"))
+            render_environment = (environment if profile is None else
+                                  {**environment, "COMPOSE_PROFILES": profile})
+            result = self._invoke(tuple(argv), timeout_seconds=60,
+                                  environment=render_environment,
+                                  private_environment_source=source)
+            try:
+                rendered = json.loads(result["stdout"])
+            except (TypeError, json.JSONDecodeError):
+                raise RemoteActivationError("topology_mismatch") from None
+            return result, rendered
+
+        result, rendered = render()
         services = rendered.get("services") if isinstance(rendered, dict) else None
-        digest = rendered.get("x-sandbox-configuration-digest") \
-            if isinstance(rendered, dict) else None
+        digest = (rendered.get("x-sandbox-configuration-digest")
+                  if isinstance(rendered, dict) else None)
         if (result["returncode"] != 0 or result["terminated"] is not True
-                or type(services) is not dict or set(services) != set(selected_services)
+                or type(services) is not dict
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest or "") is None):
             raise RemoteActivationError("topology_mismatch")
+
+        # Compose omits profile-gated services from a default config render.
+        # If the declared set is incomplete, discover profiles through the same
+        # private channel and accept exactly one profile that renders the exact
+        # declared service set. Never enable an ambiguous or over-broad profile.
+        if set(services) != expected_services:
+            profile_argv = ["docker", "compose"]
+            for path in compose_files:
+                profile_argv.extend(("--file", path))
+            profile_argv.extend(("--project-directory", directory, "--project-name",
+                                 project, "config", "--profiles"))
+            profiles_result = self._invoke(
+                tuple(profile_argv), timeout_seconds=60, environment=environment,
+                private_environment_source=source)
+            if (profiles_result["returncode"] != 0
+                    or profiles_result["terminated"] is not True):
+                raise RemoteActivationError("topology_mismatch")
+            names = profiles_result["stdout"].splitlines()
+            if (not names or len(names) > 16
+                    or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)
+                           is None for name in names)
+                    or len(set(names)) != len(names)):
+                raise RemoteActivationError("topology_mismatch")
+            matches = []
+            for profile in names:
+                candidate_result, candidate = render(profile)
+                candidate_services = (candidate.get("services")
+                                      if isinstance(candidate, dict) else None)
+                candidate_digest = (candidate.get("x-sandbox-configuration-digest")
+                                    if isinstance(candidate, dict) else None)
+                if (candidate_result["returncode"] == 0
+                        and candidate_result["terminated"] is True
+                        and type(candidate_services) is dict
+                        and set(candidate_services) == expected_services
+                        and re.fullmatch(r"sha256:[0-9a-f]{64}",
+                                         candidate_digest or "") is not None):
+                    matches.append((candidate_result, candidate))
+            if len(matches) != 1:
+                raise RemoteActivationError("topology_mismatch")
+            result, rendered = matches[0]
+            services = rendered["services"]
+            digest = rendered["x-sandbox-configuration-digest"]
+        if not set(selected_services) <= expected_services:
+            raise RemoteActivationError("topology_mismatch")
+        # The private Compose render includes one-shot initializers; activation
+        # binds and starts only the persistent service projection.
+        services = {name: services[name] for name in selected_services}
         for name in selected_services:
             row = services.get(name)
             if type(row) is not dict or row.get("image") != images[name] \
@@ -396,9 +525,14 @@ class RegisteredRemoteActivationTransport:
             # the caller; never derive or overwrite it from Docker's Id.
             if expected_config_digest is None:
                 expected_config_digest = image_id
+            # Docker 29's containerd image store may expose the bare manifest
+            # digest as ``.Id``. The signed receipt still binds the config
+            # digest, while the qualified RepoDigest above proves the exact
+            # manifest. Accept all three equivalent engine identities.
+            manifest_digest = image.rsplit("@", 1)[-1]
             if (not isinstance(expected_config_digest, str)
                     or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_config_digest)
-                    or image_id not in {expected_config_digest, image}):
+                    or image_id not in {expected_config_digest, image, manifest_digest}):
                 raise RemoteActivationError("local_image_mismatch")
             end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
             end_target = self._observed_target(end_epoch)
@@ -658,7 +792,8 @@ class RegisteredRemoteActivationTransport:
                            compose_project: str, topology_digest: str,
                            compose_config_hashes: dict[str, str],
                            snapshot_digest: str,
-                           image_identities: dict[str, dict[str, str]]) -> dict:
+                           image_identities: dict[str, dict[str, str]],
+                           allow_empty_genesis: bool = False) -> dict:
         """Observe against the retained private-render identity, not labels."""
         selector = self._compose_selector_v2
         if type(image_identities) is not dict or set(image_identities) != set(services):
@@ -676,7 +811,8 @@ class RegisteredRemoteActivationTransport:
                         and not re.fullmatch(r"sha256:[0-9a-f]{64}",
                                               identity["local_image_id"]))
                     or identity["local_image_id"] not in {
-                        identity["config_digest"], identity["image_ref"]}):
+                        identity["config_digest"], identity["image_ref"],
+                        identity["image_ref"].rsplit("@", 1)[-1]}):
                 raise RemoteActivationError("runtime_mismatch")
             normalized_identities[service] = dict(identity)
         if (not selector or services != selector.get("selected_services")
@@ -699,13 +835,15 @@ class RegisteredRemoteActivationTransport:
         result = self._invoke(("sandbox-activation-observe-running-v2",
                                self._service(compose_project),
                                *map(self._service, services)), timeout_seconds=60,
+                              environment=selector["environment"],
                               private_environment_source=source)
         try:
             rows = json.loads(result["stdout"])
         except (TypeError, json.JSONDecodeError):
             raise RemoteActivationError("runtime_mismatch") from None
         if result["returncode"] != 0 or result["terminated"] is not True \
-                or type(rows) is not list or len(rows) != len(services):
+                or type(rows) is not list or (len(rows) != len(services)
+                    and not (allow_empty_genesis is True and rows == [])):
             raise RemoteActivationError("runtime_mismatch")
         normalized = []
         allowed = {"service", "compose_project", "runtime_identity", "declared_image",
@@ -725,7 +863,8 @@ class RegisteredRemoteActivationTransport:
                 raise RemoteActivationError("runtime_mismatch")
             normalized.append({**row, "topology_identity": topology_digest,
                                "compose_config_hash": compose_config_hashes[service]})
-        if {row["service"] for row in normalized} != set(services):
+        if ({row["service"] for row in normalized} != set(services)
+                and not (allow_empty_genesis is True and normalized == [])):
             raise RemoteActivationError("runtime_mismatch")
         end_epoch = self._observe_default(kind="epoch", target={})["runtime_epoch"]
         end_target = self._observed_target(end_epoch)

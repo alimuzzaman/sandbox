@@ -314,6 +314,8 @@ class ActivationServiceV2:
         rendered = self.runtime_adapter.render_topology_v2(
             compose_files=compose_files, project_name=compose_project,
             selected_services=tuple(item["service"] for item in bindings),
+            allowed_services=(request.plan_set.policy.persistent_services
+                              + request.plan_set.policy.one_shot_services),
             service_image_bindings=service_images, environment_bindings=environment,
             topology_digest=request.proof_set["observation"]["observation_digest"],
             private_compose_snapshot=request.compose_snapshot.as_mapping())
@@ -333,6 +335,8 @@ class ActivationServiceV2:
         rendered = self.runtime_adapter.render_topology_v2(
             compose_files=compose_files, project_name=compose_project,
             selected_services=tuple(item["service"] for item in bindings),
+            allowed_services=(request.plan_set.policy.persistent_services
+                              + request.plan_set.policy.one_shot_services),
             service_image_bindings=service_images, environment_bindings=environment,
             topology_digest=previous.topology_digest,
             private_compose_snapshot=request.compose_snapshot.as_mapping())

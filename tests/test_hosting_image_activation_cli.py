@@ -435,6 +435,36 @@ class ActivationCliTests(unittest.TestCase):
                 verify.assert_called_once(); verify.reset_mock()
                 state[field] = original
 
+    def test_initial_edge_bootstrap_allows_only_proven_effect_free_recovery(self):
+        from sandbox.commands.hosting import _HostImageEdgeAdapter
+        refusal = {"result_class": "refused", "ok": False,
+                   "starting_generation": 0, "resulting_generation": 0,
+                   "generation_digest": None, "code": "recovery_no_effect"}
+        recovery = {"code": "recovery_no_effect", "ok": False, "promoted": False,
+                    "starting_generation": 0, "resulting_generation": 0,
+                    "activation_request_id": "activate-a"}
+        state = {"generation": 0, "current": None, "previous": None, "active": None,
+                 "results": {"activate-a": {"result": refusal}}, "tombstones": {},
+                 "recovery_provisional": None, "recovery_results": {"recover-a": recovery}}
+        adapter = _HostImageEdgeAdapter(
+            {"routes": [], "healthcheck": {"path": "/health"}},
+            activation_repository=SimpleNamespace(snapshot=lambda _target: state),
+            target_identity="target-a")
+        with patch("sandbox.commands.hosting._verify_edge") as verify:
+            adapter.observe_plan()
+            verify.assert_not_called()
+            for changes in ({"code": "recovery_conflict"}, {"code": "committed"},
+                            {"ok": True}, {"promoted": True}, {"starting_generation": 1},
+                            {"resulting_generation": 1}, {"starting_generation": False},
+                            {"activation_request_id": "missing"}):
+                state["recovery_results"] = {"recover-a": {**recovery, **changes}}
+                adapter.observe_plan()
+                verify.assert_called_once(); verify.reset_mock()
+            state["recovery_results"] = {"recover-a": recovery}
+            state["active"] = {"request_id": "next-activation"}
+            adapter.observe_plan()
+            verify.assert_called_once()
+
     def test_reachability_only_edge_adapter_refuses_generation_authority(self):
         from sandbox.commands.hosting import _HostImageEdgeAdapter
         validated = {"routes": [], "healthcheck": {"path": "/health"},

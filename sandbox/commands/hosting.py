@@ -3389,6 +3389,24 @@ class _HostImageEdgeAdapter:
                     and entry["result"].get("resulting_generation") == 0
                     and entry["result"].get("generation_digest") is None
                     for entry in results.values())
+                recoveries = state.get("recovery_results")
+                only_effect_free_recoveries = type(recoveries) is dict and all(
+                    type(result) is dict
+                    and result.get("code") == "recovery_no_effect"
+                    and result.get("ok") is False
+                    and result.get("promoted") is False
+                    and type(result.get("starting_generation")) is int
+                    and result["starting_generation"] == 0
+                    and type(result.get("resulting_generation")) is int
+                    and result["resulting_generation"] == 0
+                    and type(results) is dict
+                    and type(result.get("activation_request_id")) is str
+                    and result.get("activation_request_id") in results
+                    and type(results[result["activation_request_id"]]) is dict
+                    and type(results[result["activation_request_id"]].get("result")) is dict
+                    and results[result["activation_request_id"]]["result"].get("code")
+                        == "recovery_no_effect"
+                    for result in recoveries.values())
                 bootstrap = (
                     state.get("generation") == 0
                     and state.get("current") is None
@@ -3397,7 +3415,7 @@ class _HostImageEdgeAdapter:
                     and only_refusals
                     and not state.get("tombstones")
                     and state.get("recovery_provisional") is None
-                    and not state.get("recovery_results")
+                    and only_effect_free_recoveries
                 )
         if not bootstrap:
             _verify_edge(self.validated["routes"],

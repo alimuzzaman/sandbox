@@ -190,6 +190,11 @@ renders are represented outside the host by target-scoped HMAC identities under
 `sandbox-hosting-private-compose-render.v2`; raw environment values, raw config
 hashes, paths, and credentials never cross that boundary or enter durable state.
 
+Before the first runtime effect, edge reachability may be deferred at generation
+zero with no current, previous, active, tombstone, or recovery state. Retained
+terminal refusals at generation zero permit this same bootstrap path; uncertain
+or successful history does not. Post-effect edge verification remains required.
+
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no
 pull, and no dependency expansion. A durable replacement intent is written

@@ -66,3 +66,9 @@ Runtime image-binding repair `5c90f119aad3112f3839b3816b752cc4e0bc218f`
 merged cleanly. It carries the retained image-binding environment into runtime
 observation. Local durable job `bfe8159b4fd556bab3779feee1e5d3f1` passed
 53 recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.
+
+Retained Compose profile repair `ddee8a1d4aed2e225206e2ca16f7e3991d8ed865`
+merged cleanly. Observation accepts exactly one profile matching the retained
+configuration digest; absent, ambiguous, or mismatched profiles refuse.
+Local durable job `aaf84d8168f8590eedfa808b2450e0e4` passed 54
+recovery/v2/private-helper/edge-cache tests, lifecycle `succeeded`, exit 0.

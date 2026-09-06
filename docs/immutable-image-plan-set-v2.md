@@ -212,6 +212,9 @@ Unrelated or malformed local IDs remain refused before the remote observation.
 The private observation runner enforces the same verified identity alternatives.
 Observation also reuses the retained public image/profile environment bindings
 so the private Compose render resolves the same immutable service images.
+If that observation render differs, bounded profile discovery must find exactly
+one profile with the retained render digest and all requested services. Missing
+or ambiguous matches refuse observation; profile selection performs no effects.
 
 Activation verifies every local image/config/platform identity, then runs one
 Compose replacement for the complete persistent service set with no build, no

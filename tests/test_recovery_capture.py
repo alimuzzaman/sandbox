@@ -69,6 +69,19 @@ class TestRecoveryCapture(unittest.TestCase):
             self.assertIn("sets/fixture-set/manifest.json", drive.objects)
             self.assertEqual(list(root.glob("set-*")), [])
 
+    def test_file_capture_creates_missing_owner_staging_root(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(b"cipher:" + Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            staging = root / "missing" / "staging"
+            receipt = StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=staging).publish_files(
+                "fixture-set", {"artifact": source}, profiles=("fixture",))
+            self.assertEqual(receipt["status"], "complete")
+            self.assertTrue(staging.is_dir())
+            self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
+
     def test_file_capture_failure_leaves_no_complete_manifest_or_staging(self):
         class BrokenCrypto:
             def encrypt_file(self, source, target): raise RecoveryError("injected", "injected_failure")

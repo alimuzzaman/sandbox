@@ -102,6 +102,7 @@ class RegisteredRemoteActivationTransport:
 
     def render_topology_v2(self, *, compose_files: tuple[str, ...], project_name: str,
                            selected_services: tuple[str, ...],
+                           allowed_services: tuple[str, ...] | None = None,
                            service_image_bindings: dict[str, str],
                            environment_bindings: dict[str, str],
                            topology_digest: str, private_compose_snapshot: dict) -> dict:
@@ -157,14 +158,22 @@ class RegisteredRemoteActivationTransport:
         markers = tuple(rendered.pop(name, None) for name in (
             "x-sandbox-has-configs", "x-sandbox-has-secrets",
             "x-sandbox-has-external-networks"))
+        expected_services = set(selected_services if allowed_services is None
+                                else allowed_services)
         if (render_digest != private_compose_snapshot["configuration_digest"]
                 or type(hashes) is not dict or set(hashes) != set(services)
                 or any(re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") is None
                        for value in hashes.values())
                 or markers[0] is not False or markers[2] is not False
                 or type(markers[1]) is not bool or set(rendered) != {"services"}
-                or set(services) != set(selected_services)):
+                or set(services) != expected_services
+                or not set(selected_services) <= expected_services):
             raise RemoteActivationError("topology_mismatch")
+        # Compose renders the declared one-shot initializers alongside the
+        # persistent services.  Keep the full-render digest above, but expose
+        # only the persistent projection to the activation contract.
+        services = {name: services[name] for name in selected_services}
+        hashes = {name: hashes[name] for name in selected_services}
         normalized = {}
         for name in selected_services:
             value = services.get(name)
@@ -195,6 +204,7 @@ class RegisteredRemoteActivationTransport:
 
     def prepare_compose_snapshot_v2(self, *, compose_files: tuple[str, ...],
             project_name: str, selected_services: tuple[str, ...],
+            allowed_services: tuple[str, ...] | None = None,
             service_image_bindings: dict[str, str],
             environment_bindings: dict[str, str], target: dict[str, str],
             snapshot_id: str, provider_revision: str) -> str:
@@ -229,10 +239,16 @@ class RegisteredRemoteActivationTransport:
         services = rendered.get("services") if isinstance(rendered, dict) else None
         digest = rendered.get("x-sandbox-configuration-digest") \
             if isinstance(rendered, dict) else None
+        expected_services = set(selected_services if allowed_services is None
+                                else allowed_services)
         if (result["returncode"] != 0 or result["terminated"] is not True
-                or type(services) is not dict or set(services) != set(selected_services)
+                or type(services) is not dict or set(services) != expected_services
+                or not set(selected_services) <= expected_services
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest or "") is None):
             raise RemoteActivationError("topology_mismatch")
+        # The private Compose render includes one-shot initializers; activation
+        # binds and starts only the persistent service projection.
+        services = {name: services[name] for name in selected_services}
         for name in selected_services:
             row = services.get(name)
             if type(row) is not dict or row.get("image") != images[name] \

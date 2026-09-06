@@ -3823,6 +3823,8 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         compose_files=prepare_selector["compose_files"],
                         project_name=prepare_selector["project_name"],
                         selected_services=plan.policy.persistent_services,
+                        allowed_services=(plan.policy.persistent_services
+                                          + plan.policy.one_shot_services),
                         service_image_bindings=images, environment_bindings=env_bindings,
                         target=target.as_mapping(), snapshot_id=snapshot_id,
                         provider_revision=provider_revision)

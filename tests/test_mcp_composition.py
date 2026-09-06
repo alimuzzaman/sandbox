@@ -1,14 +1,31 @@
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.subprocess_support import run_test_process
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
 sys.path.insert(0, str(MCP_ROOT))
 
 
 class TestMcpComposition(unittest.TestCase):
+    def test_root_tools_package_resolves_mcp_manifest(self):
+        """A repository-root import must work before the MCP server starts."""
+        process = run_test_process(
+            [
+                sys.executable,
+                "-c",
+                "import tools.audit_agent_usage; import tools.manifest; import composition; import dependencies",
+            ],
+            cwd=str(MCP_ROOT.parent.parent),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+
     def test_ensure_returns_the_cli_typed_mount_refusal_envelope(self):
         from tools import instances
 

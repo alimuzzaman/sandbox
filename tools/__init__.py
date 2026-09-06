@@ -10,9 +10,12 @@ cached repository package still resolves the MCP modules deterministically.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 
 _MCP_TOOLS = Path(__file__).resolve().parent.parent / "mcp" / "wp-server" / "tools"
 if _MCP_TOOLS.is_dir():
+    _MCP_ROOT = _MCP_TOOLS.parent
+    if str(_MCP_ROOT) not in sys.path:
+        sys.path.append(str(_MCP_ROOT))
     __path__.append(str(_MCP_TOOLS))
-

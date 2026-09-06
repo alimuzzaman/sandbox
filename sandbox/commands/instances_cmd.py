@@ -137,8 +137,14 @@ def _generic_descriptor_document(project_root: Path) -> dict:
     kept local to the CLI compatibility surface.
     """
     try:
-        from sandbox.config.descriptors import _load_mapping, primary_config
-        path = primary_config(project_root)
+        from sandbox.config.descriptors import _load_mapping
+        # Explicit init is an exact-target operation.  Do not call the
+        # general primary_config resolver here: when neither in-tree home has
+        # a descriptor it probes Git to discover a shared config home, which
+        # both escapes this init boundary and makes a review-only init run a
+        # subprocess.  _exact_init_sources validates the same root/nested
+        # descriptor family without consulting shared state.
+        path, _ = _exact_init_sources(project_root)
         return _load_mapping(path) if path is not None else {}
     except (OSError, ValueError, TypeError):
         # The canonical loader below remains authoritative for malformed or
@@ -149,13 +155,13 @@ def _generic_descriptor_document(project_root: Path) -> dict:
 def _exact_init_sources(project_root: Path) -> tuple[Path | None, Path | None]:
     """Return only safe regular descriptors at the exact init target."""
     from sandbox.config.descriptors import (
-        CONFIG_BASENAMES, CONFIG_SUBDIRECTORY, config_home, primary_config,
+        CONFIG_BASENAMES, CONFIG_SUBDIRECTORY,
     )
 
     root = project_root.resolve()
-    selected_home = config_home(root)
+    nested_home = root.joinpath(*CONFIG_SUBDIRECTORY)
     try:
-        selected_home.resolve().relative_to(root)
+        nested_home.resolve().relative_to(root)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError(
             "Sandbox init config directory must stay within the project root"
@@ -185,9 +191,23 @@ def _exact_init_sources(project_root: Path) -> tuple[Path | None, Path | None]:
             if candidate.exists() or candidate.is_symlink():
                 regular_source(candidate, "native descriptor")
 
-    native = primary_config(project_root)
-    if native is not None:
-        native = regular_source(native, "native descriptor")
+    # Init must inspect only the root and conventional nested config homes.
+    # Shared, Git-identity-keyed config is resolved by normal project commands
+    # after init; consulting it here would make a fresh target inherit an
+    # unrelated descriptor and would run Git during a review-only operation.
+    selected = []
+    for home in homes:
+        first = next((home / name for name in CONFIG_BASENAMES
+                      if (home / name).exists()), None)
+        if first is not None:
+            selected.append(first)
+    if len(selected) > 1:
+        raise ValueError(
+            "ambiguous Sandbox project configuration: primary descriptors "
+            f"exist in {root} and {nested_home}; keep exactly one "
+            "config home (project root or .config/sandbox)"
+        )
+    native = regular_source(selected[0], "native descriptor") if selected else None
     wp_env_path = root / ".wp-env.json"
     wp_env = (
         regular_source(wp_env_path, ".wp-env.json")
